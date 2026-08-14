@@ -3,8 +3,14 @@
   <Folder Name="/src/Groundwork.Kernel/">
     <Project Path="src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Query.Model/">
+    <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+  </Folder>
   <Folder Name="/tests/" />
   <Folder Name="/tests/Groundwork.Kernel.Tests/">
     <Project Path="tests/Groundwork.Kernel.Tests/Groundwork.Kernel.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Model.Tests/">
+    <Project Path="tests/Groundwork.Query.Model.Tests/Groundwork.Query.Model.Tests.csproj" />
   </Folder>
 </Solution>
