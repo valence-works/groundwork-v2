@@ -162,6 +162,14 @@ public sealed class QueryModelContractTests
     [Fact]
     public void Predicate_cannot_be_subclassed_outside_the_model()
     {
+        var constructor = typeof(Predicate).GetConstructor(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: Type.EmptyTypes,
+            modifiers: null);
+
+        Assert.NotNull(constructor);
+        Assert.True(constructor!.IsPrivate);
         Assert.Empty(typeof(Predicate).GetConstructors(BindingFlags.Instance | BindingFlags.Public));
     }
 
@@ -183,7 +191,8 @@ public sealed class QueryModelContractTests
 
         Assert.Equal(G2Q1Corpus.ExpectedShapeCount, shapes.Count);
         Assert.Equal(Enumerable.Range(1, G2Q1Corpus.ExpectedShapeCount), shapes.Select(shape => shape.Number));
-        Assert.Equal(shapes.Count, shapes.Select(shape => shape.Number + ":" + shape.Identity + ":" + shape.Description).Distinct(StringComparer.Ordinal).Count());
+        var duplicateKeys = shapes.GroupBy(shape => shape.CanonicalInput, StringComparer.Ordinal).Where(group => group.Count() > 1).Select(group => group.Key + " [" + string.Join(",", group.Select(shape => shape.Number)) + "]");
+        Assert.True(shapes.Count == shapes.Select(shape => shape.CanonicalInput).Distinct(StringComparer.Ordinal).Count(), string.Join("; ", duplicateKeys));
         Assert.Equal(243, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
         Assert.Equal(57, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
 
@@ -192,12 +201,13 @@ public sealed class QueryModelContractTests
             if (shape.Decision == Q1CorpusDecision.Refuse)
             {
                 Assert.NotEmpty(shape.DecisionId);
-                Assert.Null(shape.Build);
+                var refusal = Assert.Throws<Q1CorpusRefusalException>(() => shape.Exercise());
+                Assert.Equal(shape.DecisionId, refusal.DecisionId);
                 continue;
             }
 
-            var first = shape.Build!();
-            var second = shape.Build();
+            var first = shape.Exercise();
+            var second = shape.Exercise();
 
             Assert.NotEmpty(first.CanonicalPredicate);
             Assert.NotEmpty(first.ShapeFingerprint);

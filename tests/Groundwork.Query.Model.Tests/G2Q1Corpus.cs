@@ -24,13 +24,25 @@ internal enum Q1CorpusOperation
     LessThanOrEqual
 }
 
+internal sealed class Q1CorpusRefusalException : InvalidOperationException
+{
+    public Q1CorpusRefusalException(string decisionId)
+        : base("Q1 corpus refusal: " + decisionId)
+    {
+        DecisionId = decisionId;
+    }
+
+    public string DecisionId { get; }
+}
+
 internal sealed record Q1CorpusShape(
     int Number,
     string Identity,
+    string CanonicalInput,
     Q1CorpusDecision Decision,
     string DecisionId,
     string Description,
-    Func<QueryRequest>? Build);
+    Func<QueryRequest> Exercise);
 
 /// <summary>
 /// Provider-free projection of the pinned G2 issue #230 shape vocabulary.
@@ -71,7 +83,7 @@ internal static class G2Q1Corpus
             "typed-decimal-18-4");
         AddPredicateShapes(shapes, ref number, Boolean, "q-boolValue",
             [Q1CorpusOperation.Equal, Q1CorpusOperation.In, Q1CorpusOperation.NotEqual],
-            [null, true, false, true, false, true],
+            [null, "true", "false", "True", "False", "TRUE"],
             (_, _) => false,
             "total-boolean-null-complement");
         AddPredicateShapes(shapes, ref number, Instant, "q-dateTicks",
@@ -109,11 +121,12 @@ internal static class G2Q1Corpus
             shapes.Add(new Q1CorpusShape(
                 number++,
                 "q-order-" + identity + "-" + suffix,
+                "order(" + identity + "," + direction + ",offset=" + capturedPage * 2 + ",limit=2)|decision=" + (refused ? "refuse" : "normalize"),
                 refused ? Q1CorpusDecision.Refuse : Q1CorpusDecision.Normalize,
                 refused ? "binary-order-refused" : "normalized-ordering",
                 identity + " " + direction + " page " + page,
                 refused
-                    ? null
+                    ? Refuse("binary-order-refused")
                     : () => Request(
                         Predicate.AlwaysTrue.Instance,
                         ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
@@ -137,6 +150,7 @@ internal static class G2Q1Corpus
             shapes.Add(new Q1CorpusShape(
                 number++,
                 "q-compound",
+                "predicate=" + PredicateCanonicalizer.ToCanonicalString(PredicateNormalizer.Normalize(capturedPredicate)) + "|decision=" + (disjunction ? "compound-disjunction" : "compound-conjunction"),
                 Q1CorpusDecision.Normalize,
                 disjunction ? "compound-disjunction" : "compound-conjunction",
                 disjunction ? "text OR number" : "text AND number",
@@ -168,10 +182,11 @@ internal static class G2Q1Corpus
                 shapes.Add(new Q1CorpusShape(
                     number++,
                     identity,
+                    identity + "|predicate=" + operation + "(" + Describe(value) + ")|decision=" + (refused ? "refuse" : "normalize"),
                     refused ? Q1CorpusDecision.Refuse : Q1CorpusDecision.Normalize,
                     refused ? RefusalId(column, operation, value) : decisionId,
                     identity + " " + operation + " " + Describe(value),
-                    refused ? null : () => Request(BuildPredicate(column, capturedOperation, capturedValue), ImmutableArray<OrderTerm>.Empty, Paging.None)));
+                    refused ? Refuse(RefusalId(column, operation, value)) : () => Request(BuildPredicate(column, capturedOperation, capturedValue), ImmutableArray<OrderTerm>.Empty, Paging.None)));
             }
 
             if (operation == Q1CorpusOperation.In)
@@ -179,6 +194,7 @@ internal static class G2Q1Corpus
                 shapes.Add(new Q1CorpusShape(
                     number++,
                     identity,
+                    identity + "|predicate=In(empty)|decision=normalize",
                     Q1CorpusDecision.Normalize,
                     decisionId,
                     identity + " In [] (empty membership is false)",
@@ -189,7 +205,10 @@ internal static class G2Q1Corpus
 
     private static Predicate BuildPredicate(ColumnRef column, Q1CorpusOperation operation, object? value)
     {
-        var constant = QueryConstant.Of(column, value);
+        var typedValue = column.Type == QueryType.Boolean && value is string boolean
+            ? bool.Parse(boolean)
+            : value;
+        var constant = QueryConstant.Of(column, typedValue);
         return operation switch
         {
             Q1CorpusOperation.Equal => new Predicate.Equal(column, constant),
@@ -215,6 +234,8 @@ internal static class G2Q1Corpus
         Projection.All,
         paging);
 
+    private static Func<QueryRequest> Refuse(string decisionId) => () => throw new Q1CorpusRefusalException(decisionId);
+
     private static string RefusalId(ColumnRef column, Q1CorpusOperation operation, object? value) =>
         value is null && operation is Q1CorpusOperation.GreaterThan or Q1CorpusOperation.GreaterThanOrEqual or Q1CorpusOperation.LessThan or Q1CorpusOperation.LessThanOrEqual
             ? "null-range-refused"
@@ -229,6 +250,7 @@ internal static class G2Q1Corpus
         null => "NULL",
         byte[] bytes => Convert.ToBase64String(bytes),
         DateTimeOffset instant => instant.ToString("O", CultureInfo.InvariantCulture),
+        string text => "string[" + text.Length + "]:" + text,
         _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty
     };
 }
