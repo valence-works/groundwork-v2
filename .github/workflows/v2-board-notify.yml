@@ -1,0 +1,20 @@
+name: Notify v2 board
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request authoritative board sync
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: >-
+          gh api --method POST
+          repos/valence-works/Groundwork/dispatches
+          -f event_type=v2-board-sync

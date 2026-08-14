@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+.codebase-memory/
+.idea/
+.vscode/
+TestResults/
+*.user
+*.suo
