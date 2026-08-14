@@ -2,7 +2,7 @@ using System.Collections.Immutable;
 
 namespace Groundwork.Query.Model;
 
-public abstract record Predicate
+public abstract class Predicate
 {
     private Predicate()
     {
@@ -10,7 +10,7 @@ public abstract record Predicate
 
     public string CanonicalForm => PredicateCanonicalizer.ToCanonicalString(this);
 
-    public sealed record Equal : Predicate
+    public sealed class Equal : Predicate
     {
         public Equal(ColumnRef column, QueryConstant value)
         {
@@ -22,7 +22,7 @@ public abstract record Predicate
         public QueryConstant Value { get; }
     }
 
-    public sealed record In : Predicate
+    public sealed class In : Predicate
     {
         public In(ColumnRef column, ImmutableArray<QueryConstant> values)
         {
@@ -41,7 +41,7 @@ public abstract record Predicate
         public ImmutableArray<QueryConstant> Values { get; }
     }
 
-    public sealed record Range : Predicate
+    public sealed class Range : Predicate
     {
         public Range(ColumnRef column, Bound? lower, Bound? upper)
         {
@@ -63,7 +63,7 @@ public abstract record Predicate
                 : Bound.Exclusive(bound.Value.Bind(column));
     }
 
-    public sealed record StartsWith : Predicate
+    public sealed class StartsWith : Predicate
     {
         public StartsWith(ColumnRef column, string prefix)
         {
@@ -77,7 +77,7 @@ public abstract record Predicate
         public string Prefix { get; }
     }
 
-    public sealed record Substring : Predicate
+    public sealed class Substring : Predicate
     {
         public Substring(ColumnRef column, string needle, Anchor anchor)
         {
@@ -93,7 +93,7 @@ public abstract record Predicate
         public Anchor Anchor { get; }
     }
 
-    public sealed record ElementOf : Predicate
+    public sealed class ElementOf : Predicate
     {
         public ElementOf(ElementSetRef set, ImmutableArray<QueryConstant> values, SetQuantifier quantifier)
         {
@@ -112,7 +112,7 @@ public abstract record Predicate
         public SetQuantifier Quantifier { get; }
     }
 
-    public sealed record ColumnCompare : Predicate
+    public sealed class ColumnCompare : Predicate
     {
         public ColumnCompare(ColumnRef left, CompareOp op, ColumnRef right)
         {
@@ -130,14 +130,14 @@ public abstract record Predicate
         public ColumnRef Right { get; }
     }
 
-    public sealed record Not : Predicate
+    public sealed class Not : Predicate
     {
         public Not(Predicate inner) => Inner = inner ?? throw new ArgumentNullException(nameof(inner));
 
         public Predicate Inner { get; }
     }
 
-    public sealed record And : Predicate
+    public sealed class And : Predicate
     {
         public And(ImmutableArray<Predicate> terms)
         {
@@ -154,7 +154,7 @@ public abstract record Predicate
         public ImmutableArray<Predicate> Terms { get; }
     }
 
-    public sealed record Or : Predicate
+    public sealed class Or : Predicate
     {
         public Or(ImmutableArray<Predicate> terms)
         {
@@ -171,12 +171,12 @@ public abstract record Predicate
         public ImmutableArray<Predicate> Terms { get; }
     }
 
-    public sealed record AlwaysTrue : Predicate
+    public sealed class AlwaysTrue : Predicate
     {
         public static AlwaysTrue Instance { get; } = new();
     }
 
-    public sealed record AlwaysFalse : Predicate
+    public sealed class AlwaysFalse : Predicate
     {
         public static AlwaysFalse Instance { get; } = new();
     }
