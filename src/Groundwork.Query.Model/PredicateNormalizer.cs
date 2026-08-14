@@ -25,7 +25,7 @@ public static class PredicateNormalizer
         if (predicate is null)
             throw new ArgumentNullException(nameof(predicate));
         var normalizedNnf = ToNnf(predicate, negate: false);
-        var clauses = ToCnf(normalizedNnf, predicate);
+        var clauses = ToCnf(normalizedNnf);
         var fused = Fuse(clauses);
         return FromCnf(fused);
     }
@@ -66,7 +66,7 @@ public static class PredicateNormalizer
         Predicate.Range range => NormalizeRange(range),
         Predicate.ElementOf elementOf => new Predicate.ElementOf(
             elementOf.Set,
-            elementOf.Values.Distinct().OrderBy(value => value.ToCanonicalString()).ToImmutableArray(),
+            elementOf.Values.Distinct().OrderBy(value => value.ToCanonicalString(), StringComparer.Ordinal).ToImmutableArray(),
             elementOf.Quantifier),
         _ => predicate
     };
@@ -97,7 +97,7 @@ public static class PredicateNormalizer
         return range;
     }
 
-    private static List<List<Predicate>> ToCnf(Predicate predicate, Predicate source)
+    private static List<List<Predicate>> ToCnf(Predicate predicate)
     {
         switch (predicate)
         {
@@ -110,11 +110,11 @@ public static class PredicateNormalizer
                 var result = new List<List<Predicate>>();
                 foreach (var term in and.Terms)
                 {
-                    var next = ToCnf(term, source);
+                    var next = ToCnf(term);
                     if (IsFalse(result) || IsFalse(next))
                         return new List<List<Predicate>> { new() };
                     result.AddRange(next);
-                    CheckBudget(result, source);
+                    CheckBudget(result, predicate);
                 }
                 return result;
             }
@@ -124,14 +124,14 @@ public static class PredicateNormalizer
                 var first = true;
                 foreach (var term in or.Terms)
                 {
-                    var next = ToCnf(term, source);
+                    var next = ToCnf(term);
                     if (IsTrue(next))
                         return next;
                     if (first)
                     {
                         result = next;
                         first = false;
-                        CheckBudget(result, source);
+                        CheckBudget(result, predicate);
                         continue;
                     }
                     if (IsTrue(result))
@@ -148,13 +148,13 @@ public static class PredicateNormalizer
                     {
                         var clause = left.Concat(right).ToList();
                         if (clause.Count > MaxDisjunctsPerConjunct)
-                            ThrowBudget(source, result.Count * next.Count, clause.Count);
+                            ThrowBudget(predicate, result.Count * next.Count, clause.Count);
                         distributed.Add(clause);
                         if (distributed.Count > MaxConjuncts)
-                            ThrowBudget(source, distributed.Count, clause.Count);
+                            ThrowBudget(predicate, distributed.Count, clause.Count);
                     }
                     result = distributed;
-                    CheckBudget(result, source);
+                    CheckBudget(result, predicate);
                 }
                 return result;
             }

@@ -4,6 +4,10 @@ namespace Groundwork.Query.Model;
 
 public abstract record Predicate
 {
+    private Predicate()
+    {
+    }
+
     public string CanonicalForm => PredicateCanonicalizer.ToCanonicalString(this);
 
     public sealed record Equal : Predicate

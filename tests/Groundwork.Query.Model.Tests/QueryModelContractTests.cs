@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Reflection;
 using Groundwork.Query.Model;
 using Xunit;
@@ -81,21 +82,128 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
-    public void Cnf_budget_reports_the_offending_expression()
+    public void Cnf_budget_reports_the_exact_nested_offending_expression()
     {
-        var terms = Enumerable.Range(0, 5)
+        var nested = new Predicate.Or(Enumerable.Range(0, 5)
             .Select(_ => new Predicate.And(ImmutableArray.Create<Predicate>(
                 new Predicate.Equal(Name, QueryConstant.Of(Name, "a")),
                 new Predicate.Equal(Name, QueryConstant.Of(Name, "b")),
                 new Predicate.Equal(Name, QueryConstant.Of(Name, "c")),
                 new Predicate.Equal(Name, QueryConstant.Of(Name, "d")))))
             .Cast<Predicate>()
-            .ToImmutableArray();
+            .ToImmutableArray());
+        var root = new Predicate.And(ImmutableArray.Create<Predicate>(
+            new Predicate.Equal(Name, QueryConstant.Of(Name, "outside")),
+            nested));
 
-        var exception = Assert.Throws<QueryNormalizationException>(() => PredicateNormalizer.Normalize(new Predicate.Or(terms)));
+        var exception = Assert.Throws<QueryNormalizationException>(() => PredicateNormalizer.Normalize(root));
 
         Assert.Equal("GW-QUERY-020", exception.Code);
-        Assert.Contains("or(", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(PredicateCanonicalizer.ToCanonicalString(nested), exception.Subexpression);
+        Assert.Equal("GW-QUERY-020: CNF budget exceeded (65 conjuncts, 4 disjuncts per conjunct; limits are 64/16). Offending sub-expression: " + exception.Subexpression, exception.Message);
+    }
+
+    [Fact]
+    public void Element_set_names_are_escaped_without_delimiter_aliases()
+    {
+        var commaInName = new Predicate.ElementOf(
+            new ElementSetRef("a,b"),
+            ImmutableArray.Create(QueryConstant.Of(Name, "c")),
+            SetQuantifier.Any);
+        var commaInValue = new Predicate.ElementOf(
+            new ElementSetRef("a"),
+            ImmutableArray.Create(QueryConstant.Of(Name, "b,c")),
+            SetQuantifier.Any);
+
+        Assert.NotEqual(
+            PredicateCanonicalizer.ToCanonicalString(commaInName),
+            PredicateCanonicalizer.ToCanonicalString(commaInValue));
+    }
+
+    [Fact]
+    public void Canonical_ordering_and_paging_fingerprints_are_culture_independent()
+    {
+        var previous = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("en-US");
+            var english = PredicateNormalizer.Normalize(new Predicate.ElementOf(
+                new ElementSetRef("tags"),
+                new[] { QueryConstant.Of(Name, "I"), QueryConstant.Of(Name, "i"), QueryConstant.Of(Name, "İ"), QueryConstant.Of(Name, "ı") },
+                SetQuantifier.Any));
+            var englishRequest = new QueryRequest(
+                Table,
+                english,
+                ImmutableArray<OrderTerm>.Empty,
+                Projection.All,
+                Paging.OffsetLimit(12, 25));
+
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("tr-TR");
+            var turkish = PredicateNormalizer.Normalize(new Predicate.ElementOf(
+                new ElementSetRef("tags"),
+                new[] { QueryConstant.Of(Name, "I"), QueryConstant.Of(Name, "i"), QueryConstant.Of(Name, "İ"), QueryConstant.Of(Name, "ı") },
+                SetQuantifier.Any));
+            var turkishRequest = new QueryRequest(
+                Table,
+                turkish,
+                ImmutableArray<OrderTerm>.Empty,
+                Projection.All,
+                Paging.OffsetLimit(12, 25));
+
+            Assert.Equal(PredicateCanonicalizer.ToCanonicalString(english), PredicateCanonicalizer.ToCanonicalString(turkish));
+            Assert.Equal(englishRequest.ShapeFingerprint, turkishRequest.ShapeFingerprint);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
+    }
+
+    [Fact]
+    public void Predicate_cannot_be_subclassed_outside_the_model()
+    {
+        Assert.Empty(typeof(Predicate).GetConstructors(BindingFlags.Instance | BindingFlags.Public));
+    }
+
+    [Fact]
+    public void Query_result_snapshots_rows_and_validates_input()
+    {
+        var source = new List<int> { 1 };
+        var result = new QueryResult<int>(source, null);
+        source[0] = 2;
+
+        Assert.Equal(1, result.Rows[0]);
+        Assert.Throws<ArgumentNullException>(() => new QueryResult<int>(null!, null));
+    }
+
+    [Fact]
+    public void Pinned_g2_corpus_has_exactly_300_deterministic_q1_shape_decisions()
+    {
+        var shapes = G2Q1Corpus.Shapes;
+
+        Assert.Equal(G2Q1Corpus.ExpectedShapeCount, shapes.Count);
+        Assert.Equal(Enumerable.Range(1, G2Q1Corpus.ExpectedShapeCount), shapes.Select(shape => shape.Number));
+        Assert.Equal(shapes.Count, shapes.Select(shape => shape.Number + ":" + shape.Identity + ":" + shape.Description).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(243, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
+        Assert.Equal(57, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
+
+        foreach (var shape in shapes)
+        {
+            if (shape.Decision == Q1CorpusDecision.Refuse)
+            {
+                Assert.NotEmpty(shape.DecisionId);
+                Assert.Null(shape.Build);
+                continue;
+            }
+
+            var first = shape.Build!();
+            var second = shape.Build();
+
+            Assert.NotEmpty(first.CanonicalPredicate);
+            Assert.NotEmpty(first.ShapeFingerprint);
+            Assert.Equal(first.CanonicalPredicate, second.CanonicalPredicate);
+            Assert.Equal(first.ShapeFingerprint, second.ShapeFingerprint);
+        }
     }
 
     [Fact]

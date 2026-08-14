@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -179,7 +180,17 @@ public sealed record QueryRequest
     public string ContinuationFingerprint { get; }
 }
 
-public sealed record QueryResult<T>(IReadOnlyList<T> Rows, long? TotalCount);
+public sealed record QueryResult<T>
+{
+    public QueryResult(IReadOnlyList<T> rows, long? totalCount)
+    {
+        Rows = (rows ?? throw new ArgumentNullException(nameof(rows))).ToArray();
+        TotalCount = totalCount;
+    }
+
+    public IReadOnlyList<T> Rows { get; }
+    public long? TotalCount { get; }
+}
 
 public static class QueryFingerprint
 {
@@ -194,7 +205,7 @@ public static class QueryFingerprint
         foreach (var term in request.Order)
             builder.Append(PredicateCanonicalizer.Column(term.Column)).Append(':').Append(term.Direction).Append(':').Append(term.NullOrder).Append(';');
         builder.Append("|projection=").Append(request.Projection.AllColumns ? "all" : string.Join(";", request.Projection.Columns.Select(PredicateCanonicalizer.Column)));
-        builder.Append("|paging=").Append(request.Paging.Offset?.ToString() ?? "none").Append(':').Append(request.Paging.Limit?.ToString() ?? "none").Append(':').Append(request.Paging.ContinuationToken is null ? "token" : "continuation");
+        builder.Append("|paging=").Append(request.Paging.Offset?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.Limit?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.ContinuationToken is null ? "token" : "continuation");
         builder.Append("|latest=").Append(request.LatestPerKey is null ? "none" : PredicateCanonicalizer.Column(request.LatestPerKey.Key) + ":" + PredicateCanonicalizer.Column(request.LatestPerKey.Timestamp));
         builder.Append("|scan=").Append(request.AcceptedScan?.Allowed == true ? "allow" : "refuse");
         if (includeResultShape)
