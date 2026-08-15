@@ -7,7 +7,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession
+internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -50,6 +50,8 @@ internal sealed class SqliteStorageSession : IStorageSession
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Insert);
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
+        Mutate(values, options, Mutation.Upsert, exactOutcome: true);
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
@@ -70,7 +72,11 @@ internal sealed class SqliteStorageSession : IStorageSession
 
     internal void Close() => closed = true;
 
-    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
+    private WriteOutcome Mutate(
+        StorageValues values,
+        WriteOptions? options,
+        Mutation mutation,
+        bool exactOutcome = false) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
         ValidateValues(values.Values, mutation == Mutation.Insert);
@@ -92,7 +98,7 @@ internal sealed class SqliteStorageSession : IStorageSession
             columns.Add(ScopeColumnDefinition!);
 
         if (mutation == Mutation.Upsert)
-            return Upsert(values, existing, columns);
+            return Upsert(values, existing, columns, exactOutcome);
         var sets = supplied.Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
             .Select(column => $"{Quote(column.Name)}=@{column.Name}").ToArray();
         var parameters = BuildParameters(values.Values, supplied);
@@ -122,9 +128,16 @@ internal sealed class SqliteStorageSession : IStorageSession
         return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
     });
 
-    private WriteOutcome Upsert(StorageValues values, StoredEntry? existing, IReadOnlyList<ColumnDefinition> columns)
+    private WriteOutcome Upsert(
+        StorageValues values,
+        StoredEntry? existing,
+        IReadOnlyList<ColumnDefinition> columns,
+        bool exactOutcome)
     {
-        var updateColumns = columns.Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) && column.Name != SqliteSchemaCoordinator.ScopeColumn).ToArray();
+        var updateColumns = columns.Where(column =>
+            !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+            column.Name != SqliteSchemaCoordinator.ScopeColumn &&
+            (!exactOutcome || column.Name != "createdAt")).ToArray();
         if (VersionColumnDefinition is not null && updateColumns.All(column => column.Name != VersionColumnDefinition.Name))
             updateColumns = updateColumns.Append(VersionColumnDefinition).ToArray();
         var keyNames = Unit.Key.Columns;
@@ -136,7 +149,16 @@ internal sealed class SqliteStorageSession : IStorageSession
         if (ScopeColumnDefinition is not null && !parameters.ContainsKey("@__groundwork_scope")) parameters["@__groundwork_scope"] = Access.Scope!.Value;
         using var command = Command(sql);
         AddParameters(command, parameters);
-        try { command.ExecuteNonQuery(); return new WriteOutcome(WriteOutcomeStatus.Upserted, VersionColumnDefinition is null ? null : existing is null ? 1 : existing.Version + 1); }
+        try
+        {
+            command.ExecuteNonQuery();
+            var version = VersionColumnDefinition is null ? (long?)null : existing is null ? 1 : existing.Version + 1;
+            return new WriteOutcome(
+                exactOutcome
+                    ? existing is null ? WriteOutcomeStatus.Inserted : WriteOutcomeStatus.Updated
+                    : WriteOutcomeStatus.Upserted,
+                version);
+        }
         catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version); }
     }
 

@@ -100,3 +100,39 @@ jobs:
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p1ci?replicaSet=p1rs&directConnection=true
         run: dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-restore --configuration Release
+
+  concurrency-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Initialize MongoDB replica set
+        run: |
+          docker run --detach --name groundwork-w2-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet w2rs --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec groundwork-w2-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"w2rs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec groundwork-w2-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+      - run: dotnet restore Groundwork.slnx
+      - name: Report provider coverage
+        run: |
+          {
+            echo '### W2 provider coverage'
+            echo
+            echo '- InMemory: executed (reference adapter)'
+            echo '- SQLite: executed (in-process adapter)'
+            echo '- MongoDB: executed (live replica set)'
+            echo '- PostgreSQL: not executed — W2 adapter is not yet present'
+            echo '- SQL Server: not executed — W2 adapter is not yet present'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run W2 concurrency conformance
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w2ci?replicaSet=w2rs&directConnection=true
+        run: dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj --no-restore --configuration Release
