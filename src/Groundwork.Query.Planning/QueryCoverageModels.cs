@@ -92,7 +92,7 @@ public sealed record CoverageIndex
 /// <summary>A single provider-neutral planning diagnostic.</summary>
 public sealed record CoverageRefusal
 {
-    internal CoverageRefusal(string code, string message, CoverageIndex? nearestIndex, CoverageIndex suggestedIndex)
+    internal CoverageRefusal(string code, string message, CoverageIndex? nearestIndex, CoverageIndex? suggestedIndex)
     {
         Code = code;
         Message = message;
@@ -103,8 +103,8 @@ public sealed record CoverageRefusal
     public string Code { get; }
     public string Message { get; }
     public CoverageIndex? NearestIndex { get; }
-    public CoverageIndex SuggestedIndex { get; }
-    public string SuggestedDeclaration => SuggestedIndex.Declaration;
+    public CoverageIndex? SuggestedIndex { get; }
+    public string SuggestedDeclaration => SuggestedIndex?.Declaration ?? string.Empty;
 }
 
 /// <summary>The immutable result of checking a query against candidate indexes.</summary>

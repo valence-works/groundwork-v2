@@ -58,4 +58,7 @@
   <Folder Name="/tests/Groundwork.Analyzers.Tests/">
     <Project Path="tests/Groundwork.Analyzers.Tests/Groundwork.Analyzers.Tests.csproj" />
   </Folder>
+  <Folder Name="/tests/Groundwork.Runtime.Tests/">
+    <Project Path="tests/Groundwork.Runtime.Tests/Groundwork.Runtime.Tests.csproj" />
+  </Folder>
 </Solution>

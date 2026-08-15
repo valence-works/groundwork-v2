@@ -23,6 +23,9 @@ public static class QueryCoverageChecker
         var constraints = ConstraintSet.Create(request.Where);
         if (request.Where is Predicate.AlwaysFalse)
         {
+            if (request.AcceptedScan?.Allowed == true)
+                return StaleAcceptance(request, null, null);
+
             return new QueryCoverageResult(
                 CoverageDecision.Covered,
                 null,
@@ -70,6 +73,9 @@ public static class QueryCoverageChecker
         var winner = refusals.Any() ? null : evaluated.FirstOrDefault(candidate => candidate.Failure is null);
         if (winner is not null)
         {
+            if (request.AcceptedScan?.Allowed == true)
+                return StaleAcceptance(request, winner.Index, suggested);
+
             return new QueryCoverageResult(
                 CoverageDecision.Covered,
                 winner.Index,
@@ -88,6 +94,20 @@ public static class QueryCoverageChecker
             suggested);
         return new QueryCoverageResult(CoverageDecision.Refuse, null, [refusal], failure.Message);
     }
+
+    private static QueryCoverageResult StaleAcceptance(
+        QueryRequest request,
+        CoverageIndex? index,
+        CoverageIndex? suggested) =>
+        new(
+            CoverageDecision.Refuse,
+            null,
+            [new CoverageRefusal(
+                "GW-COVER-901",
+                "AcceptScan '" + request.AcceptedScan!.Id + "' is no longer needed because the query is index-covered.",
+                index,
+                suggested)],
+            "The accepted scan is stale because the query is index-covered.");
 
     private static string BuildMessage(
         QueryRequest request,

@@ -170,10 +170,62 @@ public sealed class CoverageAnalyzerTests
             $"500 query sites took {stopwatch.Elapsed.TotalMilliseconds:F0} ms to analyze.");
     }
 
+    [Fact]
+    public async Task Accepted_uncovered_query_emits_inventory_with_reason_and_owner()
+    {
+        var source = WithSchema(SchemaWithIndex("ix_other", "other ASC"), allowAcceptedScans: true) +
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", reason: \"admin report\", owner: \"billing\", expiresOn: \"2027-01-01\").QueryAsync();");
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        var inventory = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_905"));
+        Assert.Contains("GW-SCAN-0007", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("admin report", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("billing", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_COVER_006");
+    }
+
+    [Fact]
+    public async Task Accepted_scan_on_covered_query_is_a_build_error()
+    {
+        var source = WithSchema(SchemaWithIndex("ix_status", "status ASC"), allowAcceptedScans: true) +
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_901");
+    }
+
+    [Fact]
+    public async Task Accepted_scan_without_assembly_opt_in_is_a_build_error()
+    {
+        var source = WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_902");
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_COVER_006");
+    }
+
+    [Fact]
+    public async Task Accepted_scan_expiry_warns_then_errors_at_the_expiry_date()
+    {
+        var source = WithSchema(SchemaWithIndex("ix_other", "other ASC"), allowAcceptedScans: true) +
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
+
+        var warning = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+        Assert.Contains(warning, item => item.Id == "GW_COVER_904" && item.Severity == DiagnosticSeverity.Warning);
+
+        var error = await Analyze(source, now: new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        Assert.Contains(error, item => item.Id == "GW_COVER_903" && item.Severity == DiagnosticSeverity.Error);
+    }
+
     private static async Task<ImmutableArray<Diagnostic>> Analyze(
         string source,
         AdditionalText? additional = null,
-        IEnumerable<MetadataReference>? references = null)
+        IEnumerable<MetadataReference>? references = null,
+        DateTimeOffset? now = null)
     {
         var compilation = CSharpCompilation.Create(
             "CoverageInput",
@@ -184,7 +236,7 @@ public sealed class CoverageAnalyzerTests
             ? ImmutableArray<AdditionalText>.Empty
             : [additional]);
         var result = await compilation.WithAnalyzers(
-            [new CoverageAnalyzer()],
+            [now is null ? new CoverageAnalyzer() : new CoverageAnalyzer(() => now.Value)],
             new CompilationWithAnalyzersOptions(options, onAnalyzerException: null, concurrentAnalysis: false, logAnalyzerExecutionTime: true))
             .GetAnalyzerDiagnosticsAsync();
         return result;
@@ -201,11 +253,13 @@ public sealed class CoverageAnalyzerTests
             .Select(path => MetadataReference.CreateFromFile(path));
     }
 
-    private static string WithSchema(string schema)
+    private static string WithSchema(string schema, bool allowAcceptedScans = false)
     {
         var document = GroundworkSchemaCanonical.Parse(schema);
         var fingerprint = GroundworkSchemaCanonical.Fingerprint(document);
-        return "using Groundwork.Schema; [assembly: GroundworkSchema(" + Literal(schema) + ", " + Literal(fingerprint) + ")]\n";
+        return "using Groundwork.Schema; using Groundwork.Query.Model; " +
+               (allowAcceptedScans ? "[assembly: GwAllowAcceptedScans] " : string.Empty) +
+               "[assembly: GroundworkSchema(" + Literal(schema) + ", " + Literal(fingerprint) + ")]\n";
     }
 
     private static string QuerySource(string query) => "#nullable enable\n" + QueryInfrastructure + "\n" + query + "\n";
@@ -248,11 +302,12 @@ public sealed class CoverageAnalyzerTests
         {
             public Query<T> Where(Func<T, bool> predicate) => this;
             public Query<T> WhereIf(bool condition, Func<T, bool> predicate) => this;
+            public Query<T> AcceptScan(string id, string reason, string owner, string expiresOn) => this;
             public Query<T> OrderByDescending<TKey>(Func<T, TKey> selector) => this;
             public Query<T> Take(int count) => this;
             public Task QueryAsync() => Task.CompletedTask;
         }
-        public static class QueryHost { public static Db db = new Db(); public static bool enabled; public static bool c0, c1, c2, c3, c4, c5, c6; public static string status = "open"; public static DateTimeOffset from; }
+        public static class QueryHost { public static Db db = new Db(); public static bool enabled; public static bool c0, c1, c2, c3, c4, c5, c6; public static string status = "open"; public const string term = "open"; public static DateTimeOffset from; }
         """;
 
     private sealed class InMemoryAdditionalText(string path, string content) : AdditionalText
