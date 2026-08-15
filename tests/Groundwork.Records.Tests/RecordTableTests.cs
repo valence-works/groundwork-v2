@@ -39,6 +39,9 @@ public sealed class RecordTableTests
         var mixed = RecordTable.For<MixedCustomer>("mixed_customers")
             .Key(row => row.Id)
             .Build();
+        var mutableStruct = RecordTable.For<MutableStructCustomer>("mutable_struct_customers")
+            .Key(row => row.Id)
+            .Build();
         var id = Guid.NewGuid();
         var values = new RowValues(new Dictionary<string, object?>
         {
@@ -49,9 +52,11 @@ public sealed class RecordTableTests
 
         var mutableValue = mutable.FromRowValues(values);
         var mixedValue = mixed.FromRowValues(values);
+        var mutableStructValue = mutableStruct.FromRowValues(values);
 
         Assert.Equal((id, "Ada", "ada@example.test"), (mutableValue.Id, mutableValue.Name, mutableValue.Email));
         Assert.Equal((id, "Ada", "ada@example.test"), (mixedValue.Id, mixedValue.Name, mixedValue.Email));
+        Assert.Equal((id, "Ada", "ada@example.test"), (mutableStructValue.Id, mutableStructValue.Name, mutableStructValue.Email));
     }
 
     [Fact]
@@ -222,6 +227,20 @@ public sealed class RecordTableTests
         public Guid Id { get; } = id;
         public string Name { get; set; } = "unset";
         public string Email { get; set; } = "unset";
+    }
+
+    public struct MutableStructCustomer
+    {
+        public MutableStructCustomer()
+        {
+            Id = default;
+            Name = string.Empty;
+            Email = string.Empty;
+        }
+
+        public Guid Id { get; set; }
+        public string Name { get; set; }
+        public string Email { get; set; }
     }
 
     public sealed record VersionedCustomer(Guid Id, string Name, long Version);

@@ -104,14 +104,15 @@ internal sealed class RecordAccessor<T>
             .Select(candidate => candidate.Candidate)
             .FirstOrDefault();
 
-        if (constructor is null)
+        if (constructor is null && (!typeof(T).IsValueType || members.Any(member => !IsWritable(member.Member))))
             throw new ArgumentException(
                 $"'{typeof(T).FullName}' must expose a public constructor and/or writable public members that initialize every declared member.", nameof(T));
 
         var value = Expression.Variable(typeof(T), "value");
-        var bound = constructor.GetParameters().Select(parameter => members.Single(member =>
+        var parameters = constructor?.GetParameters() ?? [];
+        var bound = parameters.Select(parameter => members.Single(member =>
             string.Equals(member.Name, parameter.Name, StringComparison.OrdinalIgnoreCase))).ToHashSet();
-        var arguments = constructor.GetParameters().Select(parameter =>
+        var arguments = parameters.Select(parameter =>
         {
             var member = members.Single(member =>
                 string.Equals(member.Name, parameter.Name, StringComparison.OrdinalIgnoreCase));
@@ -119,7 +120,9 @@ internal sealed class RecordAccessor<T>
         });
         var expressions = new List<Expression>
         {
-            Expression.Assign(value, Expression.New(constructor, arguments))
+            Expression.Assign(value, constructor is null
+                ? Expression.New(typeof(T))
+                : Expression.New(constructor, arguments))
         };
         foreach (var member in members)
         {
