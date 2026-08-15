@@ -84,11 +84,17 @@ public sealed class ConcurrencyHarnessTests
     }
 
     [SkippableTheory]
-    [InlineData(1, true)]
-    [InlineData(1000, true)]
-    [InlineData(1, false)]
+    [InlineData(1, false, false)]
+    [InlineData(1, false, true)]
+    [InlineData(1, true, false)]
+    [InlineData(1, true, true)]
+    [InlineData(1000, false, false)]
+    [InlineData(1000, false, true)]
+    [InlineData(1000, true, false)]
+    [InlineData(1000, true, true)]
     public void PostgreSql_holds_the_named_invariants_for_each_live_shape(
         int keyCount,
+        bool includePartialUniqueIndex,
         bool optimistic)
     {
         using var store = PostgreSqlStore.OpenOrSkip();
@@ -100,9 +106,10 @@ public sealed class ConcurrencyHarnessTests
                 WriterCount = 32,
                 KeyCount = keyCount,
                 RepeatCount = 2,
-                Seed = optimistic ? 9245 : 10245,
+                Seed = 9245 + (keyCount == 1000 ? 100 : 0) +
+                    (includePartialUniqueIndex ? 10 : 0) + (optimistic ? 1 : 0),
                 Concurrency = optimistic ? ConcurrencyKind.Optimistic : ConcurrencyKind.None,
-                IncludePartialUniqueIndex = optimistic
+                IncludePartialUniqueIndex = includePartialUniqueIndex
             });
 
         Assert.True(report.Passed, Describe(report));
