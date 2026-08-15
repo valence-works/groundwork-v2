@@ -134,6 +134,9 @@ internal sealed class MongoProviderState
     internal IMongoCollection<BsonDocument> Sequences =>
         Context.Database.GetCollection<BsonDocument>("__groundwork_sequences");
 
+    internal IMongoCollection<BsonDocument> Operations(string ledgerName) =>
+        Context.Database.GetCollection<BsonDocument>(ledgerName);
+
     internal MongoAppliedUnit Resolve(StorageUnit declaration, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(declaration);
@@ -408,7 +411,9 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 $"[{string.Join("; ", report.ColumnDrift.Select(refusal => refusal.Code + " at " + refusal.Path + ": " + refusal.Message))}]");
         }
 
-        return state.Context.Database.GetCollection<BsonDocument>(CollectionName(applied, access));
+        var collection = state.Context.Database.GetCollection<BsonDocument>(CollectionName(applied, access));
+        EnsureLedgerIndexes(state, applied.Declaration.AppendIdempotency?.LedgerName);
+        return collection;
     }
 
     /// <summary>
@@ -544,6 +549,17 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         }
     }
 
+    private static void EnsureLedgerIndexes(MongoProviderState state, string? ledgerName)
+    {
+        if (ledgerName is null)
+            return;
+
+        var ledger = state.Operations(ledgerName);
+        ledger.Indexes.CreateOne(new CreateIndexModel<BsonDocument>(
+            Builders<BsonDocument>.IndexKeys.Ascending("unit").Ascending("committed_at"),
+            new CreateIndexOptions { Name = "__groundwork_ledger_cleanup" }));
+    }
+
     private static void CreateIndexes(
         IMongoCollection<BsonDocument> collection,
         StorageUnit unit,
@@ -600,7 +616,8 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 throw new MongoSchemaConflictException(
                     $"Storage unit '{desired.Name}' changed its retention declaration non-additively.");
             if (current.Scope != desired.Scope || current.Concurrency != desired.Concurrency ||
-                current.Timestamps != desired.Timestamps || current.SchemaVersion != desired.SchemaVersion)
+                current.Timestamps != desired.Timestamps || current.SchemaVersion != desired.SchemaVersion ||
+                !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
             {
                 throw new MongoSchemaConflictException($"Storage unit '{desired.Name}' changed non-additive storage metadata.");
             }
@@ -778,6 +795,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             var refusal = portability.Refusals[0];
             throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
         }
+        unit.AppendIdempotency?.Validate(unit);
         if (unit.Columns.Count == 0)
             throw new ArgumentException("A MongoDB storage unit must declare at least one column.", nameof(unit));
         if (unit.Key.Columns.Count == 0)
@@ -817,6 +835,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
     private readonly MongoAppliedUnit applied;
     private readonly IMongoCollection<BsonDocument> collection;
     private readonly IClientSessionHandle? transactionSession;
+    private readonly MongoUnitOfWork? unitOfWork;
     private bool disposed;
 
     internal MongoStorageSession(
@@ -824,12 +843,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         MongoAppliedUnit applied,
         MongoStorageAccess access,
         IMongoCollection<BsonDocument> collection,
-        IClientSessionHandle? transactionSession)
+        IClientSessionHandle? transactionSession,
+        MongoUnitOfWork? unitOfWork = null)
     {
         this.state = state;
         this.applied = applied;
         this.collection = collection;
         this.transactionSession = transactionSession;
+        this.unitOfWork = unitOfWork;
         Access = access;
         Unit = MongoDeclarationSnapshot.Clone(applied.Declaration);
     }
@@ -1350,6 +1371,177 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
                      !string.Equals(key, declaration.OrderColumn, StringComparison.Ordinal)))
             sort[key] = 1;
         return sort;
+    }
+
+    public MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
+    {
+        ThrowIfDisposed();
+        var declaration = Unit.AppendIdempotency ?? throw new InvalidOperationException(
+            $"Storage unit '{Unit.Name}' does not declare append idempotency.");
+        declaration.Validate(Unit);
+        if (string.IsNullOrWhiteSpace(operationId.Nonce))
+            throw new ArgumentException("An operation id requires a non-empty nonce.", nameof(operationId));
+        if (operationId.Nonce.Length > 256)
+            throw new ArgumentException("An operation nonce cannot exceed 256 UTF-16 code units.", nameof(operationId));
+        ArgumentNullException.ThrowIfNull(values);
+        if (values.Count == 0 || values.Any(value => value is null))
+            throw new ArgumentException("An append batch must contain at least one non-null row.", nameof(values));
+        IdempotencyRules.ValidateOperation(
+            Unit,
+            operationId,
+            values.Select(value => new StorageValues(value.Values)).ToArray());
+        foreach (var value in values)
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration));
+            }
+            catch (MongoLedgerConflictException) when (attempt == 0)
+            {
+                // A concurrent upsert can surface as a duplicate-key error after the other
+                // transaction commits. A standalone append is retried by its outer transaction
+                // wrapper. An explicit unit of work may already contain other writes, so its
+                // transaction is aborted as a whole and the caller must retry the whole unit of
+                // work; restarting only the append would silently lose those earlier writes.
+                if (transactionSession is not null)
+                {
+                    try { transactionSession.AbortTransaction(); }
+                    catch (MongoException) { }
+                    unitOfWork?.Poison();
+                    throw new MongoUnitOfWorkConflictException(
+                        "A concurrent idempotency nonce conflict aborted the whole MongoDB unit of work; retry the complete unit of work.");
+                }
+            }
+        }
+    }
+
+    private MongoWriteOutcome AppendCore(
+        OperationId operationId,
+        IReadOnlyList<MongoStorageValues> values,
+        AppendIdempotencyDeclaration declaration)
+    {
+        var scope = Access.Scope?.Value ?? string.Empty;
+        var ledger = state.Operations(declaration.LedgerName);
+        var cutoffExpression = new BsonDocument("$dateSubtract", new BsonDocument
+        {
+            ["startDate"] = "$$NOW",
+            ["unit"] = "millisecond",
+            ["amount"] = Math.Max(1L, checked((long)Math.Ceiling(declaration.Window.TotalMilliseconds)))
+        });
+        var expired = ledger.Find(
+                transactionSession,
+                new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
+                {
+                    new BsonDocument("$eq", new BsonArray { "$unit", Unit.Id.Value }),
+                    new BsonDocument("$lte", new BsonArray { "$committed_at", cutoffExpression })
+                })))
+            .Limit(128)
+            .Project(new BsonDocument("_id", 1))
+            .ToList();
+        if (expired.Count != 0)
+        {
+            var ids = expired.Select(document => document["_id"]).ToArray();
+            var deleteFilter = Builders<BsonDocument>.Filter.In("_id", ids);
+            if (transactionSession is null)
+                ledger.DeleteMany(deleteFilter);
+            else
+                ledger.DeleteMany(transactionSession, deleteFilter);
+        }
+
+        var identity = new BsonDocument
+        {
+            ["unit"] = Unit.Id.Value,
+            ["scope"] = scope,
+            ["nonce"] = operationId.Nonce
+        };
+        var validIdentity = new BsonDocument
+        {
+            ["_id"] = identity,
+            ["$expr"] = new BsonDocument("$gt", new BsonArray { "$committed_at", cutoffExpression })
+        };
+        var existing = transactionSession is null
+            ? ledger.Find(validIdentity).FirstOrDefault()
+            : ledger.Find(transactionSession, validIdentity).FirstOrDefault();
+        if (existing is not null)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.Replayed);
+
+        var expiredExisting = transactionSession is null
+            ? ledger.Find(new BsonDocument("_id", identity)).FirstOrDefault()
+            : ledger.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();
+        if (expiredExisting is not null)
+        {
+            if (transactionSession is null)
+                ledger.DeleteOne(new BsonDocument("_id", identity));
+            else
+                ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
+        }
+
+        var ledgerSet = new BsonDocument
+        {
+            ["unit"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$unit"), "missing" }),
+                Unit.Id.Value,
+                "$unit"
+            }),
+            ["scope"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$scope"), "missing" }),
+                scope,
+                "$scope"
+            }),
+            ["nonce"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$nonce"), "missing" }),
+                operationId.Nonce,
+                "$nonce"
+            }),
+            ["committed_at"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$committed_at"), "missing" }),
+                "$$NOW",
+                "$committed_at"
+            })
+        };
+        var ledgerUpdate = Builders<BsonDocument>.Update.Pipeline(
+            new EmptyPipelineDefinition<BsonDocument>()
+                .AppendStage<BsonDocument, BsonDocument, BsonDocument>(new BsonDocument("$set", ledgerSet)));
+        var ledgerOptions = new FindOneAndUpdateOptions<BsonDocument>
+        {
+            IsUpsert = true,
+            ReturnDocument = ReturnDocument.Before
+        };
+        BsonDocument? previous;
+        try
+        {
+            previous = transactionSession is null
+                ? ledger.FindOneAndUpdate(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions)
+                : ledger.FindOneAndUpdate(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions);
+        }
+        catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+        {
+            throw new MongoLedgerConflictException();
+        }
+        catch (MongoCommandException exception) when (
+            exception.Code == 112 || exception.HasErrorLabel("TransientTransactionError"))
+        {
+            // WiredTiger reports a concurrent insert into the same ledger identity as a
+            // transaction write conflict on some server versions rather than duplicate key.
+            // Both outcomes mean this transaction lost the nonce race and can retry safely.
+            throw new MongoLedgerConflictException();
+        }
+        if (previous is not null)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.Replayed);
+
+        foreach (var value in values)
+        {
+            var outcome = MutateCore(value, MongoWriteOptions.Unconditional, MutationKind.Insert);
+            if (!outcome.Succeeded)
+                throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
+        }
+        return new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted);
     }
 
     private static WriteOptions? ToTestingOptions(MongoWriteOptions? options) => options is null
@@ -1996,10 +2188,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
     {
         if (transactionSession is not null)
             return operation(this);
-        if (!Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+        if (!Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence) &&
+            Unit.AppendIdempotency is null)
             return operation(this);
 
-        state.Context.RequireTransactions("ProviderSequence");
+        var transactionReason = Unit.AppendIdempotency is null ? "ProviderSequence" : "AppendIdempotency";
+        state.Context.RequireTransactions(transactionReason);
         MongoException? lastTransientFailure = null;
         for (var attempt = 0; attempt < 5; attempt++)
         {
@@ -2032,7 +2226,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
 
         if (lastTransientFailure is not null)
             throw lastTransientFailure;
-        throw new InvalidOperationException("MongoDB ProviderSequence transaction retries were exhausted.");
+        throw new InvalidOperationException($"MongoDB {transactionReason} transaction retries were exhausted.");
     }
 
     internal static void CommitTransactionWithRetry(IClientSessionHandle session)
@@ -2053,6 +2247,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         }
     }
 
+    private sealed class MongoLedgerConflictException : Exception
+    {
+    }
+
     private void ThrowIfDisposed()
     {
         if (disposed)
@@ -2060,7 +2258,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
     }
 }
 
-internal sealed class MongoUnitOfWork : IMongoUnitOfWork
+internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
 {
     private readonly MongoProviderState state;
     private readonly IReadOnlyDictionary<StorageUnitId, (MongoAppliedUnit Applied, IMongoCollection<BsonDocument> Collection)> units;
@@ -2091,7 +2289,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
         ThrowIfTerminal();
         if (!units.TryGetValue(unit.Id, out var applied))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
-        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session);
+        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session, this);
         sessions.Add(session);
         return session;
     }
@@ -2116,7 +2314,8 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
         ThrowIfTerminal();
         try
         {
-            session.AbortTransaction();
+            if (session.IsInTransaction)
+                session.AbortTransaction();
             terminal = true;
             CloseSessions();
         }
@@ -2142,6 +2341,19 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
     {
         if (terminal)
             throw new InvalidOperationException("The unit of work is already terminal.");
+    }
+
+    public bool IsActive => !terminal;
+
+    public void EnsureActive() => ThrowIfTerminal();
+
+    internal void Poison()
+    {
+        if (terminal)
+            return;
+        terminal = true;
+        CloseSessions();
+        session.Dispose();
     }
 }
 
@@ -2250,6 +2462,9 @@ internal static class SchemaIdentity
         unit.Timestamps,
         RetentionCanonicalization.Canonicalize(unit.Retention),
         unit.SchemaVersion,
+        unit.AppendIdempotency is null
+            ? "idempotency:none"
+            : string.Join("|", "idempotency", unit.AppendIdempotency.Window.Ticks, unit.AppendIdempotency.LedgerName),
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
@@ -2267,6 +2482,12 @@ internal static class SchemaIdentity
             RetentionCanonicalization.Canonicalize(left),
             RetentionCanonicalization.Canonicalize(right),
             StringComparison.Ordinal);
+
+    internal static bool IdempotencyEquals(
+        AppendIdempotencyDeclaration? left,
+        AppendIdempotencyDeclaration? right) =>
+        left?.Window == right?.Window &&
+        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
 
     private static string Column(ColumnDefinition column) => string.Join("|",
         column.Name, column.Type, column.IsNullable, column.MaxLength, column.Precision,

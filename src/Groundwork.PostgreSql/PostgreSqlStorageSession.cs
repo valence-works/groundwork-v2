@@ -235,6 +235,115 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         return new RetentionResult(deleted, batches);
     });
 
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        foreach (var value in values)
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        return ExecuteWrite(() => AppendCore(operationId, values, declaration));
+    }
+
+    private WriteOutcome AppendCore(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        AppendIdempotencyDeclaration declaration)
+    {
+        EnsureLedgerTable(declaration.LedgerName);
+        var providerNow = ProviderNow();
+        var scope = Access.Scope?.Value ?? string.Empty;
+        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
+        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE ctid IN (SELECT ctid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
+        {
+            Add(reclaim, "reclaim_unit", Unit.Id.Value);
+            Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
+            reclaim.ExecuteNonQuery();
+        }
+
+        var expiredExisting = false;
+        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
+        {
+            AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
+            using var reader = existing.ExecuteReader();
+            if (reader.Read())
+            {
+                var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
+                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
+                expiredExisting = true;
+            }
+        }
+        if (expiredExisting)
+        {
+            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
+            deleteExpired.ExecuteNonQuery();
+        }
+
+        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}) VALUES (@unit, @scope, @nonce, @committed_at) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;"))
+        {
+            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
+            Add(insertLedger, "committed_at", FormatLedgerTime(providerNow));
+            if (insertLedger.ExecuteNonQuery() == 0)
+                return new WriteOutcome(WriteOutcomeStatus.Replayed);
+        }
+
+        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, PostgreSqlSchemaCoordinator.ScopeColumn);
+        var writes = values
+            .Select(value => RowWrite.Insert(logicalUnit, value))
+            .ToArray();
+        var outcomes = SequenceColumn is not null
+            ? writes.Select(InsertAppendSequence).ToArray()
+            : ApplyBatchCore(writes);
+        if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
+            throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
+        return new WriteOutcome(WriteOutcomeStatus.Inserted);
+    }
+
+    private RowWriteOutcome InsertAppendSequence(RowWrite write)
+    {
+        var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
+        ValidateValues(values.Values, requireAllNonNullable: true);
+        return new RowWriteOutcome(write, InsertCore(values));
+    }
+
+    private void EnsureLedgerTable(string table)
+    {
+        using var command = Command($"CREATE TABLE IF NOT EXISTS {Quote(table)} (" +
+            $"{Quote(LedgerUnit)} text NOT NULL, " +
+            $"{Quote(LedgerScope)} text NOT NULL, " +
+            $"{Quote(LedgerNonce)} text NOT NULL, " +
+            $"{Quote(LedgerCommittedAt)} text NOT NULL, " +
+            $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}));");
+        command.ExecuteNonQuery();
+
+        using var cleanupIndex = Command($"CREATE INDEX IF NOT EXISTS {Quote(IdempotencyRules.CleanupIndexName(table))} " +
+            $"ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
+        cleanupIndex.ExecuteNonQuery();
+    }
+
+    private void AddLedgerParameters(NpgsqlCommand command, string unit, string scope, string nonce)
+    {
+        Add(command, "unit", unit);
+        Add(command, "scope", scope);
+        Add(command, "nonce", nonce);
+    }
+
+    private DateTimeOffset ProviderNow()
+    {
+        using var command = Command("SELECT clock_timestamp();");
+        var value = command.ExecuteScalar();
+        return value switch
+        {
+            DateTimeOffset timestamp => timestamp.ToUniversalTime(),
+            DateTime timestamp => new DateTimeOffset(DateTime.SpecifyKind(timestamp, DateTimeKind.Utc)),
+            _ => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal)
+        };
+    }
+
+    private static string FormatLedgerTime(DateTimeOffset value) =>
+        value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
     internal void Close() => closed = true;
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
@@ -248,9 +357,6 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
-        if (writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() != 1)
-            return ApplyBatchFallback(writes);
-
         var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
         return physicalWrites[0].Mode switch
         {
@@ -377,7 +483,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             for (var index = 0; index < Unit.Key.Columns.Count; index++)
             {
                 var column = Unit.Key.Columns[index];
-                if (column != PostgreSqlSchemaCoordinator.ScopeColumn)
+                if (column == PostgreSqlSchemaCoordinator.ScopeColumn)
+                    values[column] = Access.Scope!.Value;
+                else
                     values[column] = FromDatabase(reader.GetValue(index), Column(column));
             }
             var versionOrdinal = Unit.Key.Columns.Count;
@@ -941,6 +1049,11 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         column.Generation == ColumnGeneration.ProviderSequence);
 
     private ColumnDefinition? VersionColumn => Unit.Columns.FirstOrDefault(column => column.Name == PostgreSqlSchemaCoordinator.VersionColumn);
+
+    private const string LedgerUnit = "unit";
+    private const string LedgerScope = "scope";
+    private const string LedgerNonce = "nonce";
+    private const string LedgerCommittedAt = "committed_at";
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 

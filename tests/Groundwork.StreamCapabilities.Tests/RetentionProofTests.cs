@@ -7,6 +7,7 @@ using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
 using Groundwork.Query.Model;
+using Microsoft.Data.Sqlite;
 using Xunit;
 
 namespace Groundwork.StreamCapabilities.Tests;
@@ -92,6 +93,19 @@ public sealed class RetentionProofTests
         {
             try { File.Delete(path); } catch { }
         }
+    }
+
+    [Fact]
+    public async Task SQLite_in_memory_OnAppend_serializes_the_shared_connection_and_coalesces_cleanup()
+    {
+        var connectionString = $"Data Source=s3-retention-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        using var keeper = new SqliteConnection(connectionString);
+        keeper.Open();
+        using var connection = new SqliteProviderFactory().Create(connectionString);
+
+        var serial = await MeasureOnAppend(connection, "mems", concurrent: false);
+        var concurrent = await MeasureOnAppend(connection, "memc", concurrent: true);
+        AssertNativeOnAppendCoalesces(serial, concurrent);
     }
 
     [SkippableFact]

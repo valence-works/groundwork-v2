@@ -257,6 +257,12 @@ jobs:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
         run: dotnet test tests/Groundwork.WritePath.Tests/Groundwork.WritePath.Tests.csproj --no-restore --configuration Release
+      - name: Run S2 idempotency proof across all providers
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s2ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Idempotency
       - name: Run S4 native aggregation proof across all providers
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s4ci?replicaSet=w2rs&directConnection=true

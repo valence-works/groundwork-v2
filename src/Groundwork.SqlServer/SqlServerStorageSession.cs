@@ -285,6 +285,115 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         return new RetentionResult(deleted, batches);
     }
 
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        foreach (var value in values)
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        return ExecuteWrite(() => AppendCore(operationId, values, declaration));
+    }
+
+    private WriteOutcome AppendCore(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        AppendIdempotencyDeclaration declaration)
+    {
+        EnsureLedgerTable(declaration.LedgerName);
+        var providerNow = ProviderNow();
+        var scope = Access.Scope?.Value ?? string.Empty;
+        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
+        using (var reclaim = Command($"WITH expired AS (SELECT TOP (128) * FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff) DELETE FROM expired;"))
+        {
+            AddLedgerParameter(reclaim, "reclaim_unit", Unit.Id.Value);
+            AddLedgerParameter(reclaim, "cutoff", FormatLedgerTime(cutoff));
+            reclaim.ExecuteNonQuery();
+        }
+
+        var expiredExisting = false;
+        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
+        {
+            AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
+            using var reader = existing.ExecuteReader();
+            if (reader.Read())
+            {
+                var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
+                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
+                expiredExisting = true;
+            }
+        }
+        if (expiredExisting)
+        {
+            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
+            deleteExpired.ExecuteNonQuery();
+        }
+
+        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}) SELECT @unit, @scope, @nonce, @committed_at WHERE NOT EXISTS (SELECT 1 FROM {Quote(declaration.LedgerName)} WITH (UPDLOCK, HOLDLOCK) WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce);"))
+        {
+            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
+            AddLedgerParameter(insertLedger, "committed_at", FormatLedgerTime(providerNow));
+            if (insertLedger.ExecuteNonQuery() == 0)
+                return new WriteOutcome(WriteOutcomeStatus.Replayed);
+        }
+
+        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, SqlServerSchemaCoordinator.ScopeColumn);
+        var writes = values
+            .Select(value => RowWrite.Insert(logicalUnit, value))
+            .ToArray();
+        var outcomes = SequenceColumnDefinition is not null
+            ? writes.Select(InsertAppendSequence).ToArray()
+            : ApplyBatchCore(writes);
+        if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
+            throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
+        return new WriteOutcome(WriteOutcomeStatus.Inserted);
+    }
+
+    private RowWriteOutcome InsertAppendSequence(RowWrite write)
+    {
+        var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
+        ValidateValues(values.Values, requireAllNonNullable: true);
+        return new RowWriteOutcome(write, InsertCore(values.Values, WriteOutcomeStatus.Inserted));
+    }
+
+    private void EnsureLedgerTable(string table)
+    {
+        using var command = Command($"BEGIN TRY IF OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}', N'U') IS NULL BEGIN CREATE TABLE {Quote(table)} (" +
+            $"{Quote(LedgerUnit)} nvarchar(450) NOT NULL, " +
+            $"{Quote(LedgerScope)} nvarchar(128) NOT NULL, " +
+            $"{Quote(LedgerNonce)} nvarchar(256) NOT NULL, " +
+            $"{Quote(LedgerCommittedAt)} nvarchar(64) NOT NULL, " +
+            // The tuple is 1,668 bytes at its declared maxima. A clustered key is capped at
+            // 900 bytes, while SQL Server's nonclustered key budget is 1,700 bytes.
+            $"PRIMARY KEY NONCLUSTERED ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)})); END; END TRY BEGIN CATCH IF ERROR_NUMBER() <> 2714 THROW; END CATCH;");
+        command.ExecuteNonQuery();
+
+        using var cleanupIndex = Command($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{IdempotencyRules.CleanupIndexName(table)}' AND object_id = OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}')) " +
+            $"CREATE INDEX {Quote(IdempotencyRules.CleanupIndexName(table))} ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
+        cleanupIndex.ExecuteNonQuery();
+    }
+
+    private static void AddLedgerParameters(SqlCommand command, string unit, string scope, string nonce)
+    {
+        AddLedgerParameter(command, "unit", unit);
+        AddLedgerParameter(command, "scope", scope);
+        AddLedgerParameter(command, "nonce", nonce);
+    }
+
+    private static void AddLedgerParameter(SqlCommand command, string name, string value) =>
+        command.Parameters.AddWithValue("@" + name, value);
+
+    private static string FormatLedgerTime(DateTimeOffset value) =>
+        value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private DateTimeOffset ProviderNow()
+    {
+        using var command = Command("SELECT SYSUTCDATETIME();");
+        var value = (DateTime)command.ExecuteScalar()!;
+        return new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc));
+    }
+
     internal void Close() => closed = true;
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
@@ -492,7 +601,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             for (var index = 0; index < Unit.Key.Columns.Count; index++)
             {
                 var column = Unit.Key.Columns[index];
-                if (column != SqlServerSchemaCoordinator.ScopeColumn)
+                if (column == SqlServerSchemaCoordinator.ScopeColumn)
+                    values[column] = Access.Scope!.Value;
+                else
                     values[column] = FromSqlServer(reader.GetValue(index + 1), Column(column));
             }
             var versionOrdinal = Unit.Key.Columns.Count + 1;
@@ -1100,6 +1211,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private IReadOnlyList<string> LogicalKeyColumns => Unit.Key.Columns.Where(column => column != SqlServerSchemaCoordinator.ScopeColumn).ToArray();
     private ColumnDefinition? ScopeColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn);
     private ColumnDefinition? VersionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqlServerSchemaCoordinator.VersionColumn);
+    private const string LedgerUnit = "unit";
+    private const string LedgerScope = "scope";
+    private const string LedgerNonce = "nonce";
+    private const string LedgerCommittedAt = "committed_at";
     private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
     private static string Quote(string value) => SqlServerProviderConnection.QuoteIdentifier(value);
 
