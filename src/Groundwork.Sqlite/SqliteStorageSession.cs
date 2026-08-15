@@ -144,8 +144,14 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         return Execute(() => ConditionalUpsertCore(values, options));
     }
 
-    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
-        ExecuteWrite(() => ApplyBatchCore(writes));
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var nativeOnAppend = IsNativeAppendBatch(writes);
+        var outcomes = ExecuteWrite(() => ApplyBatchCore(writes));
+        if (nativeOnAppend && OnAppendRetentionCoordinator.TryGetObserver(outcomes, out var observer))
+            ApplyOnAppendRetention(observer);
+        return outcomes;
+    }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
@@ -254,6 +260,15 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             _ => ApplyBatchFallback(writes)
         };
     }
+
+    private bool IsNativeAppendBatch(IReadOnlyList<RowWrite> writes) =>
+        Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+        writes.Count != 0 &&
+        SequenceColumnDefinition is null &&
+        writes.All(write => write.Options.Precondition.Kind == WritePreconditionKind.Unconditional) &&
+        !HasSecondaryUniqueIndex(writes[0].Unit) &&
+        writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() == 1 &&
+        writes[0].Mode is RowWriteMode.Insert or RowWriteMode.Upsert;
 
     private IReadOnlyList<RowWriteOutcome> ApplyInsertBatch(IReadOnlyList<RowWrite> writes)
     {
@@ -470,8 +485,17 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var outcome = MutateCore(values, options, mutation, exactOutcome);
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             mutation is Mutation.Insert or Mutation.Upsert)
-            ApplyRetention(new RetentionExecutionOptions { Observer = options?.Observer });
+            ApplyOnAppendRetention(options?.Observer);
         return outcome;
+    }
+
+    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    {
+        void Cleanup() => ApplyRetention(new RetentionExecutionOptions { Observer = observer });
+        if (transaction is null)
+            OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup);
+        else
+            Cleanup();
     }
 
     private WriteOutcome MutateCore(

@@ -925,7 +925,17 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         // retention follow the same shape, so concurrent appends do not queue behind a scan.
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             kind is MutationKind.Insert or MutationKind.Upsert)
-            ApplyRetention(new RetentionExecutionOptions { MaxRowsPerBatch = 512 });
+        {
+            void Cleanup() => ApplyRetention(new RetentionExecutionOptions
+            {
+                MaxRowsPerBatch = 512,
+                Observer = options?.Observer
+            });
+            if (liveState)
+                OnAppendRetentionCoordinator.Run(database, Unit, Access.Scope?.Value, Cleanup);
+            else
+                Cleanup();
+        }
         return outcome;
     }
 

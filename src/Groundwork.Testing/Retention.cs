@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
@@ -154,5 +156,82 @@ internal static class RetentionRows
                 return string.CompareOrdinal(leftText, rightText);
             return ((IComparable)left).CompareTo(right);
         }
+    }
+}
+
+/// <summary>
+/// Coalesces post-append cleanup per provider connection, storage unit, and scope. Appenders
+/// arriving while cleanup is active mark the watermark dirty and return; the active owner drains
+/// that signal before releasing ownership, so concurrent sessions never wait in a cleanup convoy.
+/// </summary>
+internal static class OnAppendRetentionCoordinator
+{
+    private static readonly ConditionalWeakTable<object, OwnerState> Owners = new();
+
+    internal static bool TryGetObserver(
+        IReadOnlyList<RowWriteOutcome> outcomes,
+        out IWritePathObserver? observer)
+    {
+        foreach (var outcome in outcomes)
+        {
+            if (!outcome.Outcome.Succeeded || outcome.Write.Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
+                continue;
+            observer = outcome.Write.Options.Observer;
+            return true;
+        }
+        observer = null;
+        return false;
+    }
+
+    internal static void Run(
+        object owner,
+        StorageUnit unit,
+        string? scope,
+        Action cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        var identity = $"{unit.Id.Value.Length}:{unit.Id.Value}|{scope?.Length ?? -1}:{scope}";
+        var state = Owners.GetValue(owner, static _ => new OwnerState()).States
+            .GetOrAdd(identity, static _ => new DrainState());
+        Interlocked.Exchange(ref state.Pending, 1);
+
+        while (true)
+        {
+            if (Interlocked.CompareExchange(ref state.Running, 1, 0) != 0)
+                return;
+            try
+            {
+                while (Interlocked.Exchange(ref state.Pending, 0) != 0)
+                    cleanup();
+            }
+            catch
+            {
+                Interlocked.Exchange(ref state.Pending, 1);
+                throw;
+            }
+            finally
+            {
+                Volatile.Write(ref state.Running, 0);
+            }
+
+            // Covers an append that marked the state dirty after the final drain check but
+            // before ownership was released. If it acquired ownership itself, this loses the
+            // compare-exchange above and returns without waiting.
+            if (Volatile.Read(ref state.Pending) == 0)
+                return;
+        }
+    }
+
+    private sealed class OwnerState
+    {
+        internal ConcurrentDictionary<string, DrainState> States { get; } = new(StringComparer.Ordinal);
+    }
+
+    private sealed class DrainState
+    {
+        internal int Pending;
+        internal int Running;
     }
 }

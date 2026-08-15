@@ -666,10 +666,6 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
             RowWriteMode.Delete => inner.Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
-        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            outcomes.Any(outcome => outcome.Outcome.Succeeded &&
-                outcome.Write.Mode is RowWriteMode.Insert or RowWriteMode.Upsert))
-            RetentionSessionExtensions.ApplyRetention(this);
         return outcomes;
     }
 }
