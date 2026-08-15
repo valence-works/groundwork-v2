@@ -211,7 +211,9 @@ public static class ConformanceSuite
             Name = id,
             Columns =
             [
-                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                // Keep the provider-neutral probe's variable-length primary key bounded so
+                // providers can validate native key widths from the declaration alone.
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
                 new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 256 },
                 new ColumnDefinition { Name = "uniqueValue", Type = PortableType.String, MaxLength = 256 }
             ],

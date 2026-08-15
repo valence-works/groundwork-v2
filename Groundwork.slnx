@@ -42,6 +42,9 @@
   <Folder Name="/src/Groundwork.Sqlite/">
     <Project Path="src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.SqlServer/">
+    <Project Path="src/Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.PostgreSql/">
     <Project Path="src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
   </Folder>
@@ -90,6 +93,9 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Sqlite.Tests/">
     <Project Path="tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.SqlServer.Tests/">
+    <Project Path="tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Analyzers.Tests/">
     <Project Path="tests/Groundwork.Analyzers.Tests/Groundwork.Analyzers.Tests.csproj" />

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>Groundwork.SqlServer</PackageId>
+    <Description>SQL Server provider for Groundwork typed storage.</Description>
+    <PackageReadmeFile>sqlserver-provider.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+    <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../Groundwork.Testing/Groundwork.Testing.csproj" />
+    <ProjectReference Include="../Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../docs/sqlserver-provider.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
