@@ -97,6 +97,7 @@ public sealed class KernelBoundaryTests
         var name = assembly.GetName().Name;
         return IsKernelAssembly(name) || IsSubstrateAssembly(name) || IsProviderAssembly(assembly) ||
                IsContractFamily(assembly) ||
+               HasMetadata(assembly, "Groundwork.Tool", "true") ||
                string.Equals(name, "Groundwork.Testing", StringComparison.Ordinal) ||
                name?.StartsWith("Groundwork.Tool", StringComparison.Ordinal) == true;
     }
