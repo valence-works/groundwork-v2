@@ -11,9 +11,9 @@ public enum PortableSemanticDecision
     Refuse
 }
 
-public sealed record PortableSemanticDiagnostic(string Code, string Message, string Path)
+public sealed record PortableSemanticRefusal(string Code, string Message, string Path)
 {
-    public PortableSemanticDiagnostic(string code, string message)
+    public PortableSemanticRefusal(string code, string message)
         : this(code, message, string.Empty)
     {
     }
@@ -21,13 +21,13 @@ public sealed record PortableSemanticDiagnostic(string Code, string Message, str
 
 public sealed class PortableSemanticValidationResult
 {
-    internal PortableSemanticValidationResult(IReadOnlyList<PortableSemanticDiagnostic> diagnostics)
+    internal PortableSemanticValidationResult(IReadOnlyList<PortableSemanticRefusal> refusals)
     {
-        Diagnostics = new ReadOnlyCollection<PortableSemanticDiagnostic>(diagnostics.ToArray());
+        Refusals = new ReadOnlyCollection<PortableSemanticRefusal>(refusals.ToArray());
     }
 
-    public IReadOnlyList<PortableSemanticDiagnostic> Diagnostics { get; }
-    public bool IsPortable => Diagnostics.Count == 0;
+    public IReadOnlyList<PortableSemanticRefusal> Refusals { get; }
+    public bool IsPortable => Refusals.Count == 0;
     public PortableSemanticDecision Decision => IsPortable ? PortableSemanticDecision.Normalize : PortableSemanticDecision.Refuse;
 }
 
@@ -42,9 +42,9 @@ public static class PortableQuerySemantics
         if (predicate is null)
             throw new ArgumentNullException(nameof(predicate));
 
-        var diagnostics = new List<PortableSemanticDiagnostic>();
-        ValidatePredicate(predicate, diagnostics, "predicate");
-        return new PortableSemanticValidationResult(diagnostics);
+        var refusals = new List<PortableSemanticRefusal>();
+        ValidatePredicate(predicate, refusals, "predicate");
+        return new PortableSemanticValidationResult(refusals);
     }
 
     public static PortableSemanticValidationResult Validate(QueryRequest request)
@@ -52,29 +52,29 @@ public static class PortableQuerySemantics
         if (request is null)
             throw new ArgumentNullException(nameof(request));
 
-        var diagnostics = new List<PortableSemanticDiagnostic>();
-        ValidatePredicate(request.Where, diagnostics, "where");
+        var refusals = new List<PortableSemanticRefusal>();
+        ValidatePredicate(request.Where, refusals, "where");
 
         foreach (var term in request.Order)
         {
-            ValidateColumn(term.Column, diagnostics, "order." + term.Column.Name);
+            ValidateColumn(term.Column, refusals, "order." + term.Column.Name);
             if (term.NullOrder == NullOrder.ProviderDefault)
-                Refuse(diagnostics, "GW-SEM-ORDER-004", "Provider-default null ordering is not portable; choose explicit nulls-first or nulls-last ordering.", "order." + term.Column.Name);
+                Refuse(refusals, "GW-SEM-ORDER-004", "Provider-default null ordering is not portable; choose explicit nulls-first or nulls-last ordering.", "order." + term.Column.Name);
             if (term.Column.Type is QueryType.Binary or QueryType.Double)
-                Refuse(diagnostics, "GW-SEM-ORDER-001", "Ordering this type is not portable; order a declared portable projection or key instead.", "order." + term.Column.Name);
+                Refuse(refusals, "GW-SEM-ORDER-001", "Ordering this type is not portable; order a declared portable projection or key instead.", "order." + term.Column.Name);
             if (term.Column.Type == QueryType.Boolean)
-                Refuse(diagnostics, "GW-SEM-ORDER-005", "Boolean ordering is not portable without an explicit three-state projected key; order the declared projection instead.", "order." + term.Column.Name);
+                Refuse(refusals, "GW-SEM-ORDER-005", "Boolean ordering is not portable without an explicit three-state projected key; order the declared projection instead.", "order." + term.Column.Name);
         }
 
         if (request.LatestPerKey is not null)
         {
-            ValidateColumn(request.LatestPerKey.Key, diagnostics, "latestPerKey.key");
-            ValidateColumn(request.LatestPerKey.Timestamp, diagnostics, "latestPerKey.timestamp");
+            ValidateColumn(request.LatestPerKey.Key, refusals, "latestPerKey.key");
+            ValidateColumn(request.LatestPerKey.Timestamp, refusals, "latestPerKey.timestamp");
             if (request.LatestPerKey.Timestamp.Type != QueryType.DateTimeOffset || request.LatestPerKey.Timestamp.IsNullable)
-                Refuse(diagnostics, "GW-SEM-LATEST-001", "Latest-per-key requires a non-null DateTimeOffset timestamp; project a non-null UTC timestamp instead.", "latestPerKey.timestamp");
+                Refuse(refusals, "GW-SEM-LATEST-001", "Latest-per-key requires a non-null DateTimeOffset timestamp; project a non-null UTC timestamp instead.", "latestPerKey.timestamp");
         }
 
-        return new PortableSemanticValidationResult(diagnostics);
+        return new PortableSemanticValidationResult(refusals);
     }
 
     public static bool Evaluate(Predicate predicate, IReadOnlyDictionary<string, object?> row)
@@ -87,7 +87,7 @@ public static class PortableQuerySemantics
         return EvaluateCore(predicate, row);
     }
 
-    private static void ValidatePredicate(Predicate predicate, ICollection<PortableSemanticDiagnostic> diagnostics, string path)
+    private static void ValidatePredicate(Predicate predicate, ICollection<PortableSemanticRefusal> refusals, string path)
     {
         switch (predicate)
         {
@@ -95,121 +95,121 @@ public static class PortableQuerySemantics
             case Predicate.AlwaysFalse:
                 return;
             case Predicate.Equal equal:
-                ValidateColumn(equal.Column, diagnostics, path + ".column");
-                ValidateConstant(equal.Column, equal.Value, diagnostics, path + ".value");
+                ValidateColumn(equal.Column, refusals, path + ".column");
+                ValidateConstant(equal.Column, equal.Value, refusals, path + ".value");
                 return;
             case Predicate.In membership:
-                ValidateColumn(membership.Column, diagnostics, path + ".column");
+                ValidateColumn(membership.Column, refusals, path + ".column");
                 foreach (var (value, index) in membership.Values.Select((value, index) => (value, index)))
-                    ValidateConstant(membership.Column, value, diagnostics, path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                    ValidateConstant(membership.Column, value, refusals, path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
                 return;
             case Predicate.Range range:
-                ValidateColumn(range.Column, diagnostics, path + ".column");
-                ValidateRangeType(range.Column, diagnostics, path);
+                ValidateColumn(range.Column, refusals, path + ".column");
+                ValidateRangeType(range.Column, refusals, path);
                 if (range.Lower is not null)
-                    ValidateConstant(range.Column, range.Lower.Value, diagnostics, path + ".lower");
+                    ValidateConstant(range.Column, range.Lower.Value, refusals, path + ".lower");
                 if (range.Upper is not null)
-                    ValidateConstant(range.Column, range.Upper.Value, diagnostics, path + ".upper");
+                    ValidateConstant(range.Column, range.Upper.Value, refusals, path + ".upper");
                 if (range.Lower?.Value.Kind == QueryConstantKind.Null || range.Upper?.Value.Kind == QueryConstantKind.Null)
-                    Refuse(diagnostics, "GW-SEM-NULL-001", "A range with a null operand is not portable; use Equal(column, null) or its total complement instead.", path);
+                    Refuse(refusals, "GW-SEM-NULL-001", "A range with a null operand is not portable; use Equal(column, null) or its total complement instead.", path);
                 return;
             case Predicate.StartsWith startsWith:
-                ValidateColumn(startsWith.Column, diagnostics, path + ".column");
-                Refuse(diagnostics, "GW-SEM-TEXT-002", "Prefix matching is not portable for this contract; use a persisted, versioned search key and Substring instead.", path);
+                ValidateColumn(startsWith.Column, refusals, path + ".column");
+                Refuse(refusals, "GW-SEM-TEXT-002", "Prefix matching is not portable for this contract; use a persisted, versioned search key and Substring instead.", path);
                 return;
             case Predicate.Substring substring:
-                ValidateColumn(substring.Column, diagnostics, path + ".column");
+                ValidateColumn(substring.Column, refusals, path + ".column");
                 if (substring.Anchor is not (Anchor.Contains or Anchor.EndsWith))
-                    Refuse(diagnostics, "GW-SEM-TEXT-003", "The requested substring anchor is not portable; use Contains or a persisted search key.", path);
+                    Refuse(refusals, "GW-SEM-TEXT-003", "The requested substring anchor is not portable; use Contains or a persisted search key.", path);
                 return;
             case Predicate.ElementOf elementOf:
-                ValidateElementSet(elementOf, diagnostics, path);
+                ValidateElementSet(elementOf, refusals, path);
                 return;
             case Predicate.ColumnCompare compare:
-                ValidateColumn(compare.Left, diagnostics, path + ".left");
-                ValidateColumn(compare.Right, diagnostics, path + ".right");
+                ValidateColumn(compare.Left, refusals, path + ".left");
+                ValidateColumn(compare.Right, refusals, path + ".right");
                 if (compare.Left.Type != compare.Right.Type)
-                    Refuse(diagnostics, "GW-SEM-TYPE-001", "Column comparison requires an exact matching type; compare a portable projection with the same declared type instead.", path);
+                    Refuse(refusals, "GW-SEM-TYPE-001", "Column comparison requires an exact matching type; compare a portable projection with the same declared type instead.", path);
                 if (compare.Op is not (CompareOp.Equal or CompareOp.NotEqual) && !IsOrderable(compare.Left.Type))
-                    Refuse(diagnostics, "GW-SEM-ORDER-002", "Ordering comparison for this type is not portable; use equality or a declared orderable projection instead.", path);
+                    Refuse(refusals, "GW-SEM-ORDER-002", "Ordering comparison for this type is not portable; use equality or a declared orderable projection instead.", path);
                 return;
             case Predicate.Not not:
-                ValidatePredicate(not.Inner, diagnostics, path + ".inner");
+                ValidatePredicate(not.Inner, refusals, path + ".inner");
                 if ((not.Inner is Predicate.In negatedMembership && negatedMembership.Values.Length != 0) || not.Inner is Predicate.Range or Predicate.StartsWith or Predicate.Substring)
-                    Refuse(diagnostics, "GW-SEM-NOT-001", "This negation is not portable; use the supported total Equal/ColumnCompare complement or a portable positive predicate instead.", path);
+                    Refuse(refusals, "GW-SEM-NOT-001", "This negation is not portable; use the supported total Equal/ColumnCompare complement or a portable positive predicate instead.", path);
                 return;
             case Predicate.And and:
                 foreach (var (term, index) in and.Terms.Select((term, index) => (term, index)))
-                    ValidatePredicate(term, diagnostics, path + ".terms[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                    ValidatePredicate(term, refusals, path + ".terms[" + index.ToString(CultureInfo.InvariantCulture) + "]");
                 return;
             case Predicate.Or or:
                 foreach (var (term, index) in or.Terms.Select((term, index) => (term, index)))
-                    ValidatePredicate(term, diagnostics, path + ".terms[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                    ValidatePredicate(term, refusals, path + ".terms[" + index.ToString(CultureInfo.InvariantCulture) + "]");
                 return;
             default:
-                Refuse(diagnostics, "GW-SEM-UNKNOWN-001", "The predicate node is not portable; use a declared v2 predicate node instead.", path);
+                Refuse(refusals, "GW-SEM-UNKNOWN-001", "The predicate node is not portable; use a declared v2 predicate node instead.", path);
                 return;
         }
     }
 
-    private static void ValidateElementSet(Predicate.ElementOf elementOf, ICollection<PortableSemanticDiagnostic> diagnostics, string path)
+    private static void ValidateElementSet(Predicate.ElementOf elementOf, ICollection<PortableSemanticRefusal> refusals, string path)
     {
         if (elementOf.Set.Type is not QueryType type)
         {
-            Refuse(diagnostics, "GW-SEM-TYPE-007", "An element set must declare its exact element type; bind a typed set before provider planning.", path + ".set");
+            Refuse(refusals, "GW-SEM-TYPE-007", "An element set must declare its exact element type; bind a typed set before provider planning.", path + ".set");
             return;
         }
         if (type == QueryType.Double)
-            Refuse(diagnostics, "GW-SEM-TYPE-002", "Double membership is not portable; use an exact supported numeric type instead.", path + ".set");
+            Refuse(refusals, "GW-SEM-TYPE-002", "Double membership is not portable; use an exact supported numeric type instead.", path + ".set");
 
         foreach (var (value, index) in elementOf.Values.Select((value, index) => (value, index)))
         {
             if (value is null)
             {
-                Refuse(diagnostics, "GW-SEM-TYPE-004", "A null element-set constant is not portable; use an explicit typed constant instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                Refuse(refusals, "GW-SEM-TYPE-004", "A null element-set constant is not portable; use an explicit typed constant instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
                 continue;
             }
             if (value.Kind == QueryConstantKind.Null)
             {
                 if (value.Type != type)
-                    Refuse(diagnostics, "GW-SEM-TYPE-005", "The element-set null constant must carry the set's exact declared type; bind a typed null instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                    Refuse(refusals, "GW-SEM-TYPE-005", "The element-set null constant must carry the set's exact declared type; bind a typed null instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
                 continue;
             }
             if (value.Type != type)
             {
-                Refuse(diagnostics, "GW-SEM-TYPE-005", "Element-set values must exactly match the set's declared type; use a typed projection instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                Refuse(refusals, "GW-SEM-TYPE-005", "Element-set values must exactly match the set's declared type; use a typed projection instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
                 continue;
             }
         }
     }
 
-    private static void ValidateConstant(ColumnRef column, QueryConstant constant, ICollection<PortableSemanticDiagnostic> diagnostics, string path)
+    private static void ValidateConstant(ColumnRef column, QueryConstant constant, ICollection<PortableSemanticRefusal> refusals, string path)
     {
         if (constant is null)
         {
-            Refuse(diagnostics, "GW-SEM-TYPE-004", "A null constant reference is not portable; use an explicit typed null constant instead.", path);
+            Refuse(refusals, "GW-SEM-TYPE-004", "A null constant reference is not portable; use an explicit typed null constant instead.", path);
             return;
         }
         if (constant.Type != column.Type)
-            Refuse(diagnostics, "GW-SEM-TYPE-005", "The constant type must exactly match the column type; bind an exact typed constant instead.", path);
+            Refuse(refusals, "GW-SEM-TYPE-005", "The constant type must exactly match the column type; bind an exact typed constant instead.", path);
         if (constant.Kind == QueryConstantKind.Null && !column.IsNullable)
-            Refuse(diagnostics, "GW-SEM-NULL-002", "A null value for a non-nullable column is not portable; use a non-null value or a nullable projection instead.", path);
+            Refuse(refusals, "GW-SEM-NULL-002", "A null value for a non-nullable column is not portable; use a non-null value or a nullable projection instead.", path);
     }
 
-    private static void ValidateRangeType(ColumnRef column, ICollection<PortableSemanticDiagnostic> diagnostics, string path)
+    private static void ValidateRangeType(ColumnRef column, ICollection<PortableSemanticRefusal> refusals, string path)
     {
         if (!IsOrderable(column.Type))
-            Refuse(diagnostics, "GW-SEM-ORDER-003", "Range ordering for this type is not portable; use equality/membership or a declared orderable projection instead.", path);
+            Refuse(refusals, "GW-SEM-ORDER-003", "Range ordering for this type is not portable; use equality/membership or a declared orderable projection instead.", path);
     }
 
-    private static void ValidateColumn(ColumnRef column, ICollection<PortableSemanticDiagnostic> diagnostics, string path)
+    private static void ValidateColumn(ColumnRef column, ICollection<PortableSemanticRefusal> refusals, string path)
     {
         if (column.Type == QueryType.Double)
-            Refuse(diagnostics, "GW-SEM-TYPE-006", "Binary floating-point values are not portable in predicates or indexes; use Int32, Int64, or declared Decimal instead.", path);
+            Refuse(refusals, "GW-SEM-TYPE-006", "Binary floating-point values are not portable in predicates or indexes; use Int32, Int64, or declared Decimal instead.", path);
         if (column.Type == QueryType.Decimal && (column.DecimalPrecision != 18 || column.DecimalScale != 4))
-            Refuse(diagnostics, "GW-SEM-DECIMAL-001", "Portable Decimal requires declared decimal(18,4) with no rounding; use decimal(18,4) or an exact integer type instead.", path);
+            Refuse(refusals, "GW-SEM-DECIMAL-001", "Portable Decimal requires declared decimal(18,4) with no rounding; use decimal(18,4) or an exact integer type instead.", path);
         if (column.Type == QueryType.String && IsRefusedTextComparison(column.StringComparison))
-            Refuse(diagnostics, "GW-SEM-TEXT-001", "This text comparison policy is not portable without an explicit versioned persisted search-key projection; use Ordinal or bind such a projection.", path);
+            Refuse(refusals, "GW-SEM-TEXT-001", "This text comparison policy is not portable without an explicit versioned persisted search-key projection; use Ordinal or bind such a projection.", path);
     }
 
     private static bool IsRefusedTextComparison(QueryStringComparisonPolicy policy) => policy != QueryStringComparisonPolicy.Ordinal;
@@ -217,8 +217,8 @@ public static class PortableQuerySemantics
     private static bool IsOrderable(QueryType type) => type is
         QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or QueryType.DateTimeOffset or QueryType.Guid;
 
-    private static void Refuse(ICollection<PortableSemanticDiagnostic> diagnostics, string code, string message, string path) =>
-        diagnostics.Add(new PortableSemanticDiagnostic(code, message, path));
+    private static void Refuse(ICollection<PortableSemanticRefusal> refusals, string code, string message, string path) =>
+        refusals.Add(new PortableSemanticRefusal(code, message, path));
 
     private static bool EvaluateCore(Predicate predicate, IReadOnlyDictionary<string, object?> row)
     {

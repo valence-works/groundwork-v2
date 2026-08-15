@@ -6,11 +6,12 @@ sent to a database. A predicate is either true or false for a row; there is no
 exact complement of `p`.
 
 The public entry points are `PortableQuerySemantics.Validate` and
-`PortableQuerySemantics.Evaluate`. Validation returns immutable diagnostics. A
+`PortableQuerySemantics.Evaluate`. Validation returns immutable `Refusals` of
+`PortableSemanticRefusal` values. A
 refusal always has a `GW-SEM-*` code, names the offending path, and names a
 portable alternative. `Evaluate` is the pure two-valued AST oracle, including
 for a shape that a provider plan must refuse; callers compile only shapes for
-which `Validate` returns no diagnostics.
+which `Validate` returns no refusals.
 
 ## Normalized behavior
 

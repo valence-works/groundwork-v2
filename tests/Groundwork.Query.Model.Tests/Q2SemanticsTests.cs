@@ -96,11 +96,11 @@ public sealed class Q2SemanticsTests
             ImmutableArray<QueryConstant>.Empty,
             SetQuantifier.Any);
 
-        Assert.Contains(PortableQuerySemantics.Validate(untyped).Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TYPE-007");
+        Assert.Contains(PortableQuerySemantics.Validate(untyped).Refusals, refusal => refusal.Code == "GW-SEM-TYPE-007");
         Assert.False(PortableQuerySemantics.Validate(untyped).IsPortable);
-        Assert.Contains(PortableQuerySemantics.Validate(mismatchedValue).Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TYPE-005");
+        Assert.Contains(PortableQuerySemantics.Validate(mismatchedValue).Refusals, refusal => refusal.Code == "GW-SEM-TYPE-005");
         Assert.False(PortableQuerySemantics.Validate(mismatchedValue).IsPortable);
-        Assert.Contains(PortableQuerySemantics.Validate(doubleSet).Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TYPE-002");
+        Assert.Contains(PortableQuerySemantics.Validate(doubleSet).Refusals, refusal => refusal.Code == "GW-SEM-TYPE-002");
         Assert.False(PortableQuerySemantics.Validate(doubleSet).IsPortable);
         Assert.True(PortableQuerySemantics.Validate(typed).IsPortable);
         Assert.True(PortableQuerySemantics.Evaluate(typed, new Dictionary<string, object?> { ["tags"] = new[] { "red" } }));
@@ -171,11 +171,11 @@ public sealed class Q2SemanticsTests
         {
             var result = PortableQuerySemantics.Validate(predicate);
             Assert.False(result.IsPortable, predicate.ToString());
-            Assert.NotEmpty(result.Diagnostics);
-            Assert.All(result.Diagnostics, diagnostic =>
+            Assert.NotEmpty(result.Refusals);
+            Assert.All(result.Refusals, refusal =>
             {
-                Assert.StartsWith("GW-SEM-", diagnostic.Code);
-                Assert.Contains("portable", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
+                Assert.StartsWith("GW-SEM-", refusal.Code);
+                Assert.Contains("portable", refusal.Message, StringComparison.OrdinalIgnoreCase);
             });
         }
     }
@@ -230,7 +230,7 @@ public sealed class Q2SemanticsTests
             var result = PortableQuerySemantics.Validate(predicate);
 
             Assert.False(result.IsPortable);
-            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TEXT-001");
+            Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-SEM-TEXT-001");
             Assert.False(PortableQuerySemantics.Evaluate(predicate, new Dictionary<string, object?> { [column.Name] = actual }));
             Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(predicate), new Dictionary<string, object?> { [column.Name] = actual }));
         }
@@ -273,7 +273,7 @@ public sealed class Q2SemanticsTests
             [new OrderTerm(Binary, OrderDirection.Ascending, NullOrder.First)], Projection.All, Paging.None);
         var result = PortableQuerySemantics.Validate(request);
         Assert.False(result.IsPortable);
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-ORDER-001");
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-SEM-ORDER-001");
     }
 
     [Fact]
@@ -289,7 +289,7 @@ public sealed class Q2SemanticsTests
         var result = PortableQuerySemantics.Validate(request);
 
         Assert.False(result.IsPortable);
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-ORDER-004");
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-SEM-ORDER-004");
     }
 
     [Fact]
@@ -305,7 +305,7 @@ public sealed class Q2SemanticsTests
         var result = PortableQuerySemantics.Validate(request);
 
         Assert.False(result.IsPortable);
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-ORDER-005");
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-SEM-ORDER-005");
         Assert.True(PortableQuerySemantics.Validate(new Predicate.Equal(Boolean, QueryConstant.Of(Boolean, true))).IsPortable);
 
         var projectedKey = new ColumnRef(Table, "flagKey", QueryType.Int32, isNullable: false);
@@ -383,16 +383,16 @@ public sealed class Q2SemanticsTests
             };
             if (shape.Decision == Q1CorpusDecision.Normalize)
             {
-                Assert.True(result.IsPortable, $"{shape.Number}: {shape.Description}: {string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message))}");
+                Assert.True(result.IsPortable, $"{shape.Number}: {shape.Description}: {string.Join("; ", result.Refusals.Select(refusal => refusal.Message))}");
             }
             else
             {
                 Assert.False(result.IsPortable, $"{shape.Number}: {shape.Description}");
-                Assert.NotEmpty(result.Diagnostics);
-                Assert.All(result.Diagnostics, diagnostic =>
+                Assert.NotEmpty(result.Refusals);
+                Assert.All(result.Refusals, refusal =>
                 {
-                    Assert.StartsWith("GW-SEM-", diagnostic.Code);
-                    Assert.Contains("portable", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
+                    Assert.StartsWith("GW-SEM-", refusal.Code);
+                    Assert.Contains("portable", refusal.Message, StringComparison.OrdinalIgnoreCase);
                 });
             }
             AssertDeterministicComplement(exercise.Request.Where, row);
