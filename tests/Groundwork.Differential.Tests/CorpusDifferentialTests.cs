@@ -7,6 +7,8 @@ using Groundwork.Query.Planning;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 using System.Collections.Immutable;
 using Xunit;
 
@@ -143,7 +145,7 @@ public sealed class CorpusDifferentialTests
     [SkippableFact]
     public void Explain_assert_uses_a_selective_compound_index_after_postgresql_statistics_are_current()
     {
-        Skip.If(!ExplainAssertTestMode.Enabled, "Set GW_EXPLAIN_ASSERT=1 to run native plan proof.");
+        Skip.If(!ExplainAssertionMode.Enabled, "Set GW_EXPLAIN_ASSERT=1 to run native plan proof.");
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
         var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
         var mongo = Required("GROUNDWORK_MONGO_CONNECTION");

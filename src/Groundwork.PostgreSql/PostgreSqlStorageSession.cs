@@ -6,7 +6,8 @@ using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -90,13 +91,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
-        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
         var logicalIndex = query.SelectedIndex!;
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
         using var explain = Command("EXPLAIN (FORMAT JSON) " + query.CommandText.TrimEnd().TrimEnd(';'));
         RelationalQueryResultReader.AddParameters(explain, query);
         var rawPlan = Convert.ToString(explain.ExecuteScalar(), CultureInfo.InvariantCulture) ?? string.Empty;
-        ExplainAssertTestMode.AssertChosenIndex(
+        ExplainAssertionMode.AssertChosenIndex(
             "PostgreSQL", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
             PostgreSqlExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
     }

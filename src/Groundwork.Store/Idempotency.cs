@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Groundwork.Kernel;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Store;
 
 /// <summary>Shared validation and time rules for provider idempotency ledgers.</summary>
 public static class IdempotencyRules

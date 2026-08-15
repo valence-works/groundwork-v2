@@ -5,7 +5,8 @@ using System.Text.Json.Nodes;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 
 namespace Groundwork.MongoDb;
 

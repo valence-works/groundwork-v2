@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Diagnostics;
+
+
 
 /// <summary>Failure raised by the opt-in native explain-plan assertion mode.</summary>
 public sealed class ExplainAssertionException : InvalidOperationException
@@ -14,10 +16,10 @@ public sealed class ExplainAssertionException : InvalidOperationException
 }
 
 /// <summary>
-/// Test/CI-only assertion plumbing shared by native providers. The mode is disabled unless
+/// Opt-in assertion plumbing shared by native providers. The mode is disabled unless
 /// <c>GW_EXPLAIN_ASSERT</c> is <c>1</c> or <c>true</c>.
 /// </summary>
-public static class ExplainAssertTestMode
+public static class ExplainAssertionMode
 {
     private static long sequence;
 

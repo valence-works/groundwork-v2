@@ -29,7 +29,7 @@ rendered parameter, including cursor and page parameters, is checked against the
 (SQLite 999, SQL Server 2,100, PostgreSQL 65,535). No renderer emits database-side case folding;
 non-ordinal text policies are refused by the normalized semantic contract.
 
-## Explain-assert test mode
+## Explain-plan assertion diagnostics
 
 Set `GW_EXPLAIN_ASSERT=1` (or `true`) when running the differential suite to verify that every
 query carrying a coverage-proven selected index actually uses its deployed physical index:
@@ -40,7 +40,7 @@ GW_EXPLAIN_ARTIFACT_DIR="$PWD/TestResults/groundwork-explain" \
 dotnet test tests/Groundwork.Differential.Tests
 ```
 
-The mode is off by default and adds no plan command to normal query execution. When enabled, the
+The diagnostic mode is off by default and adds no plan command to normal query execution. When enabled, the
 provider executes the query normally and then obtains its native plan: PostgreSQL uses
 `EXPLAIN (FORMAT JSON)`, SQL Server uses showplan XML, SQLite uses `EXPLAIN QUERY PLAN`, and
 MongoDB uses `explain` with `executionStats`. The assertion requires the exact resolved physical

@@ -1,8 +1,10 @@
 using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 
 namespace Groundwork.Testing.SelfTests;
 
-public sealed class ExplainAssertTestModeTests
+public sealed class ExplainAssertionModeTests
 {
     [Theory]
     [InlineData("1", true)]
@@ -12,14 +14,14 @@ public sealed class ExplainAssertTestModeTests
     [InlineData("0", false)]
     [InlineData("yes", false)]
     public void Mode_is_enabled_only_by_the_documented_flag_values(string? value, bool expected) =>
-        Assert.Equal(expected, ExplainAssertTestMode.IsEnabled(value));
+        Assert.Equal(expected, ExplainAssertionMode.IsEnabled(value));
 
     [Fact]
     public void Verification_retains_raw_plan_and_distinguishes_free_selection()
     {
         using var directory = new TemporaryDirectory();
         var messages = new List<string>();
-        var artifact = ExplainAssertTestMode.Verify(
+        var artifact = ExplainAssertionMode.Verify(
             "PostgreSQL", "ix_logical", "ix_physical", hinted: false, "RAW PLAN", chosen: true,
             directory.Path, messages.Add);
 
@@ -31,7 +33,7 @@ public sealed class ExplainAssertTestModeTests
     public void Misdeclared_index_fails_after_retaining_the_raw_hinted_plan()
     {
         using var directory = new TemporaryDirectory();
-        var exception = Assert.Throws<ExplainAssertionException>(() => ExplainAssertTestMode.Verify(
+        var exception = Assert.Throws<ExplainAssertionException>(() => ExplainAssertionMode.Verify(
             "SQL Server", "ix_wrong", "ix_wrong_physical", hinted: true, "RAW XML", chosen: false,
             directory.Path, _ => { }));
 

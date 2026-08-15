@@ -10,7 +10,8 @@
   <ItemGroup>
     <PackageReference Include="Npgsql" />
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
-    <ProjectReference Include="../Groundwork.Testing/Groundwork.Testing.csproj" />
+    <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
+    <ProjectReference Include="../Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
     <ProjectReference Include="../Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </ItemGroup>

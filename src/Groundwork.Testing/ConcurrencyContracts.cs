@@ -4,6 +4,8 @@ using Groundwork.Kernel;
 
 namespace Groundwork.Testing;
 
+using Groundwork.Store;
+
 /// <summary>Options for one deterministic concurrency scenario.</summary>
 public sealed record ConcurrencyProbeOptions
 {
@@ -506,16 +508,6 @@ public sealed class StorageProviderConcurrencyFactory : IConcurrencyProviderFact
 
     public IConcurrencyProviderConnection Create(string connectionString, StorageUnit declaration) =>
         new StorageProviderConcurrencyConnection(provider.Create(connectionString), declaration);
-}
-
-/// <summary>Optional extension implemented by a provider's testing adapter.</summary>
-public interface IConcurrencyStorageSession
-{
-    /// <summary>
-    /// Executes one provider-native conditional upsert. Providers do not pre-read the
-    /// stored row; createdAt is insert-only and conflict detail is available lazily.
-    /// </summary>
-    WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null);
 }
 
 internal sealed class StorageProviderConcurrencyConnection : IConcurrencyProviderConnection

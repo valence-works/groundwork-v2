@@ -20,6 +20,5 @@
     <ProjectReference Include="../../src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
     <ProjectReference Include="../../src/Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
     <ProjectReference Include="../../src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
-    <ProjectReference Include="../../src/Groundwork.MongoDb.TestingAdapter/Groundwork.MongoDb.TestingAdapter.csproj" />
   </ItemGroup>
 </Project>

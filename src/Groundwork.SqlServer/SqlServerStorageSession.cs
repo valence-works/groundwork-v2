@@ -7,7 +7,8 @@ using Microsoft.Data.SqlClient;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
@@ -85,7 +86,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
-        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
         var logicalIndex = query.SelectedIndex!;
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
         using (var enable = Command("SET STATISTICS XML ON")) enable.ExecuteNonQuery();
@@ -121,7 +122,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             using var disable = Command("SET STATISTICS XML OFF");
             disable.ExecuteNonQuery();
         }
-        ExplainAssertTestMode.AssertChosenIndex(
+        ExplainAssertionMode.AssertChosenIndex(
             "SQL Server", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
             SqlServerExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
     }

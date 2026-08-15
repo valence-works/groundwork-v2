@@ -1,7 +1,8 @@
 using System.Data;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 

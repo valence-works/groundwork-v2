@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>Groundwork.Records.Store</PackageId>
+    <Description>Production provider bridge and typed unit-of-work helpers for Groundwork Records.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Groundwork.Records/Groundwork.Records.csproj" />
+    <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
+  </ItemGroup>
+
+</Project>

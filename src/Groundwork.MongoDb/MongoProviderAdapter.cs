@@ -1,22 +1,21 @@
 using Groundwork.Kernel;
-using Groundwork.MongoDb;
 using Groundwork.Query.Model;
-using Groundwork.Testing;
+using Groundwork.Store;
 
-namespace Groundwork.MongoDb.TestingAdapter;
+namespace Groundwork.MongoDb;
 
-/// <summary>Adapts the provider-native MongoDB contract to Groundwork.Testing.</summary>
-public sealed class MongoDbTestingFactory : IStorageProviderFactory
+/// <summary>Provides the production provider-neutral MongoDB contract over the native adapter.</summary>
+public sealed class MongoProviderFactory : IStorageProviderFactory
 {
     public IStorageProviderConnection Create(string connectionString) =>
-        new MongoTestingConnection(new MongoDbProviderFactory().Create(connectionString));
+        new MongoStoreConnection(new MongoDbProviderFactory().Create(connectionString));
 }
 
-internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : IStorageProviderConnection
+internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : IStorageProviderConnection
 {
-    public IProviderCatalog Catalog { get; } = new MongoTestingCatalog(inner.Catalog);
+    public IProviderCatalog Catalog { get; } = new MongoStoreCatalog(inner.Catalog);
 
-    public ISchemaCoordinator Schema { get; } = new MongoTestingSchema(inner.Schema);
+    public ISchemaCoordinator Schema { get; } = new MongoStoreSchema(inner.Schema);
 
     public IReadOnlyList<CapabilityDescriptor> Capabilities
     {
@@ -39,7 +38,7 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
     }
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access) =>
-        new MongoTestingSession(inner.OpenSession(unit, ToNative(access)));
+        new MongoStoreSession(inner.OpenSession(unit, ToNative(access)));
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
         BeginUnitOfWork(access, BatchWriteOptions.Default, units);
@@ -48,7 +47,7 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units) =>
-        new MongoTestingUnitOfWork(inner.BeginUnitOfWork(ToNative(access), units), options);
+        new MongoStoreUnitOfWork(inner.BeginUnitOfWork(ToNative(access), units), options);
 
     public void Dispose() => inner.Dispose();
 
@@ -58,7 +57,7 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
             "A scoped access context requires a scope."));
 }
 
-internal sealed class MongoTestingCatalog(IMongoProviderCatalog inner) : IProviderCatalog
+internal sealed class MongoStoreCatalog(IMongoProviderCatalog inner) : IProviderCatalog
 {
     public IReadOnlyList<ProviderIndex> ReadIndexes(StorageUnitId storageUnitId) =>
         inner.ReadIndexes(storageUnitId).Select(index => new ProviderIndex(
@@ -69,21 +68,21 @@ internal sealed class MongoTestingCatalog(IMongoProviderCatalog inner) : IProvid
             index.SchemaVersion)).ToArray();
 }
 
-internal sealed class MongoTestingSchema(IMongoSchemaCoordinator inner) : ISchemaCoordinator
+internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaCoordinator
 {
-    public SchemaDiff Diff(StorageUnit desired) => ToTesting(inner.Diff(desired));
+    public SchemaDiff Diff(StorageUnit desired) => ToStore(inner.Diff(desired));
 
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         var result = inner.Apply(desired);
-        return new SchemaApplyResult(ToTesting(result.Diff), result.Applied);
+        return new SchemaApplyResult(ToStore(result.Diff), result.Applied);
     }
 
-    private static SchemaDiff ToTesting(MongoSchemaDiff diff) => new(diff.Changes.Select(change =>
+    private static SchemaDiff ToStore(MongoSchemaDiff diff) => new(diff.Changes.Select(change =>
         new SchemaChange((SchemaChangeKind)change.Kind, change.Identity)).ToArray());
 }
 
-internal sealed class MongoTestingSession(
+internal sealed class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
@@ -97,7 +96,7 @@ internal sealed class MongoTestingSession(
     public StoredEntry? Read(StorageKey key)
     {
         beforeRead?.Invoke(key);
-        return ToTesting(inner.Read(new MongoStorageKey(key.Values)));
+        return ToStore(inner.Read(new MongoStorageKey(key.Values)));
     }
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
@@ -110,34 +109,34 @@ internal sealed class MongoTestingSession(
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return ToTesting(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
+        return ToStore(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return ToTesting(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
+        return ToStore(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return ToTesting(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
+        return ToStore(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        return ToTesting(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
+        return ToStore(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
     }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
-        return ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
+        return ToStore(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
     }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
@@ -152,7 +151,7 @@ internal sealed class MongoTestingSession(
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
-        return ToTesting(inner.Append(operationId, native));
+        return ToStore(inner.Append(operationId, native));
     }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
@@ -179,14 +178,14 @@ internal sealed class MongoTestingSession(
         ? null
         : new MongoWriteOptions { Precondition = options.Precondition, Observer = options.Observer };
 
-    private static WriteOutcome ToTesting(MongoWriteOutcome result) =>
+    private static WriteOutcome ToStore(MongoWriteOutcome result) =>
         new((WriteOutcomeStatus)result.Status, result.Version, result.UniqueIndexName,
             result.GeneratedValues);
 
-    private WriteOutcome ToTesting(MongoWriteOutcome result, StorageValues values, WriteOptions? options)
+    private WriteOutcome ToStore(MongoWriteOutcome result, StorageValues values, WriteOptions? options)
     {
         if (result.Status != MongoWriteOutcomeStatus.ConcurrencyConflict)
-            return ToTesting(result);
+            return ToStore(result);
 
         return WriteOutcome.Deferred(
             WriteOutcomeStatus.ConcurrencyConflict,
@@ -205,19 +204,19 @@ internal sealed class MongoTestingSession(
             });
     }
 
-    private static StoredEntry? ToTesting(MongoStoredEntry? entry) => entry is null
+    private static StoredEntry? ToStore(MongoStoredEntry? entry) => entry is null
         ? null
         : new StoredEntry(new StorageValues(entry.Values.Values), entry.Version);
 }
 
-internal sealed class MongoTestingUnitOfWork : IUnitOfWork
+internal sealed class MongoStoreUnitOfWork : IUnitOfWork
 {
     private readonly IMongoUnitOfWork inner;
     private readonly BatchContext batch;
     private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
     private bool terminal;
 
-    internal MongoTestingUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options)
+    internal MongoStoreUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options)
     {
         this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
         batch = new BatchContext(options ?? throw new ArgumentNullException(nameof(options)));
@@ -229,7 +228,7 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
         ThrowIfTerminal();
         if (sessions.TryGetValue(unit.Id, out var existing))
             return existing;
-        var session = new BatchStorageSession(new MongoTestingSession(inner.OpenSession(unit)), batch);
+        var session = new BatchStorageSession(new MongoStoreSession(inner.OpenSession(unit)), batch);
         sessions.Add(unit.Id, session);
         batch.Register(session);
         return session;

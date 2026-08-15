@@ -18,7 +18,6 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
-    <ProjectReference Include="../../src/Groundwork.MongoDb.TestingAdapter/Groundwork.MongoDb.TestingAdapter.csproj" />
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
 

@@ -1,9 +1,10 @@
-using Groundwork.MongoDb.TestingAdapter;
+using Groundwork.MongoDb;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
+using Groundwork.Store;
 using MongoDB.Driver;
 using Npgsql;
 using Xunit;
@@ -125,7 +126,7 @@ public sealed class ConcurrencyHarnessTests
         {
             DatabaseName = "w3_batched_" + Guid.NewGuid().ToString("N")
         }.ToMongoUrl().ToString();
-        AssertBatchedProvider(new MongoDbTestingFactory(), isolatedConnection, "mongodb");
+        AssertBatchedProvider(new MongoProviderFactory(), isolatedConnection, "mongodb");
     }
 
     [SkippableTheory]
@@ -229,7 +230,7 @@ public sealed class ConcurrencyHarnessTests
             DatabaseName = "w2_" + Guid.NewGuid().ToString("N")
         }.ToMongoUrl().ToString();
         var report = ConcurrencyHarness.Run(
-            new StorageProviderConcurrencyFactory("mongodb", new MongoDbTestingFactory()),
+            new StorageProviderConcurrencyFactory("mongodb", new MongoProviderFactory()),
             isolatedConnection,
             new ConcurrencyProbeOptions
             {

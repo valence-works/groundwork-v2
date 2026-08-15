@@ -1,6 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
+using Groundwork.Store;
 
 namespace Groundwork.Testing.SelfTests;
 

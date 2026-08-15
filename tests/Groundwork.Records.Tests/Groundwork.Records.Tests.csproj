@@ -15,7 +15,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.Records/Groundwork.Records.csproj" />
-    <ProjectReference Include="../../src/Groundwork.Records.TestingAdapter/Groundwork.Records.TestingAdapter.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Records.Store/Groundwork.Records.Store.csproj" />
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
     <ProjectReference Include="../../src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
     <ProjectReference Include="../../src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />

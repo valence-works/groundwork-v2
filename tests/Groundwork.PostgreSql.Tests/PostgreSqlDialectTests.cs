@@ -3,6 +3,7 @@ using Groundwork.Kernel;
 using Groundwork.PostgreSql;
 using Groundwork.Substrate.Relational;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Npgsql;
 using Xunit;
 
