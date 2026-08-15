@@ -58,7 +58,24 @@ public static class QuerySearchKeyRewriter
         {
             case Predicate.StartsWith starts:
                 if (!mappings.TryGetValue(starts.Column.Name, out var mapping))
-                    return starts;
+                {
+                    if (starts.Column.StringComparison != QueryStringComparisonPolicy.Ordinal)
+                        return starts;
+                    mapping = new QuerySearchKeyColumn(
+                        starts.Column.Name,
+                        starts.Column.Name,
+                        QuerySearchKeyPolicy.Ordinal,
+                        starts.Column.MaxLength);
+                }
+                if (!string.Equals(mapping.SourceColumn, starts.Column.Name, StringComparison.Ordinal) ||
+                    !Matches(starts.Column.StringComparison, mapping.Policy))
+                {
+                    throw new QueryRenderException(
+                        "GW-QUERY-031",
+                        $"StartsWith column '{starts.Column.Name}' declares comparison policy " +
+                        $"'{starts.Column.StringComparison}', but its schema search-key mapping declares '{mapping.Policy}'. " +
+                        "Build the ColumnRef from the schema and use its matching comparison policy.");
+                }
                 var source = new ColumnRef(
                     starts.Column.Table,
                     starts.Column.Name,
@@ -94,4 +111,10 @@ public static class QuerySearchKeyRewriter
                 return predicate;
         }
     }
+
+    private static bool Matches(QueryStringComparisonPolicy comparison, QuerySearchKeyPolicy searchKey) =>
+        (comparison, searchKey) is
+            (QueryStringComparisonPolicy.Ordinal, QuerySearchKeyPolicy.Ordinal) or
+            (QueryStringComparisonPolicy.AsciiIgnoreCase, QuerySearchKeyPolicy.AsciiIgnoreCase) or
+            (QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase);
 }

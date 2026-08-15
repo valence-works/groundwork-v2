@@ -9,6 +9,32 @@ public sealed class Q9SearchKeyQueryTests
     private static readonly TableId Table = new("tickets");
     private static readonly ColumnRef Status = new(Table, "status", QueryType.String, true, 32, stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
 
+    [Theory]
+    [InlineData(QueryStringComparisonPolicy.Ordinal, QuerySearchKeyPolicy.AsciiIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.CurrentCulture, QuerySearchKeyPolicy.AsciiIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.Icu, QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, QuerySearchKeyPolicy.AsciiIgnoreCase)]
+    [InlineData(QueryStringComparisonPolicy.AsciiIgnoreCase, QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase)]
+    public void Prefix_rewrite_refuses_a_column_policy_that_does_not_match_the_schema_mapping(
+        QueryStringComparisonPolicy supplied,
+        QuerySearchKeyPolicy declared)
+    {
+        var column = new ColumnRef(Table, "status", QueryType.String, true, 32, stringComparison: supplied);
+        var request = new QueryRequest(Table, new Predicate.StartsWith(column, "Op"), [], Projection.All, Paging.None);
+
+        var failure = Assert.Throws<QueryRenderException>(() => QuerySearchKeyRewriter.Rewrite(request,
+            new Dictionary<string, QuerySearchKeyColumn>
+            {
+                ["status"] = new("status", "__groundwork_search_status", declared, 160)
+            }));
+
+        Assert.Equal("GW-QUERY-031", failure.Code);
+        Assert.Contains("status", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(supplied.ToString(), failure.Message, StringComparison.Ordinal);
+        Assert.Contains(declared.ToString(), failure.Message, StringComparison.Ordinal);
+        Assert.Contains("matching", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Non_empty_prefix_rewrites_to_an_exact_hidden_range()
     {
@@ -39,14 +65,11 @@ public sealed class Q9SearchKeyQueryTests
     }
 
     [Fact]
-    public void Ordinal_prefix_uses_base_column_without_a_derived_key()
+    public void Ordinal_prefix_uses_base_column_without_a_mapping_or_derived_key()
     {
         var request = new QueryRequest(Table, new Predicate.StartsWith(
             new ColumnRef(Table, "status", QueryType.String), "ab"), [], Projection.All, Paging.None);
-        var rewritten = QuerySearchKeyRewriter.Rewrite(request, new Dictionary<string, QuerySearchKeyColumn>
-        {
-            ["status"] = new("status", "status", QuerySearchKeyPolicy.Ordinal, 32)
-        });
+        var rewritten = QuerySearchKeyRewriter.Rewrite(request, new Dictionary<string, QuerySearchKeyColumn>());
         var range = Assert.IsType<Predicate.Range>(rewritten.Where);
         Assert.Equal("status", range.Column.Name);
         Assert.Equal("ab", range.Lower!.Value.Value);

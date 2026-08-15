@@ -138,6 +138,9 @@ public sealed class SqliteProviderTests
             new TableId(folded.Name), "status", Groundwork.Query.Model.QueryType.String, false, 32,
             stringComparison: Groundwork.Query.Model.QueryStringComparisonPolicy.AsciiIgnoreCase);
         var session = connection.OpenSession(folded, StorageAccess.Global);
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.NotNull(stored);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored!.Values.Values.Keys);
         var result = session.Query(new Groundwork.Query.Model.QueryRequest(
             new Groundwork.Query.Model.TableId(folded.Name),
             new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),

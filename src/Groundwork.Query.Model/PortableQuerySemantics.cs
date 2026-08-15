@@ -115,7 +115,6 @@ public static class PortableQuerySemantics
                 return;
             case Predicate.StartsWith startsWith:
                 ValidateColumn(startsWith.Column, refusals, path + ".column");
-                Refuse(refusals, "GW-SEM-TEXT-002", "Prefix matching is not portable for this contract; use a persisted, versioned search key and Substring instead.", path);
                 return;
             case Predicate.Substring substring:
                 ValidateColumn(substring.Column, refusals, path + ".column");

@@ -287,7 +287,7 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
-    public void Folded_partial_updates_preserve_keys_through_exact_and_fallback_batches()
+    public void Folded_partial_updates_preserve_keys_through_aggregate_exact_and_fallback_batches()
     {
         using var connection = OpenConnection();
         var unit = new StorageUnit
@@ -306,8 +306,18 @@ public sealed class MongoProviderIntegrationTests
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
             new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+        var stored = session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.NotNull(stored);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored.Values.Values.Keys);
 
         var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+        var aggregateObserver = new WritePathObserver();
+        var aggregate = batch.ApplyBatch(
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+                new WriteOptions { Observer = aggregateObserver })]);
+        Assert.Equal(WriteOutcomeStatus.Upserted, Assert.Single(aggregate).Outcome.Status);
+        Assert.Contains(aggregateObserver.Commands, command => command.Operation == "mongodb.batch-write");
+
         var exact = batch.ApplyBatch(
             [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }))],
             exactOutcomes: true);
@@ -316,6 +326,11 @@ public sealed class MongoProviderIntegrationTests
         var fallback = batch.ApplyBatch(
             [RowWrite.Update(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }))]);
         Assert.Equal(WriteOutcomeStatus.Updated, Assert.Single(fallback).Outcome.Status);
+
+        var missing = Assert.Throws<InvalidOperationException>(() => batch.ApplyBatch(
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 2 }))]));
+        Assert.Contains("status", missing.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
 
         var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, false, 32,
             stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);

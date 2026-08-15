@@ -28,6 +28,9 @@ public sealed class InMemoryProviderTests
         session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 2, ["status"] = "other" }));
         session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 3, ["status"] = null }));
         session.Update(new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }));
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.NotNull(stored);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored!.Values.Values.Keys);
 
         var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, true, 32, stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
         var request = new QueryRequest(new TableId(unit.Name), new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None);
@@ -36,6 +39,12 @@ public sealed class InMemoryProviderTests
         Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
         Assert.Equal(["Open"], result.Rows.Select(row => Assert.IsType<string>(row["status"])));
         Assert.Contains(connection.Catalog.ReadIndexes(unit.Id), index => index.Columns.Single().Column == "__groundwork_search_status");
+
+        var forged = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, true, 32,
+            stringComparison: QueryStringComparisonPolicy.Ordinal);
+        var failure = Assert.Throws<QueryRenderException>(() => session.Query(new QueryRequest(
+            new TableId(unit.Name), new Predicate.StartsWith(forged, "OP"), [], Projection.All, Paging.None)));
+        Assert.Equal("GW-QUERY-031", failure.Code);
     }
 
     [Fact]

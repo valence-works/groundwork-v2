@@ -7,6 +7,17 @@ public static class SearchKeyProjection
 {
     public const string Prefix = "__groundwork_search_";
 
+    public static bool IsProviderOwnedColumn(string columnName) =>
+        columnName?.StartsWith(Prefix, StringComparison.Ordinal) == true;
+
+    public static IReadOnlyDictionary<string, object?> PublicValues(IReadOnlyDictionary<string, object?> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        return new ReadOnlyDictionary<string, object?>(values
+            .Where(pair => !IsProviderOwnedColumn(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
+    }
+
     public static bool IsFolded(PortableCollation? collation) =>
         collation is PortableCollation.OrdinalIgnoreCase or PortableCollation.UnicodeOrdinalIgnoreCase;
 

@@ -91,20 +91,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key) => Execute(() =>
-    {
-        var (where, parameters) = KeyPredicate(key.Values);
-        var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
-        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
-        AddParameters(command, parameters);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
-        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        for (var i = 0; i < UserColumns.Count; i++)
-            values[UserColumns[i].Name] = FromSqlite(reader.GetValue(i), UserColumns[i]);
-        var version = VersionColumnDefinition is null ? (long?)null : Convert.ToInt64(reader.GetValue(UserColumns.Count), CultureInfo.InvariantCulture);
-        return new StoredEntry(new StorageValues(values), version);
-    });
+    public StoredEntry? Read(StorageKey key) => Execute(() => PublicEntry(ReadCore(key)));
+
+    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
+        ? null
+        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Insert);
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);

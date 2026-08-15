@@ -349,9 +349,25 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
             if (updates.ElementCount != 0)
                 collection.UpdateOne(
-                    new BsonDocument("_id", document.GetValue("_id")),
+                    BuildBackfillFilter(document, pending),
                     new BsonDocument("$set", updates));
         }
+    }
+
+    internal static BsonDocument BuildBackfillFilter(
+        BsonDocument document,
+        IReadOnlyList<DerivedColumnDefinition> pending)
+    {
+        var filter = new BsonDocument("_id", document.GetValue("_id"));
+        foreach (var source in pending.Select(derived => derived.SourceColumn).Distinct(StringComparer.Ordinal))
+        {
+            filter[source] = !document.TryGetValue(source, out var value)
+                ? new BsonDocument("$exists", false)
+                : value.IsBsonNull
+                    ? new BsonDocument("$type", 10)
+                    : value;
+        }
+        return filter;
     }
 
     internal static IMongoCollection<BsonDocument> EnsureAdmission(
@@ -1029,12 +1045,18 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         }
 
         var models = new List<WriteModel<BsonDocument>>(writes.Count);
+        var incompleteWrites = new List<ColumnDefinition?>();
         foreach (var write in physicalWrites)
         {
             var identity = MongoDocumentMapper.EncodeKey(Unit, write.Values!.Values);
-            var document = MongoDocumentMapper.EncodeDocument(
-                Unit, write.Values.Values, identity, existing: null, _ =>
-                    throw new InvalidOperationException("ProviderSequence must use the fallback batch path."));
+            var missingRequired = MissingRequiredColumn(write.Values.Values);
+            var canInsert = missingRequired is null;
+            incompleteWrites.Add(missingRequired);
+            var document = canInsert
+                ? MongoDocumentMapper.EncodeDocument(
+                    Unit, write.Values.Values, identity, existing: null, _ =>
+                        throw new InvalidOperationException("ProviderSequence must use the fallback batch path."))
+                : null;
             var set = new BsonDocument();
             var setOnInsert = new BsonDocument();
             foreach (var column in Unit.Columns)
@@ -1044,14 +1066,18 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                     // Mongo's _id is the lookup identity, not a substitute for the
                     // declared key fields. Persist the key fields on insert so schema
                     // admission and subsequent reads see the complete declaration.
-                    setOnInsert[column.Name] = document[column.Name];
+                    if (canInsert)
+                        setOnInsert[column.Name] = document![column.Name];
                     continue;
                 }
                 if (column.Name != "createdAt" && write.Values.Values.ContainsKey(column.Name))
-                    set[column.Name] = document[column.Name];
-                else
-                    setOnInsert[column.Name] = document[column.Name];
+                    set[column.Name] = document?[column.Name] ??
+                        MongoValueCodec.Encode(write.Values.Values[column.Name], column);
+                else if (canInsert)
+                    setOnInsert[column.Name] = document![column.Name];
             }
+            if (!canInsert && set.ElementCount == 0)
+                AddKeyOnlyNoOp(set, write.Values.Values);
             var update = new BsonDocument();
             if (set.ElementCount != 0)
                 update["$set"] = set;
@@ -1061,20 +1087,24 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
             models.Add(new UpdateOneModel<BsonDocument>(new BsonDocument("_id", identity), update)
             {
-                IsUpsert = true
+                IsUpsert = canInsert
             });
         }
 
         writes[0].Options.Observer?.Observe(new WritePathEvent(
             "mongodb.batch-write",
-            "MongoDB.BulkWrite(UpdateOne upsert:true ordered:false)",
+            "MongoDB.BulkWrite(UpdateOne upsert:eligible-per-row ordered:false)",
             IsProbe: false));
         try
         {
-            if (transactionSession is null)
-                collection.BulkWrite(models, new BulkWriteOptions { IsOrdered = false });
-            else
-                collection.BulkWrite(transactionSession, models, new BulkWriteOptions { IsOrdered = false });
+            var result = transactionSession is null
+                ? collection.BulkWrite(models, new BulkWriteOptions { IsOrdered = false })
+                : collection.BulkWrite(transactionSession, models, new BulkWriteOptions { IsOrdered = false });
+            if (result.IsAcknowledged && result.MatchedCount + result.Upserts.Count != writes.Count)
+            {
+                var missing = incompleteWrites.First(column => column is not null)!;
+                throw new InvalidOperationException($"Column '{missing.Name}' is required.");
+            }
             return writes.Select(write => new RowWriteOutcome(write,
                 new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
         }
@@ -1318,11 +1348,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoWriteOptions? options)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
-        var missingRequired = Unit.Columns.FirstOrDefault(column =>
-            column.Generation == ColumnGeneration.Supplied &&
-            !column.IsNullable &&
-            column.Default is null &&
-            !values.Values.ContainsKey(column.Name));
+        var missingRequired = MissingRequiredColumn(values.Values);
         var canInsert = missingRequired is null;
         var document = canInsert
             ? MongoDocumentMapper.EncodeDocument(
@@ -1348,11 +1374,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         // it non-upserting and make a key-only update observable without touching source
         // or provider-owned search-key values.
         if (!canInsert && set.ElementCount == 0)
-        {
-            var key = Unit.Key.Columns[0];
-            var definition = Unit.Columns.Single(column => column.Name == key);
-            set[key] = MongoValueCodec.Encode(values.Values[key], definition);
-        }
+            AddKeyOnlyNoOp(set, values.Values);
 
         var setOnInsert = new BsonDocument();
         foreach (var element in document ?? [])
@@ -1399,6 +1421,20 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             var indexName = ExtractIndexName(exception.WriteError?.Message);
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, null, indexName);
         }
+    }
+
+    private ColumnDefinition? MissingRequiredColumn(IReadOnlyDictionary<string, object?> values) =>
+        Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.Supplied &&
+            !column.IsNullable &&
+            column.Default is null &&
+            !values.ContainsKey(column.Name));
+
+    private void AddKeyOnlyNoOp(BsonDocument set, IReadOnlyDictionary<string, object?> values)
+    {
+        var key = Unit.Key.Columns[0];
+        var definition = Unit.Columns.Single(column => column.Name == key);
+        set[key] = MongoValueCodec.Encode(values[key], definition);
     }
 
     private static bool IsIdentityIndex(string? indexName) =>
@@ -1759,7 +1795,7 @@ internal static class MongoDocumentMapper
     internal static MongoStoredEntry DecodeEntry(StorageUnit unit, BsonDocument document, long? version)
     {
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        foreach (var column in unit.Columns)
+        foreach (var column in unit.Columns.Where(column => !SearchKeyProjection.IsProviderOwnedColumn(column.Name)))
             values[column.Name] = document.TryGetValue(column.Name, out var value)
                 ? MongoValueCodec.Decode(value, column)
                 : null;

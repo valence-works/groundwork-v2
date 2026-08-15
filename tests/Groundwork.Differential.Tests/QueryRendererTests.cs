@@ -216,6 +216,58 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void All_four_renderers_refuse_a_forged_prefix_comparison_policy()
+    {
+        var forged = new ColumnRef(Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.Ordinal);
+        var request = Request(new Predicate.StartsWith(forged, "I"), [], Paging.None, ResultShape.Rows.Instance);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new("name", SearchKeyProjection.ColumnName("name"), QuerySearchKeyPolicy.AsciiIgnoreCase, 500)
+            }
+        };
+
+        foreach (var renderer in new object[]
+        {
+            new SqliteQueryRenderer(),
+            new PostgreSqlQueryRenderer(),
+            new SqlServerQueryRenderer(),
+            new MongoQueryRenderer()
+        })
+        {
+            var failure = Assert.Throws<QueryRenderException>(() => Render(renderer, request, options));
+            Assert.Equal("GW-QUERY-031", failure.Code);
+            Assert.Contains("matching comparison policy", failure.Message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void All_four_renderers_lower_ordinal_prefix_to_an_exact_base_column_range()
+    {
+        var request = Request(new Predicate.StartsWith(Name, "ab"), [], Paging.None, ResultShape.Rows.Instance);
+        var relational = new[]
+        {
+            new SqliteQueryRenderer().Render(request),
+            new PostgreSqlQueryRenderer().Render(request),
+            new SqlServerQueryRenderer().Render(request)
+        };
+
+        foreach (var command in relational)
+        {
+            Assert.Contains(command.Parameters, parameter => Equals(parameter.Value, "ab"));
+            Assert.Contains(command.Parameters, parameter => Equals(parameter.Value, "ac"));
+            Assert.DoesNotContain("LIKE", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var mongo = new MongoQueryRenderer().Render(request);
+        Assert.Contains("$gte", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$lt", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("$regex", mongo.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Mongo_partial_match_none_requires_exact_index_column_types()
     {
         var request = Request(new Predicate.In(Id, ImmutableArray<QueryConstant>.Empty), [], Paging.None, ResultShape.Rows.Instance);
@@ -523,6 +575,15 @@ public sealed class QueryRendererTests
         PostgreSqlQueryRenderer postgres => postgres.Render(request),
         SqlServerQueryRenderer sqlServer => sqlServer.Render(request),
         MongoQueryRenderer mongo => mongo.Render(request),
+        _ => throw new ArgumentOutOfRangeException(nameof(renderer))
+    };
+
+    private static object Render(object renderer, QueryRequest request, QueryRenderOptions options) => renderer switch
+    {
+        SqliteQueryRenderer sqlite => sqlite.Render(request, options),
+        PostgreSqlQueryRenderer postgres => postgres.Render(request, options),
+        SqlServerQueryRenderer sqlServer => sqlServer.Render(request, options),
+        MongoQueryRenderer mongo => mongo.Render(request, options),
         _ => throw new ArgumentOutOfRangeException(nameof(renderer))
     };
 

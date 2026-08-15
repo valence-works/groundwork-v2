@@ -263,8 +263,8 @@ public sealed class CorpusDifferentialTests
         var providers = new[] { sqlite, pg, sql, mongoSession };
 
         Assert.Equal(G2Q1Corpus.ExpectedShapeCount, G2Q1Corpus.Shapes.Count);
-        Assert.Equal(243, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
-        Assert.Equal(57, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
+        Assert.Equal(251, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
+        Assert.Equal(49, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
 
         foreach (var shape in G2Q1Corpus.Shapes)
         {

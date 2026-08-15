@@ -504,7 +504,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Read(CurrentState(), partition, key);
+            var entry = Mutation.Read(CurrentState(), partition, key);
+            return entry is null
+                ? null
+                : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
         }
     }
 
