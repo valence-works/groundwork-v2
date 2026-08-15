@@ -11,6 +11,70 @@ namespace Groundwork.Sqlite.Tests;
 
 public sealed class SqliteProviderTests
 {
+    [Fact]
+    public void Declared_aggregation_profile_executes_as_a_bounded_native_reduction()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-sqlite"),
+            Name = "aggregation_sqlite",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false },
+                new() { Name = "amount", Type = PortableType.Int64 },
+                new() { Name = "label", Type = PortableType.String },
+                new() { Name = "order", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates =
+                    [
+                        new Aggregate.Min("minimum", "amount"),
+                        new Aggregate.Max("maximum", "amount"),
+                        new Aggregate.Sum("total", "amount"),
+                        new Aggregate.SetUnion("labels", "label", 4),
+                        new Aggregate.FirstBy("first", "label", "order")
+                    ],
+                    MaxGroups = 4,
+                    MaxInputRows = 8
+                }
+            ]
+        };
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(PortableType.Int64, session.Unit.Columns.Single(column => column.Name == "amount").Type);
+        Assert.Equal("amount", Assert.IsType<Aggregate.Sum>(session.Unit.AggregationProfiles.Single().Aggregates.Single(item => item.Alias == "total")).Column);
+        foreach (var row in new[]
+        {
+            (Id: "1", Group: "a", Amount: (long?)3, Label: "x", Order: 2L),
+            (Id: "2", Group: "a", Amount: (long?)null, Label: "y", Order: 1L),
+            (Id: "3", Group: "b", Amount: (long?)7, Label: null, Order: 3L),
+            (Id: "4", Group: "c", Amount: (long?)null, Label: "z", Order: 4L)
+        })
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = row.Id, ["group"] = row.Group, ["amount"] = row.Amount, ["label"] = row.Label, ["order"] = row.Order
+            })).Status);
+
+        var result = session.Aggregate(new AggregationQuery("summary"));
+
+        Assert.Equal(3, result.Rows.Count);
+        var a = Assert.Single(result.Rows, item => Equals(item["group"], "a"));
+        Assert.Equal(3L, Assert.IsType<long>(a["total"]));
+        Assert.Equal(new[] { "x", "y" }, Assert.IsType<string[]>(a["labels"]));
+        Assert.Equal("y", a["first"]);
+        var c = Assert.Single(result.Rows, item => Equals(item["group"], "c"));
+        Assert.Null(c["total"]);
+    }
+
     private sealed class LinqTicket
     {
         public string Id { get; set; } = string.Empty;

@@ -134,6 +134,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
             Key = new KeyDefinition { Columns = key },
             DerivedColumns = source.DerivedColumns,
             Indexes = indexes,
+            AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
             Scope = source.Scope,
             Concurrency = source.Concurrency,
             Timestamps = source.Timestamps,

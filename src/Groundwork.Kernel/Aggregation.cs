@@ -205,6 +205,19 @@ public sealed class AggregationBudgetExceededException : InvalidOperationExcepti
 /// <summary>Validates the closed aggregation declaration and post-reduction surface.</summary>
 public static class AggregationProfileValidator
 {
+    public static AggregationProfile ResolveOrThrow(StorageUnit unit, string profileName)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        if (string.IsNullOrWhiteSpace(profileName))
+            throw new AggregationValidationException([new("GW-AGG-QUERY-004", "An aggregation profile name is required.", "profileName")]);
+        var profile = (unit.AggregationProfiles ?? []).SingleOrDefault(candidate =>
+            candidate is not null && string.Equals(candidate.Name, profileName, StringComparison.Ordinal));
+        return profile ?? throw new AggregationValidationException([new(
+            "GW-AGG-QUERY-004",
+            $"Aggregation profile '{profileName}' is not declared by storage unit '{unit.Name}'.",
+            "profileName")]);
+    }
+
     public static void Validate(StorageUnit unit, AggregationProfile profile)
     {
         ArgumentNullException.ThrowIfNull(unit);
@@ -365,6 +378,8 @@ public static class AggregationExecutor
         query ??= AggregationQuery.For(profile.Name);
         if (!string.Equals(query.ProfileName, profile.Name, StringComparison.Ordinal))
             throw new AggregationValidationException([new("GW-AGG-QUERY-001", $"Profile '{query.ProfileName}' is not the selected declaration.", "profileName")]);
+        if (query.PostPredicate is not null)
+            ValidatePredicateValues(unit, profile, query.PostPredicate);
 
         var input = new List<IReadOnlyDictionary<string, object?>>(Math.Min(profile.MaxInputRows, 4096));
         foreach (var row in rows)
@@ -506,6 +521,67 @@ public static class AggregationExecutor
         ValidatePredicateShape(query.PostPredicate, allowances);
         output.RemoveAll(row => !Evaluate(query.PostPredicate, row.Values, allowances));
     }
+
+    private static void ValidatePredicateValues(StorageUnit unit, AggregationProfile profile, AggregationPredicate predicate)
+    {
+        var aggregates = profile.Aggregates.ToDictionary(item => item.Alias, StringComparer.Ordinal);
+        var allowances = profile.AllowedPredicates.ToDictionary(item => item.Alias, StringComparer.Ordinal);
+        switch (predicate)
+        {
+            case AggregationPredicate.All all:
+                if (all.Predicates is null || all.Predicates.Count == 0)
+                    throw new AggregationValidationException([new("GW-AGG-PRED-006", "Aggregation logical predicates must contain at least one child.", "postPredicate")]);
+                foreach (var child in all.Predicates)
+                    ValidatePredicateValues(unit, profile, child ?? throw new AggregationValidationException([new("GW-AGG-PRED-010", "Aggregation predicate children cannot be null.", "postPredicate")]));
+                return;
+            case AggregationPredicate.Any any:
+                if (any.Predicates is null || any.Predicates.Count == 0)
+                    throw new AggregationValidationException([new("GW-AGG-PRED-006", "Aggregation logical predicates must contain at least one child.", "postPredicate")]);
+                foreach (var child in any.Predicates)
+                    ValidatePredicateValues(unit, profile, child ?? throw new AggregationValidationException([new("GW-AGG-PRED-010", "Aggregation predicate children cannot be null.", "postPredicate")]));
+                return;
+            case AggregationPredicate.Comparison comparison:
+                if (!allowances.TryGetValue(comparison.Alias, out var allowance) ||
+                    !allowance.SupportedPredicates.Contains(comparison.Operator) ||
+                    !aggregates.TryGetValue(comparison.Alias, out var aggregate))
+                    throw new AggregationValidationException([new("GW-AGG-PRED-007", $"Predicate '{comparison.Operator}' is not declared for output '{comparison.Alias}'.", "postPredicate")]);
+                var values = comparison.Values ?? throw new AggregationValidationException([new("GW-AGG-PRED-008", "Predicate values are required.", "postPredicate.values")]);
+                var expected = comparison.Operator == AggregationPredicateOperator.Contains ? PortableType.String : OutputType(unit, aggregate);
+                foreach (var value in values)
+                {
+                    if (value is null) continue;
+                    if (!IsCompatible(expected, value))
+                        throw new AggregationValidationException([new("GW-AGG-PRED-012", $"Predicate value for '{comparison.Alias}' is not compatible with {expected}.", "postPredicate.values")]);
+                }
+                return;
+            default:
+                throw new AggregationValidationException([new("GW-AGG-PRED-006", "Aggregation logical predicates must contain at least one child.", "postPredicate")]);
+        }
+    }
+
+    private static PortableType OutputType(StorageUnit unit, Aggregate aggregate) => aggregate switch
+    {
+        Aggregate.Sum sum when unit.Columns.Single(column => column.Name == sum.Column).Type is PortableType.Int32 or PortableType.Int64 => PortableType.Int64,
+        Aggregate.Sum sum => unit.Columns.Single(column => column.Name == sum.Column).Type,
+        Aggregate.Min min => unit.Columns.Single(column => column.Name == min.Column).Type,
+        Aggregate.Max max => unit.Columns.Single(column => column.Name == max.Column).Type,
+        Aggregate.FirstBy first => unit.Columns.Single(column => column.Name == first.Column).Type,
+        Aggregate.SetUnion => PortableType.String,
+        _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
+    };
+
+    private static bool IsCompatible(PortableType type, object value) => type switch
+    {
+        PortableType.String => value is string,
+        PortableType.Int32 => value is int,
+        PortableType.Int64 => value is int or long,
+        PortableType.Decimal => value is byte or sbyte or short or ushort or int or uint or long or ulong or decimal,
+        PortableType.Boolean => value is bool,
+        PortableType.DateTimeOffset => value is DateTimeOffset,
+        PortableType.Guid => value is Guid,
+        PortableType.Binary => value is byte[],
+        _ => false
+    };
 
     private static void ValidatePredicateShape(
         AggregationPredicate predicate,

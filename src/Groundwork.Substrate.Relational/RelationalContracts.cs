@@ -16,6 +16,13 @@ public abstract class RelationalDialect
     /// <summary>Whether CreateTableSql materializes the complete column set in one statement.</summary>
     public virtual bool CreateTableIncludesColumns => false;
 
+    /// <summary>Renders the provider-native command for a declared grouped reduction.</summary>
+    public virtual RelationalAggregationCommand RenderAggregation(
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery? query = null) =>
+        RelationalAggregationRenderer.Render(this, unit, profile, query);
+
     public abstract string QuoteIdentifier(string identifier);
 
     public abstract string MapType(ColumnDefinition definition);

@@ -670,7 +670,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
-internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession
 {
     private readonly MongoProviderState state;
     private readonly MongoAppliedUnit applied;
@@ -813,8 +813,19 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             sourceIncludesContinuation: true);
     }
 
-    public AggregationResult Aggregate(AggregationQuery query) =>
-        AggregationSessionExecutor.Execute(Unit, request => Query(request), query);
+    public AggregationResult Aggregate(AggregationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ThrowIfDisposed();
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        AggregationProfileValidator.Validate(Unit, profile);
+        var conflictingFirstByOrder = profile.Aggregates.OfType<Aggregate.FirstBy>()
+            .GroupBy(aggregate => aggregate.OrderColumn, StringComparer.Ordinal)
+            .Any(group => group.Select(aggregate => aggregate.Direction).Distinct().Count() > 1);
+        if (Access.Policy != ScopePolicy.Global || query.PostPredicate is not null || conflictingFirstByOrder)
+            return AggregationSessionExecutor.Execute(Unit, request => Query(request), query);
+        return ExecuteNativeAggregation(profile, query);
+    }
 
     private void AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options)
     {
@@ -1767,7 +1778,8 @@ internal static class SchemaIdentity
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection))),
-        string.Join("|", unit.Indexes.Select(Index)));
+        string.Join("|", unit.Indexes.Select(Index)),
+        string.Join("|", unit.AggregationProfiles.Select(AggregationProfile)));
 
     internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
         string.Equals(Column(left), Column(right), StringComparison.Ordinal);
@@ -1783,6 +1795,25 @@ internal static class SchemaIdentity
     private static string Index(IndexDefinition index) => string.Join("|",
         index.Name, index.IsUnique, index.MissingValues, index.SchemaVersion,
         string.Join(",", index.Columns.Select(column => column.Column + ":" + column.Direction)));
+
+    private static string AggregationProfile(AggregationProfile profile) => string.Join("|",
+        profile.Name,
+        string.Join(",", profile.GroupByColumns.OrderBy(column => column, StringComparer.Ordinal)),
+        string.Join(",", profile.Aggregates.Select(Aggregate).OrderBy(value => value, StringComparer.Ordinal)),
+        string.Join(",", profile.AllowedPredicates.Select(allowance => allowance.Alias + ":" +
+            string.Join("+", allowance.SupportedPredicates.OrderBy(value => value)))),
+        profile.MaxGroups,
+        profile.MaxInputRows);
+
+    private static string Aggregate(Groundwork.Kernel.Aggregate aggregate) => aggregate switch
+    {
+        Groundwork.Kernel.Aggregate.Min min => $"min:{min.Alias}:{min.Column}",
+        Groundwork.Kernel.Aggregate.Max max => $"max:{max.Alias}:{max.Column}",
+        Groundwork.Kernel.Aggregate.Sum sum => $"sum:{sum.Alias}:{sum.Column}",
+        Groundwork.Kernel.Aggregate.SetUnion set => $"setUnion:{set.Alias}:{set.Column}:{set.MaxValues}",
+        Groundwork.Kernel.Aggregate.FirstBy first => $"firstBy:{first.Alias}:{first.Column}:{first.OrderColumn}:{first.Direction}",
+        _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
+    };
 }
 
 internal static class MongoDeclarationSnapshot

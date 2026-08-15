@@ -22,26 +22,20 @@ public static class AggregationSessionExecutor
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(queryRows);
         ArgumentNullException.ThrowIfNull(query);
-        var profile = unit.AggregationProfiles
-            .SingleOrDefault(candidate => string.Equals(candidate.Name, query.ProfileName, StringComparison.Ordinal));
-        if (profile is null)
-            throw new AggregationValidationException([new(
-                "GW-AGG-QUERY-004",
-                $"Aggregation profile '{query.ProfileName}' is not declared by storage unit '{unit.Name}'.",
-                "profileName")]);
-
+        var profile = AggregationProfileValidator.ResolveOrThrow(unit, query.ProfileName);
         AggregationProfileValidator.Validate(unit, profile);
         var columns = unit.Columns.ToDictionary(column => column.Name, QueryColumn, StringComparer.Ordinal);
         var order = unit.Key.Columns
             .Where(columns.ContainsKey)
             .Select(name => new OrderTerm(columns[name], OrderDirection.Ascending, NullOrder.First))
             .ToImmutableArray();
+        var probeLimit = profile.MaxInputRows == int.MaxValue ? int.MaxValue : profile.MaxInputRows + 1;
         var request = new QueryRequest(
             new TableId(unit.Name),
             Predicate.AlwaysTrue.Instance,
             order,
             Projection.All,
-            Paging.OffsetLimit(0, checked(profile.MaxInputRows + 1)));
+            Paging.OffsetLimit(0, probeLimit));
         var source = queryRows(request);
         return AggregationExecutor.Execute(unit, profile, source.Rows, query);
     }
