@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
@@ -121,6 +122,9 @@ internal sealed class InMemoryUnitState
 
     internal StorageUnit Unit { get; }
 
+    // Compare-and-swap token used by unit-of-work commits.
+    internal long Revision { get; set; }
+
     internal Dictionary<string, Dictionary<string, InMemoryEntry>> Partitions { get; } = [];
 
     internal List<ProviderIndex> PhysicalIndexes { get; } = [];
@@ -128,6 +132,7 @@ internal sealed class InMemoryUnitState
     internal InMemoryUnitState Clone()
     {
         var clone = new InMemoryUnitState(Unit);
+        clone.Revision = Revision;
         foreach (var partition in Partitions)
         {
             clone.Partitions[partition.Key] = partition.Value.ToDictionary(
@@ -140,7 +145,8 @@ internal sealed class InMemoryUnitState
             index.Name,
             index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
             index.IsUnique,
-            index.MissingValues)));
+            index.MissingValues,
+            index.SchemaVersion)));
 
         return clone;
     }
@@ -179,7 +185,8 @@ internal sealed class InMemoryProviderCatalog(InMemoryDatabase database) : IProv
                     index.Name,
                     index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
                     index.IsUnique,
-                    index.MissingValues))
+                    index.MissingValues,
+                    index.SchemaVersion))
                 .ToArray();
         }
     }
@@ -209,11 +216,6 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
             if (diff.IsEmpty)
                 return new SchemaApplyResult(diff, false);
 
-            var next = current is null ? new InMemoryUnitState(desired) : current;
-            if (current is not null && current.Unit.Scope != desired.Scope)
-                throw new SchemaConflictException(
-                    $"Storage unit '{desired.Name}' cannot change scope from {current.Unit.Scope} to {desired.Scope}.");
-
             var merged = Merge(current?.Unit, desired);
             var physicalIndexes = current?.PhysicalIndexes.ToList() ?? [];
             foreach (var index in desired.Indexes.Where(index =>
@@ -223,9 +225,11 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
                     index.Name,
                     index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
                     index.IsUnique,
-                    index.MissingValues));
+                    index.MissingValues,
+                    index.SchemaVersion));
             }
 
+            InMemoryUnitState next;
             if (current is null)
                 next = new InMemoryUnitState(merged);
             else
@@ -236,6 +240,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
                         pair => pair.Key,
                         pair => pair.Value.Clone(),
                         StringComparer.Ordinal);
+                replacement.Revision = checked(current.Revision + 1);
                 next = replacement;
             }
 
@@ -259,6 +264,12 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         if (current is not null && current.Timestamps != desired.Timestamps)
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change timestamp declaration non-additively.");
+        if (current is not null && current.Scope != desired.Scope)
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change scope from {current.Scope} to {desired.Scope}.");
+        if (current is not null && current.SchemaVersion != desired.SchemaVersion)
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change schema version non-additively.");
 
         if (current is null)
         {
@@ -345,7 +356,7 @@ internal static class SchemaIdentity
     internal static bool KeyEquals(KeyDefinition left, KeyDefinition right) =>
         left.Columns.SequenceEqual(right.Columns, StringComparer.Ordinal);
 
-    private static string Column(ColumnDefinition column) => string.Join("|",
+    private static string Column(ColumnDefinition column) => Encode(
         column.Name,
         column.Type,
         column.IsNullable,
@@ -353,19 +364,35 @@ internal static class SchemaIdentity
         column.Precision,
         column.Scale,
         column.Collation,
-        column.Default?.Value is null ? "<null>" : Value(column.Default.Value),
+        column.Default is null ? "default:absent" : $"default:present:{Value(column.Default.Value)}",
         column.Generation);
 
-    private static string Index(IndexDefinition index) => string.Join("|",
+    private static string Index(IndexDefinition index) => Encode(
         index.Name,
         index.IsUnique,
         index.MissingValues,
-        string.Join(",", index.Columns.Select(column => $"{column.Column}:{column.Direction}")));
+        index.SchemaVersion,
+        string.Join("", index.Columns.Select(column => Encode(column.Column, column.Direction))));
 
-    private static string Value(object value) => value switch
+    private static string Encode(params object?[] parts) => string.Join(";", parts.Select(part =>
     {
+        var value = part?.ToString() ?? "<null>";
+        return $"{value.Length}:{value}";
+    }));
+
+    private static string Value(object? value) => value switch
+    {
+        null => "null",
         string text => $"s:{text.Length}:{text}",
         byte[] bytes => $"b:{Convert.ToBase64String(bytes)}",
+        IReadOnlyDictionary<string, object?> dictionary =>
+            $"dict:{string.Join("", dictionary.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => Encode(pair.Key, Value(pair.Value))))}",
+        IDictionary dictionary =>
+            $"dict:{string.Join("", dictionary.Cast<DictionaryEntry>()
+                .OrderBy(pair => pair.Key?.ToString(), StringComparer.Ordinal)
+                .Select(pair => Encode(pair.Key?.ToString(), Value(pair.Value))))}",
+        IEnumerable sequence => $"seq:{string.Join("", sequence.Cast<object?>().Select(Value))}",
         IFormattable formattable => $"{value.GetType().FullName}:{formattable.ToString(null, CultureInfo.InvariantCulture)}",
         _ => $"{value.GetType().FullName}:{value}"
     };
@@ -471,6 +498,7 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
     private readonly InMemoryDatabase database;
     private readonly StorageAccess access;
     private readonly Dictionary<StorageUnitId, InMemoryUnitState> staged;
+    private readonly Dictionary<StorageUnitId, long> baseRevisions;
     private readonly List<InMemoryStorageSession> sessions = [];
     private bool terminal;
 
@@ -481,7 +509,11 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
     {
         this.database = database;
         this.access = access;
-        staged = states.ToDictionary(state => state.Unit.Id, state => state.Clone());
+        lock (database.Gate)
+        {
+            baseRevisions = states.ToDictionary(state => state.Unit.Id, state => state.Revision);
+            staged = states.ToDictionary(state => state.Unit.Id, state => state.Clone());
+        }
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -502,6 +534,16 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         ThrowIfTerminal();
         lock (database.Gate)
         {
+            foreach (var pair in staged)
+            {
+                if (!database.Units.TryGetValue(pair.Key, out var current) ||
+                    current.Revision != baseRevisions[pair.Key])
+                {
+                    throw new InvalidOperationException(
+                        $"Storage unit '{pair.Key.Value}' changed while the unit of work was active.");
+                }
+            }
+
             foreach (var pair in staged)
                 database.Units[pair.Key] = pair.Value;
         }
@@ -598,6 +640,7 @@ internal static class Mutation
             _ => WriteOutcomeStatus.Upserted
         };
         entries[identity] = new InMemoryEntry(values.Values, version);
+        state.Revision = checked(state.Revision + 1);
         return new WriteOutcome(status, version);
     }
 
@@ -620,6 +663,7 @@ internal static class Mutation
             return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
 
         entries.Remove(identity);
+        state.Revision = checked(state.Revision + 1);
         return new WriteOutcome(WriteOutcomeStatus.Deleted,
             state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic ? existing.Version : null);
     }

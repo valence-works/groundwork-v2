@@ -1,4 +1,7 @@
 using System.Collections.ObjectModel;
+using System.Collections;
+using System.Text.Json.Nodes;
+using System.Text.Json;
 using Groundwork.Kernel;
 
 namespace Groundwork.Testing;
@@ -44,16 +47,46 @@ public sealed class StorageValues
         return new ReadOnlyDictionary<string, object?>(copy);
     }
 
-    internal static object? CloneValue(object? value) => value switch
+    internal static object? CloneValue(object? value)
     {
-        byte[] bytes => bytes.ToArray(),
-        IReadOnlyDictionary<string, object?> nested =>
-            new ReadOnlyDictionary<string, object?>(nested.ToDictionary(
-                pair => pair.Key,
-                pair => CloneValue(pair.Value),
-                StringComparer.Ordinal)),
-        _ => value
-    };
+        switch (value)
+        {
+            case null:
+                return null;
+            case byte[] bytes:
+                return bytes.ToArray();
+            case JsonNode node:
+                return node.DeepClone();
+            case JsonElement element:
+                return element.Clone();
+            case JsonDocument document:
+                return document.RootElement.Clone();
+            case IReadOnlyDictionary<string, object?> nested:
+                return new ReadOnlyDictionary<string, object?>(nested.ToDictionary(
+                    pair => pair.Key,
+                    pair => CloneValue(pair.Value),
+                    StringComparer.Ordinal));
+            case IDictionary dictionary:
+            {
+                var copy = new Dictionary<object, object?>();
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    if (entry.Key is null)
+                        throw new ArgumentException("Snapshot dictionaries cannot contain a null key.");
+                    copy[entry.Key] = CloneValue(entry.Value);
+                }
+
+                return new ReadOnlyDictionary<object, object?>(copy);
+            }
+            case IEnumerable sequence when value is not string:
+                return Array.AsReadOnly(sequence.Cast<object?>().Select(CloneValue).ToArray());
+            default:
+                if (value.GetType().IsValueType || value is string)
+                    return value;
+                throw new ArgumentException(
+                    $"Cannot snapshot mutable value of type '{value.GetType().FullName}'.");
+        }
+    }
 }
 
 /// <summary>A defensive snapshot of a declared key.</summary>
@@ -122,7 +155,8 @@ public sealed class ProviderIndex
         string name,
         IReadOnlyList<ProviderIndexColumn> columns,
         bool isUnique,
-        MissingValueBehavior missingValues)
+        MissingValueBehavior missingValues,
+        int schemaVersion = 1)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(columns);
@@ -130,6 +164,7 @@ public sealed class ProviderIndex
         Columns = Array.AsReadOnly(columns.ToArray());
         IsUnique = isUnique;
         MissingValues = missingValues;
+        SchemaVersion = schemaVersion;
     }
 
     public string Name { get; }
@@ -139,6 +174,8 @@ public sealed class ProviderIndex
     public bool IsUnique { get; }
 
     public MissingValueBehavior MissingValues { get; }
+
+    public int SchemaVersion { get; }
 }
 
 public enum SchemaChangeKind

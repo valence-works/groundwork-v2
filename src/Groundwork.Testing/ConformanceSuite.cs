@@ -27,9 +27,10 @@ public static class ConformanceSuite
                 Require(!first.IsNoOp, "the first schema application must have work");
                 var second = connection.Schema.Apply(global);
                 Require(second.IsNoOp, "reapplying an unchanged schema must be a no-op");
+                Require(connection.Schema.Diff(global).IsEmpty,
+                    "the provider reported a non-empty diff for the applied declaration");
                 var indexes = connection.Catalog.ReadIndexes(global.Id);
-                Require(indexes.Any(index => index.Name == "unique-value" && index.IsUnique),
-                    "the provider catalog did not report the unique index");
+                AssertCatalog(global, indexes);
             });
 
             RunCheck(checks, "storage-scope isolation", () =>
@@ -157,6 +158,32 @@ public static class ConformanceSuite
         throw new ConformanceFailureException("contract", $"Expected {typeof(TException).Name}.");
     }
 
+    private static void AssertCatalog(StorageUnit declaration, IReadOnlyList<ProviderIndex> actual)
+    {
+        Require(actual.Count == declaration.Indexes.Count,
+            "the provider catalog returned a different number of indexes");
+
+        foreach (var expected in declaration.Indexes)
+        {
+            var found = actual.SingleOrDefault(index => index.Name == expected.Name);
+            Require(found is not null, $"the provider catalog did not report index '{expected.Name}'");
+            Require(found!.IsUnique == expected.IsUnique,
+                $"catalog uniqueness differs for index '{expected.Name}'");
+            Require(found.MissingValues == expected.MissingValues,
+                $"catalog missing-value behavior differs for index '{expected.Name}'");
+            Require(found.SchemaVersion == expected.SchemaVersion,
+                $"catalog schema version differs for index '{expected.Name}'");
+            Require(found.Columns.Count == expected.Columns.Count,
+                $"catalog column count differs for index '{expected.Name}'");
+            for (var i = 0; i < expected.Columns.Count; i++)
+            {
+                Require(found.Columns[i].Column == expected.Columns[i].Column &&
+                        found.Columns[i].Direction == expected.Columns[i].Direction,
+                    $"catalog columns differ for index '{expected.Name}'");
+            }
+        }
+    }
+
     private static class ProbeModel
     {
         internal static readonly StorageUnit Global = Create("conformance-global", ScopePolicy.Global,
@@ -193,6 +220,7 @@ public static class ConformanceSuite
             Concurrency = concurrency,
             Indexes =
             [
+                new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] },
                 new IndexDefinition { Name = "unique-value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }
             ]
         };

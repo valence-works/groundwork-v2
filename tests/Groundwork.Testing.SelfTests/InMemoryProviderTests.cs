@@ -59,6 +59,42 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Schema_diff_identity_includes_scope_version_defaults_and_index_version()
+    {
+        var factory = new InMemoryProviderFactory();
+        using var connection = factory.Create("memory://schema-identity");
+        var baseUnit = TestingFixture.GlobalUnit("schema-identity");
+        var initial = baseUnit with
+        {
+            Columns = baseUnit.Columns
+                .Select(column => column.Name == "value"
+                    ? column with { Default = new PortableDefault(null) }
+                    : column)
+                .ToArray()
+        };
+        connection.Schema.Apply(initial);
+
+        var absentDefault = initial with
+        {
+            Columns = initial.Columns
+                .Select(column => column.Name == "value" ? column with { Default = null } : column)
+                .ToArray()
+        };
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(absentDefault));
+
+        var changedIndex = initial with
+        {
+            Indexes = initial.Indexes
+                .Select(index => index.Name == "by-value" ? index with { SchemaVersion = 2 } : index)
+                .ToArray()
+        };
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedIndex));
+
+        var changedScope = initial with { Scope = ScopePolicy.Scoped };
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedScope));
+    }
+
+    [Fact]
     public void CRUD_reports_write_outcomes_and_enforces_unique_indexes()
     {
         var factory = new InMemoryProviderFactory();
@@ -157,6 +193,79 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Unit_of_work_rejects_lost_updates_atomically()
+    {
+        var factory = new InMemoryProviderFactory();
+        using var connection = factory.Create("memory://uow-conflict");
+        var unit = TestingFixture.GlobalUnit("uow-conflict");
+        connection.Schema.Apply(unit);
+        var outside = connection.OpenSession(unit, StorageAccess.Global);
+        outside.Insert(TestingFixture.Values("same", "before"));
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        work.OpenSession(unit).Update(TestingFixture.Values("same", "staged"));
+        outside.Update(TestingFixture.Values("same", "outside"));
+
+        Assert.Throws<InvalidOperationException>(() => work.Commit());
+        Assert.Equal("outside", outside.Read(TestingFixture.Key("same"))!.Values.Values["value"]);
+        work.Rollback();
+    }
+
+    [Fact]
+    public void Declared_defaults_are_deep_snapshots()
+    {
+        var factory = new InMemoryProviderFactory();
+        using var connection = factory.Create("memory://default-snapshot");
+        var bytes = new byte[] { 1, 2 };
+        var items = new List<int> { 3, 4 };
+        var nested = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["bytes"] = bytes,
+            ["items"] = items
+        };
+        var baseUnit = TestingFixture.GlobalUnit("default-snapshot");
+        var unit = baseUnit with
+        {
+            Columns = baseUnit.Columns
+                .Select(column => column.Name == "value"
+                    ? column with { Default = new PortableDefault(nested) }
+                    : column)
+                .ToArray()
+        };
+
+        connection.Schema.Apply(unit);
+        bytes[0] = 9;
+        items[0] = 8;
+        nested["new"] = "mutated";
+
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var snapshot = session.Unit.Columns.Single(column => column.Name == "value").Default!.Value;
+        var dictionary = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(snapshot);
+        Assert.Equal(new byte[] { 1, 2 }, Assert.IsType<byte[]>(dictionary["bytes"]));
+        Assert.Equal(new object?[] { 3, 4 },
+            Assert.IsAssignableFrom<IEnumerable<object?>>(dictionary["items"]).ToArray());
+        Assert.False(dictionary.ContainsKey("new"));
+    }
+
+    [Fact]
+    public void Unsupported_mutable_default_is_rejected_at_snapshot_boundary()
+    {
+        var factory = new InMemoryProviderFactory();
+        using var connection = factory.Create("memory://default-rejection");
+        var baseUnit = TestingFixture.GlobalUnit("default-rejection");
+        var unit = baseUnit with
+        {
+            Columns = baseUnit.Columns
+                .Select(column => column.Name == "value"
+                    ? column with { Default = new PortableDefault(new MutableValue()) }
+                    : column)
+                .ToArray()
+        };
+
+        Assert.Throws<ArgumentException>(() => connection.Schema.Apply(unit));
+    }
+
+    [Fact]
     public void Values_and_results_are_defensive_snapshots()
     {
         var factory = new InMemoryProviderFactory();
@@ -186,5 +295,10 @@ public sealed class InMemoryProviderTests
 
         public IStorageProviderConnection Create(string connectionString) =>
             inner.Create(connectionString);
+    }
+
+    private sealed class MutableValue
+    {
+        public string Text { get; set; } = "mutable";
     }
 }
