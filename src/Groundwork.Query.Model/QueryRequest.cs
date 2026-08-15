@@ -184,7 +184,7 @@ public sealed record QueryResult<T>
 {
     public QueryResult(IReadOnlyList<T> rows, long? totalCount)
     {
-        Rows = (rows ?? throw new ArgumentNullException(nameof(rows))).ToArray();
+        Rows = Array.AsReadOnly((rows ?? throw new ArgumentNullException(nameof(rows))).ToArray());
         TotalCount = totalCount;
     }
 

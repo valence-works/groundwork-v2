@@ -14,6 +14,7 @@ public sealed class QueryModelContractTests
     private static readonly ColumnRef Created = new(Table, "created", QueryType.DateTimeOffset, isNullable: false);
     private static readonly ColumnRef Id = new(Table, "id", QueryType.Guid, isNullable: false);
     private static readonly ColumnRef Tags = new(Table, "tags", QueryType.String, isNullable: true);
+    private static readonly ColumnRef Binary = new(Table, "payload", QueryType.Binary, isNullable: false);
 
     [Fact]
     public void Query_constants_validate_types_scale_ranges_and_unicode()
@@ -168,6 +169,32 @@ public sealed class QueryModelContractTests
 
         Assert.Equal(1, result.Rows[0]);
         Assert.Throws<ArgumentNullException>(() => new QueryResult<int>(null!, null));
+    }
+
+    [Fact]
+    public void Binary_constants_and_results_remain_immutable_through_public_values()
+    {
+        var source = new byte[] { 1, 2, 3 };
+        var constant = QueryConstant.Of(Binary, source);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Binary, constant),
+            ImmutableArray<OrderTerm>.Empty,
+            Projection.All,
+            Paging.None);
+        var canonical = request.CanonicalPredicate;
+        var fingerprint = request.ShapeFingerprint;
+
+        source[0] = 9;
+        ((byte[])constant.Value!)[0] = 8;
+
+        Assert.Equal(canonical, request.CanonicalPredicate);
+        Assert.Equal(fingerprint, request.ShapeFingerprint);
+        Assert.Equal(new byte[] { 1, 2, 3 }, (byte[])constant.Value!);
+
+        var rows = new QueryResult<int>(new[] { 1 }, null);
+        Assert.Throws<NotSupportedException>(() => ((IList<int>)rows.Rows)[0] = 9);
+        Assert.Equal(1, rows.Rows[0]);
     }
 
     [Fact]

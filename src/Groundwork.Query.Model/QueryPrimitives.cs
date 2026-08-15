@@ -103,11 +103,13 @@ public sealed record ColumnRef
 
 public sealed class QueryConstant : IEquatable<QueryConstant>
 {
+    private readonly object? _value;
+
     private QueryConstant(QueryConstantKind kind, QueryType? declaredType, object? value)
     {
         Kind = kind;
         DeclaredType = declaredType;
-        Value = value is byte[] bytes ? (byte[])bytes.Clone() : value;
+        _value = value is byte[] bytes ? (byte[])bytes.Clone() : value;
     }
 
     public QueryConstantKind Kind { get; }
@@ -125,7 +127,7 @@ public sealed class QueryConstant : IEquatable<QueryConstant>
         QueryConstantKind.Binary => QueryType.Binary,
         _ => null
     };
-    public object? Value { get; }
+    public object? Value => _value is byte[] bytes ? (byte[])bytes.Clone() : _value;
 
     public static QueryConstant Of(ColumnRef column, object? value)
     {
