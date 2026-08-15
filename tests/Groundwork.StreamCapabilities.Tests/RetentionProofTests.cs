@@ -53,12 +53,7 @@ public sealed class RetentionProofTests
 
         var serial = await MeasureOnAppend(connection, "pgs", concurrent: false);
         var concurrent = await MeasureOnAppend(connection, "pgc", concurrent: true);
-
-        Assert.True(concurrent.RetentionCommands * 2 <= serial.RetentionCommands,
-            $"Concurrent OnAppend issued {concurrent.RetentionCommands} retention commands in {concurrent.Elapsed}; " +
-            $"the serial baseline issued {serial.RetentionCommands} in {serial.Elapsed}. " +
-            "The coalesced path must remove at least half of the serial cleanup commands.");
-        Assert.Equal(8, concurrent.Survivors);
+        AssertNativeOnAppendCoalesces(serial, concurrent);
     }
 
     [SkippableFact]
@@ -71,6 +66,35 @@ public sealed class RetentionProofTests
     }
 
     [SkippableFact]
+    public async Task SQLServer_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server OnAppend proof.");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+
+        var serial = await MeasureOnAppend(connection, "sqls", concurrent: false);
+        var concurrent = await MeasureOnAppend(connection, "sqlc", concurrent: true);
+        AssertNativeOnAppendCoalesces(serial, concurrent);
+    }
+
+    [Fact]
+    public async Task SQLite_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-s3-convoy-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
+            var serial = await MeasureOnAppend(connection, "lites", concurrent: false);
+            var concurrent = await MeasureOnAppend(connection, "litec", concurrent: true);
+            AssertNativeOnAppendCoalesces(serial, concurrent);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [SkippableFact]
     public void MongoDB_retention_uses_bounded_deleteMany_and_keeps_newest_rows_per_partition()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
@@ -79,6 +103,18 @@ public sealed class RetentionProofTests
         AssertRetention(connection, "mongodb");
         AssertMongoRetentionDriftIsRefused(connection);
         AssertMongoLargePartitionUsesBoundedWatermarks(connection);
+    }
+
+    [SkippableFact]
+    public async Task MongoDB_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB OnAppend proof.");
+        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+
+        var serial = await MeasureOnAppend(connection, "mngs", concurrent: false);
+        var concurrent = await MeasureOnAppend(connection, "mngc", concurrent: true);
+        AssertNativeOnAppendCoalesces(serial, concurrent);
     }
 
     [Fact]
@@ -349,16 +385,15 @@ public sealed class RetentionProofTests
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var observer = new WritePathObserver();
-        Action<int> append = index =>
+        static void Append(IStorageSession session, WritePathObserver observer, int index)
         {
-            var session = connection.OpenSession(unit, StorageAccess.Global);
             var outcome = session.Insert(new StorageValues(new Dictionary<string, object?>
             {
                 ["id"] = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
                 ["ordering"] = (long)index
             }), new WriteOptions { Observer = observer });
             Assert.True(outcome.Succeeded);
-        };
+        }
         var stopwatch = new Stopwatch();
         if (concurrent)
         {
@@ -366,9 +401,10 @@ public sealed class RetentionProofTests
             using var ready = new CountdownEvent(writes);
             var tasks = Enumerable.Range(0, writes).Select(index => Task.Factory.StartNew(() =>
             {
+                var session = connection.OpenSession(unit, StorageAccess.Global);
                 ready.Signal();
                 start.Wait();
-                append(index);
+                Append(session, observer, index);
             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
             Assert.True(ready.Wait(TimeSpan.FromSeconds(5)), "Native writers did not reach the start gate.");
             stopwatch.Start();
@@ -378,7 +414,8 @@ public sealed class RetentionProofTests
         else
         {
             stopwatch.Start();
-            for (var index = 0; index < writes; index++) append(index);
+            for (var index = 0; index < writes; index++)
+                Append(connection.OpenSession(unit, StorageAccess.Global), observer, index);
         }
         stopwatch.Stop();
 
@@ -387,6 +424,17 @@ public sealed class RetentionProofTests
         var retentionCommands = observer.Commands.Count(command =>
             command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase));
         return new OnAppendMeasurement(stopwatch.Elapsed, retentionCommands, survivors);
+    }
+
+    private static void AssertNativeOnAppendCoalesces(
+        OnAppendMeasurement serial,
+        OnAppendMeasurement concurrent)
+    {
+        Assert.True(concurrent.RetentionCommands * 2 <= serial.RetentionCommands,
+            $"Concurrent OnAppend issued {concurrent.RetentionCommands} retention commands in {concurrent.Elapsed}; " +
+            $"the serial baseline issued {serial.RetentionCommands} in {serial.Elapsed}. " +
+            "The coalesced path must remove at least half of the serial cleanup commands.");
+        Assert.Equal(8, concurrent.Survivors);
     }
 
     private static void AssertNativeBatchOnAppend(IStorageProviderConnection connection, string provider)

@@ -456,7 +456,10 @@ internal static class SchemaIdentity
         string.Equals(AggregationProfile(left), AggregationProfile(right), StringComparison.Ordinal);
 
     internal static bool RetentionEquals(RetentionDeclaration? left, RetentionDeclaration? right) =>
-        EncodeRetention(left) == EncodeRetention(right);
+        string.Equals(
+            RetentionCanonicalization.Canonicalize(left),
+            RetentionCanonicalization.Canonicalize(right),
+            StringComparison.Ordinal);
 
     private static string Column(ColumnDefinition column) => Encode(
         column.Name,
@@ -480,11 +483,6 @@ internal static class SchemaIdentity
 
     private static string AggregationProfile(AggregationProfile profile) =>
         AggregationProfileCanonicalization.Canonicalize(profile);
-
-    private static string EncodeRetention(RetentionDeclaration? retention) => retention is null
-        ? "retention:none"
-        : Encode(retention.KeepNewest, retention.OrderColumn, retention.Trigger,
-            string.Join("|", retention.PartitionColumns));
 
     private static string Encode(params object?[] parts) => string.Join(";", parts.Select(part =>
     {

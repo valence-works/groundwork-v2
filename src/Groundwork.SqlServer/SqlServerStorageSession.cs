@@ -165,18 +165,40 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        var outcome = Execute(() => ConditionalUpsertCore(values, options));
-        if (outcome.Status == WriteOutcomeStatus.Inserted && Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
-            ApplyOnAppendRetention(options?.Observer);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        WriteOutcome outcome;
+        try
+        {
+            outcome = Execute(() => ConditionalUpsertCore(values, options));
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            throw;
+        }
+        CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted, options?.Observer);
         return outcome;
     }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
     {
         var nativeOnAppend = IsNativeAppendBatch(writes);
-        var outcomes = ExecuteWrite(() => ApplyBatchCore(writes));
-        if (nativeOnAppend && OnAppendRetentionCoordinator.TryGetObserver(outcomes, out var observer))
-            ApplyOnAppendRetention(observer);
+        var registration = BeginOnAppend(nativeOnAppend);
+        IReadOnlyList<RowWriteOutcome> outcomes;
+        try
+        {
+            outcomes = ExecuteWrite(() => ApplyBatchCore(writes));
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            throw;
+        }
+        IWritePathObserver? observer = null;
+        var succeeded = nativeOnAppend &&
+            OnAppendRetentionCoordinator.TryGetObserver(outcomes, out observer);
+        CompleteOnAppend(registration, succeeded, observer);
         return outcomes;
     }
 
@@ -212,9 +234,11 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         });
     }
 
-    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) => ExecuteWrite(() =>
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
+        ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
+
+    private RetentionResult ApplyRetentionCore(RetentionExecutionOptions options)
     {
-        options ??= new RetentionExecutionOptions();
         if (options.MaxRowsPerBatch <= 0)
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
         var declaration = Unit.Retention ??
@@ -259,7 +283,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 break;
         }
         return new RetentionResult(deleted, batches);
-    });
+    }
 
     internal void Close() => closed = true;
 
@@ -556,16 +580,45 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
 
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation)
     {
-        var outcome = MutateCore(values, options, mutation);
-        if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            mutation is Mutation.Insert or Mutation.Upsert)
-            ApplyOnAppendRetention(options?.Observer);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            mutation is Mutation.Insert or Mutation.Upsert;
+        var registration = BeginOnAppend(onAppend);
+        WriteOutcome outcome;
+        try
+        {
+            outcome = MutateCore(values, options, mutation);
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            throw;
+        }
+        CompleteOnAppend(registration, onAppend && outcome.Succeeded, options?.Observer);
         return outcome;
     }
 
-    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible) =>
+        eligible && transaction is null
+            ? OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value)
+            : null;
+
+    private void CompleteOnAppend(
+        OnAppendRetentionCoordinator.AppendRegistration? registration,
+        bool cleanupRequired,
+        IWritePathObserver? observer)
     {
-        void Cleanup() => ApplyRetention(new RetentionExecutionOptions { Observer = observer });
+        void Cleanup()
+        {
+            owner.ThrowIfDisposed();
+            ApplyRetentionCore(new RetentionExecutionOptions { Observer = observer });
+        }
+        if (registration is not null)
+        {
+            registration.Complete(cleanupRequired, Cleanup);
+            return;
+        }
+        if (!cleanupRequired)
+            return;
         if (transaction is null)
             OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup);
         else

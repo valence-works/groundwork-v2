@@ -32,7 +32,9 @@ upsert/CreateOnly, or native batch append. Concurrent committed appenders coales
 per-unit/per-scope dirty signal: one owner recomputes retention until the signal is drained while
 the other writers return without waiting behind cleanup. The provider-neutral proof blocks the
 active cleanup owner and requires every other writer to complete; the live proof also compares
-native cleanup commands against an equal-size barrier-started serial baseline. Cancellation is
+native cleanup commands on every provider against an equal-size barrier-started serial baseline.
+SQL Server and SQLite register appenders before their shared write gates and run coalesced cleanup
+only after the successful write transaction releases that gate. Cancellation is
 checked between native delete batches. SQL providers roll back the interrupted pass, while MongoDB
 may leave a completed bounded batch; both forms resume by recomputing the watermark and converge on
 the exact retained count.

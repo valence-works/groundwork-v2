@@ -44,7 +44,7 @@ public sealed class SchemaSubject
                 Scope.ToString(),
                 Concurrency.ToString(),
                 Timestamps.ToString(),
-                CanonicalRetention(definition.Retention),
+                RetentionCanonicalization.Canonicalize(definition.Retention),
                 .. Columns.Select(CanonicalColumn),
                 .. Key.Columns.Select(column => $"key:{column}"),
                 .. DerivedColumns.Select(CanonicalDerivedColumn),
@@ -222,14 +222,6 @@ public sealed class SchemaSubject
     private static string CanonicalAggregationProfile(AggregationProfile profile) =>
         AggregationProfileCanonicalization.Canonicalize(profile);
 
-    private static string CanonicalRetention(RetentionDeclaration? retention) => retention is null
-        ? "retention:none"
-        : SchemaFingerprint.Canonicalize([
-            "retention",
-            retention.KeepNewest.ToString(CultureInfo.InvariantCulture),
-            retention.OrderColumn,
-            retention.Trigger.ToString(),
-            .. retention.PartitionColumns]);
 }
 
 /// <summary>Provider-owned schema materialization metadata carried through the neutral plan.</summary>

@@ -240,11 +240,33 @@ internal static class OnAppendRetentionCoordinator
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(cleanup);
-        var identity = $"{unit.Id.Value.Length}:{unit.Id.Value}|{scope?.Length ?? -1}:{scope}";
-        var state = Owners.GetValue(owner, static _ => new OwnerState()).States
-            .GetOrAdd(identity, static _ => new DrainState());
+        var state = State(owner, unit, scope);
         Interlocked.Exchange(ref state.Pending, 1);
+        Drain(state, cleanup);
+    }
 
+    /// <summary>
+    /// Registers an appender before it enters a provider write gate. The last concurrent
+    /// appender drains the shared dirty signal after every registered write has committed.
+    /// </summary>
+    internal static AppendRegistration Begin(object owner, StorageUnit unit, string? scope)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentNullException.ThrowIfNull(unit);
+        var state = State(owner, unit, scope);
+        Interlocked.Increment(ref state.Appenders);
+        return new AppendRegistration(state);
+    }
+
+    private static DrainState State(object owner, StorageUnit unit, string? scope)
+    {
+        var identity = $"{unit.Id.Value.Length}:{unit.Id.Value}|{scope?.Length ?? -1}:{scope}";
+        return Owners.GetValue(owner, static _ => new OwnerState()).States
+            .GetOrAdd(identity, static _ => new DrainState());
+    }
+
+    private static void Drain(DrainState state, Action cleanup)
+    {
         while (true)
         {
             if (Interlocked.CompareExchange(ref state.Running, 1, 0) != 0)
@@ -272,13 +294,36 @@ internal static class OnAppendRetentionCoordinator
         }
     }
 
+    internal sealed class AppendRegistration(DrainState state) : IDisposable
+    {
+        private int completed;
+
+        internal void Complete(bool cleanupRequired, Action cleanup)
+        {
+            ArgumentNullException.ThrowIfNull(cleanup);
+            if (Interlocked.Exchange(ref completed, 1) != 0)
+                throw new InvalidOperationException("An OnAppend registration can only be completed once.");
+            if (cleanupRequired)
+                Interlocked.Exchange(ref state.Pending, 1);
+            if (Interlocked.Decrement(ref state.Appenders) == 0 && Volatile.Read(ref state.Pending) != 0)
+                Drain(state, cleanup);
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref completed, 1) == 0)
+                Interlocked.Decrement(ref state.Appenders);
+        }
+    }
+
     private sealed class OwnerState
     {
         internal ConcurrentDictionary<string, DrainState> States { get; } = new(StringComparer.Ordinal);
     }
 
-    private sealed class DrainState
+    internal sealed class DrainState
     {
+        internal int Appenders;
         internal int Pending;
         internal int Running;
     }

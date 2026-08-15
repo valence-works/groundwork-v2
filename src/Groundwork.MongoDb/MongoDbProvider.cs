@@ -2248,7 +2248,7 @@ internal static class SchemaIdentity
         unit.Scope,
         unit.Concurrency,
         unit.Timestamps,
-        Retention(unit.Retention),
+        RetentionCanonicalization.Canonicalize(unit.Retention),
         unit.SchemaVersion,
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
@@ -2263,7 +2263,10 @@ internal static class SchemaIdentity
         string.Equals(Index(left), Index(right), StringComparison.Ordinal);
 
     internal static bool RetentionEquals(RetentionDeclaration? left, RetentionDeclaration? right) =>
-        string.Equals(Retention(left), Retention(right), StringComparison.Ordinal);
+        string.Equals(
+            RetentionCanonicalization.Canonicalize(left),
+            RetentionCanonicalization.Canonicalize(right),
+            StringComparison.Ordinal);
 
     private static string Column(ColumnDefinition column) => string.Join("|",
         column.Name, column.Type, column.IsNullable, column.MaxLength, column.Precision,
@@ -2281,18 +2284,6 @@ internal static class SchemaIdentity
     private static string AggregationProfile(AggregationProfile profile) =>
         AggregationProfileCanonicalization.Canonicalize(profile);
 
-    private static string Retention(RetentionDeclaration? retention) => retention is null
-        ? "retention:none"
-        : Encode("retention", retention.KeepNewest, retention.OrderColumn, retention.Trigger,
-            Encode(retention.PartitionColumns.Cast<object?>().ToArray()));
-
-    private static string Encode(params object?[] parts) => string.Concat(parts.Select(part =>
-    {
-        var value = part is IFormattable formattable
-            ? formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture)
-            : part?.ToString();
-        return value is null ? "-1:" : $"{value.Length}:{value}";
-    }));
 }
 
 internal static class MongoDeclarationSnapshot
