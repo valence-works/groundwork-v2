@@ -441,7 +441,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     private static string Escape(string value) => value.Replace("'", "''", StringComparison.Ordinal);
 
-    private static string PhysicalIndexName(string table, string index)
+    internal static string PhysicalIndexName(string table, string index)
     {
         var logical = $"{table}__{index}";
         if (logical.Length <= 63)

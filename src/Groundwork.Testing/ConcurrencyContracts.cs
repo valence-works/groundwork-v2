@@ -514,6 +514,10 @@ public sealed class StorageProviderConcurrencyFactory : IConcurrencyProviderFact
 /// <summary>Optional extension implemented by a provider's testing adapter.</summary>
 public interface IConcurrencyStorageSession
 {
+    /// <summary>
+    /// Executes one provider-native conditional upsert. Providers do not pre-read the
+    /// stored row; createdAt is insert-only and conflict detail is available lazily.
+    /// </summary>
     WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null);
 }
 
@@ -569,16 +573,11 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
                 $"Provider session '{session.GetType().FullName}' does not implement the W2 conditional-upsert adapter.");
         }
 
-        var existing = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = request.Key }));
-        var createdAt = existing?.Values.Values.TryGetValue("createdAt", out var prior) == true &&
-            prior is DateTimeOffset priorTimestamp
-            ? priorTimestamp
-            : request.CreatedAt;
         var values = new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["id"] = request.Key,
             ["value"] = request.Value,
-            ["createdAt"] = createdAt
+            ["createdAt"] = request.CreatedAt
         });
         var options = declaration.Concurrency == ConcurrencyDeclaration.Optimistic
             ? new WriteOptions { ExpectedVersion = request.ExpectedVersion }
@@ -586,7 +585,7 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
         var result = concurrencySession.ConditionalUpsert(values, options);
         if (result.Status == WriteOutcomeStatus.ConcurrencyConflict)
             return new ConcurrencyWriteOutcome(ConcurrencyWriteOutcomeStatus.ConcurrencyConflict,
-                result.Version ?? existing?.Version ?? 0);
+                result.Version ?? 0);
         if (result.Status is not (WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Updated))
         {
             throw new InvalidOperationException(

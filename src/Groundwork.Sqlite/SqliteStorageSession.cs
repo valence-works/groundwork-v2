@@ -51,7 +51,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, Mutation.Upsert, exactOutcome: true);
+        Execute(() => ConditionalUpsertCore(values, options));
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
@@ -128,6 +128,127 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
     });
 
+    private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        ValidateValues(values.Values, requireAllNonNullable: false);
+
+        var key = new StorageKey(LogicalKeyColumns.ToDictionary(
+            column => column,
+            column => values.Values.TryGetValue(column, out var value)
+                ? value
+                : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
+            StringComparer.Ordinal));
+        if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
+
+        var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
+        var insertColumns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+            insertColumns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            insertColumns.Add(ScopeColumnDefinition);
+
+        var updates = supplied
+            .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                             column.Name != SqliteSchemaCoordinator.ScopeColumn &&
+                             column.Name != "createdAt")
+            .Select(column => $"{Quote(column.Name)}=excluded.{Quote(column.Name)}")
+            .ToList();
+        if (VersionColumnDefinition is not null)
+            updates.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(Unit.Name)}.{Quote(VersionColumnDefinition.Name)}+1");
+        if (updates.Count == 0)
+        {
+            var noOpColumn = LogicalKeyColumns[0];
+            updates.Add($"{Quote(noOpColumn)}={Quote(Unit.Name)}.{Quote(noOpColumn)}");
+        }
+        if (ActionColumnDefinition is not null)
+            updates.Add($"{Quote(ActionColumnDefinition.Name)}='U'");
+
+        var parameters = BuildParameters(values.Values, supplied);
+        var (keyPredicate, keyParameters) = KeyPredicate(key.Values);
+        foreach (var pair in keyParameters)
+            parameters[pair.Key] = pair.Value;
+        if (VersionColumnDefinition is not null)
+        {
+            parameters["@__groundwork_version"] = 1L;
+            parameters["@__expected"] = options?.ExpectedVersion;
+        }
+        if (ScopeColumnDefinition is not null)
+            parameters["@__groundwork_scope"] = Access.Scope!.Value;
+
+        var insertValues = string.Join(", ", insertColumns.Select(column =>
+            column.Name == SqliteSchemaCoordinator.VersionColumn ? "@__groundwork_version" :
+            column.Name == SqliteSchemaCoordinator.ScopeColumn ? "@__groundwork_scope" : "@" + column.Name));
+        var insertSource = VersionColumnDefinition is null || options?.ExpectedVersion is null
+            ? $"VALUES ({insertValues})"
+            : $"SELECT {insertValues} WHERE EXISTS (SELECT 1 FROM {Quote(Unit.Name)} WHERE {keyPredicate} AND {Quote(VersionColumnDefinition.Name)}=@__expected)";
+        var conflict = string.Join(", ", Unit.Key.Columns.Select(Quote));
+        var expected = VersionColumnDefinition is null
+            ? string.Empty
+            : $" WHERE @__expected IS NOT NULL AND {Quote(Unit.Name)}.{Quote(VersionColumnDefinition.Name)}=@__expected";
+        var returning = VersionColumnDefinition is null
+            ? Quote(ActionColumnDefinition!.Name)
+            : Quote(VersionColumnDefinition.Name);
+        var sql = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", insertColumns.Select(column => Quote(column.Name)))}) " +
+                  $"{insertSource} ON CONFLICT ({conflict}) DO UPDATE SET {string.Join(", ", updates)}{expected} " +
+                  $"RETURNING {returning};";
+        using var command = Command(sql);
+        AddParameters(command, parameters);
+        options?.Observer?.Observe(new WritePathEvent("sqlite.conditional-upsert", sql, IsProbe: false));
+        try
+        {
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+                return DeferredConflict(key, options?.Observer);
+
+            var inserted = ActionColumnDefinition is not null
+                ? string.Equals(reader.GetString(0), "I", StringComparison.Ordinal)
+                : options?.ExpectedVersion is null;
+            var version = VersionColumnDefinition is null
+                ? (long?)null
+                : Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+            var status = inserted ? WriteOutcomeStatus.Inserted : WriteOutcomeStatus.Updated;
+            return new WriteOutcome(status, version);
+        }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName));
+        }
+    }
+
+    private WriteOutcome DeferredConflict(StorageKey key, IWritePathObserver? observer) =>
+        WriteOutcome.Deferred(
+            WriteOutcomeStatus.ConcurrencyConflict,
+            null,
+            () =>
+            {
+                var existing = ReadCore(key, observer);
+                return existing is null
+                    ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
+                    : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            });
+
+    private string? LogicalIndexName(string? reportedName)
+    {
+        if (string.IsNullOrWhiteSpace(reportedName))
+            return reportedName;
+
+        // SQLite reports the exact table/column tuple rather than the named index.
+        // Compare the complete logical tuple: a prefix match could otherwise report
+        // the wrong declaration when both (a) and (a,b) are unique.
+        var reportedColumns = reportedName.Split(',')
+            .Select(part => part.Trim().Trim('"', '\'', '[', ']', '(', ')', '.'))
+            .Select(part => part[(part.LastIndexOf('.') + 1)..].Trim('"', '\'', '[', ']'))
+            .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal))
+            .ToArray();
+        var matches = Unit.Indexes.Where(index =>
+            index.IsUnique &&
+            index.Columns.Select(column => column.Column).SequenceEqual(reportedColumns, StringComparer.Ordinal))
+            .ToArray();
+        return matches.Length == 1 ? matches[0].Name : reportedName;
+    }
+
     private WriteOutcome Upsert(
         StorageValues values,
         StoredEntry? existing,
@@ -162,12 +283,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version); }
     }
 
-    private StoredEntry? ReadCore(StorageKey key)
+    private StoredEntry? ReadCore(StorageKey key, IWritePathObserver? observer = null)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
+        observer?.Observe(new WritePathEvent("sqlite.write-probe", command.CommandText, IsProbe: true));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -292,10 +414,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     }
 
     private ColumnDefinition Column(string name) => UserColumns.First(column => column.Name == name);
-    private IReadOnlyList<ColumnDefinition> UserColumns => Unit.Columns.Where(column => column.Name is not SqliteSchemaCoordinator.ScopeColumn and not SqliteSchemaCoordinator.VersionColumn).ToArray();
+    private IReadOnlyList<ColumnDefinition> UserColumns => Unit.Columns.Where(column => column.Name is not SqliteSchemaCoordinator.ScopeColumn and not SqliteSchemaCoordinator.VersionColumn and not SqliteSchemaCoordinator.ActionColumn).ToArray();
     private IReadOnlyList<string> LogicalKeyColumns => Unit.Key.Columns.Where(column => column != SqliteSchemaCoordinator.ScopeColumn).ToArray();
     private ColumnDefinition? ScopeColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.ScopeColumn);
     private ColumnDefinition? VersionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.VersionColumn);
+    private ColumnDefinition? ActionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.ActionColumn);
     private static string Quote(string value) => SqliteProviderConnection.QuoteIdentifier(value);
     private static object? ToSqlite(object? value, ColumnDefinition definition) => SqliteProviderConnection.ToSqliteValue(value, definition);
 

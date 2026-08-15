@@ -115,11 +115,26 @@ internal sealed class SqlServerDialect : RelationalDialect
     {
         if (exception is SqlException sql && sql.Number is 2601 or 2627)
         {
-            indexName = sql.Message;
+            indexName = ExtractConstraintName(sql.Message);
             return true;
         }
         indexName = string.Empty;
         return false;
+    }
+
+    private static string ExtractConstraintName(string message)
+    {
+        foreach (var marker in new[] { "index '", "constraint '" })
+        {
+            var start = message.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (start < 0)
+                continue;
+            start += marker.Length;
+            var end = message.IndexOf('\'', start);
+            if (end > start)
+                return message[start..end];
+        }
+        return message;
     }
 
     public override void AcquireApplicationLock(DbConnection connection, string resource)
