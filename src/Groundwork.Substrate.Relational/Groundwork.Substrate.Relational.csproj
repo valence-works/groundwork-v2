@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </ItemGroup>
 
 </Project>

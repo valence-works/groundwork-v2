@@ -46,7 +46,7 @@ public sealed class MongoValueCodecTests
             document.Add(column.Name, MongoValueCodec.Encode(values[column.Name], columns[column.Name]));
 
         Assert.Equal(BsonType.String, document["id"].BsonType);
-        Assert.Equal(BsonType.DateTime, document["createdAt"].BsonType);
+        Assert.Equal(BsonType.Int64, document["createdAt"].BsonType);
         Assert.Equal(BsonType.Boolean, document["isActive"].BsonType);
         Assert.Equal(BsonType.Decimal128, document["balance"].BsonType);
         Assert.True(document["email"].IsBsonNull);

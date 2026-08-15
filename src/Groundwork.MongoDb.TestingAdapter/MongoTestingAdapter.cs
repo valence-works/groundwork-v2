@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
+using Groundwork.Query.Model;
 using Groundwork.Testing;
 
 namespace Groundwork.MongoDb.TestingAdapter;
@@ -67,6 +68,9 @@ internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorage
 
     public StoredEntry? Read(StorageKey key) =>
         ToTesting(inner.Read(new MongoStorageKey(key.Values)));
+
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
+        inner.Query(request, options);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
         ToTesting(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));

@@ -91,6 +91,9 @@
   <Folder Name="/tests/Groundwork.Query.Planning.Tests/">
     <Project Path="tests/Groundwork.Query.Planning.Tests/Groundwork.Query.Planning.Tests.csproj" />
   </Folder>
+  <Folder Name="/tests/Groundwork.Differential.Tests/">
+    <Project Path="tests/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj" />
+  </Folder>
   <Folder Name="/tests/Groundwork.Substrate.Relational.Tests/">
     <Project Path="tests/Groundwork.Substrate.Relational.Tests/Groundwork.Substrate.Relational.Tests.csproj" />
   </Folder>

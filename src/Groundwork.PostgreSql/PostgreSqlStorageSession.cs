@@ -1,8 +1,11 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
+using System.Collections.Immutable;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
+using Groundwork.Substrate.Relational;
 using Groundwork.Testing;
 using Npgsql;
 using NpgsqlTypes;
@@ -34,6 +37,39 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     public StorageUnit Unit { get; }
 
     public StorageAccess Access { get; }
+
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var executionSource = WithScopePredicate(request);
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
+        {
+            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
+        };
+        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
+        var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
+        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
+        {
+            if (name == "__groundwork_total_count") return value;
+            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
+        });
+        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+    });
+
+    private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
+        ? request
+        : QueryRequestExecution.WithProviderPredicate(request, new Predicate.And([
+            request.Where,
+            new Predicate.Equal(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String),
+                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
+            QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
     public StoredEntry? Read(StorageKey key) => Execute(() => ReadCore(key));
 
@@ -70,6 +106,38 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     });
 
     internal void Close() => closed = true;
+
+    private ColumnRef? QueryColumn(string name)
+    {
+        var column = Unit.Columns.Single(item => item.Name == name);
+        return column.Type switch
+        {
+            PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
+            PortableType.Int32 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int32, column.IsNullable),
+            PortableType.Int64 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int64, column.IsNullable),
+            PortableType.Decimal => new ColumnRef(new TableId(Unit.Name), name, QueryType.Decimal, column.IsNullable, null,
+                column.Precision is int precision ? checked((byte)precision) : null,
+                column.Scale is int scale ? checked((byte)scale) : null),
+            PortableType.String => new ColumnRef(new TableId(Unit.Name), name, QueryType.String, column.IsNullable, column.MaxLength),
+            PortableType.DateTimeOffset => new ColumnRef(new TableId(Unit.Name), name, QueryType.DateTimeOffset, column.IsNullable),
+            PortableType.Guid => new ColumnRef(new TableId(Unit.Name), name, QueryType.Guid, column.IsNullable),
+            PortableType.Binary => new ColumnRef(new TableId(Unit.Name), name, QueryType.Binary, column.IsNullable, column.MaxLength),
+            _ => null
+        };
+    }
+
+    private static QueryType? QueryTypeOf(PortableType type) => type switch
+    {
+        PortableType.Boolean => QueryType.Boolean,
+        PortableType.Int32 => QueryType.Int32,
+        PortableType.Int64 => QueryType.Int64,
+        PortableType.Decimal => QueryType.Decimal,
+        PortableType.String => QueryType.String,
+        PortableType.DateTimeOffset => QueryType.DateTimeOffset,
+        PortableType.Guid => QueryType.Guid,
+        PortableType.Binary => QueryType.Binary,
+        _ => null
+    };
 
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {

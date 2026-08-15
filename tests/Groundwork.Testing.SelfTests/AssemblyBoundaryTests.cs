@@ -11,6 +11,6 @@ public sealed class AssemblyBoundaryTests
         var assembly = typeof(IStorageProviderFactory).Assembly;
         Assert.DoesNotContain(assembly.GetReferencedAssemblies(), reference =>
             reference.Name?.StartsWith("Groundwork.", StringComparison.Ordinal) == true &&
-            reference.Name != "Groundwork.Kernel");
+            reference.Name is not ("Groundwork.Kernel" or "Groundwork.Query.Model"));
     }
 }

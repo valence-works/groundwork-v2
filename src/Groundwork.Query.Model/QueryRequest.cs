@@ -72,6 +72,10 @@ public sealed record Paging
     public static Paging None { get; } = new(null, null, null);
 
     public static Paging OffsetLimit(int offset, int limit) => new(offset, limit, null);
+
+    /// <summary>Starts a keyset page without an offset; a continuation can be supplied for later pages.</summary>
+    public static Paging Keyset(int limit) => new(null, limit, null);
+
     public static Paging Continuation(string token, int? limit = null)
     {
         if (string.IsNullOrWhiteSpace(token))
@@ -149,7 +153,7 @@ public sealed record QueryRequest
         AcceptedScan = acceptedScan;
         CanonicalPredicate = PredicateCanonicalizer.ToCanonicalString(Where);
         ShapeFingerprint = QueryFingerprint.Create(this, includeResultShape: true);
-        ContinuationFingerprint = QueryFingerprint.Create(this, includeResultShape: false);
+        ContinuationFingerprint = QueryFingerprint.Create(this, includeResultShape: false, includePaging: false);
     }
 
     public TableId Table { get; }
@@ -160,9 +164,11 @@ public sealed record QueryRequest
     public ResultShape Result { get; }
     public LatestPerKey? LatestPerKey { get; }
     public ScanAcceptance? AcceptedScan { get; }
-    public string CanonicalPredicate { get; }
+    public string CanonicalPredicate { get; internal init; }
     public string ShapeFingerprint { get; }
-    public string ContinuationFingerprint { get; }
+    public string ContinuationFingerprint { get; internal init; }
+
+    internal string? ContinuationBindingDiscriminator { get; init; }
 }
 
 public sealed record QueryResult<T>
@@ -179,7 +185,7 @@ public sealed record QueryResult<T>
 
 public static class QueryFingerprint
 {
-    public static string Create(QueryRequest request, bool includeResultShape = true)
+    public static string Create(QueryRequest request, bool includeResultShape = true, bool includePaging = true)
     {
         if (request is null)
             throw new ArgumentNullException(nameof(request));
@@ -190,7 +196,8 @@ public static class QueryFingerprint
         foreach (var term in request.Order)
             builder.Append(PredicateCanonicalizer.Column(term.Column)).Append(':').Append(term.Direction).Append(':').Append(term.NullOrder).Append(';');
         builder.Append("|projection=").Append(request.Projection.AllColumns ? "all" : string.Join(";", request.Projection.Columns.Select(PredicateCanonicalizer.Column)));
-        builder.Append("|paging=").Append(request.Paging.Offset?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.Limit?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.ContinuationToken is null ? "token" : "continuation");
+        if (includePaging)
+            builder.Append("|paging=").Append(request.Paging.Offset?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.Limit?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.ContinuationToken is null ? "token" : "continuation");
         builder.Append("|latest=").Append(request.LatestPerKey is null ? "none" : PredicateCanonicalizer.Column(request.LatestPerKey.Key) + ":" + PredicateCanonicalizer.Column(request.LatestPerKey.Timestamp));
         builder.Append("|scan=").Append(request.AcceptedScan?.Allowed == true ? "allow" : "refuse");
         if (includeResultShape)
@@ -199,7 +206,7 @@ public static class QueryFingerprint
     }
 
     public static string CreateShapeFingerprint(QueryRequest request) => Create(request, includeResultShape: true);
-    public static string CreateContinuationFingerprint(QueryRequest request) => Create(request, includeResultShape: false);
+    public static string CreateContinuationFingerprint(QueryRequest request) => Create(request, includeResultShape: false, includePaging: false);
 
     private static string Sha256(string value)
     {
