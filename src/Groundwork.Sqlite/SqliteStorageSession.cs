@@ -58,10 +58,28 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
         });
+        AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
     });
+
+    private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
+    {
+        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        var logicalIndex = query.SelectedIndex!;
+        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
+        using var explain = Command("EXPLAIN QUERY PLAN " + query.CommandText.TrimEnd().TrimEnd(';'));
+        RelationalQueryResultReader.AddParameters(explain, query);
+        using var reader = explain.ExecuteReader();
+        var details = new List<string>();
+        while (reader.Read())
+            details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => Convert.ToString(reader.GetValue(index), CultureInfo.InvariantCulture))));
+        var rawPlan = string.Join(Environment.NewLine, details);
+        ExplainAssertTestMode.AssertChosenIndex(
+            "SQLite", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
+            SqliteExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+    }
 
     private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
         ? request

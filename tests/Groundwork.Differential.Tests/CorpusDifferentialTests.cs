@@ -3,6 +3,7 @@ using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
 using Groundwork.Query.Model.Tests;
+using Groundwork.Query.Planning;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
@@ -18,6 +19,123 @@ public sealed class CorpusDifferentialTests
     private static readonly string SemanticEdgeTableName = "g2-semantic-edge-" + Guid.NewGuid().ToString("N");
     private static readonly string LatestTableName = "g2-latest-" + Guid.NewGuid().ToString("N");
     private static readonly string ScopedTableName = "g2-scoped-" + Guid.NewGuid().ToString("N");
+    private static readonly string ExplainTableName = "g2-explain-" + Guid.NewGuid().ToString("N");
+
+    [Fact]
+    public void Differential_corpus_marks_only_coverage_proven_queries_for_explain_assertion()
+    {
+        var table = new TableId(RunTableName);
+        var number = new ColumnRef(table, "numberValue", QueryType.Decimal, true, decimalPrecision: 18, decimalScale: 4);
+        var text = new ColumnRef(table, "textSearch", QueryType.String, true, maxLength: 320);
+        var covered = new QueryRequest(table, new Predicate.Equal(number, QueryConstant.Of(number, 10m)), [], Projection.All, Paging.None);
+        var uncovered = new QueryRequest(table, new Predicate.Equal(text, QueryConstant.Of(text, "x")), [], Projection.All, Paging.None);
+        var orderOnly = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(number, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.Keyset(5));
+
+        Assert.Equal("ix_number", Options(covered).FindPinnedIndex()?.Name);
+        Assert.Null(Options(uncovered).FindPinnedIndex());
+        Assert.Null(Options(orderOnly).FindPinnedIndex());
+    }
+
+    [Fact]
+    public void Explain_assert_flag_executes_a_native_plan_check_and_retains_the_sqlite_plan()
+    {
+        using var environment = new ExplainEnvironment("positive");
+        using var sqlite = OpenSqlite();
+        var table = new TableId(RunTableName);
+        var number = new ColumnRef(table, "numberValue", QueryType.Decimal, isNullable: true, decimalPrecision: 18, decimalScale: 4);
+        var request = new QueryRequest(
+            table,
+            new Predicate.Equal(number, QueryConstant.Of(number, 10m)),
+            [],
+            Projection.ColumnsOnly(number),
+            Paging.None);
+
+        var result = sqlite.Query(request, Options(request));
+
+        Assert.Equal("ix_number", result.SelectedIndex);
+        var artifact = Assert.Single(Directory.GetFiles(environment.ArtifactDirectory, "*.txt"));
+        Assert.Contains(
+            "INDEX " + SqliteDialect.PhysicalIndexName(RunTableName, "ix_number"),
+            File.ReadAllText(artifact),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Explain_assert_runtime_rejects_a_misdeclared_index_and_retains_the_plan()
+    {
+        using var environment = new ExplainEnvironment("negative");
+        using var sqlite = OpenSqlite();
+        var table = new TableId(RunTableName);
+        var number = new ColumnRef(table, "numberValue", QueryType.Decimal, true, decimalPrecision: 18, decimalScale: 4);
+        var request = new QueryRequest(
+            table,
+            new Predicate.Equal(number, QueryConstant.Of(number, 10m)),
+            [],
+            Projection.ColumnsOnly(number),
+            Paging.None);
+        var wrongOptions = new QueryRenderOptions(
+            [new QueryIndexDeclaration("ix_misdeclared", [new QueryIndexColumn("numberValue", true, QueryType.Decimal)], QueryIndexPinning.Pinned)],
+            selectedIndex: "ix_misdeclared");
+
+        var exception = Assert.Throws<ExplainAssertionException>(() => sqlite.Query(request, wrongOptions));
+
+        Assert.Equal("ix_misdeclared", Path.GetFileNameWithoutExtension(exception.ArtifactPath).Split('-').Last());
+        Assert.NotEmpty(File.ReadAllText(exception.ArtifactPath));
+    }
+
+    [SkippableFact]
+    public void Explain_assert_uses_a_selective_compound_index_after_postgresql_statistics_are_current()
+    {
+        Skip.If(!ExplainAssertTestMode.Enabled, "Set GW_EXPLAIN_ASSERT=1 to run native plan proof.");
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
+        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var rows = Enumerable.Range(1, 2_000)
+            .Select(value => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+            {
+                ["id"] = (long)value,
+                ["numberValue"] = (decimal)value
+            })
+            .ToArray();
+        using var sqlite = OpenSqlite(ExplainUnit, rows);
+        using var pg = OpenPostgreSql(postgres, ExplainUnit, rows);
+        using var sql = OpenSqlServer(sqlServer, ExplainUnit, rows);
+        using var mongoSession = OpenMongo(mongo, ExplainUnit, rows);
+        using (var analyzeConnection = new Npgsql.NpgsqlConnection(postgres))
+        {
+            analyzeConnection.Open();
+            using var analyze = analyzeConnection.CreateCommand();
+            analyze.CommandText = "ANALYZE \"" + ExplainTableName.Replace("\"", "\"\"", StringComparison.Ordinal) + "\";";
+            analyze.ExecuteNonQuery();
+        }
+        var table = new TableId(ExplainTableName);
+        var number = new ColumnRef(table, "numberValue", QueryType.Decimal, false, decimalPrecision: 18, decimalScale: 4);
+        var id = new ColumnRef(table, "id", QueryType.Int64, false);
+        var request = new QueryRequest(
+            table,
+            new Predicate.Equal(number, QueryConstant.Of(number, 1_999m)),
+            [],
+            Projection.ColumnsOnly(id, number),
+            Paging.None);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration("ix_number_id", [
+                new QueryIndexColumn("numberValue", false, QueryType.Decimal),
+                new QueryIndexColumn("id", false, QueryType.Int64)
+            ], QueryIndexPinning.Pinned)],
+            selectedIndex: "ix_number_id",
+            tieBreakColumns: [id]);
+
+        foreach (var provider in new[] { sqlite, pg, sql, mongoSession })
+        {
+            var result = provider.Query(request, options);
+            Assert.Equal(1_999L, Assert.Single(result.Rows)["id"]);
+        }
+    }
 
     [SkippableFact]
     public void Scoped_queries_isolate_rows_counts_and_continuation_tokens_on_all_four_providers()
@@ -86,7 +204,6 @@ public sealed class CorpusDifferentialTests
         using var sql = OpenSqlServer(sqlServer);
         using var mongoSession = OpenMongo(mongo);
         var providers = new[] { sqlite, pg, sql, mongoSession };
-        var options = Options();
 
         Assert.Equal(G2Q1Corpus.ExpectedShapeCount, G2Q1Corpus.Shapes.Count);
         Assert.Equal(243, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
@@ -102,6 +219,7 @@ public sealed class CorpusDifferentialTests
 
             var exercise = shape.Exercise();
             var request = Retarget(exercise.Request);
+            var options = Options(request);
             var expectedValidation = PortableQuerySemantics.Validate(request);
             var observations = providers.Select(provider => Observe(provider, request, options)).ToArray();
             if (shape.Decision == Q1CorpusDecision.Normalize)
@@ -140,13 +258,13 @@ public sealed class CorpusDifferentialTests
         var table = new TableId(RunTableName);
         var amount = new ColumnRef(table, "numberValue", QueryType.Decimal, isNullable: true, decimalPrecision: 18, decimalScale: 4);
         var id = new ColumnRef(table, "id", QueryType.Int64, isNullable: false);
-        var options = Options();
         var firstRequest = new QueryRequest(
             table,
             Predicate.AlwaysTrue.Instance,
             [new OrderTerm(amount, OrderDirection.Ascending, NullOrder.First)],
             Projection.ColumnsOnly(amount),
             Paging.Keyset(5));
+        var options = Options(firstRequest);
 
         var firstPages = providers.Select(provider => provider.Query(firstRequest, options)).ToArray();
         Assert.All(firstPages, page => Assert.NotNull(page.NextContinuationToken));
@@ -188,7 +306,7 @@ public sealed class CorpusDifferentialTests
 
         foreach (var provider in providers)
         {
-            var result = provider.Query(request, Options());
+            var result = provider.Query(request, Options(request));
             Assert.Equal(40, result.TotalCount);
             Assert.Equal(40, result.Rows.Count);
             Assert.All(result.Rows, row =>
@@ -197,47 +315,57 @@ public sealed class CorpusDifferentialTests
                 Assert.DoesNotContain(row.Keys, key => key.StartsWith("_groundwork_", StringComparison.Ordinal));
             });
 
-            var allColumns = provider.Query(new QueryRequest(
+            var allRequest = new QueryRequest(
                 table,
                 request.Where,
                 request.Order,
                 Projection.All,
                 Paging.None,
-                ResultShape.TotalCount.Instance), Options());
+                ResultShape.TotalCount.Instance);
+            var allColumns = provider.Query(allRequest, Options(allRequest));
             Assert.Equal(40, allColumns.TotalCount);
             Assert.All(allColumns.Rows, row => Assert.DoesNotContain(
                 row.Keys, key => key.StartsWith("_groundwork_", StringComparison.Ordinal)));
 
-            var beyondEnd = provider.Query(new QueryRequest(
+            var beyondEndRequest = new QueryRequest(
                 table,
                 request.Where,
                 request.Order,
                 request.Projection,
                 Paging.OffsetLimit(100, 5),
-                ResultShape.TotalCount.Instance), Options());
+                ResultShape.TotalCount.Instance);
+            var beyondEnd = provider.Query(beyondEndRequest, Options(beyondEndRequest));
             Assert.Empty(beyondEnd.Rows);
             Assert.True(beyondEnd.TotalCount == 40, $"{provider.Name} reported {beyondEnd.TotalCount} for an empty counted page.");
 
-            var firstCountedPage = provider.Query(new QueryRequest(
+            var firstCountedRequest = new QueryRequest(
                 table,
                 request.Where,
                 request.Order,
                 request.Projection,
                 Paging.Keyset(5),
-                ResultShape.TotalCount.Instance), Options());
+                ResultShape.TotalCount.Instance);
+            var firstCountedPage = provider.Query(firstCountedRequest, Options(firstCountedRequest));
             Assert.Equal(40, firstCountedPage.TotalCount);
             Assert.NotNull(firstCountedPage.NextContinuationToken);
-            var laterCountedPage = provider.Query(new QueryRequest(
+            var laterCountedRequest = new QueryRequest(
                 table,
                 request.Where,
                 request.Order,
                 request.Projection,
                 Paging.Continuation(firstCountedPage.NextContinuationToken!, 5),
-                ResultShape.TotalCount.Instance), Options());
+                ResultShape.TotalCount.Instance);
+            var laterCountedPage = provider.Query(laterCountedRequest, Options(laterCountedRequest));
             Assert.Equal(40, laterCountedPage.TotalCount);
         }
 
-        var hinted = sql.Query(request, Options());
+        var hintedRequest = new QueryRequest(
+            table,
+            new Predicate.Equal(amount, QueryConstant.Of(amount, 10m)),
+            [],
+            Projection.ColumnsOnly(id, amount),
+            Paging.None);
+        var hinted = sql.Query(hintedRequest, Options(hintedRequest));
         Assert.True(hinted.IndexHintApplied);
         Assert.Equal("ix_number", hinted.SelectedIndex);
     }
@@ -493,10 +621,45 @@ public sealed class CorpusDifferentialTests
         }
     }
 
-    private static QueryRenderOptions Options() => new(
-        indexes: [new QueryIndexDeclaration("ix_number", [new QueryIndexColumn("numberValue", true, QueryType.Decimal)], QueryIndexPinning.Pinned)],
-        selectedIndex: "ix_number",
-        tieBreakColumns: [new ColumnRef(new TableId(RunTableName), "id", QueryType.Int64, isNullable: false)]);
+    private static QueryRenderOptions Options(QueryRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var coverageIndex = new CoverageIndex(
+            "ix_number",
+            [
+                new CoverageIndexColumn("numberValue", OrderDirection.Ascending, isNullable: true),
+                new CoverageIndexColumn("id", OrderDirection.Ascending, isNullable: false)
+            ]);
+        var id = new ColumnRef(new TableId(RunTableName), "id", QueryType.Int64, isNullable: false);
+        var tieBreakOptions = new QueryRenderOptions(tieBreakColumns: [id]);
+        var effectiveRequest = new QueryRequest(
+            request.Table,
+            request.Where,
+            tieBreakOptions.GetEffectiveOrder(request),
+            request.Projection,
+            request.Paging,
+            request.Result,
+            request.LatestPerKey,
+            request.AcceptedScan);
+        var selected = request.Where is not Predicate.AlwaysTrue &&
+                       PortableQuerySemantics.Validate(effectiveRequest).IsPortable &&
+                       QueryCoverageChecker.Check(effectiveRequest, [coverageIndex]).Index is not null
+            ? "ix_number"
+            : null;
+        return new QueryRenderOptions(
+            indexes:
+            [
+                new QueryIndexDeclaration(
+                    "ix_number",
+                    [
+                        new QueryIndexColumn("numberValue", true, QueryType.Decimal),
+                        new QueryIndexColumn("id", false, QueryType.Int64)
+                    ],
+                    selected is null ? QueryIndexPinning.ProviderDefault : QueryIndexPinning.Pinned)
+            ],
+            selectedIndex: selected,
+            tieBreakColumns: [id]);
+    }
 
     private static StorageUnit Unit => new()
     {
@@ -514,7 +677,7 @@ public sealed class CorpusDifferentialTests
             new() { Name = "binaryValue", Type = PortableType.Binary, IsNullable = true, MaxLength = 64 }
         ],
         Key = new KeyDefinition { Columns = ["id"] },
-        Indexes = [new IndexDefinition { Name = "ix_number", Columns = [new IndexColumn("numberValue")] }]
+        Indexes = [new IndexDefinition { Name = "ix_number", Columns = [new IndexColumn("numberValue"), new IndexColumn("id")] }]
     };
 
     private static StorageUnit SparseUnit => new()
@@ -536,6 +699,19 @@ public sealed class CorpusDifferentialTests
                 MissingValues = MissingValueBehavior.Excluded
             }
         ]
+    };
+
+    private static StorageUnit ExplainUnit => new()
+    {
+        Id = new StorageUnitId(ExplainTableName),
+        Name = ExplainTableName,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "numberValue", Type = PortableType.Decimal, IsNullable = false, Precision = 18, Scale = 4 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "ix_number_id", Columns = [new IndexColumn("numberValue"), new IndexColumn("id")] }]
     };
 
     private static StorageUnit SemanticEdgeUnit => new()
@@ -804,6 +980,28 @@ public sealed class CorpusDifferentialTests
     }
 
     private sealed record Observation(string Provider, bool IsSuccess, string? Result, string? Error);
+
+    private sealed class ExplainEnvironment : IDisposable
+    {
+        private readonly string? previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
+        private readonly string? previousDirectory = Environment.GetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR");
+
+        internal ExplainEnvironment(string label)
+        {
+            ArtifactDirectory = Path.Combine(Path.GetTempPath(), "groundwork-q11-" + label + "-" + Guid.NewGuid().ToString("N"));
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", "1");
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", ArtifactDirectory);
+        }
+
+        internal string ArtifactDirectory { get; }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", previousFlag);
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", previousDirectory);
+            if (Directory.Exists(ArtifactDirectory)) Directory.Delete(ArtifactDirectory, recursive: true);
+        }
+    }
 
     private class CorpusSession(string name, Func<QueryRequest, QueryRenderOptions?, QueryMaterializedResult> query, Action dispose) : IDisposable
     {
