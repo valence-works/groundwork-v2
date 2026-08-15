@@ -104,6 +104,10 @@ internal sealed class InMemoryDatabase
     internal readonly object Gate = new();
     internal readonly Dictionary<StorageUnitId, InMemoryUnitState> Units = [];
 
+    // This is the reference provider's durable kernel-owned ledger. It lives beside, rather than
+    // inside, a storage unit so the key is always (unit, scope, nonce), including for global units.
+    internal readonly Dictionary<IdempotencyLedgerKey, DateTimeOffset> IdempotencyLedger = [];
+
     internal InMemoryUnitState GetState(StorageUnit requested, StorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(requested);
@@ -218,6 +222,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        desired.AppendIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
@@ -232,6 +237,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        desired.AppendIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
@@ -309,6 +315,9 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         if (current is not null && current.SchemaVersion != desired.SchemaVersion)
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change schema version non-additively.");
+        if (current is not null && !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change append idempotency window or ledger non-additively.");
 
         if (current is null)
         {
@@ -435,6 +444,12 @@ internal static class SchemaIdentity
     internal static bool KeyEquals(KeyDefinition left, KeyDefinition right) =>
         left.Columns.SequenceEqual(right.Columns, StringComparer.Ordinal);
 
+    internal static bool IdempotencyEquals(
+        AppendIdempotencyDeclaration? left,
+        AppendIdempotencyDeclaration? right) =>
+        left?.Window == right?.Window &&
+        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
+
     internal static bool AggregationProfileEquals(AggregationProfile left, AggregationProfile right) =>
         string.Equals(AggregationProfile(left), AggregationProfile(right), StringComparison.Ordinal);
 
@@ -507,8 +522,10 @@ internal static class StorageDeclaration
 internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStorageSession
 {
     private readonly InMemoryDatabase database;
-    private readonly InMemoryUnitState state;
+    private InMemoryUnitState state;
     private readonly bool liveState;
+    private readonly Dictionary<IdempotencyLedgerKey, DateTimeOffset>? stagedLedger;
+    private readonly Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits;
     private readonly string partition;
     private bool disposed;
 
@@ -516,11 +533,15 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         InMemoryDatabase database,
         InMemoryUnitState state,
         StorageAccess access,
-        bool liveState = false)
+        bool liveState = false,
+        Dictionary<IdempotencyLedgerKey, DateTimeOffset>? stagedLedger = null,
+        Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits = null)
     {
         this.database = database;
         this.state = state;
         this.liveState = liveState;
+        this.stagedLedger = stagedLedger;
+        this.stagedUnits = stagedUnits;
         Access = access;
         Unit = StorageDeclaration.Clone(state.Unit);
         partition = access.Scope?.Value ?? "<global>";
@@ -820,6 +841,60 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         }
     }
 
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        lock (database.Gate)
+        {
+            ThrowIfDisposed();
+            var now = DateTimeOffset.UtcNow;
+            var ledger = liveState
+                ? database.IdempotencyLedger
+                : stagedLedger ?? throw new InvalidOperationException("The staged append ledger is unavailable.");
+            ReclaimLedger(ledger, Unit.Id, now, declaration.Window);
+            var ledgerKey = new IdempotencyLedgerKey(Unit.Id, partition, operationId.Nonce);
+            if (ledger.TryGetValue(ledgerKey, out var committedAt))
+            {
+                if (IdempotencyRules.IsWithinWindow(committedAt, now, declaration.Window))
+                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
+                ledger.Remove(ledgerKey);
+            }
+
+            var candidate = CurrentState().Clone();
+            foreach (var value in values)
+            {
+                WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+                var outcome = Mutation.Apply(candidate, partition, value, WriteOptions.Unconditional, MutationKind.Insert);
+                if (!outcome.Succeeded)
+                    throw new InvalidOperationException($"Append row failed with outcome '{outcome.Status}'.");
+            }
+
+            state = candidate;
+            if (liveState)
+                database.Units[Unit.Id] = candidate;
+            else
+                stagedUnits![Unit.Id] = candidate;
+            ledger[ledgerKey] = now;
+            return new WriteOutcome(WriteOutcomeStatus.Inserted);
+        }
+    }
+
+    private static void ReclaimLedger(
+        Dictionary<IdempotencyLedgerKey, DateTimeOffset> ledger,
+        StorageUnitId unit,
+        DateTimeOffset providerNow,
+        TimeSpan window)
+    {
+        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, window);
+        foreach (var key in ledger
+                     .Where(pair => pair.Key.Unit == unit && pair.Value <= cutoff)
+                     .Take(128)
+                     .Select(pair => pair.Key)
+                     .ToArray())
+            ledger.Remove(key);
+    }
+
     internal void Close() => disposed = true;
 
     private WriteOutcome Mutate(
@@ -848,12 +923,15 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     }
 }
 
+internal readonly record struct IdempotencyLedgerKey(StorageUnitId Unit, string Scope, string Nonce);
+
 internal sealed class InMemoryUnitOfWork : IUnitOfWork
 {
     private readonly InMemoryDatabase database;
     private readonly StorageAccess access;
     private readonly Dictionary<StorageUnitId, InMemoryUnitState> staged;
     private readonly Dictionary<StorageUnitId, long> baseRevisions;
+    private readonly Dictionary<IdempotencyLedgerKey, DateTimeOffset> stagedLedger;
     private readonly List<InMemoryStorageSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;
@@ -871,6 +949,7 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         {
             baseRevisions = states.ToDictionary(state => state.Unit.Id, state => state.Revision);
             staged = states.ToDictionary(state => state.Unit.Id, state => state.Clone());
+            stagedLedger = database.IdempotencyLedger.ToDictionary(pair => pair.Key, pair => pair.Value);
         }
     }
 
@@ -882,7 +961,7 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
             throw new InvalidOperationException(
                 $"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
 
-        var session = new InMemoryStorageSession(database, state, access);
+        var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged);
         sessions.Add(session);
         var batched = new BatchStorageSession(session, batch);
         batch.Register(batched);
@@ -930,6 +1009,13 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
             foreach (var pair in staged)
                 database.Units[pair.Key] = pair.Value;
+            var stagedUnits = this.staged.Keys.ToHashSet();
+            foreach (var key in database.IdempotencyLedger.Keys
+                         .Where(key => stagedUnits.Contains(key.Unit))
+                         .ToArray())
+                database.IdempotencyLedger.Remove(key);
+            foreach (var pair in stagedLedger.Where(pair => stagedUnits.Contains(pair.Key.Unit)))
+                database.IdempotencyLedger[pair.Key] = pair.Value;
         }
 
         terminal = true;

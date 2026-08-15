@@ -140,6 +140,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
             Indexes = indexes,
             AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
             Scope = source.Scope,
+            AppendIdempotency = source.AppendIdempotency,
             Concurrency = source.Concurrency,
             Timestamps = source.Timestamps,
             SchemaVersion = source.SchemaVersion

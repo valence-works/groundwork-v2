@@ -118,6 +118,7 @@ public enum MongoWriteOutcomeStatus
     Updated,
     Upserted,
     Deleted,
+    Replayed,
     NotFound,
     UniqueViolation,
     ConcurrencyConflict
@@ -316,6 +317,11 @@ public interface IMongoStorageSession
     MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
     MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null);
+
+    MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values);
+
+    MongoWriteOutcome Append(OperationId operationId, params MongoStorageValues[] values) =>
+        Append(operationId, (IReadOnlyList<MongoStorageValues>)values);
 }
 
 public interface IMongoUnitOfWork : IDisposable
@@ -325,6 +331,14 @@ public interface IMongoUnitOfWork : IDisposable
     void Commit();
 
     void Rollback();
+}
+
+/// <summary>Exposes terminal-state evidence to adapters that stage work above the native UOW.</summary>
+public interface IMongoUnitOfWorkState
+{
+    bool IsActive { get; }
+
+    void EnsureActive();
 }
 
 public interface IMongoProviderConnection : IDisposable
@@ -356,6 +370,17 @@ public interface IMongoProviderFactory
 public sealed class MongoSchemaConflictException : InvalidOperationException
 {
     public MongoSchemaConflictException(string message) : base(message)
+    {
+    }
+}
+
+/// <summary>
+/// Indicates that a concurrent idempotency nonce conflict aborted the whole explicit unit of
+/// work. The caller must retry the complete unit of work; no partial work can be committed.
+/// </summary>
+public sealed class MongoUnitOfWorkConflictException : InvalidOperationException
+{
+    public MongoUnitOfWorkConflictException(string message) : base(message)
     {
     }
 }

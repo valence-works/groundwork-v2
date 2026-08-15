@@ -20,6 +20,8 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId NativeBatch { get; } = new("groundwork.storage.batched-native");
 
+    public static CapabilityId AppendIdempotency { get; } = new("groundwork.storage.append-idempotency");
+
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
@@ -35,8 +37,13 @@ public static class BatchWriteCapabilities
         "Native batched writes",
         "Executes grouped writes through the provider's native multi-row command or bulk-write primitive.");
 
+    public static CapabilityDescriptor AppendIdempotencyDescriptor { get; } = new(
+        AppendIdempotency,
+        "Idempotent append",
+        "Records caller-supplied append operation nonces in a kernel-owned durable ledger and commits the ledger entry with the payload atomically.");
+
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -56,6 +63,10 @@ public static class BatchWriteCapabilities
             PerRowOutcomesDescriptor with
             {
                 Description = $"Returns one outcome per staged row for {provider}; exact evidence cost: {exactOutcomeCost}."
+            },
+            AppendIdempotencyDescriptor with
+            {
+                Description = $"Provides durable idempotent appends on {provider}; ledger and payload are committed atomically."
             },
             ..(nativeBatch ? [NativeBatchDescriptor] : Array.Empty<CapabilityDescriptor>())
         ]);
@@ -221,6 +232,17 @@ public sealed class RowWrite
             var value = Canonical(keyValues[column]);
             return $"{value.Length}:{value}";
         }));
+
+    internal static string IdentityForAvailableKeys(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> values) => string.Concat(
+        unit.Key.Columns
+            .Where(values.ContainsKey)
+            .Select(column =>
+            {
+                var value = Canonical(values[column]);
+                return $"{column.Length}:{column}{value.Length}:{value}";
+            }));
 
     internal bool Matches(StorageKey key)
     {
@@ -631,6 +653,9 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
+
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) =>
+        inner.Append(operationId, values);
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
         inner is IConcurrencyStorageSession concurrency

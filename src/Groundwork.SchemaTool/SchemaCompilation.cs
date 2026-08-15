@@ -9,7 +9,9 @@ public static class SchemaCompilation
     public static IReadOnlyList<StorageUnit> Compile(SchemaDocument schema)
     {
         ArgumentNullException.ThrowIfNull(schema);
-        return schema.Tables.Select(Compile).ToArray();
+        var units = schema.Tables.Select(Compile).ToArray();
+        SchemaSubject.ValidateManifest(units);
+        return units;
     }
 
     public static StorageUnit Compile(SchemaTable table)
