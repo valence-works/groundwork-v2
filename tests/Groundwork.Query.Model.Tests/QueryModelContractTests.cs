@@ -181,24 +181,27 @@ public sealed class QueryModelContractTests
         Assert.True(shapes.Count == shapes.Select(shape => shape.CanonicalInput).Distinct(StringComparer.Ordinal).Count(), string.Join("; ", duplicateKeys));
         Assert.Equal(243, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
         Assert.Equal(57, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
+        Assert.Equal(9, shapes.Count(shape => shape.PublicConstructionRejects));
 
         foreach (var shape in shapes)
         {
-            if (shape.Decision == Q1CorpusDecision.Refuse)
+            if (shape.PublicConstructionRejects)
             {
-                Assert.NotEmpty(shape.DecisionId);
-                var refusal = Assert.Throws<Q1CorpusRefusalException>(() => shape.Exercise());
-                Assert.Equal(shape.DecisionId, refusal.DecisionId);
+                Assert.ThrowsAny<ArgumentException>(() => shape.Exercise());
                 continue;
             }
 
             var first = shape.Exercise();
             var second = shape.Exercise();
 
-            Assert.NotEmpty(first.CanonicalPredicate);
-            Assert.NotEmpty(first.ShapeFingerprint);
-            Assert.Equal(first.CanonicalPredicate, second.CanonicalPredicate);
-            Assert.Equal(first.ShapeFingerprint, second.ShapeFingerprint);
+            Assert.NotEmpty(first.Request.CanonicalPredicate);
+            Assert.NotEmpty(first.Request.ShapeFingerprint);
+            Assert.Equal(first.Request.CanonicalPredicate, second.Request.CanonicalPredicate);
+            Assert.Equal(first.Request.ShapeFingerprint, second.Request.ShapeFingerprint);
+            if (shape.Decision == Q1CorpusDecision.Refuse)
+                Assert.Equal(shape.DecisionId, first.PlanningDecisionId);
+            else
+                Assert.Null(first.PlanningDecisionId);
         }
     }
 

@@ -24,16 +24,7 @@ internal enum Q1CorpusOperation
     LessThanOrEqual
 }
 
-internal sealed class Q1CorpusRefusalException : InvalidOperationException
-{
-    public Q1CorpusRefusalException(string decisionId)
-        : base("Q1 corpus refusal: " + decisionId)
-    {
-        DecisionId = decisionId;
-    }
-
-    public string DecisionId { get; }
-}
+internal sealed record Q1CorpusExercise(QueryRequest Request, string? PlanningDecisionId);
 
 internal sealed record Q1CorpusShape(
     int Number,
@@ -42,7 +33,8 @@ internal sealed record Q1CorpusShape(
     Q1CorpusDecision Decision,
     string DecisionId,
     string Description,
-    Func<QueryRequest> Exercise);
+    bool PublicConstructionRejects,
+    Func<Q1CorpusExercise> Exercise);
 
 /// <summary>
 /// Provider-free projection of the pinned G2 issue #230 shape vocabulary.
@@ -118,6 +110,15 @@ internal static class G2Q1Corpus
             var suffix = direction == OrderDirection.Ascending ? "asc" : "desc";
             var capturedDirection = direction;
             var capturedPage = page;
+            Func<Q1CorpusExercise> exercise = refused
+                ? () => new Q1CorpusExercise(Request(
+                    Predicate.AlwaysTrue.Instance,
+                    ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
+                    Paging.OffsetLimit(capturedPage * 2, 2)), "binary-order-refused")
+                : () => new Q1CorpusExercise(Request(
+                    Predicate.AlwaysTrue.Instance,
+                    ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
+                    Paging.OffsetLimit(capturedPage * 2, 2)), null);
             shapes.Add(new Q1CorpusShape(
                 number++,
                 "q-order-" + identity + "-" + suffix,
@@ -125,12 +126,8 @@ internal static class G2Q1Corpus
                 refused ? Q1CorpusDecision.Refuse : Q1CorpusDecision.Normalize,
                 refused ? "binary-order-refused" : "normalized-ordering",
                 identity + " " + direction + " page " + page,
-                refused
-                    ? Refuse("binary-order-refused")
-                    : () => Request(
-                        Predicate.AlwaysTrue.Instance,
-                        ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
-                        Paging.OffsetLimit(capturedPage * 2, 2))));
+                false,
+                exercise));
         }
 
         var textValues = new object?[] { string.Empty, " ", "  \t", "I", "i", "İ" };
@@ -154,7 +151,8 @@ internal static class G2Q1Corpus
                 Q1CorpusDecision.Normalize,
                 disjunction ? "compound-disjunction" : "compound-conjunction",
                 disjunction ? "text OR number" : "text AND number",
-                () => Request(capturedPredicate, ImmutableArray<OrderTerm>.Empty, Paging.None)));
+                PublicConstructionRejects: false,
+                () => new Q1CorpusExercise(Request(capturedPredicate, ImmutableArray<OrderTerm>.Empty, Paging.None), null)));
         }
 
         if (shapes.Count != ExpectedShapeCount)
@@ -186,7 +184,10 @@ internal static class G2Q1Corpus
                     refused ? Q1CorpusDecision.Refuse : Q1CorpusDecision.Normalize,
                     refused ? RefusalId(column, operation, value) : decisionId,
                     identity + " " + operation + " " + Describe(value),
-                    refused ? Refuse(RefusalId(column, operation, value)) : () => Request(BuildPredicate(column, capturedOperation, capturedValue), ImmutableArray<OrderTerm>.Empty, Paging.None)));
+                    PublicConstructionRejects: refused && PublicConstructionRejects(column, operation, value),
+                    refused
+                        ? () => new Q1CorpusExercise(Request(BuildPredicate(column, capturedOperation, capturedValue), ImmutableArray<OrderTerm>.Empty, Paging.None), RefusalId(column, operation, value))
+                        : () => new Q1CorpusExercise(Request(BuildPredicate(column, capturedOperation, capturedValue), ImmutableArray<OrderTerm>.Empty, Paging.None), null)));
             }
 
             if (operation == Q1CorpusOperation.In)
@@ -198,7 +199,8 @@ internal static class G2Q1Corpus
                     Q1CorpusDecision.Normalize,
                     decisionId,
                     identity + " In [] (empty membership is false)",
-                    () => Request(new Predicate.In(column, ImmutableArray<QueryConstant>.Empty), ImmutableArray<OrderTerm>.Empty, Paging.None)));
+                    PublicConstructionRejects: false,
+                    () => new Q1CorpusExercise(Request(new Predicate.In(column, ImmutableArray<QueryConstant>.Empty), ImmutableArray<OrderTerm>.Empty, Paging.None), null)));
             }
         }
     }
@@ -217,7 +219,7 @@ internal static class G2Q1Corpus
                 : ImmutableArray.Create(constant, QueryConstant.Of(column, null))),
             Q1CorpusOperation.Contains => new Predicate.Substring(column, (string)value!, Anchor.Contains),
             Q1CorpusOperation.NotEqual => new Predicate.Not(new Predicate.Equal(column, constant)),
-            Q1CorpusOperation.StartsWith => new Predicate.StartsWith(column, (string)value!),
+            Q1CorpusOperation.StartsWith => new Predicate.StartsWith(column, (column.Type == QueryType.String ? (string?)value : string.Empty)!),
             Q1CorpusOperation.NotContains => new Predicate.Not(new Predicate.Substring(column, (string)value!, Anchor.Contains)),
             Q1CorpusOperation.GreaterThan => new Predicate.Range(column, Bound.Exclusive(constant), null),
             Q1CorpusOperation.GreaterThanOrEqual => new Predicate.Range(column, Bound.Inclusive(constant), null),
@@ -234,7 +236,9 @@ internal static class G2Q1Corpus
         Projection.All,
         paging);
 
-    private static Func<QueryRequest> Refuse(string decisionId) => () => throw new Q1CorpusRefusalException(decisionId);
+    private static bool PublicConstructionRejects(ColumnRef column, Q1CorpusOperation operation, object? value) =>
+        value is null && operation is Q1CorpusOperation.Contains or Q1CorpusOperation.NotContains or Q1CorpusOperation.StartsWith ||
+        column.Type == QueryType.Binary && operation == Q1CorpusOperation.StartsWith;
 
     private static string RefusalId(ColumnRef column, Q1CorpusOperation operation, object? value) =>
         value is null && operation is Q1CorpusOperation.GreaterThan or Q1CorpusOperation.GreaterThanOrEqual or Q1CorpusOperation.LessThan or Q1CorpusOperation.LessThanOrEqual
