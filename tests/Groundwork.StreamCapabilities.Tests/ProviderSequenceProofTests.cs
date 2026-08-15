@@ -39,7 +39,7 @@ public sealed class ProviderSequenceProofTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run the PostgreSQL sequence proof.");
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
-        AssertSequence(connection, "postgresql");
+        AssertSequence(connection, "pg");
     }
 
     [SkippableFact]

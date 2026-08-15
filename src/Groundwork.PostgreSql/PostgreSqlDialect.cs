@@ -346,7 +346,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
                    pg_get_expr(ad.adbin, ad.adrelid),
                    COALESCE(coll.collname, ''),
                    COALESCE(array_position(con.conkey, a.attnum), 0),
-                   a.attidentity
+                   a.attidentity::text
             FROM pg_catalog.pg_attribute a
             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
