@@ -31,7 +31,7 @@ public static class PredicateCanonicalizer
     }
 
     internal static string Column(ColumnRef column) =>
-        "column(" + Escape(column.Table.Value) + "," + Escape(column.Name) + "," + column.Type + "," + (column.IsNullable ? "nullable" : "required") + ")";
+        "column(" + Escape(column.Table.Value) + "," + Escape(column.Name) + "," + column.Type + "," + (column.IsNullable ? "nullable" : "required") + "," + column.StringComparison + ")";
 
     internal static string Bound(Bound? bound, bool includeValues) => bound is null
         ? "none"
