@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Substrate.Mongo;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -61,6 +62,13 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
 
     /// <summary>Provides read-only access to the native database for catalog/evidence tests.</summary>
     public IMongoDatabase Database => state.Context.Database;
+
+    public MongoSchemaAdmissionReport InspectSchema(StorageUnit unit, MongoStorageAccess access)
+    {
+        ThrowIfDisposed();
+        var applied = state.Resolve(unit, access);
+        return MongoSchemaCoordinator.InspectAdmission(state, applied, access);
+    }
 
     public IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access)
     {
@@ -306,27 +314,144 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         MongoAppliedUnit applied,
         MongoStorageAccess access)
     {
-        var name = CollectionName(applied, access);
-        EnsureCollection(state, applied, name);
-        var collection = state.Context.Database.GetCollection<BsonDocument>(name);
-        var missing = applied.Declaration.Columns
-            .Where(column => !string.Equals(column.Name, "_id", StringComparison.Ordinal))
-            .Select(column => new BsonDocument(column.Name,
-                new BsonDocument("$exists", false)))
-            .ToArray();
-        if (missing.Length != 0 && collection.CountDocuments(new BsonDocument("$or", new BsonArray(missing))) > 0)
+        var report = InspectAdmission(state, applied, access);
+        if (!report.IsProcessReady)
         {
+            var name = CollectionName(applied, access);
             var commands = string.Join("; ", applied.Declaration.Columns.Select(column =>
                 $"db.getCollection('{Escape(name)}').updateMany(" +
                 $"{{ \"{Escape(column.Name)}\": {{ $exists: false }} }}, " +
                 $"{{ $set: {{ \"{Escape(column.Name)}\": {(column.IsNullable ? "null" : "<backfill-value>")} }} }});"));
             throw new InvalidOperationException(
                 $"Storage unit '{applied.Declaration.Name}' is not admitted: existing documents are missing declared columns. " +
-                $"Backfill before opening it, for example: {commands}");
+                $"Backfill before opening it, for example: {commands} " +
+                $"[{string.Join("; ", report.ColumnDrift.Select(refusal => refusal.Code + " at " + refusal.Path + ": " + refusal.Message))}]");
         }
 
-        return collection;
+        return state.Context.Database.GetCollection<BsonDocument>(CollectionName(applied, access));
     }
+
+    /// <summary>
+    /// Reads Mongo's actual collection/index catalog. This is deliberately inspect-only: missing
+    /// or changed indexes do not make Mongo startup fatal, while missing/invalid declared fields do.
+    /// </summary>
+    internal static MongoSchemaAdmissionReport InspectAdmission(
+        MongoProviderState state,
+        MongoAppliedUnit applied,
+        MongoStorageAccess access)
+    {
+        var name = CollectionName(applied, access);
+        EnsureCollection(state, applied, name);
+        var collection = state.Context.Database.GetCollection<BsonDocument>(name);
+        var columnDrift = new List<SchemaRefusal>();
+        foreach (var column in applied.Declaration.Columns)
+        {
+            if (string.Equals(column.Name, "_id", StringComparison.Ordinal))
+                continue;
+
+            var missing = collection.Find(new BsonDocument(column.Name,
+                    new BsonDocument("$exists", false)))
+                .Limit(1)
+                .Any();
+            if (missing)
+            {
+                columnDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-001",
+                    $"Physical MongoDB collection contains a document missing declared column '{column.Name}'.",
+                    $"columns.{column.Name}"));
+                continue;
+            }
+
+            var expectedType = MongoValueCodec.GetBsonTypeName(column);
+            var acceptedValues = new BsonArray
+            {
+                new BsonDocument(column.Name,
+                    new BsonDocument("$type", expectedType))
+            };
+            if (column.IsNullable)
+                acceptedValues.Add(new BsonDocument(column.Name, BsonNull.Value));
+            var wrongType = collection.Find(new BsonDocument("$and", new BsonArray
+                {
+                    new BsonDocument(column.Name, new BsonDocument("$exists", true)),
+                    new BsonDocument("$nor", acceptedValues)
+                }))
+                .Limit(1)
+                .Any();
+            if (wrongType)
+            {
+                columnDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-001",
+                    $"Physical MongoDB column '{column.Name}' contains a value whose BSON type does not match '{expectedType}'.",
+                    $"columns.{column.Name}.type"));
+            }
+        }
+
+        var metadata = state.Metadata.Find(new BsonDocument("_id", "schema:" + applied.Declaration.Id.Value))
+            .FirstOrDefault();
+        if (applied.Declaration.DerivedColumns.Count != 0)
+        {
+            var persisted = metadata is not null &&
+                metadata.TryGetValue("derived", out var derived) && derived.IsBsonArray
+                ? derived.AsBsonArray
+                .OfType<BsonDocument>()
+                .ToDictionary(item => item["name"].AsString,
+                    item => item["algorithmId"].AsString,
+                    StringComparer.Ordinal)
+                : new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var expected in applied.Declaration.DerivedColumns)
+            {
+                var algorithm = ProjectionAlgorithmId(expected.Projection);
+                if (!persisted.TryGetValue(expected.Name, out var actual) ||
+                    !string.Equals(actual, algorithm, StringComparison.Ordinal))
+                {
+                    columnDrift.Add(new SchemaRefusal(
+                        "GW-RUNTIME-001",
+                        $"Persisted MongoDB search-key algorithm for derived column '{expected.Name}' differs from '{algorithm}'.",
+                        $"columns.{expected.Name}.searchKeyAlgorithm"));
+                }
+            }
+        }
+
+        var actualIndexes = new MongoProviderCatalog(state).ReadIndexes(name, applied.Declaration.Indexes);
+        var indexDrift = new List<SchemaRefusal>();
+        foreach (var expected in applied.Declaration.Indexes)
+        {
+            var actual = actualIndexes.FirstOrDefault(index =>
+                string.Equals(index.Name, expected.Name, StringComparison.Ordinal));
+            if (actual is null)
+            {
+                indexDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-002",
+                    $"Physical MongoDB collection is missing declared index '{expected.Name}'.",
+                    $"indexes.{expected.Name}"));
+                continue;
+            }
+
+            var keysMatch = actual.Columns.Count == expected.Columns.Count &&
+                actual.Columns.Zip(expected.Columns)
+                    .All(pair => string.Equals(pair.First.Column, pair.Second.Column, StringComparison.Ordinal) &&
+                                 pair.First.Direction == pair.Second.Direction);
+            if (actual.IsUnique != expected.IsUnique ||
+                actual.MissingValues != expected.MissingValues ||
+                !keysMatch)
+            {
+                indexDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-002",
+                    $"Physical MongoDB index '{expected.Name}' differs in key order, direction, uniqueness, or partial filter.",
+                    $"indexes.{expected.Name}"));
+            }
+        }
+
+        return new MongoSchemaAdmissionReport(applied.Declaration.Id, columnDrift, indexDrift);
+    }
+
+    private static string ProjectionAlgorithmId(PortableProjection projection) => projection switch
+    {
+        PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
+        PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
+        PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
+        _ => throw new ArgumentOutOfRangeException(nameof(projection), projection, null)
+    };
 
     private static void EnsureCollection(MongoProviderState state, MongoAppliedUnit applied, string name)
     {
@@ -471,7 +596,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             ["_id"] = SchemaMetadataId(unit.Id),
             ["collection"] = unit.Name,
             ["key"] = new BsonArray(unit.Key.Columns),
-            ["fingerprint"] = SchemaIdentity.Fingerprint(unit)
+            ["fingerprint"] = SchemaIdentity.Fingerprint(unit),
+            ["derived"] = new BsonArray(unit.DerivedColumns.Select(column => new BsonDocument
+            {
+                ["name"] = column.Name,
+                ["algorithmId"] = ProjectionAlgorithmId(column.Projection)
+            }))
         };
         state.Metadata.ReplaceOne(
             new BsonDocument("_id", SchemaMetadataId(unit.Id)),

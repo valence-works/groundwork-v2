@@ -151,8 +151,67 @@ public sealed class MongoProviderIntegrationTests
         var exception = Assert.Throws<InvalidOperationException>(() =>
             connection.OpenSession(unit, MongoStorageAccess.Global));
 
+        var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
+        Assert.Contains(report.ColumnDrift, refusal => refusal.Code == "GW-RUNTIME-001" &&
+            refusal.Path == "columns.id");
+        Assert.False(report.IsProcessReady);
+
         Assert.Contains("backfill", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(unit.Name, exception.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void Mongo_index_drift_is_classified_without_blocking_store_open()
+    {
+        using var connection = OpenConnection();
+        var unit = TestUnits.Customer with
+        {
+            Id = new StorageUnitId("p1-index-admission-" + Guid.NewGuid().ToString("N")),
+            Name = "P1IndexAdmission_" + Guid.NewGuid().ToString("N")
+        };
+        connection.Schema.Apply(unit);
+        var native = Assert.IsType<MongoDbProviderConnection>(connection).Database
+            .GetCollection<BsonDocument>(unit.Name);
+        native.Indexes.DropOne("unique-email");
+
+        var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
+
+        Assert.True(report.IsProcessReady);
+        Assert.Contains(report.IndexDrift, refusal => refusal.Code == "GW-RUNTIME-002" &&
+            refusal.Path == "indexes.unique-email");
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.NotNull(session);
+    }
+
+    [SkippableFact]
+    public void Mongo_bson_type_drift_names_the_column_without_confusing_it_with_index_drift()
+    {
+        using var connection = OpenConnection();
+        var unit = TestUnits.Customer with
+        {
+            Id = new StorageUnitId("p1-type-admission-" + Guid.NewGuid().ToString("N")),
+            Name = "P1TypeAdmission_" + Guid.NewGuid().ToString("N")
+        };
+        connection.Schema.Apply(unit);
+        Assert.IsType<MongoDbProviderConnection>(connection).Database
+            .GetCollection<BsonDocument>(unit.Name)
+            .InsertOne(new BsonDocument
+            {
+                ["_id"] = "bad-type",
+                ["id"] = 42,
+                ["name"] = "Ada",
+                ["email"] = "bad-type@example.test",
+                ["createdAt"] = DateTime.UtcNow,
+                ["isActive"] = true,
+                ["balance"] = new BsonDecimal128(1m)
+            });
+
+        var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
+
+        Assert.Contains(report.ColumnDrift, refusal => refusal.Code == "GW-RUNTIME-001" &&
+            refusal.Path == "columns.id.type");
+        Assert.DoesNotContain(report.IndexDrift, refusal => refusal.Path == "columns.id.type");
+        Assert.False(report.IsProcessReady);
     }
 
     [SkippableFact]
