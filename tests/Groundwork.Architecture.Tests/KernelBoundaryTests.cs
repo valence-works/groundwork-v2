@@ -27,6 +27,16 @@ public sealed class KernelBoundaryTests
             .Select(assembly => assembly.GetName().Name!)
             .Concat(KnownContractFamilies)
             .ToImmutableHashSet(StringComparer.Ordinal);
+        var unclassified = universe.Assemblies
+            .Where(assembly => !IsClassifiedProductAssembly(assembly))
+            .Select(assembly => assembly.GetName().Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(unclassified.Length == 0,
+            "Every Groundwork product assembly must be classified as kernel, substrate, provider, " +
+            "contract family, testing, or tooling. New providers must set " +
+            "[assembly: AssemblyMetadata(\"Groundwork.Provider\", \"true\")]:" +
+            Environment.NewLine + string.Join(Environment.NewLine, unclassified));
 
         var violations = universe.Assemblies
             .Where(IsKernelSubstrateOrProvider)
@@ -79,7 +89,16 @@ public sealed class KernelBoundaryTests
     private static bool IsKernelSubstrateOrProvider(Assembly assembly)
     {
         var name = assembly.GetName().Name;
-        return IsKernelAssembly(name) || IsSubstrateAssembly(name) || IsProviderAssembly(name);
+        return IsKernelAssembly(name) || IsSubstrateAssembly(name) || IsProviderAssembly(assembly);
+    }
+
+    private static bool IsClassifiedProductAssembly(Assembly assembly)
+    {
+        var name = assembly.GetName().Name;
+        return IsKernelAssembly(name) || IsSubstrateAssembly(name) || IsProviderAssembly(assembly) ||
+               IsContractFamily(assembly) ||
+               string.Equals(name, "Groundwork.Testing", StringComparison.Ordinal) ||
+               name?.StartsWith("Groundwork.Tool", StringComparison.Ordinal) == true;
     }
 
     private static bool IsKernelAssembly(string? name) =>
@@ -90,20 +109,27 @@ public sealed class KernelBoundaryTests
     private static bool IsSubstrateAssembly(string? name) =>
         name?.StartsWith("Groundwork.Substrate.", StringComparison.Ordinal) == true;
 
-    private static bool IsProviderAssembly(string? name) =>
-        name?.StartsWith("Groundwork.MongoDb", StringComparison.Ordinal) == true ||
-        name?.StartsWith("Groundwork.PostgreSql", StringComparison.Ordinal) == true ||
-        name?.StartsWith("Groundwork.Sqlite", StringComparison.Ordinal) == true ||
-        name?.StartsWith("Groundwork.SqlServer", StringComparison.Ordinal) == true;
+    private static bool IsProviderAssembly(Assembly assembly)
+    {
+        var name = assembly.GetName().Name;
+        return name?.StartsWith("Groundwork.MongoDb", StringComparison.Ordinal) == true ||
+               name?.StartsWith("Groundwork.PostgreSql", StringComparison.Ordinal) == true ||
+               name?.StartsWith("Groundwork.Sqlite", StringComparison.Ordinal) == true ||
+               name?.StartsWith("Groundwork.SqlServer", StringComparison.Ordinal) == true ||
+               HasMetadata(assembly, "Groundwork.Provider", "true");
+    }
 
     private static bool IsContractFamily(Assembly assembly) =>
+        HasMetadata(assembly, "Groundwork.ContractFamily", "true");
+
+    private static bool HasMetadata(Assembly assembly, string key, string value) =>
         assembly.GetCustomAttributesData().Any(attribute =>
             attribute.AttributeType.FullName == typeof(AssemblyMetadataAttribute).FullName &&
             attribute.ConstructorArguments.Count == 2 &&
             string.Equals(attribute.ConstructorArguments[0].Value as string,
-                "Groundwork.ContractFamily", StringComparison.Ordinal) &&
+                key, StringComparison.Ordinal) &&
             string.Equals(attribute.ConstructorArguments[1].Value as string,
-                "true", StringComparison.OrdinalIgnoreCase));
+                value, StringComparison.OrdinalIgnoreCase));
 
     private static IEnumerable<string> PublicSignatures(Assembly assembly)
     {
