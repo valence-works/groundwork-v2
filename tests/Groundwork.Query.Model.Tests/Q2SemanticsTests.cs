@@ -153,18 +153,36 @@ public sealed class Q2SemanticsTests
     public void Text_policy_is_explicit_and_culture_dependent_policies_are_refused()
     {
         var ordinal = new ColumnRef(Table, "ordinalText", QueryType.String, stringComparison: QueryStringComparisonPolicy.Ordinal);
-        var folded = new ColumnRef(Table, "foldedText", QueryType.String, stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
         var culture = new ColumnRef(Table, "cultureText", QueryType.String, stringComparison: QueryStringComparisonPolicy.CurrentCulture);
 
         Assert.False(PortableQuerySemantics.Evaluate(
             new Predicate.Equal(ordinal, QueryConstant.Of(ordinal, "I")),
             new Dictionary<string, object?> { [ordinal.Name] = "i" }));
-        Assert.True(PortableQuerySemantics.Evaluate(
-            new Predicate.Equal(folded, QueryConstant.Of(folded, "I")),
-            new Dictionary<string, object?> { [folded.Name] = "i" }));
         Assert.False(PortableQuerySemantics.Validate(new Predicate.Equal(culture, QueryConstant.Of(culture, "I"))).IsPortable);
-        Assert.NotEqual(PredicateCanonicalizer.ToCanonicalString(new Predicate.Equal(ordinal, QueryConstant.Of(ordinal, "I"))),
-            PredicateCanonicalizer.ToCanonicalString(new Predicate.Equal(folded, QueryConstant.Of(folded, "I"))));
+    }
+
+    [Fact]
+    public void Folded_text_policies_are_refused_without_a_versioned_search_key()
+    {
+        var cases = new[]
+        {
+            (QueryStringComparisonPolicy.AsciiIgnoreCase, "A", "a"),
+            (QueryStringComparisonPolicy.AsciiIgnoreCase, "Å", "å"),
+            (QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, "A", "a"),
+            (QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, "\U00010400", "\U00010428")
+        };
+
+        foreach (var (policy, expected, actual) in cases)
+        {
+            var column = new ColumnRef(Table, "foldedText", QueryType.String, stringComparison: policy);
+            var predicate = new Predicate.Equal(column, QueryConstant.Of(column, expected));
+            var result = PortableQuerySemantics.Validate(predicate);
+
+            Assert.False(result.IsPortable);
+            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TEXT-001");
+            Assert.False(PortableQuerySemantics.Evaluate(predicate, new Dictionary<string, object?> { [column.Name] = actual }));
+            Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(predicate), new Dictionary<string, object?> { [column.Name] = actual }));
+        }
     }
 
     [Fact]
@@ -176,11 +194,70 @@ public sealed class Q2SemanticsTests
         Assert.False(PortableQuerySemantics.Evaluate(equalEmpty, new Dictionary<string, object?> { [Binary.Name] = null }));
         Assert.True(PortableQuerySemantics.Evaluate(equalNull, new Dictionary<string, object?> { [Binary.Name] = null }));
 
+        var otherBinary = new ColumnRef(Table, "otherBinary", QueryType.Binary);
+        var equalColumns = new Predicate.ColumnCompare(Binary, CompareOp.Equal, otherBinary);
+        var unequalColumns = new Predicate.ColumnCompare(Binary, CompareOp.NotEqual, otherBinary);
+        Assert.True(PortableQuerySemantics.Evaluate(equalColumns, new Dictionary<string, object?>
+        {
+            [Binary.Name] = new byte[] { 1, 2 },
+            [otherBinary.Name] = new byte[] { 1, 2 }
+        }));
+        Assert.True(PortableQuerySemantics.Evaluate(unequalColumns, new Dictionary<string, object?>
+        {
+            [Binary.Name] = new byte[] { 1, 2 },
+            [otherBinary.Name] = new byte[] { 1, 3 }
+        }));
+        Assert.False(PortableQuerySemantics.Evaluate(
+            new Predicate.ColumnCompare(Binary, CompareOp.LessThan, otherBinary),
+            new Dictionary<string, object?>
+            {
+                [Binary.Name] = new byte[] { 1 },
+                [otherBinary.Name] = new byte[] { 2 }
+            }));
+        Assert.False(PortableQuerySemantics.Evaluate(
+            new Predicate.Range(Binary, Bound.Inclusive(QueryConstant.Of(Binary, new byte[] { 1 })), null),
+            new Dictionary<string, object?> { [Binary.Name] = new byte[] { 2 } }));
+
         var request = new QueryRequest(Table, Predicate.AlwaysTrue.Instance,
             [new OrderTerm(Binary, OrderDirection.Ascending, NullOrder.First)], Projection.All, Paging.None);
         var result = PortableQuerySemantics.Validate(request);
         Assert.False(result.IsPortable);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-ORDER-001");
+    }
+
+    [Fact]
+    public void Provider_default_null_ordering_is_refused()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Number)],
+            Projection.All,
+            Paging.None);
+
+        var result = PortableQuerySemantics.Validate(request);
+
+        Assert.False(result.IsPortable);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-ORDER-004");
+    }
+
+    [Fact]
+    public void Refused_and_unknown_nodes_still_have_deterministic_boolean_evaluation()
+    {
+        var malformed = new Predicate.ElementOf(
+            new ElementSetRef("tags"),
+            ImmutableArray.CreateRange(new[] { (QueryConstant)null! }),
+            SetQuantifier.Any);
+        var row = new Dictionary<string, object?> { ["tags"] = new[] { "value" } };
+
+        Assert.False(PortableQuerySemantics.Validate(malformed).IsPortable);
+        Assert.False(PortableQuerySemantics.Evaluate(malformed, row));
+        Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(malformed), row));
+
+        var unknown = new UnknownPredicate();
+        Assert.False(PortableQuerySemantics.Validate(unknown).IsPortable);
+        Assert.False(PortableQuerySemantics.Evaluate(unknown, row));
+        Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(unknown), row));
     }
 
     [Fact]
@@ -243,4 +320,6 @@ public sealed class Q2SemanticsTests
             }
         }
     }
+
+    private sealed record UnknownPredicate : Predicate;
 }

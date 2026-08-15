@@ -22,10 +22,14 @@ which `Validate` returns no diagnostics.
   negative forms are refused rather than delegated to SQL/BSON three-valued
   logic. `ElementOf(Any)` is false for an empty owner, so its complement is
   true for an empty owner.
-- Text is explicitly `Ordinal`, `UnicodeOrdinalIgnoreCase`, or
-  `AsciiIgnoreCase`. The latter two require the versioned persisted search key
-  defined by #256. Culture, ICU, accent, and implicit Unicode-normalization
-  semantics are refused; malformed UTF-16 is rejected at binding.
+- Text accepted for provider planning is explicitly `Ordinal`. The
+  `UnicodeOrdinalIgnoreCase` and `AsciiIgnoreCase` policies require an AST
+  node naming the versioned persisted search key defined by #256; until that
+  projection exists in this model, both policies are refused. Culture, ICU,
+  accent, and implicit Unicode-normalization semantics are refused; malformed
+  UTF-16 is rejected at binding. Evaluating a refused folded policy remains a
+  deterministic two-valued operation and never invokes runtime
+  `OrdinalIgnoreCase` behavior.
 - Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` values are portable.
   No numeric coercion or rounding is performed. Binary floating point is
   refused for predicates, ordering, and indexes.
@@ -36,8 +40,9 @@ which `Validate` returns no diagnostics.
   and membership use exact bytes; binary range, prefix, and ordering are
   refused. Null and empty binary values remain distinct.
 - Ordering normalizes nulls-first ascending and nulls-last descending and
-  appends the identity tie-break before paging. Guid ordering uses the same
-  network-byte key; binary ordering is refused.
+  appends the identity tie-break before paging. Callers must provide the
+  corresponding explicit null order; `ProviderDefault` is refused. Guid
+  ordering uses the same network-byte key; binary ordering is refused.
 
 The accepted #230 gate records the UTC-tick and network-GUID decisions. They
 intentionally supersede the earlier exploratory wording that proposed BSON

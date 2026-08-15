@@ -58,10 +58,10 @@ public static class PortableQuerySemantics
         foreach (var term in request.Order)
         {
             ValidateColumn(term.Column, diagnostics, "order." + term.Column.Name);
+            if (term.NullOrder == NullOrder.ProviderDefault)
+                Refuse(diagnostics, "GW-SEM-ORDER-004", "Provider-default null ordering is not portable; choose explicit nulls-first or nulls-last ordering.", "order." + term.Column.Name);
             if (term.Column.Type is QueryType.Binary or QueryType.Double)
                 Refuse(diagnostics, "GW-SEM-ORDER-001", "Ordering this type is not portable; order a declared portable projection or key instead.", "order." + term.Column.Name);
-            if (term.Column.Type == QueryType.String && IsCultureDependent(term.Column.StringComparison))
-                Refuse(diagnostics, "GW-SEM-TEXT-001", "Culture-dependent text ordering is not portable; use Ordinal or a persisted ordinal-ignore-case search key instead.", "order." + term.Column.Name);
         }
 
         if (request.LatestPerKey is not null)
@@ -196,15 +196,11 @@ public static class PortableQuerySemantics
             Refuse(diagnostics, "GW-SEM-TYPE-006", "Binary floating-point values are not portable in predicates or indexes; use Int32, Int64, or declared Decimal instead.", path);
         if (column.Type == QueryType.Decimal && (column.DecimalPrecision != 18 || column.DecimalScale != 4))
             Refuse(diagnostics, "GW-SEM-DECIMAL-001", "Portable Decimal requires declared decimal(18,4) with no rounding; use decimal(18,4) or an exact integer type instead.", path);
-        if (column.Type == QueryType.String && IsCultureDependent(column.StringComparison))
-            Refuse(diagnostics, "GW-SEM-TEXT-001", "Culture-dependent text comparison is not portable; use Ordinal or a versioned ordinal-ignore-case search key instead.", path);
+        if (column.Type == QueryType.String && IsRefusedTextComparison(column.StringComparison))
+            Refuse(diagnostics, "GW-SEM-TEXT-001", "This text comparison policy is not portable without an explicit versioned persisted search-key projection; use Ordinal or bind such a projection.", path);
     }
 
-    private static bool IsCultureDependent(QueryStringComparisonPolicy policy) => policy is
-        QueryStringComparisonPolicy.CurrentCulture or
-        QueryStringComparisonPolicy.InvariantCulture or
-        QueryStringComparisonPolicy.AccentInsensitive or
-        QueryStringComparisonPolicy.Icu;
+    private static bool IsRefusedTextComparison(QueryStringComparisonPolicy policy) => policy != QueryStringComparisonPolicy.Ordinal;
 
     private static bool IsOrderable(QueryType type) => type is
         QueryType.Boolean or QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or QueryType.DateTimeOffset or QueryType.Guid;
@@ -239,7 +235,9 @@ public static class PortableQuerySemantics
             case Predicate.StartsWith startsWith:
             {
                 var actual = GetValue(startsWith.Column, row) as string;
-                return actual is not null && actual.StartsWith(startsWith.Prefix, StringComparisonFor(startsWith.Column.StringComparison));
+                return actual is not null
+                    && startsWith.Column.StringComparison == QueryStringComparisonPolicy.Ordinal
+                    && actual.StartsWith(startsWith.Prefix, StringComparison.Ordinal);
             }
             case Predicate.Substring substring:
             {
@@ -263,7 +261,10 @@ public static class PortableQuerySemantics
                 var right = GetValue(compare.Right, row);
                 if (left is null || right is null)
                     return false;
-                return ApplyComparison(CompareValues(compare.Left, left, right), compare.Op);
+                if (compare.Left.Type == QueryType.Binary && compare.Op is not (CompareOp.Equal or CompareOp.NotEqual))
+                    return false;
+                var comparison = CompareValues(compare.Left, left, right);
+                return comparison is int value && ApplyComparison(value, compare.Op);
             }
             case Predicate.Not not:
                 return !EvaluateCore(not.Inner, row);
@@ -272,7 +273,7 @@ public static class PortableQuerySemantics
             case Predicate.Or or:
                 return or.Terms.Any(term => EvaluateCore(term, row));
             default:
-                throw new InvalidOperationException("Unknown predicate node.");
+                return false;
         }
     }
 
@@ -322,8 +323,10 @@ public static class PortableQuerySemantics
         return CompareUntyped(actual, expected, column.StringComparison);
     }
 
-    private static bool CompareUntyped(object? actual, QueryConstant expected, QueryStringComparisonPolicy policy = QueryStringComparisonPolicy.Ordinal)
+    private static bool CompareUntyped(object? actual, QueryConstant? expected, QueryStringComparisonPolicy policy = QueryStringComparisonPolicy.Ordinal)
     {
+        if (expected is null)
+            return false;
         if (expected.Kind == QueryConstantKind.Null)
             return actual is null;
         if (actual is null)
@@ -331,7 +334,7 @@ public static class PortableQuerySemantics
         if (!IsExactRuntimeType(expected.Type!.Value, actual))
             throw new ArgumentException("Element value must have exact type " + expected.Type + ".", nameof(actual));
         if (actual is string actualText && expected.Value is string expectedText)
-            return string.Equals(actualText, expectedText, StringComparisonFor(policy));
+            return policy == QueryStringComparisonPolicy.Ordinal && string.Equals(actualText, expectedText, StringComparison.Ordinal);
         if (actual is byte[] actualBytes && expected.Value is byte[] expectedBytes)
             return actualBytes.SequenceEqual(expectedBytes);
         if (actual is DateTimeOffset actualInstant && expected.Value is DateTimeOffset expectedInstant)
@@ -341,21 +344,29 @@ public static class PortableQuerySemantics
 
     private static bool CompareBound(ColumnRef column, object actual, Bound bound)
     {
-        var comparison = CompareValues(column, actual, bound.Value.Value!);
-        return bound.IsInclusive ? comparison >= 0 : comparison > 0;
+        if (column.Type == QueryType.Binary)
+            return false;
+        if (bound.Value.Kind == QueryConstantKind.Null || bound.Value.Value is null)
+            return false;
+        var comparison = CompareValues(column, actual, bound.Value.Value);
+        return comparison is int value && (bound.IsInclusive ? value >= 0 : value > 0);
     }
 
-    private static int CompareValues(ColumnRef column, object left, object right)
+    private static int? CompareValues(ColumnRef column, object left, object right)
     {
         if (left is string leftText && right is string rightText)
-            return StringComparerFor(column.StringComparison).Compare(leftText, rightText);
+            return column.StringComparison == QueryStringComparisonPolicy.Ordinal
+                ? string.CompareOrdinal(leftText, rightText)
+                : null;
         if (left is DateTimeOffset leftInstant && right is DateTimeOffset rightInstant)
             return leftInstant.UtcTicks.CompareTo(rightInstant.UtcTicks);
         if (left is Guid leftGuid && right is Guid rightGuid)
             return PortableValueComparison.CompareGuid(leftGuid, rightGuid);
+        if (left is byte[] leftBytes && right is byte[] rightBytes)
+            return PortableValueComparison.CompareBinary(leftBytes, rightBytes);
         if (left is IComparable comparable)
             return comparable.CompareTo(right);
-        throw new ArgumentException("Values of type " + column.Type + " are not orderable.");
+        return null;
     }
 
     private static bool ApplyComparison(int comparison, CompareOp op) => op switch
@@ -370,29 +381,17 @@ public static class PortableQuerySemantics
     };
 
     private static int IndexOf(string value, string needle, QueryStringComparisonPolicy policy) =>
-        value.IndexOf(needle, StringComparisonFor(policy));
+        policy == QueryStringComparisonPolicy.Ordinal ? value.IndexOf(needle, StringComparison.Ordinal) : -1;
 
     private static bool EndsWith(string value, string needle, QueryStringComparisonPolicy policy) =>
-        value.EndsWith(needle, StringComparisonFor(policy));
-
-    private static StringComparison StringComparisonFor(QueryStringComparisonPolicy policy) => policy switch
-    {
-        QueryStringComparisonPolicy.Ordinal => StringComparison.Ordinal,
-        QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase or QueryStringComparisonPolicy.AsciiIgnoreCase => StringComparison.OrdinalIgnoreCase,
-        _ => throw new InvalidOperationException("Culture-dependent text comparison is not portable.")
-    };
-
-    private static StringComparer StringComparerFor(QueryStringComparisonPolicy policy) => policy switch
-    {
-        QueryStringComparisonPolicy.Ordinal => StringComparer.Ordinal,
-        QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase or QueryStringComparisonPolicy.AsciiIgnoreCase => StringComparer.OrdinalIgnoreCase,
-        _ => throw new InvalidOperationException("Culture-dependent text comparison is not portable.")
-    };
+        policy == QueryStringComparisonPolicy.Ordinal && value.EndsWith(needle, StringComparison.Ordinal);
 }
 
 internal static class PortableValueComparison
 {
     internal static int CompareGuid(Guid left, Guid right) => CompareBytes(GuidBytes(left), GuidBytes(right));
+
+    internal static int CompareBinary(byte[] left, byte[] right) => CompareBytes(left, right);
 
     private static byte[] GuidBytes(Guid value)
     {

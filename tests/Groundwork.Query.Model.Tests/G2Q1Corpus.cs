@@ -113,11 +113,11 @@ internal static class G2Q1Corpus
             Func<Q1CorpusExercise> exercise = refused
                 ? () => new Q1CorpusExercise(Request(
                     Predicate.AlwaysTrue.Instance,
-                    ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
+                    ImmutableArray.Create(new OrderTerm(column, capturedDirection, NullOrderFor(capturedDirection))),
                     Paging.OffsetLimit(capturedPage * 2, 2)), "binary-order-refused")
                 : () => new Q1CorpusExercise(Request(
                     Predicate.AlwaysTrue.Instance,
-                    ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
+                    ImmutableArray.Create(new OrderTerm(column, capturedDirection, NullOrderFor(capturedDirection))),
                     Paging.OffsetLimit(capturedPage * 2, 2)), null);
             shapes.Add(new Q1CorpusShape(
                 number++,
@@ -159,6 +159,9 @@ internal static class G2Q1Corpus
             throw new InvalidOperationException($"Q1 G2 corpus generated {shapes.Count} shapes, expected {ExpectedShapeCount}.");
         return shapes;
     }
+
+    private static NullOrder NullOrderFor(OrderDirection direction) =>
+        direction == OrderDirection.Ascending ? NullOrder.First : NullOrder.Last;
 
     private static void AddPredicateShapes(
         ICollection<Q1CorpusShape> shapes,
