@@ -13,7 +13,7 @@ public sealed class Q10RuntimeTests
     private static readonly ColumnRef Assignee = new(Table, "assignee", QueryType.String);
 
     [Fact]
-    public void Column_drift_is_fail_open_and_names_the_column()
+    public void Column_drift_is_startup_fatal_and_names_the_column()
     {
         var target = Target([SchemaIndex("ix_status", "status")]);
         var history = ApplyTarget(target);
