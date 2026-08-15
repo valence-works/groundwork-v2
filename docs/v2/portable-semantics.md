@@ -21,7 +21,9 @@ which `Validate` returns no diagnostics.
   Their supported positive forms are total when evaluated; unsupported
   negative forms are refused rather than delegated to SQL/BSON three-valued
   logic. `ElementOf(Any)` is false for an empty owner, so its complement is
-  true for an empty owner.
+  true for an empty owner. Element sets declare an exact element type; legacy
+  untyped set references are refused rather than allowing provider-specific
+  JSON/BSON element coercion.
 - Text accepted for provider planning is explicitly `Ordinal`. The
   `UnicodeOrdinalIgnoreCase` and `AsciiIgnoreCase` policies require an AST
   node naming the versioned persisted search key defined by #256; until that
@@ -33,6 +35,9 @@ which `Validate` returns no diagnostics.
 - Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` values are portable.
   No numeric coercion or rounding is performed. Binary floating point is
   refused for predicates, ordering, and indexes.
+- Boolean equality and total complements are portable. Direct Boolean ranges,
+  ordered column comparisons, and ordering require a future explicit three-state
+  projected key and are refused until that projection is present.
 - Date/time values are compared as UTC ticks, preserving all seven supported
   fractional-digit positions. Offsets are converted to UTC; values arriving as
   `DateTime` or with an unspecified/local kind are not accepted by the model.

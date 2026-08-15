@@ -62,6 +62,8 @@ public static class PortableQuerySemantics
                 Refuse(diagnostics, "GW-SEM-ORDER-004", "Provider-default null ordering is not portable; choose explicit nulls-first or nulls-last ordering.", "order." + term.Column.Name);
             if (term.Column.Type is QueryType.Binary or QueryType.Double)
                 Refuse(diagnostics, "GW-SEM-ORDER-001", "Ordering this type is not portable; order a declared portable projection or key instead.", "order." + term.Column.Name);
+            if (term.Column.Type == QueryType.Boolean)
+                Refuse(diagnostics, "GW-SEM-ORDER-005", "Boolean ordering is not portable without an explicit three-state projected key; order the declared projection instead.", "order." + term.Column.Name);
         }
 
         if (request.LatestPerKey is not null)
@@ -152,7 +154,14 @@ public static class PortableQuerySemantics
 
     private static void ValidateElementSet(Predicate.ElementOf elementOf, ICollection<PortableSemanticDiagnostic> diagnostics, string path)
     {
-        QueryType? type = null;
+        if (elementOf.Set.Type is not QueryType type)
+        {
+            Refuse(diagnostics, "GW-SEM-TYPE-007", "An element set must declare its exact element type; bind a typed set before provider planning.", path + ".set");
+            return;
+        }
+        if (type == QueryType.Double)
+            Refuse(diagnostics, "GW-SEM-TYPE-002", "Double membership is not portable; use an exact supported numeric type instead.", path + ".set");
+
         foreach (var (value, index) in elementOf.Values.Select((value, index) => (value, index)))
         {
             if (value is null)
@@ -161,13 +170,16 @@ public static class PortableQuerySemantics
                 continue;
             }
             if (value.Kind == QueryConstantKind.Null)
+            {
+                if (value.Type != type)
+                    Refuse(diagnostics, "GW-SEM-TYPE-005", "The element-set null constant must carry the set's exact declared type; bind a typed null instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
                 continue;
-            if (value.Type == QueryType.Double)
-                Refuse(diagnostics, "GW-SEM-TYPE-002", "Double membership is not portable; use an exact supported numeric type instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
-            if (type is null)
-                type = value.Type;
-            else if (type != value.Type)
-                Refuse(diagnostics, "GW-SEM-TYPE-003", "Element-set values require one exact type; split the set or use a typed projection instead.", path);
+            }
+            if (value.Type != type)
+            {
+                Refuse(diagnostics, "GW-SEM-TYPE-005", "Element-set values must exactly match the set's declared type; use a typed projection instead.", path + ".values[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                continue;
+            }
         }
     }
 
@@ -203,7 +215,7 @@ public static class PortableQuerySemantics
     private static bool IsRefusedTextComparison(QueryStringComparisonPolicy policy) => policy != QueryStringComparisonPolicy.Ordinal;
 
     private static bool IsOrderable(QueryType type) => type is
-        QueryType.Boolean or QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or QueryType.DateTimeOffset or QueryType.Guid;
+        QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or QueryType.DateTimeOffset or QueryType.Guid;
 
     private static void Refuse(ICollection<PortableSemanticDiagnostic> diagnostics, string code, string message, string path) =>
         diagnostics.Add(new PortableSemanticDiagnostic(code, message, path));
@@ -228,9 +240,9 @@ public static class PortableQuerySemantics
                 var actual = GetValue(range.Column, row);
                 if (actual is null)
                     return false;
-                if (range.Lower is not null && !CompareBound(range.Column, actual, range.Lower))
+                if (range.Lower is not null && !CompareBound(range.Column, actual, range.Lower, isLower: true))
                     return false;
-                return range.Upper is null || CompareBound(range.Column, actual, range.Upper);
+                return range.Upper is null || CompareBound(range.Column, actual, range.Upper, isLower: false);
             }
             case Predicate.StartsWith startsWith:
             {
@@ -250,7 +262,8 @@ public static class PortableQuerySemantics
             }
             case Predicate.ElementOf elementOf:
             {
-                var elements = GetElements(elementOf.Set.Name, row);
+                if (!TryGetElements(elementOf.Set, row, out var elements))
+                    return false;
                 return elementOf.Quantifier == SetQuantifier.Any
                     ? elements.Any(element => elementOf.Values.Any(value => CompareUntyped(element, value)))
                     : elementOf.Values.All(value => elements.Any(element => CompareUntyped(element, value)));
@@ -303,15 +316,24 @@ public static class PortableQuerySemantics
         _ => false
     };
 
-    private static IEnumerable<object?> GetElements(string name, IReadOnlyDictionary<string, object?> row)
+    private static bool TryGetElements(ElementSetRef set, IReadOnlyDictionary<string, object?> row, out IReadOnlyList<object?> elements)
     {
-        if (!row.TryGetValue(name, out var value) || value is null)
-            return Array.Empty<object?>();
-        if (value is string or byte[])
-            return new[] { value };
-        if (value is IEnumerable enumerable)
-            return enumerable.Cast<object?>().ToArray();
-        return new[] { value };
+        elements = Array.Empty<object?>();
+        if (set.Type is not QueryType type)
+            return false;
+        if (!row.TryGetValue(set.Name, out var value) || value is null)
+            return true;
+
+        var candidate = value is string or byte[]
+            ? new[] { (object?)value }
+            : value is IEnumerable enumerable
+                ? enumerable.Cast<object?>().ToArray()
+                : new[] { value };
+        if (candidate.Any(element => element is not null && !IsExactRuntimeType(type, element)))
+            return false;
+
+        elements = candidate;
+        return true;
     }
 
     private static bool CompareEqual(ColumnRef column, object? actual, QueryConstant expected)
@@ -342,14 +364,18 @@ public static class PortableQuerySemantics
         return Equals(actual, expected.Value);
     }
 
-    private static bool CompareBound(ColumnRef column, object actual, Bound bound)
+    private static bool CompareBound(ColumnRef column, object actual, Bound bound, bool isLower)
     {
         if (column.Type == QueryType.Binary)
             return false;
         if (bound.Value.Kind == QueryConstantKind.Null || bound.Value.Value is null)
             return false;
         var comparison = CompareValues(column, actual, bound.Value.Value);
-        return comparison is int value && (bound.IsInclusive ? value >= 0 : value > 0);
+        if (comparison is not int value)
+            return false;
+        if (isLower)
+            return bound.IsInclusive ? value >= 0 : value > 0;
+        return bound.IsInclusive ? value <= 0 : value < 0;
     }
 
     private static int? CompareValues(ColumnRef column, object left, object right)

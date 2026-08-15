@@ -19,7 +19,7 @@ public static class PredicateCanonicalizer
             Predicate.Range range => "range(" + Column(range.Column) + "," + Bound(range.Lower, includeValues) + "," + Bound(range.Upper, includeValues) + ")",
             Predicate.StartsWith startsWith => "starts(" + Column(startsWith.Column) + "," + String(startsWith.Prefix, includeValues) + ")",
             Predicate.Substring substring => "substring(" + Column(substring.Column) + "," + substring.Anchor + "," + String(substring.Needle, includeValues) + ")",
-            Predicate.ElementOf elementOf => "element-of(" + Escape(elementOf.Set.Name) + "," + elementOf.Quantifier + "," + string.Join(",", elementOf.Values.Select(value => value.ToCanonicalString(includeValues))) + ")",
+            Predicate.ElementOf elementOf => "element-of(" + Escape(elementOf.Set.Name) + "," + (elementOf.Set.Type?.ToString() ?? "untyped") + "," + elementOf.Quantifier + "," + string.Join(",", elementOf.Values.Select(value => value.ToCanonicalString(includeValues))) + ")",
             Predicate.ColumnCompare compare => "column-compare(" + Column(compare.Left) + "," + compare.Op + "," + Column(compare.Right) + ")",
             Predicate.Not not => "not(" + ToCanonicalString(not.Inner, includeValues) + ")",
             Predicate.And and => "and(" + string.Join(",", and.Terms.Select(term => ToCanonicalString(term, includeValues))) + ")",

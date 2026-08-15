@@ -9,6 +9,7 @@ public sealed class Q2SemanticsTests
     private static readonly TableId Table = new("q2-row");
     private static readonly ColumnRef Text = new(Table, "text", QueryType.String);
     private static readonly ColumnRef Number = new(Table, "number", QueryType.Int32);
+    private static readonly ColumnRef Boolean = new(Table, "flag", QueryType.Boolean);
     private static readonly ColumnRef Decimal = new(Table, "amount", QueryType.Decimal, decimalPrecision: 18, decimalScale: 4);
     private static readonly ColumnRef Instant = new(Table, "instant", QueryType.DateTimeOffset);
     private static readonly ColumnRef Guid = new(Table, "guid", QueryType.Guid);
@@ -45,10 +46,26 @@ public sealed class Q2SemanticsTests
     }
 
     [Fact]
+    public void Range_evaluation_distinguishes_lower_and_upper_bounds_and_complements()
+    {
+        var range = new Predicate.Range(
+            Number,
+            Bound.Inclusive(QueryConstant.Of(Number, 1)),
+            Bound.Exclusive(QueryConstant.Of(Number, 10)));
+
+        Assert.True(PortableQuerySemantics.Evaluate(range, new Dictionary<string, object?> { [Number.Name] = 5 }));
+        Assert.False(PortableQuerySemantics.Evaluate(range, new Dictionary<string, object?> { [Number.Name] = 20 }));
+        Assert.False(PortableQuerySemantics.Evaluate(range, new Dictionary<string, object?> { [Number.Name] = null }));
+        Assert.False(PortableQuerySemantics.Evaluate(new Predicate.Not(range), new Dictionary<string, object?> { [Number.Name] = 5 }));
+        Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(range), new Dictionary<string, object?> { [Number.Name] = 20 }));
+        Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(range), new Dictionary<string, object?> { [Number.Name] = null }));
+    }
+
+    [Fact]
     public void ElementOf_complement_includes_an_empty_owner()
     {
         var any = new Predicate.ElementOf(
-            new ElementSetRef("tags"),
+            new ElementSetRef("tags", QueryType.String),
             [QueryConstant.Of("red")],
             SetQuantifier.Any);
         var complement = new Predicate.Not(any);
@@ -57,6 +74,38 @@ public sealed class Q2SemanticsTests
         Assert.False(PortableQuerySemantics.Evaluate(any, new Dictionary<string, object?> { ["tags"] = Array.Empty<string>() }));
         Assert.True(PortableQuerySemantics.Evaluate(complement, new Dictionary<string, object?> { ["tags"] = Array.Empty<string>() }));
         Assert.True(PortableQuerySemantics.Evaluate(complement, new Dictionary<string, object?>()));
+    }
+
+    [Fact]
+    public void Element_sets_require_declared_and_exact_owner_types()
+    {
+        var untyped = new Predicate.ElementOf(
+            new ElementSetRef("tags"),
+            [QueryConstant.Of("red")],
+            SetQuantifier.Any);
+        var typed = new Predicate.ElementOf(
+            new ElementSetRef("tags", QueryType.String),
+            [QueryConstant.Of("red")],
+            SetQuantifier.Any);
+        var mismatchedValue = new Predicate.ElementOf(
+            new ElementSetRef("tags", QueryType.String),
+            [QueryConstant.Of(1)],
+            SetQuantifier.Any);
+        var doubleSet = new Predicate.ElementOf(
+            new ElementSetRef("ratios", QueryType.Double),
+            ImmutableArray<QueryConstant>.Empty,
+            SetQuantifier.Any);
+
+        Assert.Contains(PortableQuerySemantics.Validate(untyped).Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TYPE-007");
+        Assert.False(PortableQuerySemantics.Validate(untyped).IsPortable);
+        Assert.Contains(PortableQuerySemantics.Validate(mismatchedValue).Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TYPE-005");
+        Assert.False(PortableQuerySemantics.Validate(mismatchedValue).IsPortable);
+        Assert.Contains(PortableQuerySemantics.Validate(doubleSet).Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-TYPE-002");
+        Assert.False(PortableQuerySemantics.Validate(doubleSet).IsPortable);
+        Assert.True(PortableQuerySemantics.Validate(typed).IsPortable);
+        Assert.True(PortableQuerySemantics.Evaluate(typed, new Dictionary<string, object?> { ["tags"] = new[] { "red" } }));
+        Assert.False(PortableQuerySemantics.Evaluate(typed, new Dictionary<string, object?> { ["tags"] = new[] { 1 } }));
+        Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(typed), new Dictionary<string, object?> { ["tags"] = new[] { 1 } }));
     }
 
     [Fact]
@@ -91,7 +140,7 @@ public sealed class Q2SemanticsTests
         var equal = new Predicate.Equal(Number, QueryConstant.Of(Number, 5));
         var conjunction = new Predicate.And([Predicate.AlwaysTrue.Instance, equal]);
         var disjunction = new Predicate.Or([Predicate.AlwaysFalse.Instance, equal]);
-        var all = new Predicate.ElementOf(new ElementSetRef("tags"), [QueryConstant.Of("red"), QueryConstant.Of("blue")], SetQuantifier.All);
+        var all = new Predicate.ElementOf(new ElementSetRef("tags", QueryType.String), [QueryConstant.Of("red"), QueryConstant.Of("blue")], SetQuantifier.All);
 
         Assert.True(PortableQuerySemantics.Evaluate(Predicate.AlwaysTrue.Instance, new Dictionary<string, object?>()));
         Assert.False(PortableQuerySemantics.Evaluate(Predicate.AlwaysFalse.Instance, new Dictionary<string, object?>()));
@@ -111,6 +160,8 @@ public sealed class Q2SemanticsTests
         {
             new Predicate.ColumnCompare(Double, CompareOp.Equal, Double),
             new Predicate.Range(Binary, Bound.Inclusive(QueryConstant.Of(Binary, new byte[] { 1 })), null),
+            new Predicate.Range(Boolean, Bound.Inclusive(QueryConstant.Of(Boolean, true)), null),
+            new Predicate.ColumnCompare(Boolean, CompareOp.LessThan, Boolean),
             new Predicate.StartsWith(Text, "prefix"),
             new Predicate.Not(new Predicate.In(Number, [QueryConstant.Of(Number, 1)])),
             new Predicate.Equal(UnshapedDecimal, QueryConstant.Of(UnshapedDecimal, 1m))
@@ -242,10 +293,36 @@ public sealed class Q2SemanticsTests
     }
 
     [Fact]
+    public void Boolean_ordering_requires_an_explicit_three_state_projection()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Boolean, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.None);
+
+        var result = PortableQuerySemantics.Validate(request);
+
+        Assert.False(result.IsPortable);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GW-SEM-ORDER-005");
+        Assert.True(PortableQuerySemantics.Validate(new Predicate.Equal(Boolean, QueryConstant.Of(Boolean, true))).IsPortable);
+
+        var projectedKey = new ColumnRef(Table, "flagKey", QueryType.Int32, isNullable: false);
+        var projectedRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(projectedKey, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.None);
+        Assert.True(PortableQuerySemantics.Validate(projectedRequest).IsPortable);
+    }
+
+    [Fact]
     public void Refused_and_unknown_nodes_still_have_deterministic_boolean_evaluation()
     {
         var malformed = new Predicate.ElementOf(
-            new ElementSetRef("tags"),
+            new ElementSetRef("tags", QueryType.String),
             ImmutableArray.CreateRange(new[] { (QueryConstant)null! }),
             SetQuantifier.Any);
         var row = new Dictionary<string, object?> { ["tags"] = new[] { "value" } };
@@ -295,18 +372,18 @@ public sealed class Q2SemanticsTests
 
             var exercise = shape.Exercise();
             var result = PortableQuerySemantics.Validate(exercise.Request);
+            var row = new Dictionary<string, object?>
+            {
+                ["textSearch"] = "I",
+                ["numberValue"] = 1.2344m,
+                ["boolValue"] = true,
+                ["dateTicks"] = DateTimeOffset.UnixEpoch,
+                ["guidKey"] = System.Guid.Empty,
+                ["binaryValue"] = new byte[] { 0 }
+            };
             if (shape.Decision == Q1CorpusDecision.Normalize)
             {
                 Assert.True(result.IsPortable, $"{shape.Number}: {shape.Description}: {string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message))}");
-                _ = PortableQuerySemantics.Evaluate(exercise.Request.Where, new Dictionary<string, object?>
-                {
-                    ["textSearch"] = "I",
-                    ["numberValue"] = 1.2344m,
-                    ["boolValue"] = true,
-                    ["dateTicks"] = DateTimeOffset.UnixEpoch,
-                    ["guidKey"] = System.Guid.Empty,
-                    ["binaryValue"] = new byte[] { 0 }
-                });
             }
             else
             {
@@ -318,7 +395,15 @@ public sealed class Q2SemanticsTests
                     Assert.Contains("portable", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
                 });
             }
+            AssertDeterministicComplement(exercise.Request.Where, row);
         }
+    }
+
+    private static void AssertDeterministicComplement(Predicate predicate, IReadOnlyDictionary<string, object?> row)
+    {
+        var first = PortableQuerySemantics.Evaluate(predicate, row);
+        Assert.Equal(first, PortableQuerySemantics.Evaluate(predicate, row));
+        Assert.NotEqual(first, PortableQuerySemantics.Evaluate(new Predicate.Not(predicate), row));
     }
 
     private sealed record UnknownPredicate : Predicate;

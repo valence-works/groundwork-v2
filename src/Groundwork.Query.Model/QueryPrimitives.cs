@@ -378,7 +378,16 @@ public sealed record ElementSetRef
         Name = name;
     }
 
+    public ElementSetRef(string name, QueryType type)
+        : this(name)
+    {
+        if (!Enum.IsDefined(typeof(QueryType), type))
+            throw new ArgumentOutOfRangeException(nameof(type));
+        Type = type;
+    }
+
     public string Name { get; }
+    public QueryType? Type { get; }
 }
 
 public enum SetQuantifier
