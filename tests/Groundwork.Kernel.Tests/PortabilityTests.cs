@@ -54,6 +54,8 @@ public sealed class PortabilityTests
     [InlineData(19, 9)]
     [InlineData(20, 13)]
     [InlineData(28, 13)]
+    [InlineData(29, 17)]
+    [InlineData(38, 17)]
     public void Decimal_precision_ranges_use_pinned_sql_server_key_widths(int precision, int expectedBytes)
     {
         var maxLengthAtLimit = (1699 - expectedBytes) / 2;
@@ -69,6 +71,22 @@ public sealed class PortabilityTests
         Assert.DoesNotContain(atLimit.Refusals, refusal => refusal.Code == "GW-PORT-004");
         Assert.Contains(overLimit.Refusals, refusal => refusal.Code == "GW-PORT-004" &&
             refusal.Message.Contains((1701).ToString(), StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(39)]
+    public void Decimal_precision_outside_calculable_range_fails_closed(int precision)
+    {
+        var result = Validate(Unit([
+            Column("amount", PortableType.Decimal, nullable: false, precision: precision, scale: 0)
+        ], indexes: [Index("by-amount", "amount")]));
+
+        var diagnostic = Assert.Single(result.Refusals, refusal => refusal.Code == "GW-PORT-004");
+        Assert.Contains("amount", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains($"precision {precision}", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("supported range 1-38", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -132,10 +150,10 @@ public sealed class PortabilityTests
     [InlineData(PortableType.Int32, true)]
     [InlineData(PortableType.Int64, true)]
     [InlineData(PortableType.Decimal, true)]
-    [InlineData(PortableType.Boolean, true)]
+    [InlineData(PortableType.Boolean, false)]
     [InlineData(PortableType.DateTimeOffset, true)]
-    [InlineData(PortableType.Guid, true)]
-    [InlineData(PortableType.Binary, true)]
+    [InlineData(PortableType.Guid, false)]
+    [InlineData(PortableType.Binary, false)]
     [InlineData(PortableType.Json, false)]
     public void Retention_orderability_is_explicit_for_each_portable_type(PortableType type, bool isOrderable)
     {
@@ -163,22 +181,18 @@ public sealed class PortabilityTests
     }
 
     [Fact]
-    public void All_three_invocation_seams_delegate_to_the_same_diagnostic_contract()
+    public void All_three_invocation_seams_match_for_each_portability_rule()
     {
-        var unit = Unit([
-            Column("amount", PortableType.Decimal),
-            Column("name", PortableType.String)
-        ],
-            indexes: [Index("ux-name", "name", unique: true)]);
-        var context = new PortabilityValidationContext(["mongodb"]);
+        foreach (var fixture in RuleFixtures())
+        {
+            var direct = PortabilityValidator.Validate(fixture.Unit, fixture.Context);
+            var expected = Wire(direct);
 
-        var builder = BuilderPortabilityValidation.Validate(unit, context);
-        var manifest = ManifestPortabilityValidation.Validate(unit, context);
-        var schemaTarget = SchemaTargetPortabilityValidation.Validate(unit, context);
-
-        var expected = builder.Refusals.Select(ToWire).ToArray();
-        Assert.Equal(expected, manifest.Refusals.Select(ToWire));
-        Assert.Equal(expected, schemaTarget.Refusals.Select(ToWire));
+            Assert.Equal(new[] { fixture.Code }, direct.Refusals.Select(refusal => refusal.Code));
+            Assert.Equal(expected, Wire(BuilderPortabilityValidation.Validate(fixture.Unit, fixture.Context)));
+            Assert.Equal(expected, Wire(ManifestPortabilityValidation.Validate(fixture.Unit, fixture.Context)));
+            Assert.Equal(expected, Wire(SchemaTargetPortabilityValidation.Validate(fixture.Unit, fixture.Context)));
+        }
     }
 
     private static PortabilityValidationResult Validate(StorageUnit unit, PortabilityValidationContext? context = null) =>
@@ -186,6 +200,56 @@ public sealed class PortabilityTests
 
     private static string ToWire(PortabilityRefusal diagnostic) =>
         diagnostic.Code + "|" + diagnostic.Path + "|" + diagnostic.Message;
+
+    private static string[] Wire(PortabilityValidationResult result) =>
+        result.Refusals.Select(ToWire).ToArray();
+
+    private static IEnumerable<PortabilityRuleFixture> RuleFixtures() =>
+    [
+        new(
+            "GW-PORT-001",
+            Unit([
+                Column("id", PortableType.Guid, nullable: false),
+                Column("email", PortableType.String, maxLength: 320)
+            ], indexes: [Index("ux-email", "email", unique: true)])),
+        new(
+            "GW-PORT-002",
+            Unit([Column("amount", PortableType.Decimal)])),
+        new(
+            "GW-PORT-003",
+            Unit([Column("name", PortableType.String)], indexes: [Index("ix-name", "name")])),
+        new(
+            "GW-PORT-004",
+            Unit(
+                [Column("name", PortableType.String, nullable: false, maxLength: 851)],
+                indexes: [Index("ix-name", "name")])),
+        new(
+            "GW-PORT-005",
+            Unit([Column("sequence", PortableType.Int32, generation: ColumnGeneration.ProviderSequence)])),
+        new(
+            "GW-PORT-006",
+            Unit([Column("name", PortableType.String, collation: (PortableCollation)99)])),
+        new(
+            "GW-PORT-007",
+            Unit([Column("active", PortableType.Boolean, nullable: false)]),
+            new PortabilityValidationContext(retention: new RetentionDeclaration("active"))),
+        new(
+            "GW-PORT-008",
+            Unit(
+                [
+                    Column("tenant", PortableType.String, nullable: false, maxLength: 64),
+                    Column("id", PortableType.Guid, nullable: false)
+                ],
+                key: ["tenant", "id"]),
+            new PortabilityValidationContext(
+                ["mongodb"],
+                priorAppliedMongoCompositeKeyOrder: ["id", "tenant"]))
+    ];
+
+    private sealed record PortabilityRuleFixture(
+        string Code,
+        StorageUnit Unit,
+        PortabilityValidationContext? Context = null);
 
     private static void AssertCode(PortabilityValidationResult result, string code, string detail)
     {

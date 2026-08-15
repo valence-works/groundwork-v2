@@ -50,6 +50,9 @@ public static class PortabilityValidator
 {
     public const int StrictIndexKeyByteBudget = 1700;
 
+    private const int MinimumPortableDecimalPrecision = 1;
+    private const int MaximumPortableDecimalPrecision = 38;
+
     public static PortabilityValidationResult Validate(
         StorageUnit? unit,
         PortabilityValidationContext? context = null)
@@ -195,10 +198,26 @@ public static class PortabilityValidator
             var canCalculate = true;
             foreach (var indexColumn in (index.Columns ?? []).Where(column => column is not null))
             {
-                if (indexColumn.Column is null ||
-                    !byName.TryGetValue(indexColumn.Column, out var column) ||
-                    !TryGetKeyBytes(column, out var width, out var formula))
+                if (indexColumn.Column is null || !byName.TryGetValue(indexColumn.Column, out var column))
                 {
+                    canCalculate = false;
+                    break;
+                }
+
+                if (!TryGetKeyBytes(column, out var width, out var formula))
+                {
+                    if (column.Type == PortableType.Decimal &&
+                        column.Precision is int precision &&
+                        (precision < MinimumPortableDecimalPrecision || precision > MaximumPortableDecimalPrecision))
+                    {
+                        diagnostics.Add(new(
+                            "GW-PORT-004",
+                            $"Index '{index.Name}' cannot calculate key width for decimal column '{column.Name}': " +
+                            $"precision {precision} is outside supported range {MinimumPortableDecimalPrecision}-{MaximumPortableDecimalPrecision}; " +
+                            "SQL Server decimal storage tiers are 5/9/13/17 bytes and the strict portable budget is 1700 bytes.",
+                            $"indexes.{index.Name}"));
+                    }
+
                     canCalculate = false;
                     break;
                 }
@@ -252,6 +271,10 @@ public static class PortabilityValidator
             case PortableType.Decimal when column.Precision is >= 20 and <= 28:
                 bytes = 13;
                 formula = $"{column.Name}=13(decimal precision {column.Precision})";
+                return true;
+            case PortableType.Decimal when column.Precision is >= 29 and <= 38:
+                bytes = 17;
+                formula = $"{column.Name}=17(decimal precision {column.Precision})";
                 return true;
             case PortableType.Boolean:
                 bytes = 1;
@@ -313,7 +336,7 @@ public static class PortabilityValidator
             return;
 
         var name = retention.OrderColumn ?? string.Empty;
-        if (!byName.TryGetValue(name, out var column) || column.IsNullable || column.Type == PortableType.Json)
+        if (!byName.TryGetValue(name, out var column) || column.IsNullable || !IsRetentionOrderable(column.Type))
         {
             diagnostics.Add(new(
                 "GW-PORT-007",
@@ -321,6 +344,15 @@ public static class PortabilityValidator
                 $"retention.{name}"));
         }
     }
+
+    // Keep retention orderability aligned with #230's portable encoded order keys. Native
+    // Boolean, Guid, Binary, and Json ordering waits for an explicit canonical derived projection.
+    private static bool IsRetentionOrderable(PortableType type) =>
+        type is PortableType.String or
+            PortableType.Int32 or
+            PortableType.Int64 or
+            PortableType.Decimal or
+            PortableType.DateTimeOffset;
 
     private static void ValidateMongoKeyOrder(
         StorageUnit unit,
