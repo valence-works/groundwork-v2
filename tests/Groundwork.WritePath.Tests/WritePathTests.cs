@@ -279,6 +279,12 @@ public sealed class WritePathTests
             Assert.DoesNotContain("first", commandText, StringComparison.Ordinal);
             Assert.DoesNotContain("one", commandText, StringComparison.Ordinal);
         }
+        if (provider == "sqlserver")
+        {
+            var commandText = Assert.Single(firstObserver.Commands).CommandText;
+            Assert.Contains("BEGIN TRANSACTION", commandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("COMMIT TRANSACTION", commandText, StringComparison.OrdinalIgnoreCase);
+        }
         Assert.DoesNotContain(firstObserver.Commands, command =>
             command.CommandText?.Contains("SELECT FOR UPDATE", StringComparison.OrdinalIgnoreCase) == true);
         if (provider is "sqlite" or "postgresql")

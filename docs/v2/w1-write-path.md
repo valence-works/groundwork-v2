@@ -6,6 +6,11 @@ single statement/command without a shared pre-read. The `WritePathObserver` is a
 proof seam for counting that command; observer descriptions are intentionally
 redacted diagnostic labels, not replayable command logs.
 
+SQL Server keeps its serializable range-lock transaction inside the submitted
+batch when the caller has not supplied a transaction. This preserves the lock
+across the conditional update and insert without adding client-side begin/commit
+round trips.
+
 ## Outcome and detail
 
 `WriteOutcome.Status` is the immediate result. A provider can return the

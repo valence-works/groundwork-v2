@@ -234,14 +234,19 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         if (string.IsNullOrWhiteSpace(reportedName))
             return reportedName;
 
-        // SQLite reports the table/column tuple rather than the named index. Match
-        // that tuple to the declared unique index and return the logical declaration.
-        return Unit.Indexes.FirstOrDefault(index =>
+        // SQLite reports the exact table/column tuple rather than the named index.
+        // Compare the complete logical tuple: a prefix match could otherwise report
+        // the wrong declaration when both (a) and (a,b) are unique.
+        var reportedColumns = reportedName.Split(',')
+            .Select(part => part.Trim().Trim('"', '\'', '[', ']', '(', ')', '.'))
+            .Select(part => part[(part.LastIndexOf('.') + 1)..].Trim('"', '\'', '[', ']'))
+            .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal))
+            .ToArray();
+        var matches = Unit.Indexes.Where(index =>
             index.IsUnique &&
-            reportedName.Contains(Unit.Name, StringComparison.Ordinal) &&
-            index.Columns.All(column =>
-                reportedName.Contains("." + column.Column, StringComparison.Ordinal)))?.Name
-            ?? reportedName;
+            index.Columns.Select(column => column.Column).SequenceEqual(reportedColumns, StringComparer.Ordinal))
+            .ToArray();
+        return matches.Length == 1 ? matches[0].Name : reportedName;
     }
 
     private WriteOutcome Upsert(
