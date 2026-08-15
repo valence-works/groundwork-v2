@@ -72,6 +72,10 @@ public sealed record Paging
     public static Paging None { get; } = new(null, null, null);
 
     public static Paging OffsetLimit(int offset, int limit) => new(offset, limit, null);
+
+    /// <summary>Starts a keyset page without an offset; a continuation can be supplied for later pages.</summary>
+    public static Paging Keyset(int limit) => new(null, limit, null);
+
     public static Paging Continuation(string token, int? limit = null)
     {
         if (string.IsNullOrWhiteSpace(token))

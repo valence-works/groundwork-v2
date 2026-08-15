@@ -1,0 +1,289 @@
+using Groundwork.Query.Model;
+using MongoDB.Bson;
+
+namespace Groundwork.MongoDb;
+
+/// <summary>MongoDB's one native renderer for the normalized v2 query contract.</summary>
+public sealed class MongoQueryRenderer
+{
+    private const string MatchNoneField = "_groundwork_match_none";
+
+    public MongoQueryCommand Render(QueryRequest request, QueryRenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        options ??= QueryRenderOptions.Default;
+        if (options.InValueLimit <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
+
+        var validation = PortableQuerySemantics.Validate(request);
+        if (!validation.IsPortable)
+        {
+            var refusal = validation.Refusals[0];
+            throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
+        }
+        if (request.LatestPerKey is not null)
+            throw new QueryRenderException("GW-QUERY-030", "Latest-per-key rendering is not part of the normalized Mongo query command yet.");
+
+        var order = EffectiveOrder(request, options);
+        var filter = RenderPredicate(request.Where, options.InValueLimit, request.Table.Value);
+        var matchNone = request.Where is Predicate.AlwaysFalse;
+        if (request.Paging.ContinuationToken is not null)
+        {
+            if (order.Count == 0)
+                throw new QueryRenderException("GW-QUERY-013", "Keyset continuation requires an explicit ordered query.");
+            IReadOnlyList<QueryConstant> cursor;
+            try
+            {
+                cursor = QueryContinuationToken.Decode(request.Paging.ContinuationToken, order.Select(term => term.Column).ToArray());
+            }
+            catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
+            {
+                throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
+            }
+            filter = And(filter, RenderContinuation(order, cursor));
+        }
+
+        var selectedIndex = options.FindPinnedIndex();
+        if (selectedIndex is not null && !matchNone && !selectedIndex.IncludesNulls)
+        {
+            var unproven = selectedIndex.Columns
+                .Where(column => selectedIndex.NullableColumns.Contains(column) && CanMatchNull(request.Where, column))
+                .ToArray();
+            if (unproven.Length != 0)
+                throw new QueryRenderException(
+                    "GW-QUERY-009",
+                    $"Query on '{request.Table.Value}' can match null values in sparse pinned index column(s) " +
+                    $"{string.Join(", ", unproven)}; the declaration must include nulls or use an unpinned index.");
+        }
+
+        var projection = request.Projection.AllColumns
+            ? new BsonDocument()
+            : new BsonDocument(request.Projection.Columns.ToDictionary(column => column.Name, _ => (BsonValue)1));
+        var sort = new BsonDocument(order.Select(term =>
+            new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1)));
+        var pipeline = RenderPipeline(filter, order, projection, request.Paging, request.Result.IncludesTotalCount);
+        if (order.Count != 0)
+            sort = pipeline.First(stage => stage.Contains("$sort"))["$sort"].AsBsonDocument;
+
+        return new MongoQueryCommand(
+            filter,
+            sort,
+            projection,
+            request.Paging.Offset,
+            request.Paging.Limit,
+            selectedIndex?.Name,
+            request.Result.IncludesTotalCount,
+            matchNone,
+            order.Select(term => term.Column.Name).ToArray(),
+            pipeline);
+    }
+
+    private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options)
+    {
+        var terms = request.Order.ToList();
+        foreach (var tieBreak in options.TieBreakColumns)
+        {
+            if (terms.Any(term => string.Equals(term.Column.Name, tieBreak.Name, StringComparison.Ordinal)))
+                continue;
+            terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
+        }
+        return terms;
+    }
+
+    private static BsonDocument RenderPredicate(Predicate predicate, int inValueLimit, string table)
+    {
+        switch (predicate)
+        {
+            case Predicate.AlwaysTrue:
+                return new BsonDocument();
+            case Predicate.AlwaysFalse:
+                return MatchNone();
+            case Predicate.Equal equal:
+                return new BsonDocument(equal.Column.Name, ToBson(equal.Value));
+            case Predicate.In membership:
+                if (membership.Values.Distinct().Count() > inValueLimit)
+                    throw new QueryRenderException(
+                        "GW-QUERY-015",
+                        $"Query on '{table}' has an In predicate on '{membership.Column.Name}' with " +
+                        $"{membership.Values.Distinct().Count()} distinct values, exceeding the configured maximum of {inValueLimit}.");
+                return membership.Values.Length == 0
+                    ? MatchNone()
+                    : new BsonDocument(membership.Column.Name, new BsonDocument("$in", new BsonArray(membership.Values.Select(ToBson))));
+            case Predicate.Range range:
+            {
+                var operators = new BsonDocument();
+                if (range.Lower is not null)
+                    operators.Add(range.Lower.IsInclusive ? "$gte" : "$gt", ToBson(range.Lower.Value));
+                if (range.Upper is not null)
+                    operators.Add(range.Upper.IsInclusive ? "$lte" : "$lt", ToBson(range.Upper.Value));
+                return new BsonDocument(range.Column.Name, operators);
+            }
+            case Predicate.ColumnCompare compare:
+                return new BsonDocument("$expr", new BsonDocument(
+                    compare.Op switch
+                    {
+                        CompareOp.Equal => "$eq",
+                        CompareOp.NotEqual => "$ne",
+                        CompareOp.LessThan => "$lt",
+                        CompareOp.LessThanOrEqual => "$lte",
+                        CompareOp.GreaterThan => "$gt",
+                        CompareOp.GreaterThanOrEqual => "$gte",
+                        _ => throw new ArgumentOutOfRangeException(nameof(compare.Op), compare.Op, null)
+                    },
+                    new BsonArray { "$" + compare.Left.Name, "$" + compare.Right.Name }));
+            case Predicate.Not not:
+                return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, inValueLimit, table) });
+            case Predicate.And and:
+                return and.Terms.Length == 0
+                    ? new BsonDocument()
+                    : new BsonDocument("$and", new BsonArray(and.Terms.Select(term => RenderPredicate(term, inValueLimit, table))));
+            case Predicate.Or or:
+                return or.Terms.Length == 0
+                    ? MatchNone()
+                    : new BsonDocument("$or", new BsonArray(or.Terms.Select(term => RenderPredicate(term, inValueLimit, table))));
+            case Predicate.StartsWith:
+            case Predicate.Substring:
+            case Predicate.ElementOf:
+                throw new QueryRenderException("GW-QUERY-030", "This normalized predicate requires a provider-independent persisted projection and cannot be rendered directly.");
+            default:
+                throw new QueryRenderException("GW-QUERY-030", "The predicate node is outside the closed native query surface.");
+        }
+    }
+
+    private static BsonDocument RenderContinuation(IReadOnlyList<OrderTerm> order, IReadOnlyList<QueryConstant> cursor)
+    {
+        var alternatives = new List<BsonDocument>();
+        for (var boundary = 0; boundary < order.Count; boundary++)
+        {
+            var conjunction = new List<BsonDocument>();
+            for (var prefix = 0; prefix < boundary; prefix++)
+                conjunction.Add(new BsonDocument(order[prefix].Column.Name, ToBson(cursor[prefix])));
+            conjunction.Add(RenderAfter(order[boundary], cursor[boundary]));
+            alternatives.Add(conjunction.Count == 1
+                ? conjunction[0]
+                : new BsonDocument("$and", new BsonArray(conjunction)));
+        }
+        return alternatives.Count == 1
+            ? alternatives[0]
+            : new BsonDocument("$or", new BsonArray(alternatives));
+    }
+
+    private static BsonDocument RenderAfter(OrderTerm term, QueryConstant value)
+    {
+        if (term.NullOrder is not (NullOrder.First or NullOrder.Last))
+            throw new QueryRenderException("GW-SEM-ORDER-004", "Continuation requires explicit null ordering.");
+        if (value.Kind == QueryConstantKind.Null)
+            return term.NullOrder == NullOrder.First
+                ? new BsonDocument(term.Column.Name, new BsonDocument("$ne", BsonNull.Value))
+                : MatchNone();
+
+        var strict = new BsonDocument(term.Column.Name, new BsonDocument(
+            term.Direction == OrderDirection.Ascending ? "$gt" : "$lt", ToBson(value)));
+        if (term.NullOrder == NullOrder.Last)
+            return new BsonDocument("$or", new BsonArray
+            {
+                strict,
+                new BsonDocument(term.Column.Name, BsonNull.Value)
+            });
+        return strict;
+    }
+
+    private static BsonValue ToBson(QueryConstant value)
+    {
+        if (value.Kind == QueryConstantKind.Null)
+            return BsonNull.Value;
+        return value.Type switch
+        {
+            QueryType.Boolean => new BsonBoolean((bool)value.Value!),
+            QueryType.Int32 => new BsonInt32((int)value.Value!),
+            QueryType.Int64 => new BsonInt64((long)value.Value!),
+            QueryType.Decimal => new BsonDecimal128((decimal)value.Value!),
+            QueryType.Double => new BsonDouble((double)value.Value!),
+            QueryType.String => new BsonString((string)value.Value!),
+            QueryType.DateTimeOffset => new BsonDateTime(((DateTimeOffset)value.Value!).UtcDateTime),
+            QueryType.Guid => new BsonBinaryData((Guid)value.Value!, GuidRepresentation.Standard),
+            QueryType.Binary => new BsonBinaryData((byte[])value.Value!),
+            _ => throw new ArgumentOutOfRangeException(nameof(value), value.Type, null)
+        };
+    }
+
+    private static BsonDocument MatchNone() => new(MatchNoneField, true);
+
+    private static IReadOnlyList<BsonDocument> RenderPipeline(
+        BsonDocument filter,
+        IReadOnlyList<OrderTerm> order,
+        BsonDocument projection,
+        Paging paging,
+        bool includesTotalCount)
+    {
+        if (order.Count == 0 && !includesTotalCount)
+            return Array.Empty<BsonDocument>();
+
+        var stages = new List<BsonDocument> { new("$match", filter.DeepClone()) };
+        var sort = new BsonDocument();
+        for (var index = 0; index < order.Count; index++)
+        {
+            var term = order[index];
+            if (term.NullOrder is not (NullOrder.First or NullOrder.Last))
+                throw new QueryRenderException("GW-SEM-ORDER-004", "Mongo aggregation ordering requires explicit null ordering.");
+
+            var rankName = "_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var nullRank = term.NullOrder == NullOrder.First ? 0 : 1;
+            var nonNullRank = term.NullOrder == NullOrder.First ? 1 : 0;
+            stages.Add(new BsonDocument("$set", new BsonDocument(rankName,
+                new BsonDocument("$cond", new BsonArray
+                {
+                    new BsonDocument("$eq", new BsonArray { "$" + term.Column.Name, BsonNull.Value }),
+                    nullRank,
+                    nonNullRank
+                }))));
+            sort.Add(rankName, 1);
+            sort.Add(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1);
+        }
+
+        if (includesTotalCount)
+        {
+            stages.Add(new BsonDocument("$setWindowFields", new BsonDocument("output",
+                new BsonDocument("__groundwork_total_count", new BsonDocument("$count", new BsonDocument())))));
+        }
+        if (sort.ElementCount != 0)
+            stages.Add(new BsonDocument("$sort", sort));
+        if (!projection.Equals(new BsonDocument()))
+            stages.Add(new BsonDocument("$project", projection));
+        if (paging.Offset is int offset)
+            stages.Add(new BsonDocument("$skip", offset));
+        if (paging.Limit is int limit)
+            stages.Add(new BsonDocument("$limit", limit));
+        return stages;
+    }
+
+    private static BsonDocument And(BsonDocument left, BsonDocument right) =>
+        new("$and", new BsonArray { left, right });
+
+    private static bool CanMatchNull(Predicate predicate, string column)
+    {
+        switch (predicate)
+        {
+            case Predicate.AlwaysFalse:
+                return false;
+            case Predicate.AlwaysTrue:
+                return true;
+            case Predicate.Equal equal when equal.Column.Name == column:
+                return equal.Value.Kind == QueryConstantKind.Null;
+            case Predicate.In membership when membership.Column.Name == column:
+                return membership.Values.Any(value => value.Kind == QueryConstantKind.Null);
+            case Predicate.Range range when range.Column.Name == column:
+                return false;
+            case Predicate.ColumnCompare compare when compare.Left.Name == column || compare.Right.Name == column:
+                return false;
+            case Predicate.Not not:
+                return !CanMatchNull(not.Inner, column);
+            case Predicate.And and:
+                return and.Terms.All(term => CanMatchNull(term, column));
+            case Predicate.Or or:
+                return or.Terms.Any(term => CanMatchNull(term, column));
+            default:
+                return true;
+        }
+    }
+}

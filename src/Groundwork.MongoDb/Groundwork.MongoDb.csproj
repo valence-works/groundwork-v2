@@ -12,6 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../Groundwork.Substrate.Mongo/Groundwork.Substrate.Mongo.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </ItemGroup>
 
 </Project>
