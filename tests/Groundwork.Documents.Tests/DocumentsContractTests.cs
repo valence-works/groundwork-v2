@@ -1,6 +1,8 @@
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Groundwork.Documents;
 using Groundwork.Documents.Serialization;
 using Groundwork.Kernel;
@@ -182,6 +184,104 @@ public sealed class DocumentsContractTests
             Name = "included"
         })[Assert.Single(explicitlyIncluded.Bindings).Column]);
     }
+
+    [Fact]
+    public void Conditional_and_read_only_ignore_policies_are_refused_for_selected_members()
+    {
+        var global = new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault
+        };
+        Assert.Contains(
+            Assert.Throws<DocumentDeclarationException>(() =>
+                DocumentUnit.For<EnumDocument>("conditional", "global_ignore")
+                    .JsonOptions(global)
+                    .Id(document => document.Id)
+                    .Project(document => document.Status)
+                    .Build()).Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DOC-DECL-009" && diagnostic.Message.Contains("Remove the conditional ignore", StringComparison.Ordinal));
+
+        Assert.Contains(
+            Assert.Throws<DocumentDeclarationException>(() =>
+                DocumentUnit.For<ConditionalDocument>("conditional", "member_ignore")
+                    .Id(document => document.Id)
+                    .Project(document => document.Rank)
+                    .Build()).Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DOC-DECL-009");
+
+        Assert.Contains(
+            Assert.Throws<DocumentDeclarationException>(() =>
+                DocumentUnit.For<ReadOnlyDocument>("readonly", "readonly_property")
+                    .JsonOptions(new JsonSerializerOptions { IgnoreReadOnlyProperties = true })
+                    .Id(document => document.Id)
+                    .Project(document => document.Name)
+                    .Build()).Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DOC-DECL-009" && diagnostic.Message.Contains("IgnoreReadOnly", StringComparison.Ordinal));
+
+        Assert.Contains(
+            Assert.Throws<DocumentDeclarationException>(() =>
+                DocumentUnit.For<ReadOnlyFieldDocument>("readonly", "readonly_field")
+                    .JsonOptions(new JsonSerializerOptions { IncludeFields = true, IgnoreReadOnlyFields = true })
+                    .Id(document => document.Id)
+                    .Project(document => document.Name)
+                    .Build()).Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DOC-DECL-009");
+    }
+
+    [Fact]
+    public void Custom_json_metadata_controls_paths_and_cannot_hide_selected_members()
+    {
+        var renameResolver = new DefaultJsonTypeInfoResolver();
+        renameResolver.Modifiers.Add(typeInfo =>
+        {
+            if (typeInfo.Type == typeof(Invoice))
+                Property(typeInfo, nameof(Invoice.Customer)).Name = "client";
+            if (typeInfo.Type == typeof(Customer))
+                Property(typeInfo, nameof(Customer.Name)).Name = "label";
+        });
+        var renamed = DocumentUnit.For<Invoice>("invoice", "metadata_rename")
+            .JsonOptions(new JsonSerializerOptions { TypeInfoResolver = renameResolver })
+            .Id(document => document.Id)
+            .Project(document => document.Customer.Name)
+            .Build();
+        var row = renamed.ToRowValues(new Invoice(Guid.NewGuid(), new Customer("Ada", null), 1m, []));
+
+        Assert.Equal("client.label", Assert.Single(renamed.Bindings).Path);
+        Assert.Equal("Ada", row[Assert.Single(renamed.Bindings).Column]);
+
+        var removalResolver = new DefaultJsonTypeInfoResolver();
+        removalResolver.Modifiers.Add(typeInfo =>
+        {
+            if (typeInfo.Type == typeof(Customer))
+                typeInfo.Properties.Remove(Property(typeInfo, nameof(Customer.Name)));
+        });
+        Assert.Contains(
+            Assert.Throws<DocumentDeclarationException>(() =>
+                DocumentUnit.For<Invoice>("invoice", "metadata_removal")
+                    .JsonOptions(new JsonSerializerOptions { TypeInfoResolver = removalResolver })
+                    .Id(document => document.Id)
+                    .Project(document => document.Customer.Name)
+                    .Build()).Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DOC-DECL-009");
+
+        var conditionalResolver = new DefaultJsonTypeInfoResolver();
+        conditionalResolver.Modifiers.Add(typeInfo =>
+        {
+            if (typeInfo.Type == typeof(Customer))
+                Property(typeInfo, nameof(Customer.Name)).ShouldSerialize = static (_, _) => false;
+        });
+        Assert.Contains(
+            Assert.Throws<DocumentDeclarationException>(() =>
+                DocumentUnit.For<Invoice>("invoice", "metadata_condition")
+                    .JsonOptions(new JsonSerializerOptions { TypeInfoResolver = conditionalResolver })
+                    .Id(document => document.Id)
+                    .Project(document => document.Customer.Name)
+                    .Build()).Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DOC-DECL-009" && diagnostic.Message.Contains("ShouldSerialize", StringComparison.Ordinal));
+    }
+
+    private static JsonPropertyInfo Property(JsonTypeInfo typeInfo, string memberName) =>
+        typeInfo.Properties.Single(property => property.AttributeProvider is MemberInfo member && member.Name == memberName);
 
     [Fact]
     public void Generic_and_property_enum_converters_match_projection_encoding()
@@ -529,6 +629,19 @@ public sealed class DocumentsContractTests
     {
         public Guid Id { get; init; }
         [JsonIgnore(Condition = JsonIgnoreCondition.Never)] public string Name { get; init; } = string.Empty;
+    }
+    private sealed record ConditionalDocument(
+        Guid Id,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] int Rank);
+    private sealed class ReadOnlyDocument(Guid id, string name)
+    {
+        public Guid Id { get; init; } = id;
+        public string Name { get; } = name;
+    }
+    private sealed class ReadOnlyFieldDocument
+    {
+        public Guid Id = Guid.Empty;
+        public readonly string Name = "Ada";
     }
     private sealed record StringIdDocument(string Id, string Value);
     private sealed record BinaryIdDocument(byte[] Id, string Value);

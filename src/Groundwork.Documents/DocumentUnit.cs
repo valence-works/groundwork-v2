@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Groundwork.Kernel;
 using Groundwork.Records;
 using Groundwork.Documents.Serialization;
@@ -185,15 +186,24 @@ public sealed class DocumentUnitBuilder<T>
         if (idSelector is null || idMember is null)
             diagnostics.Add(new("GW-DOC-DECL-001", "A document declaration requires one native Id selector before Build().", "id"));
 
-        var idColumn = idMember is null ? null : LowerFirst(idMember.Name);
-        var bindings = new List<ColumnBinding>();
+        var effectiveJsonOptions = jsonOptions is null
+            ? new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            : new JsonSerializerOptions(jsonOptions);
+        effectiveJsonOptions.MakeReadOnly(populateMissingResolver: true);
+        var serializedNames = new Dictionary<MemberInfo, string>();
         if (idMember is not null)
-            ValidateSerializableMember(idMember, "id", diagnostics);
+            ResolveSerializableMember(idMember, "id", effectiveJsonOptions, serializedNames, diagnostics);
         foreach (var projection in projections)
             foreach (var member in projection.Members)
-                ValidateSerializableMember(member, $"projections.{projection.Column}", diagnostics);
+                ResolveSerializableMember(member, $"projections.{projection.Column}", effectiveJsonOptions, serializedNames, diagnostics);
+        foreach (var index in indexes)
+            foreach (var member in index.Members)
+                ResolveSerializableMember(member, $"indexes.{index.Name}", effectiveJsonOptions, serializedNames, diagnostics);
+
+        var idColumn = idMember is null ? null : LowerFirst(idMember.Name);
+        var bindings = new List<ColumnBinding>();
         var resolvedProjections = projections.Select(projection => new ResolvedProjection(
-            string.Join('.', projection.Members.Select(JsonName)),
+            SerializedPath(projection.Members, serializedNames),
             projection.Column,
             ToPortableType(projection.ValueType, projection.Members),
             projection.Configure)).ToArray();
@@ -231,7 +241,7 @@ public sealed class DocumentUnitBuilder<T>
 
         foreach (var index in indexes)
         {
-            var indexPath = string.Join('.', index.Members.Select(JsonName));
+            var indexPath = SerializedPath(index.Members, serializedNames);
             var projection = resolvedProjections.FirstOrDefault(candidate => string.Equals(candidate.Path, indexPath, StringComparison.Ordinal));
             if (projection is null)
                 diagnostics.Add(new(
@@ -265,7 +275,7 @@ public sealed class DocumentUnitBuilder<T>
 
             foreach (var index in indexes)
             {
-                var indexPath = string.Join('.', index.Members.Select(JsonName));
+                var indexPath = SerializedPath(index.Members, serializedNames);
                 var projection = resolvedProjections.Single(projection => projection.Path == indexPath);
             declaration.Index(index.Name, builder =>
             {
@@ -285,7 +295,7 @@ public sealed class DocumentUnitBuilder<T>
 
             var storageUnit = declaration.Build();
             var policy = new DocumentSchemaVersionPolicy(documentKind, minimumReadableVersion, currentVersion);
-            var codec = DocumentCodecFactory.Create(policy, upcasters, jsonOptions);
+            var codec = DocumentCodecFactory.Create(policy, upcasters, effectiveJsonOptions);
             return new DocumentUnit<T>(
                 documentKind,
                 storageUnit,
@@ -294,7 +304,7 @@ public sealed class DocumentUnitBuilder<T>
                 idSelector!,
                 sharedKind,
                 codec,
-                jsonOptions);
+                effectiveJsonOptions);
         }
         catch (DeclarationBuildException exception)
         {
@@ -436,34 +446,60 @@ public sealed class DocumentUnitBuilder<T>
 
     private static string LowerFirst(string value) => value.Length == 0 ? value : char.ToLowerInvariant(value[0]) + value[1..];
 
-    private string JsonName(MemberInfo member) =>
-        member.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name ??
-        jsonOptions?.PropertyNamingPolicy?.ConvertName(member.Name) ??
-        (jsonOptions is null ? LowerFirst(member.Name) : member.Name);
+    private static string SerializedPath(
+        IReadOnlyList<MemberInfo> members,
+        IReadOnlyDictionary<MemberInfo, string> serializedNames) =>
+        string.Join('.', members.Select(member => serializedNames.GetValueOrDefault(member, member.Name)));
 
-    private void ValidateSerializableMember(MemberInfo member, string path, ICollection<DocumentDiagnostic> diagnostics)
+    private void ResolveSerializableMember(
+        MemberInfo member,
+        string path,
+        JsonSerializerOptions options,
+        IDictionary<MemberInfo, string> serializedNames,
+        ICollection<DocumentDiagnostic> diagnostics)
     {
-        if (member.GetCustomAttribute<JsonIgnoreAttribute>() is { Condition: JsonIgnoreCondition.Always })
+        if (serializedNames.ContainsKey(member))
+            return;
+
+        var ignore = member.GetCustomAttribute<JsonIgnoreAttribute>();
+        var conditionallyIgnored = ignore?.Condition is JsonIgnoreCondition.WhenWritingDefault or JsonIgnoreCondition.WhenWritingNull ||
+            ignore is null && options.DefaultIgnoreCondition != JsonIgnoreCondition.Never;
+        var readOnlyIgnored = member switch
         {
+            PropertyInfo property => options.IgnoreReadOnlyProperties && property.SetMethod is null,
+            FieldInfo field => options.IgnoreReadOnlyFields && field.IsInitOnly,
+            _ => false
+        };
+
+        JsonPropertyInfo? contractMember = null;
+        try
+        {
+            var typeInfo = options.GetTypeInfo(member.DeclaringType!);
+            contractMember = typeInfo.Properties.FirstOrDefault(property => Equals(property.AttributeProvider, member));
+        }
+        catch (NotSupportedException)
+        {
+            // Report the unsupported effective contract below as one declaration diagnostic.
+        }
+
+        var customConditional = contractMember?.ShouldSerialize is not null &&
+            (ignore?.Condition != JsonIgnoreCondition.Never || jsonOptions?.TypeInfoResolver is not null);
+        if (ignore?.Condition == JsonIgnoreCondition.Always || conditionallyIgnored || readOnlyIgnored ||
+            contractMember is null || contractMember.Get is null || customConditional)
+        {
+            var correctiveAction = conditionallyIgnored || customConditional
+                ? "Remove the conditional ignore/ShouldSerialize rule or mark the selected member with JsonIgnoreCondition.Never."
+                : readOnlyIgnored
+                    ? "Disable the matching IgnoreReadOnly option or make the selected member writable."
+                    : "Include the member in the effective JsonTypeInfo contract (for fields, enable IncludeFields or add JsonInclude).";
             diagnostics.Add(new(
                 "GW-DOC-DECL-009",
-                $"Selected member '{member.Name}' is marked with JsonIgnore and will not be present in the serialized document.",
+                $"Selected member '{member.Name}' can be omitted by the effective JSON contract. {correctiveAction}",
                 path));
             return;
         }
 
-        var explicitlyIncluded = member.GetCustomAttribute<JsonIncludeAttribute>() is not null;
-        var serializable = member switch
-        {
-            PropertyInfo property => (property.GetMethod?.IsPublic == true) || explicitlyIncluded,
-            FieldInfo field => (field.IsPublic && jsonOptions?.IncludeFields == true) || explicitlyIncluded,
-            _ => false
-        };
-        if (!serializable)
-            diagnostics.Add(new(
-                "GW-DOC-DECL-009",
-                $"Selected member '{member.Name}' is not serialized by the effective JsonSerializerOptions. Make it a public property, enable IncludeFields, or add JsonInclude.",
-                path));
+        serializedNames[member] = contractMember.Name;
     }
 
     private static string RequireText(string value, string parameterName) =>

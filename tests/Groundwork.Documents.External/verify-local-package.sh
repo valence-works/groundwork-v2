@@ -36,13 +36,13 @@ cp "$external_root/Directory.Build.props" "$external_build_root/Directory.Build.
 source_project="$external_build_root/Groundwork.Documents.Source.csproj"
 consumer_project="$external_build_root/Groundwork.Documents.External.csproj"
 solution="$external_build_root/Groundwork.Documents.slnx"
-if rg -n '<ProjectReference\b|PackageReference Include="Groundwork\.Documents"|\.\./.*src' "$source_project" ||
-  rg -n '<ProjectReference\b|\.\./.*src' "$consumer_project" ||
-  ! rg -q 'PackageReference Include="Groundwork\.Documents"' "$consumer_project"; then
+if grep -En '<ProjectReference\b|PackageReference Include="Groundwork\.Documents"|\.\./.*src' "$source_project" ||
+  grep -En '<ProjectReference\b|\.\./.*src' "$consumer_project" ||
+  ! grep -Eq 'PackageReference Include="Groundwork\.Documents"' "$consumer_project"; then
   echo "The isolated Documents solution must use copied source and package references only." >&2
   exit 1
 fi
-if ! rg -q 'Groundwork\.Documents\.Source\.csproj' "$solution" || ! rg -q 'Groundwork\.Documents\.External\.csproj' "$solution"; then
+if ! grep -Eq 'Groundwork\.Documents\.Source\.csproj' "$solution" || ! grep -Eq 'Groundwork\.Documents\.External\.csproj' "$solution"; then
   echo "The isolated external solution must build both the copied source and package consumer projects." >&2
   exit 1
 fi
@@ -52,9 +52,9 @@ msbuild_isolation_args=(
   -p:ManagePackageVersionsCentrally=false
 )
 properties="$(dotnet msbuild "$source_project" -getProperty:PackageProjectUrl -getProperty:DirectoryBuildPropsPath --nologo "${msbuild_isolation_args[@]}")"
-if printf '%s\n' "$properties" | rg -q '"PackageProjectUrl": "[^"]+"' ||
-  printf '%s\n' "$properties" | rg -Fq "$repo_root" ||
-  ! printf '%s\n' "$properties" | rg -q 'external/Directory\.Build\.props'; then
+if printf '%s\n' "$properties" | grep -Eq '"PackageProjectUrl": "[^"]+"' ||
+  printf '%s\n' "$properties" | grep -Fq "$repo_root" ||
+  ! printf '%s\n' "$properties" | grep -Eq 'external/Directory\.Build\.props'; then
   echo "The isolated Documents source project did not use only its copied external MSBuild properties." >&2
   exit 1
 fi

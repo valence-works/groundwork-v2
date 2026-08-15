@@ -49,7 +49,11 @@ the serialized contract, not CLR member spelling. Configure options before or
 after `Project()`; names and portable projection types resolve at `Build()`.
 Selected fields must be enabled by `IncludeFields` or `[JsonInclude]`. Ignored
 or otherwise unserializable selected members are refused with
-`GW-DOC-DECL-009`.
+`GW-DOC-DECL-009`. Selected IDs and projections must be unconditional: global
+or member default/null suppression, read-only suppression, and custom
+`ShouldSerialize` rules are refused unless the member explicitly uses
+`JsonIgnoreCondition.Never`. Custom `JsonTypeInfo` names are honored, and a
+resolver that removes a selected member is refused.
 
 Schema policies use a caller-owned `DocumentSchemaVersionFormat` and contiguous
 upcaster steps. Malformed, too-old, future, unknown-kind, invalid-content, and
