@@ -13,6 +13,9 @@ public abstract class RelationalDialect
 {
     public abstract string ProviderName { get; }
 
+    /// <summary>Whether CreateTableSql materializes the complete column set in one statement.</summary>
+    public virtual bool CreateTableIncludesColumns => false;
+
     public abstract string QuoteIdentifier(string identifier);
 
     public abstract string MapType(ColumnDefinition definition);
@@ -31,6 +34,25 @@ public abstract class RelationalDialect
     /// nullability, and collation when changing the temporary column definition.
     /// </summary>
     public abstract string FinalizeColumnSql(string table, string column, ColumnDefinition definition);
+
+    /// <summary>
+    /// Applies finalization for a previously backfilled column. Providers without native ALTER
+    /// COLUMN support may override this hook to perform a transactional table rebuild.
+    /// </summary>
+    public virtual void FinalizeColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(definition);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = RelationalSql.FinalizeColumn(this, table, definition);
+        command.ExecuteNonQuery();
+    }
 
     public abstract string CreateIndexSql(string table, IndexDefinition index, string? filter);
 
@@ -66,6 +88,13 @@ public abstract class RelationalDialect
         PhysicalSchemaTargetIdentity target,
         string owner,
         long fence);
+
+    /// <summary>Begins the provider's transaction mode for a schema operation batch.</summary>
+    public virtual DbTransaction BeginTransaction(DbConnection connection)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        return connection.BeginTransaction();
+    }
 
     public abstract void EnsureInfrastructure(DbConnection connection);
 

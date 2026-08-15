@@ -1,0 +1,203 @@
+using System.Data;
+using Microsoft.Data.Sqlite;
+using Groundwork.Kernel;
+using Groundwork.Testing;
+
+namespace Groundwork.Sqlite;
+
+/// <summary>Creates SQLite provider connections with one durable store-scoped schema lock.</summary>
+public sealed class SqliteProviderFactory : IStorageProviderFactory
+{
+    public IStorageProviderConnection Create(string connectionString) =>
+        new SqliteProviderConnection(connectionString);
+}
+
+public sealed class SqliteProviderConnection : IStorageProviderConnection
+{
+    private readonly object gate = new();
+    private readonly SqliteConnection connection;
+    private readonly FileStream? schemaLock;
+    private readonly List<SqliteConnection> sessionConnections = [];
+    private readonly bool isMemory;
+    private bool disposed;
+
+    public SqliteProviderConnection(string connectionString)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        var builder = new SqliteConnectionStringBuilder(connectionString);
+        FileStream? acquiredLock = null;
+        SqliteConnection? opened = null;
+        try
+        {
+            acquiredLock = AcquireSchemaLock(builder);
+            opened = CreateOpenConnection(builder.ConnectionString);
+            schemaLock = acquiredLock;
+            connection = opened;
+            isMemory = builder.Mode == SqliteOpenMode.Memory || builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase);
+            Schema = new SqliteSchemaCoordinator(this);
+            Catalog = new SqliteProviderCatalog(this);
+        }
+        catch
+        {
+            opened?.Dispose();
+            acquiredLock?.Dispose();
+            throw;
+        }
+    }
+
+    public IProviderCatalog Catalog { get; }
+
+    public ISchemaCoordinator Schema { get; }
+
+    internal object Gate => gate;
+
+    internal SqliteConnection Connection => connection;
+
+    internal SqliteConnection CreateIndependentConnection() =>
+        CreateOpenConnection(connection.ConnectionString);
+
+    internal void RefreshSchema()
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            connection.Close();
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA schema_version;";
+            _ = command.ExecuteScalar();
+        }
+    }
+
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        var sessionConnection = isMemory ? connection : CreateIndependentConnection();
+        if (!isMemory)
+            lock (gate) sessionConnections.Add(sessionConnection);
+        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null);
+    }
+
+    public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(units);
+        if (units.Length == 0)
+            throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
+        if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
+            throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
+        foreach (var unit in units)
+        {
+            ArgumentNullException.ThrowIfNull(unit);
+            SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        }
+
+        var transactional = CreateIndependentConnection();
+        try
+        {
+            var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
+            return new SqliteUnitOfWork(this, transactional, transaction, units, access);
+        }
+        catch
+        {
+            transactional.Dispose();
+            throw;
+        }
+    }
+
+    internal void ThrowIfDisposed()
+    {
+        if (disposed)
+            throw new ObjectDisposedException(nameof(SqliteProviderConnection));
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+            return;
+        disposed = true;
+        connection.Dispose();
+        foreach (var sessionConnection in sessionConnections)
+            sessionConnection.Dispose();
+        sessionConnections.Clear();
+        schemaLock?.Dispose();
+    }
+
+    internal static string QuoteIdentifier(string identifier) =>
+        $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+    internal static object? ToSqliteValue(object? value, ColumnDefinition definition)
+    {
+        if (value is null)
+            return DBNull.Value;
+        return definition.Type switch
+        {
+            PortableType.Boolean when value is bool boolean => boolean ? 1 : 0,
+            PortableType.Guid when value is Guid guid => guid.ToString("D"),
+            PortableType.DateTimeOffset when value is DateTimeOffset timestamp => timestamp.ToUniversalTime().ToString("O"),
+            PortableType.Decimal when value is decimal decimalValue => decimalValue.ToString("G29", System.Globalization.CultureInfo.InvariantCulture),
+            PortableType.Json => value is string text ? text : System.Text.Json.JsonSerializer.Serialize(value),
+            PortableType.Binary when value is byte[] bytes => bytes.ToArray(),
+            _ => value
+        };
+    }
+
+    private static FileStream? AcquireSchemaLock(SqliteConnectionStringBuilder builder)
+    {
+        if (builder.Mode == SqliteOpenMode.Memory ||
+            string.IsNullOrWhiteSpace(builder.DataSource) ||
+            builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var dataSource = builder.DataSource;
+        if (dataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+            dataSource = dataSource[5..].Split('?', 2)[0];
+        var fullPath = Path.GetFullPath(dataSource);
+        var directory = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+        var path = $"{fullPath}.schema.lock";
+        try
+        {
+            return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException exception)
+        {
+            throw new InvalidOperationException(
+                $"SQLite store '{fullPath}' is already in use by another Groundwork process.", exception);
+        }
+    }
+
+    private static SqliteConnection CreateOpenConnection(string connectionString)
+    {
+        var connection = new SqliteConnection(connectionString);
+        try
+        {
+            connection.Open();
+            using (var pragma = connection.CreateCommand())
+            {
+                pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
+                pragma.ExecuteNonQuery();
+            }
+
+            using var version = connection.CreateCommand();
+            version.CommandText = "SELECT sqlite_version();";
+            var value = Convert.ToString(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            if (!Version.TryParse(value, out var actual) || actual < new Version(3, 35, 0))
+            {
+                throw new InvalidOperationException(
+                    $"SQLite 3.35.0 or newer is required for Groundwork.Sqlite (found '{value ?? "unknown"}').");
+            }
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+}
