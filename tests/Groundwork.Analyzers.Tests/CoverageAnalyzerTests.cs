@@ -4,6 +4,7 @@ using System.Text;
 using Groundwork.Analyzers;
 using Groundwork.Schema;
 using Groundwork.Query.Linq.Fragments;
+using Groundwork.Query.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CodeActions;
 using Microsoft.CodeAnalysis.CodeFixes;
@@ -95,6 +96,34 @@ public sealed class CoverageAnalyzerTests
         const string source = "using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => ids.Contains(ticket.Id) && Enumerable.Contains(ids, ticket.Id) && ticket.Tags.Any(value => value == 7) && ticket.Tags.All(value => value == 7)); } }";
         var diagnostics = await AnalyzeLinq(source);
         Assert.DoesNotContain(diagnostics, item => item.Id is "GW_LINQ_107" or "GW_LINQ_108");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_rejects_unsupported_contains_overload()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq; using System.Linq.Expressions; using System.Collections.Generic; public sealed class Ticket { public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => Enumerable.Contains(ids, ticket.Id, EqualityComparer<int>.Default)); } }");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_107");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_rejects_reduced_extension_contains_lookalikes()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq.Expressions; using CustomExtensions; public sealed class Ticket { public int Id { get; set; } } namespace CustomExtensions { public sealed class CustomValues { } public static class CustomValueExtensions { public static bool Contains(this CustomValues values, int value) => false; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, CustomValues values) { table.Where(ticket => values.Contains(ticket.Id)); } }");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_107");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_ignores_spoofed_groundwork_namespace_apis()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq.Spoof { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public string Name { get; set; } = \"\"; } public static class Use { public static void Run(Groundwork.Query.Linq.Spoof.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Name.ToLower() == \"x\"); } }");
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_LINQ_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_rejects_non_static_fragment_properties()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq.Expressions; public sealed class Ticket { public bool IsOpen { get; set; } } public sealed class FragmentHolder { [Groundwork.Query.Linq.GwQueryFragment] public Expression<Func<Ticket, bool>> Open => ticket => ticket.IsOpen; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, FragmentHolder holder) { table.Where(holder.Open); } }");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_107");
     }
 
     [Fact]
@@ -352,7 +381,7 @@ public sealed class CoverageAnalyzerTests
     {
         var compilation = CSharpCompilation.Create(
             "LinqInput",
-            [CSharpSyntaxTree.ParseText(SourceText.From(source, Encoding.UTF8))],
+            [CSharpSyntaxTree.ParseText(SourceText.From(NormalizeLinqSource(source), Encoding.UTF8))],
             References(),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         return await compilation.WithAnalyzers(
@@ -364,12 +393,35 @@ public sealed class CoverageAnalyzerTests
                 logAnalyzerExecutionTime: true)).GetAnalyzerDiagnosticsAsync();
     }
 
+    private static string NormalizeLinqSource(string source)
+    {
+        const string marker = "namespace Groundwork.Query.Linq {";
+        while (true)
+        {
+            var start = source.IndexOf(marker, StringComparison.Ordinal);
+            if (start < 0) break;
+            var open = source.IndexOf('{', start);
+            if (open < 0) break;
+            var depth = 0;
+            var end = open;
+            for (; end < source.Length; end++)
+            {
+                if (source[end] == '{') depth++;
+                else if (source[end] == '}' && --depth == 0) break;
+            }
+            var length = end - start + 1;
+            source = source[..start] + new string(source.Substring(start, length).Select(character => character is '\r' or '\n' ? character : ' ').ToArray()) + source[(start + length)..];
+        }
+        return source;
+    }
+
     private static IEnumerable<MetadataReference> References()
     {
         var paths = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))!
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
         return paths
             .Concat([typeof(GroundworkSchemaAttribute).Assembly.Location])
+            .Concat([typeof(GwQueryTable<>).Assembly.Location])
             .Concat([typeof(ExternalFragments).Assembly.Location])
             .Where(File.Exists)
             .Distinct(StringComparer.OrdinalIgnoreCase)

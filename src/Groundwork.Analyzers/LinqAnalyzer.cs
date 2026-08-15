@@ -41,13 +41,13 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
     {
         if (context.Node is not InvocationExpressionSyntax invocation) return;
         var method = context.SemanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
-        if (method?.Name is not ("Where" or "WhereIf")) return;
-        var argumentIndex = method.Name == "WhereIf" ? 1 : 0;
+        if (!IsGroundworkWhereMethod(method)) return;
+        var argumentIndex = method!.Name == "WhereIf" ? 1 : 0;
         if (invocation.ArgumentList.Arguments.Count <= argumentIndex) return;
         var argument = invocation.ArgumentList.Arguments[argumentIndex].Expression;
         var symbol = context.SemanticModel.GetSymbolInfo(argument).Symbol;
-        if (symbol is not IPropertySymbol property || !IsValidFragmentProperty(property) && !HasFragmentAttribute(property)) return;
-        if (!IsValidFragmentProperty(property) || !HasFragmentAttribute(property))
+        if (symbol is not IPropertySymbol property) return;
+        if (!property.IsStatic || !IsValidFragmentProperty(property) || !HasFragmentAttribute(property))
             context.ReportDiagnostic(Diagnostic.Create(AnalyzerDiagnostics.For("GW-LINQ-107"), argument.GetLocation(), "GW-LINQ-107: a query fragment must be an attributed Expression<Func<T, bool>> property"));
     }
 
@@ -71,10 +71,19 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
     }
 
     private static bool HasFragmentAttribute(ISymbol symbol) => symbol.GetAttributes().Any(attribute =>
-        attribute.AttributeClass?.Name is "GwQueryFragmentAttribute" or "GwQueryFragment");
+        attribute.AttributeClass?.ToDisplayString() == "Groundwork.Query.Linq.GwQueryFragmentAttribute" &&
+        attribute.AttributeClass.ContainingAssembly.Identity.Name == "Groundwork.Query.Linq");
 
-    private static bool IsClosedSurfaceMethod(IMethodSymbol? method) => method?.ContainingType?.ToDisplayString().StartsWith("Groundwork.Query.Linq.", StringComparison.Ordinal) == true &&
+    private static bool IsClosedSurfaceMethod(IMethodSymbol? method) => method is not null &&
+        method.ContainingAssembly.Identity.Name == "Groundwork.Query.Linq" &&
+        method.ContainingType?.ToDisplayString().StartsWith("Groundwork.Query.Linq.", StringComparison.Ordinal) == true &&
         method.Name is "Where" or "WhereIf" or "OrderBy" or "OrderByDescending" or "ThenBy" or "ThenByDescending" or "Select" or "LatestPer";
+
+    private static bool IsGroundworkWhereMethod(IMethodSymbol? method) => method is not null &&
+        method.ContainingAssembly.Identity.Name == "Groundwork.Query.Linq" &&
+        method.Name is "Where" or "WhereIf" &&
+        method.ContainingType?.OriginalDefinition.ContainingNamespace.ToDisplayString() == "Groundwork.Query.Linq" &&
+        method.ContainingType.OriginalDefinition.Name is "GwQueryTable" or "IGwQueryable" or "GwQueryable";
 
     private static bool IsValidFragmentProperty(IPropertySymbol property)
     {
@@ -115,7 +124,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 Report("GW-LINQ-104", node, "GW-LINQ-104: v2 has no joins; use a declared element set or two queries");
             else if (name == "GroupBy")
                 Report("GW-LINQ-105", node, "GW-LINQ-105: use `.LatestPer(...)` for grouped top-1");
-            else if (name is "Any" or "All" && node.ArgumentList.Arguments.Count > 0 && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && (!IsEquality(nested.Body) || ReferencesOuterParameter(nested.Body)))
+            else if (IsEnumerableAnyAll(symbol, node) && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && (!IsEquality(nested.Body) || ReferencesOuterParameter(nested.Body)))
                 Report("GW-LINQ-106", node, "GW-LINQ-106: declare the element set");
             else if (name is "AddDays" or "AddHours" or "AddMinutes" or "AddSeconds" && symbol?.ContainingType?.ToDisplayString() == "System.DateTimeOffset")
             {
@@ -181,22 +190,45 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         private static bool IsEquality(CSharpSyntaxNode node) => node is BinaryExpressionSyntax binary && binary.IsKind(SyntaxKind.EqualsExpression);
         private bool IsKnownQueryMethod(IMethodSymbol symbol, InvocationExpressionSyntax node)
         {
-            if (symbol.ContainingType?.ToDisplayString() != "System.Linq.Enumerable") return false;
             if (symbol.Name == "Contains")
             {
-                var containsCollection = symbol.IsStatic
-                    ? node.ArgumentList.Arguments.FirstOrDefault()?.Expression
-                    : (node.Expression as MemberAccessExpressionSyntax)?.Expression;
-                return containsCollection is IdentifierNameSyntax or MemberAccessExpressionSyntax or ArrayCreationExpressionSyntax or ImplicitArrayCreationExpressionSyntax;
+                if (symbol.ReturnType.SpecialType != SpecialType.System_Boolean || node.Expression is not MemberAccessExpressionSyntax member)
+                    return false;
+                var containingType = symbol.ContainingType?.ToDisplayString();
+                if (containingType == "System.Linq.Enumerable")
+                {
+                    var reduced = symbol.ReducedFrom is not null;
+                    var expectedArguments = reduced ? 1 : 2;
+                    var original = symbol.ReducedFrom ?? symbol;
+                    return original.Parameters.Length == 2 && node.ArgumentList.Arguments.Count == expectedArguments &&
+                        (reduced || symbol.IsStatic) && member.Expression is not null;
+                }
+                if (containingType == "System.MemoryExtensions")
+                {
+                    var reduced = symbol.ReducedFrom is not null;
+                    var original = symbol.ReducedFrom ?? symbol;
+                    return original.Parameters.Length == 2 &&
+                        original.Parameters[0].Type.ToDisplayString().StartsWith("System.ReadOnlySpan<", StringComparison.Ordinal) &&
+                        node.ArgumentList.Arguments.Count == (reduced ? 1 : 2) &&
+                        (reduced || symbol.IsStatic);
+                }
+                return symbol.ReducedFrom is null && !symbol.IsStatic && symbol.Parameters.Length == 1 &&
+                    node.ArgumentList.Arguments.Count == 1 && IsBclCollectionType(symbol.ContainingType);
             }
-            if (symbol.Name is not ("Any" or "All")) return false;
-            if (node.ArgumentList.Arguments.Count == 0) return false;
-            var elementCollection = symbol.IsStatic
-                ? node.ArgumentList.Arguments[0].Expression
-                : (node.Expression as MemberAccessExpressionSyntax)?.Expression;
+            if (!IsEnumerableAnyAll(symbol, node)) return false;
+            var elementCollection = symbol.ReducedFrom is null ? node.ArgumentList.Arguments[0].Expression : (node.Expression as MemberAccessExpressionSyntax)?.Expression;
             var lambda = node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression as LambdaExpressionSyntax;
             return elementCollection is MemberAccessExpressionSyntax && lambda is not null && IsEquality(lambda.Body) && !ReferencesOuterParameter(lambda.Body, node);
         }
+
+        private static bool IsEnumerableAnyAll(IMethodSymbol? symbol, InvocationExpressionSyntax node) => symbol is not null &&
+            symbol.ContainingType?.ToDisplayString() == "System.Linq.Enumerable" &&
+            symbol.Name is "Any" or "All" && (symbol.ReducedFrom ?? symbol).Parameters.Length == 2 &&
+            node.ArgumentList.Arguments.Count == (symbol.ReducedFrom is null ? 2 : 1) &&
+            node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax;
+        private static bool IsBclCollectionType(INamedTypeSymbol? type) => type is not null &&
+            type.ContainingAssembly.Identity.Name is "System.Private.CoreLib" or "System.Runtime" &&
+            type.ContainingNamespace.ToDisplayString() == "System.Collections.Generic";
         private bool ReferencesOuterParameter(SyntaxNode body, InvocationExpressionSyntax? invocation = null)
         {
             var outerNames = lambda switch

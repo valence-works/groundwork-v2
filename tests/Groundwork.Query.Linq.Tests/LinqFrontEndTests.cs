@@ -13,6 +13,10 @@ public sealed class LinqFrontEndTests
         [GwStringComparison(StringComparison.OrdinalIgnoreCase)] public string Name { get; set; } = string.Empty;
         [GwStringComparison(StringComparison.OrdinalIgnoreCase)] public string Code = string.Empty;
     }
+    private sealed class MappedTicket
+    {
+        public string Display { get; set; } = string.Empty;
+    }
     private static int sideEffectReads;
     private static int SideEffectValue => Interlocked.Increment(ref sideEffectReads);
     private static int evilInitializerReads;
@@ -51,6 +55,11 @@ public sealed class LinqFrontEndTests
     {
         [GwQueryFragment]
         public static Expression<Func<Ticket, bool>> Open => ticket => ticket.IsOpen;
+    }
+
+    private static class EnumerableLookalike
+    {
+        public static bool Contains(IEnumerable<int> values, int value) => values.Contains(value);
     }
 
     [Fact]
@@ -106,9 +115,34 @@ public sealed class LinqFrontEndTests
         Assert.Equal(1, result);
     }
 
+    [Fact]
+    public async Task Public_to_list_extension_passes_the_source_model_to_the_executor()
+    {
+        var executor = new RecordingExecutor();
+        await new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.TenantId == 7).ToListAsync(executor);
+        Assert.Same(Tickets, executor.LastModel);
+    }
+
+    [Fact]
+    public async Task Public_to_list_extension_rejects_mapped_projection_without_adapter_materializer()
+    {
+        var model = new GwTableModel<MappedTicket>("mapped", new[]
+        {
+            new GwColumn<MappedTicket>(nameof(MappedTicket.Display), "value_col", QueryType.String, false)
+        });
+        var query = new GwQueryDatabase().Table(model).Query.Select(item => new { item.Display });
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync(new RecordingExecutor()));
+        Assert.Contains("model-aware adapter", exception.Message, StringComparison.Ordinal);
+    }
+
     private sealed class RecordingExecutor : IGwQueryExecutor
     {
-        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<T>>(Array.Empty<T>());
+        public object? LastModel { get; private set; }
+        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
+        {
+            LastModel = model;
+            return Task.FromResult<IReadOnlyList<T>>(Array.Empty<T>());
+        }
         public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(1L);
         public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(true);
     }
@@ -219,6 +253,20 @@ public sealed class LinqFrontEndTests
         var declared = ExpressionLowerer.Lower<Ticket>(ticket => ticket.TagIds.Any(value => value == 2), Tickets);
         Assert.IsType<Predicate.In>(collection);
         Assert.IsType<Predicate.ElementOf>(declared);
+    }
+
+    [Fact]
+    public void Static_contains_lookalikes_are_not_silently_lowered()
+    {
+        var diagnostics = ExpressionLowerer.Diagnose<Ticket>(ticket => EnumerableLookalike.Contains(new[] { 1, 2 }, ticket.TenantId), Tickets);
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-107");
+    }
+
+    [Fact]
+    public void Reduced_extension_contains_lookalikes_are_not_silently_lowered()
+    {
+        var diagnostics = ExpressionLowerer.Diagnose(Lookalikes.EnumerableExtensionFactory.Create(new Lookalikes.EnumerableExtensionFactory.CustomValues()), Tickets);
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-107");
     }
 
     [Fact]

@@ -1,6 +1,8 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using Groundwork.Query.Model;
@@ -501,14 +503,14 @@ public static class ExpressionLowerer
                     _ => Opaque(call)
                 };
             }
-            if (call.Method.Name == "Contains" && call.Arguments.Count == 2 && call.Method.IsStatic)
+            if (call.Method.Name == "Contains" && call.Arguments.Count == 2 && IsPortableMembershipMethod(call.Method))
             {
                 var column = TryColumn(call.Arguments[1]);
                 var values = ClosedValue(call.Arguments[0], parameter, diagnostics) as IEnumerable;
                 if (column is not null && values is not null)
                     return new AstPredicate.In(column, values.Cast<object?>().Select(value => QueryConstant.Of(column, value)));
             }
-            if (call.Method.Name == "Contains" && call.Arguments.Count == 1 && target is not null)
+            if (call.Method.Name == "Contains" && call.Arguments.Count == 1 && target is not null && IsPortableCollectionMembershipMethod(call.Method))
             {
                 var column = TryColumn(call.Arguments[0]);
                 var values = ClosedValue(target, parameter, diagnostics) as IEnumerable;
@@ -517,9 +519,8 @@ public static class ExpressionLowerer
             }
             var collectionExpression = target ?? (call.Method.IsStatic && call.Arguments.Count != 0 ? Unwrap(call.Arguments[0]) : null);
             var lambdaArgument = call.Method.IsStatic && call.Arguments.Count != 0 ? call.Arguments[call.Arguments.Count - 1] : call.Arguments.SingleOrDefault();
-            if (call.Method.Name is "Any" or "All" && collectionExpression is MemberExpression collection && model.ElementSets.ContainsKey(collection.Member.Name) && lambdaArgument is not null)
+            if (call.Method.Name is "Any" or "All" && call.Method.DeclaringType?.FullName == typeof(Enumerable).FullName && collectionExpression is MemberExpression collection && model.ElementSets.ContainsKey(collection.Member.Name) && lambdaArgument is not null && Unwrap(lambdaArgument) is LambdaExpression lambda)
             {
-                var lambda = (LambdaExpression)Unwrap(lambdaArgument);
                 if (lambda.Body is BinaryExpression equality && equality.NodeType == ExpressionType.Equal)
                 {
                     var constant = equality.Left == lambda.Parameters[0] ? equality.Right : equality.Right == lambda.Parameters[0] ? equality.Left : null;
@@ -555,6 +556,25 @@ public static class ExpressionLowerer
             Add("GW-LINQ-107", "The expression contains an opaque helper; mark it [GwQueryFragment]", expression);
             return AstPredicate.AlwaysFalse.Instance;
         }
+
+        private static bool IsPortableMembershipMethod(MethodInfo method)
+        {
+            if (!method.IsStatic || method.Name != "Contains") return false;
+            if (method.DeclaringType?.FullName == typeof(Enumerable).FullName)
+                return method.GetParameters().Length == 2;
+
+            // .NET 10 binds array.Contains(value) to this BCL overload, which is
+            // expression-tree safe only for its exact ReadOnlySpan<T>, T shape.
+            var parameters = method.GetParameters();
+            return method.DeclaringType?.FullName == "System.MemoryExtensions" &&
+                parameters.Length == 2 &&
+                parameters[0].ParameterType.FullName?.StartsWith("System.ReadOnlySpan`1", StringComparison.Ordinal) == true;
+        }
+
+        private static bool IsPortableCollectionMembershipMethod(MethodInfo method) =>
+            !method.IsStatic && method.Name == "Contains" && method.GetParameters().Length == 1 &&
+            method.DeclaringType?.Assembly == typeof(List<>).Assembly &&
+            method.DeclaringType.Namespace == "System.Collections.Generic";
 
         private QueryConstant? ClosedConstant(Expression expression, ColumnRef column, Expression span)
         {

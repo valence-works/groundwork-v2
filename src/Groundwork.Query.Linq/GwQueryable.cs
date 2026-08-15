@@ -9,6 +9,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
     private readonly GwTableModel<T>? model;
     private readonly IGwQueryExecutor? executor;
     private readonly GwQueryState state;
+    internal GwTableModel<T>? Model => model;
 
     internal GwQueryable(GwTableModel<T> model, IGwQueryExecutor? executor = null)
         : this(model, executor, new GwQueryState(model.Table))

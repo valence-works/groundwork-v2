@@ -150,8 +150,20 @@ public interface IGwQueryExecutor
 
 public static class GwQueryAsyncExtensions
 {
-    public static Task<IReadOnlyList<T>> ToListAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default) =>
-        (executor ?? throw new ArgumentNullException(nameof(executor))).ToListAsync<T>(query.ToQueryRequest(), null, cancellationToken);
+    public static Task<IReadOnlyList<T>> ToListAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default)
+    {
+        if (query is null) throw new ArgumentNullException(nameof(query));
+        if (executor is null) throw new ArgumentNullException(nameof(executor));
+        var model = query switch
+        {
+            GwQueryable<T> typed => typed.Model,
+            GwQueryTable<T> table => table.Model,
+            _ => null
+        };
+        if (model is null)
+            throw new InvalidOperationException("The public executor extension requires a model-aware adapter; mapped projections must use an adapter-specific materializer.");
+        return executor.ToListAsync(query.ToQueryRequest(), model, cancellationToken);
+    }
 
     public static Task<long> CountAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default) =>
         (executor ?? throw new ArgumentNullException(nameof(executor))).CountAsync(query.Count().Request, cancellationToken);
@@ -180,6 +192,7 @@ public sealed class GwQueryTable<T> : IGwQueryable<T>
 {
     private readonly GwTableModel<T> model;
     private readonly IGwQueryExecutor? executor;
+    internal GwTableModel<T> Model => model;
     internal GwQueryTable(GwTableModel<T> model, IGwQueryExecutor? executor = null) { this.model = model; this.executor = executor; }
     public IGwQueryable<T> Query => new GwQueryable<T>(model, executor);
     public IGwQueryable<T> AsQueryable() => Query;
