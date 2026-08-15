@@ -5,6 +5,8 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="Microsoft.Data.SqlClient" />

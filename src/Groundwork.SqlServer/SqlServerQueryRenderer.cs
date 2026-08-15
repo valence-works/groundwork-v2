@@ -15,6 +15,8 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
 
     protected override string RenderCountExpression() => "COUNT_BIG(*) OVER()";
 
+    protected override string RenderCountAggregate() => "COUNT_BIG(*)";
+
     protected override bool RequiresOrderForOffset => true;
 
     protected override string RenderIndexHint(string indexName) =>
@@ -101,9 +103,15 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         ColumnRef column,
         QueryConstant value,
         ICollection<QueryRenderParameter> parameters,
-        ref int parameterIndex) => column.Type == QueryType.String
-            ? RenderEquality(column, value, parameters, ref parameterIndex)
-            : base.RenderCursorEquality(column, value, parameters, ref parameterIndex);
+        ref int parameterIndex)
+    {
+        if (column.Type == QueryType.String)
+            return RenderEquality(column, value, parameters, ref parameterIndex);
+        if (column.Type != QueryType.Guid || value.Kind == QueryConstantKind.Null)
+            return base.RenderCursorEquality(column, value, parameters, ref parameterIndex);
+        var parameter = AddParameter(column, value, parameters, ref parameterIndex);
+        return RenderGuidOrderKey(RenderColumn(column)) + " = " + RenderGuidOrderKey("@" + parameter);
+    }
 
     protected override string RenderAfter(
         OrderTerm term,
@@ -111,6 +119,17 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex)
     {
+        if (term.Column.Type == QueryType.Guid && value.Kind != QueryConstantKind.Null)
+        {
+            var guidParameter = AddParameter(term.Column, value, parameters, ref parameterIndex);
+            var guidExpression = RenderGuidOrderKey(RenderColumn(term.Column));
+            var guidBoundary = RenderGuidOrderKey("@" + guidParameter);
+            var guidComparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
+            var guidStrict = "(" + RenderColumn(term.Column) + " IS NOT NULL AND " + guidExpression + " " + guidComparison + " " + guidBoundary + ")";
+            return term.NullOrder == NullOrder.Last
+                ? "(" + guidStrict + " OR " + RenderColumn(term.Column) + " IS NULL)"
+                : guidStrict;
+        }
         if (term.Column.Type != QueryType.String)
             return base.RenderAfter(term, value, parameters, ref parameterIndex);
         var expression = RenderColumn(term.Column);
@@ -156,9 +175,10 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             else
                 clauses.Add("element.[value] = @" + AddElementParameter(type, value.Value, parameters, ref parameterIndex));
         }
+        var arrayGuard = "ISJSON(" + expression + ") = 1 AND LEFT(LTRIM(" + expression + "), 1) = '['";
         return elementOf.Quantifier == SetQuantifier.Any
-            ? "EXISTS (SELECT 1 FROM OPENJSON(" + expression + ") AS element WHERE " + string.Join(" OR ", clauses) + ")"
-            : string.Join(" AND ", clauses.Select(clause => "EXISTS (SELECT 1 FROM OPENJSON(" + expression + ") AS element WHERE " + clause + ")"));
+            ? "(" + arrayGuard + " AND EXISTS (SELECT 1 FROM OPENJSON(" + expression + ") AS element WHERE " + string.Join(" OR ", clauses) + "))"
+            : "(" + arrayGuard + " AND " + string.Join(" AND ", clauses.Select(clause => "EXISTS (SELECT 1 FROM OPENJSON(" + expression + ") AS element WHERE " + clause + ")")) + ")";
     }
 
     protected override string RenderPaging(

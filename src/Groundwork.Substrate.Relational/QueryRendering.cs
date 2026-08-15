@@ -107,19 +107,16 @@ public abstract class RelationalQueryRenderer
             var refusal = validation.Refusals[0];
             throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
         }
-        if (request.LatestPerKey is not null)
-            throw new QueryRenderException("GW-QUERY-030", "Latest-per-key rendering is not part of the normalized relational query command yet.");
-
         var effectiveOrder = EffectiveOrder(request, options);
         var parameters = new List<QueryRenderParameter>();
         var parameterIndex = 0;
         var matchNone = request.Where is Predicate.AlwaysFalse;
         var where = RenderPredicate(request.Where, parameters, ref parameterIndex, options.InValueLimit, request.Table.Value);
+        IReadOnlyList<QueryConstant>? cursor = null;
         if (request.Paging.ContinuationToken is not null)
         {
             if (effectiveOrder.Count == 0)
                 throw new QueryRenderException("GW-QUERY-013", "Keyset continuation requires an explicit ordered query.");
-            IReadOnlyList<QueryConstant> cursor;
             try
             {
                 cursor = QueryContinuationToken.Decode(
@@ -131,7 +128,8 @@ public abstract class RelationalQueryRenderer
             {
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
-            where = $"({where}) AND ({RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex)})";
+            if (!request.Result.IncludesTotalCount && request.LatestPerKey is null)
+                where = $"({where}) AND ({RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex)})";
         }
 
         var selectedIndex = options.FindPinnedIndex();
@@ -158,24 +156,55 @@ public abstract class RelationalQueryRenderer
         var selection = request.Projection.AllColumns
             ? "*"
             : string.Join(", ", request.Projection.Columns.Select(column => dialect.QuoteIdentifier(column.Name)));
-        if (request.Result.IncludesTotalCount)
-            selection += ", " + RenderCountExpression() + " AS " + dialect.QuoteIdentifier("__groundwork_total_count");
+        if (request.LatestPerKey is { } latest && !request.Projection.AllColumns)
+        {
+            var required = new[] { latest.Key, latest.Timestamp }
+                .Concat(effectiveOrder.Select(term => term.Column))
+                .Where(column => !request.Projection.Columns.Any(selected => string.Equals(selected.Name, column.Name, StringComparison.Ordinal)))
+                .GroupBy(column => column.Name, StringComparer.Ordinal)
+                .Select(group => group.First());
+            foreach (var column in required)
+                selection += ", " + dialect.QuoteIdentifier(column.Name);
+        }
 
         var from = dialect.QuoteIdentifier(request.Table.Value);
         if (indexHintApplied)
             from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(selectedIndex!.Name));
-        var sql = "SELECT " + selection + " FROM " + from + " WHERE " + where;
-        if (effectiveOrder.Count != 0)
+        string sql;
+        if (request.Result.IncludesTotalCount)
         {
-            sql += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+            var latestSource = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
+            var pageWhere = request.LatestPerKey is null ? where : "__groundwork_latest_rank = 1";
+            if (cursor is not null)
+                pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
+            var page = "SELECT * FROM __groundwork_base WHERE " + pageWhere;
+            if (effectiveOrder.Count != 0)
+                page += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+            else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
+                page += " ORDER BY (SELECT 1)";
+            if (RequiresOrderForOffset && request.Paging.Offset is null && request.Paging.Limit is null)
+                page += " OFFSET 0 ROWS";
+            page += RenderPaging(request.Paging, parameters, ref parameterIndex);
+            var countWhere = request.LatestPerKey is null ? string.Empty : " WHERE __groundwork_latest_rank = 1";
+            var aggregate = RenderCountAggregate();
+            sql = latestSource + ", __groundwork_page AS (" + page + "), __groundwork_total AS (SELECT " + aggregate + " AS __groundwork_total_count FROM __groundwork_base" + countWhere + ") " +
+                "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
+                "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1;";
         }
-        else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
+        else
         {
-            sql += " ORDER BY (SELECT 1)";
+            var source = request.LatestPerKey is null
+                ? "SELECT " + selection + " FROM " + from + " WHERE " + where
+                : RenderLatestSource(request.LatestPerKey, selection, from, where, options) + " SELECT " + selection + " FROM __groundwork_base WHERE __groundwork_latest_rank = 1";
+            sql = source;
+            if (cursor is not null && request.LatestPerKey is not null)
+                sql += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
+            if (effectiveOrder.Count != 0)
+                sql += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+            else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
+                sql += " ORDER BY (SELECT 1)";
+            sql += RenderPaging(request.Paging, parameters, ref parameterIndex) + ";";
         }
-        sql += RenderPaging(request.Paging, parameters, ref parameterIndex);
-        sql += ";";
-
         if (parameters.Count > parameterBudget)
             throw new QueryRenderException(
                 "GW-QUERY-015",
@@ -195,10 +224,33 @@ public abstract class RelationalQueryRenderer
 
     protected virtual string RenderCountExpression() => "COUNT(*) OVER()";
 
+    protected virtual string RenderCountAggregate() => "COUNT(*)";
+
     protected virtual bool RequiresOrderForOffset => false;
 
     protected virtual string RenderIndexHint(string indexName) =>
         throw new NotSupportedException($"{ProviderName} does not support index hints.");
+
+    private string RenderLatestSource(
+        LatestPerKey? latest,
+        string selection,
+        string from,
+        string where,
+        QueryRenderOptions options)
+    {
+        if (latest is null)
+            return "WITH __groundwork_base AS (SELECT " + selection + ", 1 AS __groundwork_has_row FROM " + from + " WHERE " + where + ")";
+
+        IEnumerable<ColumnRef> tieBreak = options.TieBreakColumns.Length == 0
+            ? new[] { latest.Key }
+            : options.TieBreakColumns;
+        var latestOrder = new List<string> { RenderColumn(latest.Timestamp) + " DESC" };
+        latestOrder.AddRange(tieBreak
+            .Where(column => !string.Equals(column.Name, latest.Timestamp.Name, StringComparison.Ordinal))
+            .Select(column => RenderOrderTerm(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First))));
+        return "WITH __groundwork_base AS (SELECT " + selection + ", ROW_NUMBER() OVER (PARTITION BY " + RenderColumn(latest.Key) +
+            " ORDER BY " + string.Join(", ", latestOrder) + ") AS __groundwork_latest_rank, 1 AS __groundwork_has_row FROM " + from + " WHERE " + where + ")";
+    }
 
     /// <summary>Returns the provider expression used for comparisons and ordering of one column.</summary>
     protected virtual string RenderColumn(ColumnRef column) => dialect.QuoteIdentifier(column.Name);

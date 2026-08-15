@@ -69,7 +69,9 @@ public static class QueryResultMaterializer
                 ? Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture)
                 : 0L
             : (long?)null;
-        var effectiveSource = source;
+        var effectiveSource = source
+            .Where(row => !row.TryGetValue("__groundwork_count_only", out var marker) || Convert.ToInt64(marker ?? 0, CultureInfo.InvariantCulture) == 0)
+            .ToArray();
         if (!sourceIncludesContinuation && request.Paging.ContinuationToken is { } token)
         {
             IReadOnlyList<QueryConstant> cursor;
@@ -86,7 +88,7 @@ public static class QueryResultMaterializer
         }
         var offset = sourceIncludesRequestedOffset ? 0 : request.Paging.Offset ?? 0;
         var limit = request.Paging.Limit;
-        var hasMore = limit is int pageSize && effectiveSource.Count > checked(offset + pageSize);
+        var hasMore = limit is int pageSize && effectiveSource.Count() > checked(offset + pageSize);
         var visible = effectiveSource.Skip(offset).Take(limit ?? int.MaxValue).ToArray();
         var effectiveOrder = options.GetEffectiveOrder(request);
         string? nextToken = null;
@@ -181,6 +183,19 @@ public static class QueryResultMaterializer
 /// <summary>Builds the internal execution request without changing the public query binding.</summary>
 public static class QueryRequestExecution
 {
+    /// <summary>Builds a provider execution request while preserving the caller's continuation binding.</summary>
+    public static QueryRequest WithProviderPredicate(QueryRequest request, Predicate predicate)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (predicate is null) throw new ArgumentNullException(nameof(predicate));
+        return new QueryRequest(request.Table, predicate, request.Order, request.Projection, request.Paging,
+            request.Result, request.LatestPerKey, request.AcceptedScan)
+        {
+            CanonicalPredicate = request.CanonicalPredicate,
+            ContinuationFingerprint = request.ContinuationFingerprint
+        };
+    }
+
     public static QueryRequest ForPage(QueryRequest request, QueryRenderOptions options)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
@@ -199,27 +214,14 @@ public static class QueryRequestExecution
         }
 
         var paging = request.Paging;
-        if (request.Result.IncludesTotalCount && request.Paging.ContinuationToken is not null)
-        {
-            paging = Paging.None;
-        }
-        else if (request.Paging.Limit is int limit)
+        if (request.Paging.Limit is int limit)
         {
             var expandedLimit = checked(limit + 1);
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, expandedLimit)
                 : request.Paging.Offset is int offset
-                    ? request.Result.IncludesTotalCount
-                        ? Paging.OffsetLimit(0, checked(offset + expandedLimit))
-                        : Paging.OffsetLimit(offset, expandedLimit)
+                    ? Paging.OffsetLimit(offset, expandedLimit)
                     : Paging.Keyset(expandedLimit);
-        }
-        else if (request.Result.IncludesTotalCount && request.Paging.Offset is not null)
-        {
-            // A window count is computed before OFFSET, but a page beyond the last row would
-            // otherwise return no row carrying that count. Read from the beginning once and let
-            // the shared materializer apply the requested offset, preserving one native query.
-            paging = Paging.None;
         }
         return ReferenceEquals(projection, request.Projection) && ReferenceEquals(paging, request.Paging)
             ? request
@@ -227,6 +229,7 @@ public static class QueryRequestExecution
             {
                 // The extra projected tie-break fields are an execution detail, not a new
                 // continuation identity. Keep the token bound to the caller's projection.
+                CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint
             };
     }

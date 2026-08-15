@@ -16,6 +16,7 @@ public sealed class CorpusDifferentialTests
     private static readonly string RunTableName = "g2-edge-row-" + Guid.NewGuid().ToString("N");
     private static readonly string SparseTableName = "g2-sparse-" + Guid.NewGuid().ToString("N");
     private static readonly string SemanticEdgeTableName = "g2-semantic-edge-" + Guid.NewGuid().ToString("N");
+    private static readonly string LatestTableName = "g2-latest-" + Guid.NewGuid().ToString("N");
 
     [SkippableFact]
     public void Pinned_40_row_300_shape_corpus_is_bit_identical_through_public_provider_sessions()
@@ -158,7 +159,7 @@ public sealed class CorpusDifferentialTests
                 Paging.OffsetLimit(100, 5),
                 ResultShape.TotalCount.Instance), Options());
             Assert.Empty(beyondEnd.Rows);
-            Assert.Equal(40, beyondEnd.TotalCount);
+            Assert.True(beyondEnd.TotalCount == 40, $"{provider.Name} reported {beyondEnd.TotalCount} for an empty counted page.");
 
             var firstCountedPage = provider.Query(new QueryRequest(
                 table,
@@ -284,6 +285,46 @@ public sealed class CorpusDifferentialTests
                 var actual = result.Rows.Select(row => (long)row["id"]!).ToArray();
                 Assert.True(expected.SequenceEqual(actual), $"{provider.Name}/{scalar.Name}: expected [{string.Join(",", expected)}], actual [{string.Join(",", actual)}]");
             }
+        }
+    }
+
+    [SkippableFact]
+    public void Latest_per_key_is_native_and_preserves_full_count_across_pages_on_all_four_providers()
+    {
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
+        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        using var sqlite = OpenSqlite(LatestUnit, LatestRows);
+        using var pg = OpenPostgreSql(postgres, LatestUnit, LatestRows);
+        using var sql = OpenSqlServer(sqlServer, LatestUnit, LatestRows);
+        using var mongoSession = OpenMongo(mongo, LatestUnit, LatestRows);
+        var providers = new[] { sqlite, pg, sql, mongoSession };
+        var table = new TableId(LatestTableName);
+        var group = new ColumnRef(table, "groupKey", QueryType.String, false);
+        var timestamp = new ColumnRef(table, "createdAt", QueryType.DateTimeOffset, false);
+        var id = new ColumnRef(table, "id", QueryType.Int64, false);
+        var order = new[] { new OrderTerm(group, OrderDirection.Ascending, NullOrder.First) }.ToImmutableArray();
+        var latest = new LatestPerKey(group, timestamp);
+        var projection = Projection.ColumnsOnly(id, group, timestamp);
+
+        foreach (var provider in providers)
+        {
+            var first = provider.Query(new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, projection,
+                Paging.Keyset(1), ResultShape.TotalCount.Instance, latest), QueryRenderOptions.Default);
+            Assert.Equal(2, first.TotalCount);
+            Assert.Equal(new[] { 2L }, first.Rows.Select(row => (long)row["id"]!).ToArray());
+            Assert.NotNull(first.NextContinuationToken);
+
+            var second = provider.Query(new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, projection,
+                Paging.Continuation(first.NextContinuationToken!, 1), ResultShape.TotalCount.Instance, latest), QueryRenderOptions.Default);
+            Assert.Equal(2, second.TotalCount);
+            Assert.Equal(new[] { 5L }, second.Rows.Select(row => (long)row["id"]!).ToArray());
+            Assert.Null(second.NextContinuationToken);
+
+            var beyondEnd = provider.Query(new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, projection,
+                Paging.OffsetLimit(100, 1), ResultShape.TotalCount.Instance, latest), QueryRenderOptions.Default);
+            Assert.Empty(beyondEnd.Rows);
+            Assert.Equal(2, beyondEnd.TotalCount);
         }
     }
 
@@ -454,6 +495,20 @@ public sealed class CorpusDifferentialTests
         Key = new KeyDefinition { Columns = ["id"] }
     };
 
+    private static StorageUnit LatestUnit => new()
+    {
+        Id = new StorageUnitId(LatestTableName),
+        Name = LatestTableName,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "groupKey", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
+            new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false },
+            new() { Name = "value", Type = PortableType.Int32, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
     private static IReadOnlyList<IReadOnlyDictionary<string, object?>> SemanticEdgeRows =>
     [
         new Dictionary<string, object?>
@@ -520,6 +575,15 @@ public sealed class CorpusDifferentialTests
             ["instantValue"] = null,
             ["guidValue"] = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff")
         }
+    ];
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> LatestRows =>
+    [
+        new Dictionary<string, object?> { ["id"] = 1L, ["groupKey"] = "a", ["createdAt"] = DateTimeOffset.UnixEpoch.AddTicks(10), ["value"] = 10 },
+        new Dictionary<string, object?> { ["id"] = 2L, ["groupKey"] = "a", ["createdAt"] = DateTimeOffset.UnixEpoch.AddTicks(20), ["value"] = 20 },
+        new Dictionary<string, object?> { ["id"] = 3L, ["groupKey"] = "a", ["createdAt"] = DateTimeOffset.UnixEpoch.AddTicks(20), ["value"] = 30 },
+        new Dictionary<string, object?> { ["id"] = 4L, ["groupKey"] = "b", ["createdAt"] = DateTimeOffset.UnixEpoch.AddTicks(5), ["value"] = 40 },
+        new Dictionary<string, object?> { ["id"] = 5L, ["groupKey"] = "b", ["createdAt"] = DateTimeOffset.UnixEpoch.AddTicks(15), ["value"] = 50 }
     ];
 
     private sealed record ScalarOrderCase(string Name, ColumnRef Column, IReadOnlyList<object> Values);

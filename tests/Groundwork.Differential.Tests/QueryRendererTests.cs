@@ -53,11 +53,12 @@ public sealed class QueryRendererTests
         Assert.False(rows.IncludesTotalCount);
         Assert.DoesNotContain("COUNT", rows.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.True(count.IncludesTotalCount);
-        Assert.Contains("COUNT(*) OVER()", count.CommandText, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_total_count", count.CommandText, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN __groundwork_page", count.CommandText, StringComparison.Ordinal);
 
         var sqlServerCount = new SqlServerQueryRenderer().Render(
             Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 1L)), [], Paging.None, ResultShape.TotalCount.Instance));
-        Assert.Contains("COUNT_BIG(*) OVER()", sqlServerCount.CommandText, StringComparison.Ordinal);
+        Assert.Contains("COUNT_BIG(*)", sqlServerCount.CommandText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -126,13 +127,19 @@ public sealed class QueryRendererTests
     [Fact]
     public void Nullable_keyset_continuation_is_typed_and_uses_explicit_null_rank_on_all_providers()
     {
-        var token = QueryContinuationToken.Encode([QueryConstant.Of(Amount, null), QueryConstant.Of(Id, 42L)]);
+        var tokenRequest = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Amount, OrderDirection.Ascending, NullOrder.First)],
+            Paging.Keyset(5),
+            ResultShape.Rows.Instance);
+        var options = new QueryRenderOptions(tieBreakColumns: [Id]);
+        var token = QueryContinuationToken.Encode(tokenRequest, options,
+            [QueryConstant.Of(Amount, null), QueryConstant.Of(Id, 42L)]);
         var request = Request(
             Predicate.AlwaysTrue.Instance,
             [new OrderTerm(Amount, OrderDirection.Ascending, NullOrder.First)],
             Paging.Continuation(token, 5),
             ResultShape.Rows.Instance);
-        var options = new QueryRenderOptions(tieBreakColumns: [Id]);
 
         var sqlite = new SqliteQueryRenderer().Render(request, options);
         var postgres = new PostgreSqlQueryRenderer().Render(request, options);
@@ -146,6 +153,40 @@ public sealed class QueryRendererTests
         Assert.Contains("$ne", mongo.Filter.ToString(), StringComparison.Ordinal);
         Assert.Contains("_groundwork_null_rank_0", string.Join("\n", mongo.Pipeline.Select(stage => stage.ToString())), StringComparison.Ordinal);
         Assert.Equal(new[] { "amount", "id" }, mongo.AppliedOrder.ToArray());
+    }
+
+    [Fact]
+    public void Continuation_tokens_bind_invocation_values_and_reject_unbound_legacy_tokens()
+    {
+        var first = Request(new Predicate.Equal(Name, QueryConstant.Of(Name, "alice")),
+            [new OrderTerm(Id, OrderDirection.Ascending, NullOrder.First)], Paging.Keyset(1), ResultShape.Rows.Instance);
+        var options = new QueryRenderOptions();
+        var token = QueryContinuationToken.Encode(first, options, [QueryConstant.Of(Id, 7L)]);
+        var other = Request(new Predicate.Equal(Name, QueryConstant.Of(Name, "bob")),
+            [new OrderTerm(Id, OrderDirection.Ascending, NullOrder.First)], Paging.Continuation(token, 1), ResultShape.Rows.Instance);
+        Assert.Throws<FormatException>(() => QueryContinuationToken.Decode(token, other, options));
+        Assert.Throws<FormatException>(() => QueryContinuationToken.Decode(
+            QueryContinuationToken.Encode([QueryConstant.Of(Id, 7L)]), first, options));
+    }
+
+    [Fact]
+    public void Provider_cursor_and_json_array_renderers_preserve_contract_guards()
+    {
+        var guid = new ColumnRef(Table, "guid", QueryType.Guid, false);
+        var request = Request(Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(guid, OrderDirection.Ascending, NullOrder.First)], Paging.Keyset(1), ResultShape.Rows.Instance);
+        var options = new QueryRenderOptions();
+        var token = QueryContinuationToken.Encode(request, options, [QueryConstant.Of(guid, Guid.Empty)]);
+        request = Request(Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(guid, OrderDirection.Ascending, NullOrder.First)], Paging.Continuation(token, 1), ResultShape.Rows.Instance);
+        var sql = new SqlServerQueryRenderer().Render(request, options);
+        Assert.Contains("CONVERT(char(36)", sql.CommandText, StringComparison.Ordinal);
+
+        var set = new ElementSetRef("tags", QueryType.String);
+        var elementRequest = Request(new Predicate.ElementOf(set,
+            [QueryConstant.Of(Name, "x")], SetQuantifier.All), [], Paging.None, ResultShape.Rows.Instance);
+        Assert.Contains("json_type", new SqliteQueryRenderer().Render(elementRequest).CommandText, StringComparison.Ordinal);
+        Assert.Contains("LEFT(LTRIM", new SqlServerQueryRenderer().Render(elementRequest).CommandText, StringComparison.Ordinal);
     }
 
     [Fact]

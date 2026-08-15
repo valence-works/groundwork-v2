@@ -707,12 +707,20 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         var executionRequest = QueryRequestExecution.ForPage(request, renderOptions);
         var command = new MongoQueryRenderer().Render(executionRequest, renderOptions);
         List<BsonDocument> documents;
+        long? facetTotalCount = null;
         if (command.Pipeline.Length != 0)
         {
             var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
             documents = (transactionSession is null
                 ? collection.Aggregate(pipeline, new AggregateOptions { Hint = command.Hint })
                 : collection.Aggregate(transactionSession, pipeline, new AggregateOptions { Hint = command.Hint })).ToList();
+            if (command.IncludesTotalCount && documents.Count == 1 && documents[0].Contains("metadata") && documents[0].Contains("data"))
+            {
+                var envelope = documents[0];
+                var metadata = envelope["metadata"].AsBsonArray;
+                facetTotalCount = metadata.Count == 0 ? 0L : metadata[0].AsBsonDocument.GetValue("__groundwork_total_count", 0).ToInt64();
+                documents = envelope["data"].AsBsonArray.Select(value => value.AsBsonDocument).ToList();
+            }
         }
         else
         {
@@ -741,14 +749,36 @@ internal sealed class MongoStorageSession : IMongoStorageSession
                 row["__groundwork_total_count"] = count.ToInt64();
             return (IReadOnlyDictionary<string, object?>)row;
         }).ToArray();
+        if (facetTotalCount is long count)
+        {
+            if (rows.Length == 0)
+            {
+                rows =
+                [
+                    new Dictionary<string, object?>
+                    {
+                        ["__groundwork_total_count"] = count,
+                        ["__groundwork_count_only"] = 1L
+                    }
+                ];
+            }
+            else
+            {
+                var first = new Dictionary<string, object?>(rows[0], StringComparer.Ordinal)
+                {
+                    ["__groundwork_total_count"] = count
+                };
+                rows[0] = first;
+            }
+        }
         return QueryResultMaterializer.Materialize(
             request,
             renderOptions,
             rows,
             renderOptions.FindPinnedIndex()?.Name,
             command.Hint is not null,
-            !request.Result.IncludesTotalCount,
-            !(request.Result.IncludesTotalCount && request.Paging.ContinuationToken is not null));
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
     }
 
     private ColumnRef? QueryColumn(string name)

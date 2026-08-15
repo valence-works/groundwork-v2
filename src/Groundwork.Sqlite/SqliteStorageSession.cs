@@ -41,6 +41,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var executionSource = WithScopePredicate(request);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
             Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
@@ -49,7 +50,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
                 index => SqliteDialect.PhysicalIndexName(Unit.Name, index.Name),
                 StringComparer.Ordinal)
         };
-        var executionRequest = QueryRequestExecution.ForPage(request, renderOptions);
+        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
@@ -58,9 +59,16 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
         });
         return QueryResultMaterializer.Materialize(request, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            !request.Result.IncludesTotalCount,
-            !(request.Result.IncludesTotalCount && request.Paging.ContinuationToken is not null));
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
     });
+
+    private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
+        ? request
+        : QueryRequestExecution.WithProviderPredicate(request, new Predicate.And([
+            request.Where,
+            new Predicate.Equal(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String),
+                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]));
 
     public StoredEntry? Read(StorageKey key) => Execute(() =>
     {

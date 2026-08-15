@@ -22,17 +22,15 @@ public sealed class MongoQueryRenderer
             var refusal = validation.Refusals[0];
             throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
         }
-        if (request.LatestPerKey is not null)
-            throw new QueryRenderException("GW-QUERY-030", "Latest-per-key rendering is not part of the normalized Mongo query command yet.");
-
         var order = EffectiveOrder(request, options);
-        var filter = RenderPredicate(request.Where, options.InValueLimit, request.Table.Value);
+        var baseFilter = RenderPredicate(request.Where, options.InValueLimit, request.Table.Value);
+        var filter = baseFilter;
         var matchNone = request.Where is Predicate.AlwaysFalse;
+        IReadOnlyList<QueryConstant>? cursor = null;
         if (request.Paging.ContinuationToken is not null)
         {
             if (order.Count == 0)
                 throw new QueryRenderException("GW-QUERY-013", "Keyset continuation requires an explicit ordered query.");
-            IReadOnlyList<QueryConstant> cursor;
             try
             {
                 cursor = QueryContinuationToken.Decode(request.Paging.ContinuationToken, request, options);
@@ -41,7 +39,8 @@ public sealed class MongoQueryRenderer
             {
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
-            filter = And(filter, RenderContinuation(order, cursor));
+            if (!request.Result.IncludesTotalCount && request.LatestPerKey is null)
+                filter = And(filter, RenderContinuation(order, cursor));
         }
 
         var selectedIndex = options.FindPinnedIndex();
@@ -61,6 +60,7 @@ public sealed class MongoQueryRenderer
                     new BsonDocument(column, selectedIndex.ColumnTypes.TryGetValue(column, out var type) && type is QueryType knownType
                         ? new BsonDocument("$type", MongoTypeName(knownType))
                         : new BsonDocument("$exists", true)))));
+            baseFilter = And(baseFilter, sparseEligibility);
             filter = And(filter, sparseEligibility);
         }
         if (selectedIndex is not null && !matchNone && !selectedIndex.IncludesNulls)
@@ -80,10 +80,7 @@ public sealed class MongoQueryRenderer
             : new BsonDocument(request.Projection.Columns.ToDictionary(column => column.Name, _ => (BsonValue)1));
         var sort = new BsonDocument(order.Select(term =>
             new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1)));
-        var pipeline = RenderPipeline(filter, order, projection, request.Paging, request.Result.IncludesTotalCount);
-        if (order.Count != 0)
-            sort = pipeline.First(stage => stage.Contains("$sort"))["$sort"].AsBsonDocument;
-
+        var pipeline = RenderPipeline(baseFilter, cursor, request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount, options);
         return new MongoQueryCommand(
             filter,
             sort,
@@ -155,10 +152,25 @@ public sealed class MongoQueryRenderer
                 if (elementOf.Values.Length == 0)
                     return elementOf.Quantifier == SetQuantifier.Any
                         ? MatchNone()
-                        : new BsonDocument(elementOf.Set.Name, new BsonDocument("$type", "array"));
+                        : new BsonDocument("$expr", new BsonDocument("$eq", new BsonArray
+                        {
+                            new BsonDocument("$type", "$" + elementOf.Set.Name), "array"
+                        }));
                 var values = new BsonArray(elementOf.Values.Select(ToBson));
-                return new BsonDocument(elementOf.Set.Name,
-                    new BsonDocument(elementOf.Quantifier == SetQuantifier.Any ? "$in" : "$all", values));
+                return elementOf.Quantifier == SetQuantifier.Any
+                    ? new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
+                    {
+                        new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$" + elementOf.Set.Name), "array" }),
+                        new BsonDocument("$gt", new BsonArray
+                        {
+                            new BsonDocument("$size", new BsonDocument("$setIntersection", new BsonArray { "$" + elementOf.Set.Name, values })), 0
+                        })
+                    }))
+                    : new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
+                    {
+                        new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$" + elementOf.Set.Name), "array" }),
+                        new BsonDocument("$setIsSubset", new BsonArray { values, "$" + elementOf.Set.Name })
+                    }));
             case Predicate.Substring substring when substring.Anchor is Anchor.Contains or Anchor.EndsWith:
                 return new BsonDocument(substring.Column.Name,
                     new BsonRegularExpression(
@@ -181,14 +193,14 @@ public sealed class MongoQueryRenderer
         }
     }
 
-    private static BsonDocument RenderContinuation(IReadOnlyList<OrderTerm> order, IReadOnlyList<QueryConstant> cursor)
+    private BsonDocument RenderContinuation(IReadOnlyList<OrderTerm> order, IReadOnlyList<QueryConstant> cursor)
     {
         var alternatives = new List<BsonDocument>();
         for (var boundary = 0; boundary < order.Count; boundary++)
         {
             var conjunction = new List<BsonDocument>();
             for (var prefix = 0; prefix < boundary; prefix++)
-                conjunction.Add(new BsonDocument(order[prefix].Column.Name, ToBson(cursor[prefix])));
+                conjunction.Add(RenderCursorEquality(order[prefix], cursor[prefix]));
             conjunction.Add(RenderAfter(order[boundary], cursor[boundary]));
             alternatives.Add(conjunction.Count == 1
                 ? conjunction[0]
@@ -199,7 +211,19 @@ public sealed class MongoQueryRenderer
             : new BsonDocument("$or", new BsonArray(alternatives));
     }
 
-    private static BsonDocument RenderAfter(OrderTerm term, QueryConstant value)
+    private BsonDocument RenderCursorEquality(OrderTerm term, QueryConstant value)
+    {
+        if (term.Column.Type == QueryType.String && value.Kind != QueryConstantKind.Null)
+            return new BsonDocument("$expr", new BsonDocument("$eq", new BsonArray
+            {
+                RenderOrdinalKey("$" + term.Column.Name), RenderOrdinalKey(value)
+            }));
+        return new BsonDocument(term.Column.Name, value.Kind == QueryConstantKind.Null
+            ? BsonNull.Value
+            : ToBson(value));
+    }
+
+    private BsonDocument RenderAfter(OrderTerm term, QueryConstant value)
     {
         if (term.NullOrder is not (NullOrder.First or NullOrder.Last))
             throw new QueryRenderException("GW-SEM-ORDER-004", "Continuation requires explicit null ordering.");
@@ -208,8 +232,19 @@ public sealed class MongoQueryRenderer
                 ? new BsonDocument(term.Column.Name, new BsonDocument("$ne", BsonNull.Value))
                 : MatchNone();
 
-        var strict = new BsonDocument(term.Column.Name, new BsonDocument(
-            term.Direction == OrderDirection.Ascending ? "$gt" : "$lt", ToBson(value)));
+        BsonDocument strict;
+        if (term.Column.Type == QueryType.String)
+        {
+            var operation = term.Direction == OrderDirection.Ascending ? "$gt" : "$lt";
+            strict = new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
+            {
+                new BsonDocument("$ne", new BsonArray { "$" + term.Column.Name, BsonNull.Value }),
+                new BsonDocument(operation, new BsonArray { RenderOrdinalKey("$" + term.Column.Name), RenderOrdinalKey(value) })
+            }));
+        }
+        else
+            strict = new BsonDocument(term.Column.Name, new BsonDocument(
+                term.Direction == OrderDirection.Ascending ? "$gt" : "$lt", ToBson(value)));
         if (term.NullOrder == NullOrder.Last)
             return new BsonDocument("$or", new BsonArray
             {
@@ -253,17 +288,43 @@ public sealed class MongoQueryRenderer
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 
-    private static IReadOnlyList<BsonDocument> RenderPipeline(
-        BsonDocument filter,
+    private IReadOnlyList<BsonDocument> RenderPipeline(
+        BsonDocument baseFilter,
+        IReadOnlyList<QueryConstant>? cursor,
+        LatestPerKey? latest,
         IReadOnlyList<OrderTerm> order,
         BsonDocument projection,
         Paging paging,
-        bool includesTotalCount)
+        bool includesTotalCount,
+        QueryRenderOptions options)
     {
-        if (order.Count == 0 && !includesTotalCount)
+        if (order.Count == 0 && !includesTotalCount && latest is null)
             return Array.Empty<BsonDocument>();
 
-        var stages = new List<BsonDocument> { new("$match", filter.DeepClone()) };
+        var prefix = new List<BsonDocument> { new("$match", baseFilter.DeepClone()) };
+        if (latest is not null)
+        {
+            var latestSort = new BsonDocument
+            {
+                { latest.Key.Name, 1 },
+                { latest.Timestamp.Name, -1 }
+            };
+            foreach (var tieBreak in options.TieBreakColumns.Where(column =>
+                         !string.Equals(column.Name, latest.Key.Name, StringComparison.Ordinal) &&
+                         !string.Equals(column.Name, latest.Timestamp.Name, StringComparison.Ordinal)))
+                latestSort.Add(tieBreak.Name, 1);
+            prefix.Add(new BsonDocument("$sort", latestSort));
+            prefix.Add(new BsonDocument("$group", new BsonDocument
+            {
+                { "_id", "$" + latest.Key.Name },
+                { "__groundwork_latest", new BsonDocument("$first", "$$ROOT") }
+            }));
+            prefix.Add(new BsonDocument("$replaceWith", "$__groundwork_latest"));
+        }
+
+        var data = new List<BsonDocument>();
+        if (cursor is not null)
+            data.Add(new BsonDocument("$match", RenderContinuation(order, cursor)));
         var sort = new BsonDocument();
         for (var index = 0; index < order.Count; index++)
         {
@@ -274,7 +335,7 @@ public sealed class MongoQueryRenderer
             var rankName = "_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var nullRank = term.NullOrder == NullOrder.First ? 0 : 1;
             var nonNullRank = term.NullOrder == NullOrder.First ? 1 : 0;
-            stages.Add(new BsonDocument("$set", new BsonDocument(rankName,
+            data.Add(new BsonDocument("$set", new BsonDocument(rankName,
                 new BsonDocument("$cond", new BsonArray
                 {
                     new BsonDocument("$eq", new BsonArray { "$" + term.Column.Name, BsonNull.Value }),
@@ -287,7 +348,7 @@ public sealed class MongoQueryRenderer
                 : term.Column.Name;
             if (term.Column.Type == QueryType.String)
             {
-                stages.Add(new BsonDocument("$set", new BsonDocument(orderName,
+                data.Add(new BsonDocument("$set", new BsonDocument(orderName,
                     new BsonDocument("$function", new BsonDocument
                     {
                         { "body", "function(value) { if (value === null || value === undefined) return null; var key = ''; for (var i = 0; i < value.length; i++) { var unit = value.charCodeAt(i).toString(16); key += ('0000' + unit).slice(-4); } return key; }" },
@@ -297,21 +358,10 @@ public sealed class MongoQueryRenderer
             }
             sort.Add(orderName, term.Direction == OrderDirection.Ascending ? 1 : -1);
         }
-
-        if (includesTotalCount)
-        {
-            stages.Add(new BsonDocument("$setWindowFields", new BsonDocument("output",
-                new BsonDocument("__groundwork_total_count", new BsonDocument("$count", new BsonDocument())))));
-        }
         if (sort.ElementCount != 0)
-            stages.Add(new BsonDocument("$sort", sort));
+            data.Add(new BsonDocument("$sort", sort));
         if (projection.ElementCount != 0)
-        {
-            var effectiveProjection = projection.DeepClone();
-            if (includesTotalCount)
-                effectiveProjection["__groundwork_total_count"] = 1;
-            stages.Add(new BsonDocument("$project", effectiveProjection));
-        }
+            data.Add(new BsonDocument("$project", projection.DeepClone()));
         else if (order.Count != 0)
         {
             var cleanup = new BsonDocument();
@@ -321,14 +371,44 @@ public sealed class MongoQueryRenderer
                 if (order[index].Column.Type == QueryType.String)
                     cleanup.Add("_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
             }
-            stages.Add(new BsonDocument("$project", cleanup));
+            data.Add(new BsonDocument("$project", cleanup));
         }
         if (paging.Offset is int offset)
-            stages.Add(new BsonDocument("$skip", offset));
+            data.Add(new BsonDocument("$skip", offset));
         if (paging.Limit is int limit)
-            stages.Add(new BsonDocument("$limit", limit));
-        return stages;
+            data.Add(new BsonDocument("$limit", limit));
+
+        if (includesTotalCount)
+        {
+            prefix.Add(new BsonDocument("$facet", new BsonDocument
+            {
+                { "metadata", new BsonArray { new BsonDocument("$count", "__groundwork_total_count") } },
+                { "data", new BsonArray(data) }
+            }));
+            return prefix;
+        }
+        prefix.AddRange(data);
+        return prefix;
     }
+
+    private static BsonDocument RenderOrdinalKey(string field)
+        => new("$function", new BsonDocument
+        {
+            { "body", "function(value) { if (value === null || value === undefined) return null; var key = ''; for (var i = 0; i < value.length; i++) { var unit = value.charCodeAt(i).toString(16); key += ('0000' + unit).slice(-4); } return key; }" },
+            { "args", new BsonArray { field } },
+            { "lang", "js" }
+        });
+
+    private static BsonDocument RenderOrdinalKey(QueryConstant value)
+        => RenderOrdinalKey(ToBson(value));
+
+    private static BsonDocument RenderOrdinalKey(BsonValue value)
+        => new("$function", new BsonDocument
+        {
+            { "body", "function(value) { if (value === null || value === undefined) return null; var key = ''; for (var i = 0; i < value.length; i++) { var unit = value.charCodeAt(i).toString(16); key += ('0000' + unit).slice(-4); } return key; }" },
+            { "args", new BsonArray { value } },
+            { "lang", "js" }
+        });
 
     private static BsonDocument And(BsonDocument left, BsonDocument right) =>
         new("$and", new BsonArray { left, right });

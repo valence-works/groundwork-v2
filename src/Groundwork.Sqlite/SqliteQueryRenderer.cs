@@ -56,8 +56,9 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
             else
                 clauses.Add("json_each.value = @" + AddElementParameter(type, value.Value, parameters, ref parameterIndex));
         }
+        var arrayGuard = "json_valid(" + expression + ") = 1 AND json_type(" + expression + ") = 'array'";
         return elementOf.Quantifier == SetQuantifier.Any
-            ? "EXISTS (SELECT 1 FROM json_each(" + expression + ") WHERE " + string.Join(" OR ", clauses) + ")"
-            : string.Join(" AND ", clauses.Select(clause => "EXISTS (SELECT 1 FROM json_each(" + expression + ") WHERE " + clause + ")"));
+            ? "(" + arrayGuard + " AND EXISTS (SELECT 1 FROM json_each(" + expression + ") WHERE " + string.Join(" OR ", clauses) + "))"
+            : "(" + arrayGuard + " AND " + string.Join(" AND ", clauses.Select(clause => "EXISTS (SELECT 1 FROM json_each(" + expression + ") WHERE " + clause + ")")) + ")";
     }
 }

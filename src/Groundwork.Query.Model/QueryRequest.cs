@@ -164,7 +164,7 @@ public sealed record QueryRequest
     public ResultShape Result { get; }
     public LatestPerKey? LatestPerKey { get; }
     public ScanAcceptance? AcceptedScan { get; }
-    public string CanonicalPredicate { get; }
+    public string CanonicalPredicate { get; internal init; }
     public string ShapeFingerprint { get; }
     public string ContinuationFingerprint { get; internal init; }
 }

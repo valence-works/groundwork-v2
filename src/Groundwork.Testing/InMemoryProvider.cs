@@ -459,6 +459,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns
+            .Select(name => QueryColumn(name))
+            .Where(column => column is not null)
+            .Select(column => column!));
         var validation = PortableQuerySemantics.Validate(request);
         if (!validation.IsPortable)
         {
@@ -477,9 +481,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
                 : new List<IReadOnlyDictionary<string, object?>>();
 
             if (request.LatestPerKey is not null)
-                rows = LatestPerKeyRows(rows, request.LatestPerKey);
+                rows = LatestPerKeyRows(rows, request.LatestPerKey, renderOptions.TieBreakColumns);
 
-            var order = suppliedOptions.GetEffectiveOrder(request);
+            var order = renderOptions.GetEffectiveOrder(request);
             if (order.Length != 0)
                 rows.Sort(new MemoryRowComparer(order));
 
@@ -489,7 +493,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
                 IReadOnlyList<QueryConstant> cursor;
                 try
                 {
-                    cursor = QueryContinuationToken.Decode(token, request, suppliedOptions);
+                    cursor = QueryContinuationToken.Decode(token, request, renderOptions);
                 }
                 catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
                 {
@@ -498,9 +502,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
                 rows = rows.Where(row => IsAfter(row, order, cursor)).ToList();
             }
 
-            var selectedIndex = suppliedOptions.FindPinnedIndex()?.Name;
+            var selectedIndex = renderOptions.FindPinnedIndex()?.Name;
             if (!request.Result.IncludesTotalCount)
-                return QueryResultMaterializer.Materialize(request, suppliedOptions, rows, selectedIndex, sourceIncludesRequestedOffset: false);
+                return QueryResultMaterializer.Materialize(request, renderOptions, rows, selectedIndex, sourceIncludesRequestedOffset: false);
 
             if (rows.Count == 0)
                 return new QueryMaterializedResult(Array.Empty<IReadOnlyDictionary<string, object?>>(), 0L, null, selectedIndex);
@@ -511,10 +515,27 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
                     ["__groundwork_total_count"] = (long)rows.Count
                 }
                 : row).ToArray();
-            return QueryResultMaterializer.Materialize(request, suppliedOptions, counted, selectedIndex,
+            return QueryResultMaterializer.Materialize(request, renderOptions, counted, selectedIndex,
                 sourceIncludesRequestedOffset: false,
                 sourceIncludesContinuation: !deferContinuation);
         }
+    }
+
+    private ColumnRef? QueryColumn(string name)
+    {
+        var column = Unit.Columns.Single(item => item.Name == name);
+        return column.Type switch
+        {
+            PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
+            PortableType.Int32 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int32, column.IsNullable),
+            PortableType.Int64 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int64, column.IsNullable),
+            PortableType.Decimal => new ColumnRef(new TableId(Unit.Name), name, QueryType.Decimal, column.IsNullable),
+            PortableType.String => new ColumnRef(new TableId(Unit.Name), name, QueryType.String, column.IsNullable),
+            PortableType.DateTimeOffset => new ColumnRef(new TableId(Unit.Name), name, QueryType.DateTimeOffset, column.IsNullable),
+            PortableType.Guid => new ColumnRef(new TableId(Unit.Name), name, QueryType.Guid, column.IsNullable),
+            PortableType.Binary => new ColumnRef(new TableId(Unit.Name), name, QueryType.Binary, column.IsNullable),
+            _ => null
+        };
     }
 
     private static void ValidateInBudget(Predicate predicate, int limit, string table)
@@ -541,12 +562,16 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
 
     private static List<IReadOnlyDictionary<string, object?>> LatestPerKeyRows(
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
-        LatestPerKey latest)
+        LatestPerKey latest,
+        IReadOnlyList<ColumnRef> tieBreakColumns)
     {
         return rows
             .Where(row => row.TryGetValue(latest.Timestamp.Name, out var timestamp) && timestamp is DateTimeOffset)
             .GroupBy(row => ValueIdentity(row.TryGetValue(latest.Key.Name, out var key) ? key : null), StringComparer.Ordinal)
-            .Select(group => group.OrderByDescending(row => ((DateTimeOffset)row[latest.Timestamp.Name]!).UtcTicks).First())
+            .Select(group => group
+                .OrderByDescending(row => ((DateTimeOffset)row[latest.Timestamp.Name]!).UtcTicks)
+                .ThenBy(row => string.Join("\u001f", tieBreakColumns.Select(column => ValueIdentity(row.TryGetValue(column.Name, out var value) ? value : null))), StringComparer.Ordinal)
+                .First())
             .ToList();
     }
 

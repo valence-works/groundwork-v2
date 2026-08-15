@@ -251,7 +251,7 @@ public static class QueryContinuationToken
         var order = options.GetEffectiveOrder(request);
         if (snapshot.Length != order.Length)
             throw new ArgumentException("A continuation must contain one value per effective order term.", nameof(values));
-        var binding = request.ContinuationFingerprint + "|" + string.Join(";", order.Select(OrderBinding));
+        var binding = Binding(request, order);
         return BoundPrefix + EncodeText(binding) + "." + string.Join(".", snapshot.Select(value => EncodeValue(value ?? throw new ArgumentException("Continuation values cannot contain null references.", nameof(values)))));
     }
 
@@ -278,13 +278,13 @@ public static class QueryContinuationToken
         if (string.IsNullOrWhiteSpace(token))
             throw new ArgumentException("A continuation token cannot be blank.", nameof(token));
         if (!token.StartsWith(BoundPrefix, StringComparison.Ordinal))
-            return Decode(token, options.GetEffectiveOrder(request).Select(term => term.Column).ToArray());
+            throw new FormatException("The continuation token is unbound; issue a new token from the current query result.");
 
         var parts = token.Substring(BoundPrefix.Length).Split('.');
         var order = options.GetEffectiveOrder(request);
         if (parts.Length != order.Length + 1)
             throw new FormatException("The continuation token does not contain one value per effective order term.");
-        var expectedBinding = request.ContinuationFingerprint + "|" + string.Join(";", order.Select(OrderBinding));
+        var expectedBinding = Binding(request, order);
         if (!string.Equals(DecodeText(parts[0]), expectedBinding, StringComparison.Ordinal))
             throw new FormatException("The continuation token belongs to a different query shape or identity order.");
         return parts.Skip(1).Select((item, index) => DecodeValue(item, order[index].Column)).ToArray();
@@ -307,6 +307,9 @@ public static class QueryContinuationToken
 
     private static string OrderBinding(OrderTerm term) =>
         PredicateCanonicalizer.Column(term.Column) + ":" + term.Direction + ":" + term.NullOrder;
+
+    private static string Binding(QueryRequest request, IEnumerable<OrderTerm> order) =>
+        request.CanonicalPredicate + "|" + request.ContinuationFingerprint + "|" + string.Join(";", order.Select(OrderBinding));
 
     private static QueryConstant DecodeValue(string encoded, ColumnRef column)
     {
