@@ -199,11 +199,7 @@ public static class SearchKeyProjection
             if (result.ContainsKey(declaration.Name))
                 throw new ArgumentException($"Search-key column '{declaration.Name}' is provider-owned and cannot be supplied.", nameof(values));
             var source = declaration.SourceColumn;
-            var policy = declaration.AlgorithmId?.Contains(
-                PortableStringComparison.AsciiIgnoreCaseAlgorithmId,
-                StringComparison.Ordinal) == true
-                ? PortableStringComparisonPolicy.AsciiIgnoreCase
-                : PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase;
+            var policy = PortableSearchKeyAlgorithmIdentity.Parse(declaration.AlgorithmId).Policy;
             if (result.TryGetValue(source, out var value))
             {
                 result[declaration.Name] = value is string text

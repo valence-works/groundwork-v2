@@ -262,29 +262,22 @@ public sealed class PostgreSqlDialect : RelationalDialect
     {
         if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported PostgreSQL provider definition '{definition.Kind}'.");
-        var parts = definition.SubjectIdentity.Split(RelationalDialect.SearchKeyDefinitionSeparator);
-        if (parts.Length != 2)
-            throw new InvalidOperationException("A PostgreSQL search-key provider definition requires a table and column identity.");
-        using var command = Command(connection, transaction, "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=EXCLUDED.\"algorithm_id\";");
-        Add(command, "table", parts[0]);
-        Add(command, "column", parts[1]);
-        Add(command, "algorithm", definition.CanonicalDefinition);
-        command.ExecuteNonQuery();
+        RelationalSearchKeyCatalog.Apply(
+            connection,
+            transaction,
+            definition,
+            "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=EXCLUDED.\"algorithm_id\";");
     }
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
         DbTransaction transaction,
         string table)
-    {
-        using var command = Command(connection, transaction, "SELECT \"column_name\",\"algorithm_id\" FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table;");
-        Add(command, "table", table);
-        using var reader = command.ExecuteReader();
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        while (reader.Read())
-            result[reader.GetString(0)] = reader.GetString(1);
-        return result;
-    }
+        => RelationalSearchKeyCatalog.Read(
+            connection,
+            transaction,
+            table,
+            "SELECT \"column_name\",\"algorithm_id\" FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table;");
 
     public override PhysicalSchemaHistoryState ReadHistory(
         DbConnection connection,

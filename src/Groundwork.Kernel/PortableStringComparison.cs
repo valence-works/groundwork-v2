@@ -10,6 +10,38 @@ public enum PortableStringComparisonPolicy
     UnicodeOrdinalIgnoreCase
 }
 
+/// <summary>A validated, versioned identity for one persisted boundary search-key algorithm.</summary>
+public sealed record PortableSearchKeyAlgorithmIdentity
+{
+    private PortableSearchKeyAlgorithmIdentity(PortableStringComparisonPolicy policy, string value)
+    {
+        Policy = policy;
+        Value = value;
+    }
+
+    public PortableStringComparisonPolicy Policy { get; }
+
+    public string Value { get; }
+
+    public static PortableSearchKeyAlgorithmIdentity ForPolicy(PortableStringComparisonPolicy policy) =>
+        new(policy, PortableStringComparison.GetSearchKeyAlgorithmId(policy));
+
+    public static PortableSearchKeyAlgorithmIdentity Parse(string? value)
+    {
+        foreach (var policy in Enum.GetValues<PortableStringComparisonPolicy>())
+        {
+            var expected = ForPolicy(policy);
+            if (string.Equals(value, expected.Value, StringComparison.Ordinal))
+                return expected;
+        }
+
+        throw new InvalidOperationException(
+            $"Search-key algorithm identity '{value ?? "<missing>"}' is unknown, stale, or malformed. Rebuild the derived search-key column before use.");
+    }
+
+    public override string ToString() => Value;
+}
+
 public enum StringIdentityCasePolicy
 {
     Ordinal,

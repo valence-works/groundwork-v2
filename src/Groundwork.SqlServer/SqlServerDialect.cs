@@ -51,16 +51,11 @@ internal sealed class SqlServerDialect : RelationalDialect
     {
         if (string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
         {
-            var parts = definition.SubjectIdentity.Split(RelationalDialect.SearchKeyDefinitionSeparator);
-            if (parts.Length != 2)
-                throw new InvalidOperationException("A SQL Server search-key provider definition requires a table and column identity.");
-            using var searchKey = connection.CreateCommand();
-            searchKey.Transaction = transaction;
-            searchKey.CommandText = "IF EXISTS (SELECT 1 FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table AND [column_name]=@column) UPDATE [__groundwork_search_key_algorithms] SET [algorithm_id]=@algorithm WHERE [table_name]=@table AND [column_name]=@column ELSE INSERT INTO [__groundwork_search_key_algorithms] ([table_name],[column_name],[algorithm_id]) VALUES (@table,@column,@algorithm);";
-            AddParameter(searchKey, "@table", parts[0]);
-            AddParameter(searchKey, "@column", parts[1]);
-            AddParameter(searchKey, "@algorithm", definition.CanonicalDefinition);
-            searchKey.ExecuteNonQuery();
+            RelationalSearchKeyCatalog.Apply(
+                connection,
+                transaction,
+                definition,
+                "IF EXISTS (SELECT 1 FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table AND [column_name]=@column) UPDATE [__groundwork_search_key_algorithms] SET [algorithm_id]=@algorithm WHERE [table_name]=@table AND [column_name]=@column ELSE INSERT INTO [__groundwork_search_key_algorithms] ([table_name],[column_name],[algorithm_id]) VALUES (@table,@column,@algorithm);");
             return;
         }
         if (!string.Equals(definition.Kind, SqlServerSchemaCoordinator.BatchTypeKind, StringComparison.Ordinal))
@@ -294,17 +289,11 @@ internal sealed class SqlServerDialect : RelationalDialect
         DbConnection connection,
         DbTransaction transaction,
         string table)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT [column_name],[algorithm_id] FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table;";
-        AddParameter(command, "@table", table);
-        using var reader = command.ExecuteReader();
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        while (reader.Read())
-            result[reader.GetString(0)] = reader.GetString(1);
-        return result;
-    }
+        => RelationalSearchKeyCatalog.Read(
+            connection,
+            transaction,
+            table,
+            "SELECT [column_name],[algorithm_id] FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table;");
 
     public override PhysicalSchemaHistoryState ReadHistory(DbConnection connection, PhysicalSchemaTargetIdentity target)
     {

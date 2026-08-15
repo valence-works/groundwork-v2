@@ -226,14 +226,7 @@ public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
 
     public IndexDefinition Index { get; }
 
-    internal static string CanonicalIndex(IndexDefinition index) => SchemaFingerprint.Canonicalize(
-    [
-        index.Name,
-        index.IsUnique.ToString(CultureInfo.InvariantCulture),
-        index.MissingValues.ToString(),
-        index.SchemaVersion.ToString(CultureInfo.InvariantCulture),
-        .. index.Columns.Select(column => $"{column.Column}:{column.Direction}")
-    ]);
+    internal static string CanonicalIndex(IndexDefinition index) => CanonicalIndexPayload.From(index).Canonical;
 
     internal static IndexDefinition Snapshot(IndexDefinition index) => new()
     {
@@ -243,6 +236,85 @@ public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
         MissingValues = index.MissingValues,
         SchemaVersion = index.SchemaVersion
     };
+}
+
+internal sealed record CanonicalIndexPayload(
+    string Name,
+    bool IsUnique,
+    MissingValueBehavior MissingValues,
+    int SchemaVersion,
+    ImmutableArray<IndexColumn> Columns)
+{
+    public string Canonical => SchemaFingerprint.Canonicalize(
+    [
+        Name,
+        IsUnique.ToString(CultureInfo.InvariantCulture),
+        MissingValues.ToString(),
+        SchemaVersion.ToString(CultureInfo.InvariantCulture),
+        .. Columns.Select(column => $"{column.Column}:{column.Direction}")
+    ]);
+
+    public static CanonicalIndexPayload From(IndexDefinition index) => new(
+        index.Name,
+        index.IsUnique,
+        index.MissingValues,
+        index.SchemaVersion,
+        index.Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray());
+
+    public IndexDefinition ToDefinition() => new()
+    {
+        Name = Name,
+        IsUnique = IsUnique,
+        MissingValues = MissingValues,
+        SchemaVersion = SchemaVersion,
+        Columns = Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray()
+    };
+
+    public static bool TryParseOperation(string canonicalOperation, out CanonicalIndexPayload payload)
+    {
+        payload = null!;
+        return SchemaFingerprint.TryParseCanonical(canonicalOperation, out var operationParts) &&
+            operationParts.Length == 5 &&
+            operationParts[4] is { } canonicalIndex &&
+            TryParse(canonicalIndex, out payload);
+    }
+
+    public static bool TryParse(string canonical, out CanonicalIndexPayload payload)
+    {
+        payload = null!;
+        if (!SchemaFingerprint.TryParseCanonical(canonical, out var parts) ||
+            parts.Length < 5 ||
+            string.IsNullOrWhiteSpace(parts[0]) ||
+            !bool.TryParse(parts[1], out var unique) ||
+            !Enum.TryParse<MissingValueBehavior>(parts[2], ignoreCase: false, out var missingValues) ||
+            !Enum.IsDefined(missingValues) ||
+            !int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out var schemaVersion))
+        {
+            return false;
+        }
+
+        var columns = ImmutableArray.CreateBuilder<IndexColumn>(parts.Length - 4);
+        for (var index = 4; index < parts.Length; index++)
+        {
+            var term = parts[index];
+            var separator = term?.LastIndexOf(':') ?? -1;
+            if (separator <= 0 ||
+                string.IsNullOrWhiteSpace(term![..separator]) ||
+                !Enum.TryParse<SortDirection>(term![(separator + 1)..], ignoreCase: false, out var direction) ||
+                !Enum.IsDefined(direction))
+            {
+                return false;
+            }
+
+            columns.Add(new IndexColumn(term[..separator], direction));
+        }
+
+        var parsed = new CanonicalIndexPayload(parts[0]!, unique, missingValues, schemaVersion, columns.MoveToImmutable());
+        if (!string.Equals(parsed.Canonical, canonical, StringComparison.Ordinal))
+            return false;
+        payload = parsed;
+        return true;
+    }
 }
 
 public sealed class RebuildPhysicalIndexOperation : PhysicalSchemaOperation

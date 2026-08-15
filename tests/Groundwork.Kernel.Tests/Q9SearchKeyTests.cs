@@ -80,4 +80,42 @@ public sealed class Q9SearchKeyTests
             ["__groundwork_search_status"] = "spoofed"
         }));
     }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("stale-search-key-v0")]
+    [InlineData("prefix-groundwork-ascii-lower-v1-suffix")]
+    public void Populate_refuses_unknown_or_malformed_search_key_algorithm_ids(string? algorithmId)
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("malformed-search-key"),
+            Name = "malformed_search_key",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "status", Type = PortableType.String },
+                new ColumnDefinition { Name = "__groundwork_search_status", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            DerivedColumns =
+            [
+                new DerivedColumnDefinition
+                {
+                    Name = "__groundwork_search_status",
+                    SourceColumn = "status",
+                    Projection = PortableProjection.BoundarySearchKey,
+                    AlgorithmId = algorithmId
+                }
+            ]
+        };
+
+        var failure = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Populate(
+            unit,
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" }));
+
+        Assert.Contains("algorithm", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("rebuild", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }

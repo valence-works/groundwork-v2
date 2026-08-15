@@ -280,27 +280,18 @@ public static class PhysicalSchemaDiffPlanner
     {
         if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
             desired is not CreatePhysicalIndexOperation create ||
-            !SchemaFingerprint.TryParseCanonical(applied.CanonicalPayload, out var operationParts) ||
-            operationParts.Length < 5 ||
-            !SchemaFingerprint.TryParseCanonical(operationParts[4]!, out var currentIndexParts) ||
-            !SchemaFingerprint.TryParseCanonical(CreatePhysicalIndexOperation.CanonicalIndex(create.Index), out var desiredIndexParts) ||
-            currentIndexParts.Length != desiredIndexParts.Length ||
-            currentIndexParts.Length < 4 ||
-            currentIndexParts[2] != MissingValueBehavior.Excluded.ToString() ||
-            desiredIndexParts[2] != MissingValueBehavior.Included.ToString())
+            !CanonicalIndexPayload.TryParseOperation(applied.CanonicalPayload, out var current) ||
+            current.MissingValues != MissingValueBehavior.Excluded ||
+            create.Index.MissingValues != MissingValueBehavior.Included)
         {
             return false;
         }
 
-        for (var index = 0; index < currentIndexParts.Length; index++)
-        {
-            if (index == 2)
-                continue;
-            if (!string.Equals(currentIndexParts[index], desiredIndexParts[index], StringComparison.Ordinal))
-                return false;
-        }
-
-        return true;
+        var desiredPayload = CanonicalIndexPayload.From(create.Index);
+        return string.Equals(
+            (current with { MissingValues = MissingValueBehavior.Included }).Canonical,
+            desiredPayload.Canonical,
+            StringComparison.Ordinal);
     }
 
     private static bool IsSearchKeyRetarget(
@@ -309,41 +300,11 @@ public static class PhysicalSchemaDiffPlanner
     {
         if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
             desired is not CreatePhysicalIndexOperation create ||
-            !SchemaFingerprint.TryParseCanonical(applied.CanonicalPayload, out var operationParts) ||
-            operationParts.Length < 5 ||
-            !SchemaFingerprint.TryParseCanonical(operationParts[4]!, out var currentIndexParts) ||
-            currentIndexParts.Length < 5 ||
-            !Enum.TryParse<MissingValueBehavior>(currentIndexParts[2], out _) ||
-            !int.TryParse(currentIndexParts[3], out _))
+            !CanonicalIndexPayload.TryParseOperation(applied.CanonicalPayload, out var current))
         {
             return false;
         }
-
-        var previousColumns = new List<IndexColumn>(currentIndexParts.Length - 4);
-        for (var index = 4; index < currentIndexParts.Length; index++)
-        {
-            var term = currentIndexParts[index];
-            if (term is null)
-                return false;
-            var separator = term.LastIndexOf(':');
-            if (separator <= 0 ||
-                !Enum.TryParse<SortDirection>(term[(separator + 1)..], out var direction))
-            {
-                return false;
-            }
-
-            previousColumns.Add(new IndexColumn(term[..separator], direction));
-        }
-
-        var previous = new IndexDefinition
-        {
-            Name = currentIndexParts[0]!,
-            IsUnique = bool.TryParse(currentIndexParts[1], out var unique) && unique,
-            MissingValues = Enum.Parse<MissingValueBehavior>(currentIndexParts[2]!),
-            SchemaVersion = int.TryParse(currentIndexParts[3], out var schemaVersion) ? schemaVersion : 0,
-            Columns = previousColumns
-        };
-        return SearchKeyProjection.IsIndexRetarget(previous, create.Index, create.Subject.DerivedColumns);
+        return SearchKeyProjection.IsIndexRetarget(current.ToDefinition(), create.Index, create.Subject.DerivedColumns);
     }
 
     private static PhysicalSchemaAppliedSnapshot CreateSnapshot(

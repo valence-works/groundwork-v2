@@ -109,18 +109,18 @@ public sealed class CorpusDifferentialTests
         var id = new ColumnRef(table, "id", QueryType.Int64, false);
         var cases = new[]
         {
-            ("unicode-I", folded, "i", QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase),
-            ("sharp-S-prefix", folded, "Stra", QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase),
-            ("supplementary", folded, "𐐀", QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase),
-            ("unicode-maximum", folded, "\U0010FFFF", QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase),
-            ("unicode-empty", folded, "", QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase),
-            ("ascii-Turkish-I", ascii, "I", QuerySearchKeyPolicy.AsciiIgnoreCase),
-            ("ordinal-D7FF", ordinal, "\uD7FF", QuerySearchKeyPolicy.Ordinal),
-            ("ordinal-maximum", ordinal, "\uDBFF\uDFFF", QuerySearchKeyPolicy.Ordinal),
-            ("ordinal-empty", ordinal, "", QuerySearchKeyPolicy.Ordinal)
+            ("unicode-I", folded, "i", new long[] { 3, 4 }),
+            ("sharp-S-prefix", folded, "STRAẞ", new long[] { 7 }),
+            ("supplementary", folded, "𐐀", new long[] { 9, 10 }),
+            ("unicode-maximum", folded, "\U0010FFFF", new long[] { 11 }),
+            ("unicode-empty", folded, "", Enumerable.Range(2, 10).Select(value => (long)value).ToArray()),
+            ("ascii-Turkish-I", ascii, "I", new long[] { 3, 4 }),
+            ("ordinal-D7FF", ordinal, "\uD7FF", new long[] { 5 }),
+            ("ordinal-maximum", ordinal, "\uDBFF\uDFFF", new long[] { 8, 9 }),
+            ("ordinal-empty", ordinal, "", Enumerable.Range(2, 10).Select(value => (long)value).ToArray())
         };
 
-        foreach (var (name, column, prefix, policy) in cases)
+        foreach (var (name, column, prefix, expected) in cases)
         {
             var request = new QueryRequest(
                 table,
@@ -128,12 +128,6 @@ public sealed class CorpusDifferentialTests
                 [new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)],
                 Projection.ColumnsOnly(id, column),
                 Paging.None);
-            var expected = PrefixRows
-                .Where(row => PrefixMatches(row[column.Name] as string, prefix, policy))
-                .Select(row => (long)row["id"]!)
-                .OrderBy(value => value)
-                .ToArray();
-
             foreach (var provider in providers)
             {
                 var actual = provider.Query(request, QueryRenderOptions.Default).Rows
@@ -1002,16 +996,6 @@ public sealed class CorpusDifferentialTests
         new Dictionary<string, object?> { ["id"] = 10L, ["folded"] = "𐐨", ["ascii"] = "value", ["ordinal"] = "max" },
         new Dictionary<string, object?> { ["id"] = 11L, ["folded"] = "\U0010FFFF", ["ascii"] = "~", ["ordinal"] = "z" }
     ];
-
-    private static bool PrefixMatches(string? value, string prefix, QuerySearchKeyPolicy policy)
-    {
-        if (value is null)
-            return false;
-        if (prefix.Length == 0)
-            return true;
-        return QuerySearchKeys.Encode(value, policy).StartsWith(
-            QuerySearchKeys.Encode(prefix, policy), StringComparison.Ordinal);
-    }
 
     private static CorpusSession OpenSqlite() => OpenSqlite(Unit, Rows);
 

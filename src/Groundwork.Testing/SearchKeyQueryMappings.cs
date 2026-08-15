@@ -20,11 +20,13 @@ public static class SearchKeyQueryMappings
                 {
                     if (!derived.TryGetValue(column.Name, out var physical))
                         return new QuerySearchKeyColumn(column.Name, column.Name, QuerySearchKeyPolicy.Ordinal, column.MaxLength);
-                    var policy = physical.AlgorithmId?.Contains(
-                        PortableStringComparison.AsciiIgnoreCaseAlgorithmId,
-                        StringComparison.Ordinal) == true
-                        ? QuerySearchKeyPolicy.AsciiIgnoreCase
-                        : QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase;
+                    var policy = PortableSearchKeyAlgorithmIdentity.Parse(physical.AlgorithmId).Policy switch
+                    {
+                        PortableStringComparisonPolicy.AsciiIgnoreCase => QuerySearchKeyPolicy.AsciiIgnoreCase,
+                        PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase => QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                        var unsupported => throw new InvalidOperationException(
+                            $"Boundary search-key mapping '{physical.Name}' cannot use comparison policy '{unsupported}'.")
+                    };
                     var physicalColumn = unit.Columns.FirstOrDefault(item => item.Name == physical.Name);
                     return new QuerySearchKeyColumn(
                         column.Name,

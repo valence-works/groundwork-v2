@@ -11,6 +11,24 @@ public sealed class K5SchemaEvolutionTests
     private static readonly DateTimeOffset PlannedAt = new(2026, 8, 15, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void Canonical_index_payload_refuses_malformed_or_noncanonical_fields()
+    {
+        var malformed = new[]
+        {
+            SchemaFingerprint.Canonicalize(["by-name", "not-a-bool", "Included", "0", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Unknown", "0", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "not-an-int", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "0", "name:Sideways"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "0", " :Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "00", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "0"])
+        };
+
+        foreach (var canonical in malformed)
+            Assert.False(CanonicalIndexPayload.TryParse(canonical, out _));
+    }
+
+    [Fact]
     public void A_columns_only_subject_plans_without_a_route_and_applies()
     {
         var target = CreateTarget(CreateUnit(includePriority: true));

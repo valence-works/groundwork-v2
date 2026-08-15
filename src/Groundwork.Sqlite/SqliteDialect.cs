@@ -136,33 +136,22 @@ internal sealed class SqliteDialect : RelationalDialect
     {
         if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported SQLite provider definition '{definition.Kind}'.");
-        var parts = definition.SubjectIdentity.Split(RelationalDialect.SearchKeyDefinitionSeparator);
-        if (parts.Length != 2)
-            throw new InvalidOperationException("A SQLite search-key provider definition requires a table and column identity.");
-        using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
-        command.CommandText = "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=excluded.\"algorithm_id\";";
-        AddParameter(command, "@table", parts[0]);
-        AddParameter(command, "@column", parts[1]);
-        AddParameter(command, "@algorithm", definition.CanonicalDefinition);
-        command.ExecuteNonQuery();
+        RelationalSearchKeyCatalog.Apply(
+            connection,
+            transaction,
+            definition,
+            "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=excluded.\"algorithm_id\";");
     }
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
         DbTransaction transaction,
         string table)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
-        command.CommandText = "SELECT \"column_name\",\"algorithm_id\" FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table;";
-        AddParameter(command, "@table", table);
-        using var reader = command.ExecuteReader();
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        while (reader.Read())
-            result[reader.GetString(0)] = reader.GetString(1);
-        return result;
-    }
+        => RelationalSearchKeyCatalog.Read(
+            connection,
+            transaction,
+            table,
+            "SELECT \"column_name\",\"algorithm_id\" FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table;");
 
     public override PhysicalSchemaHistoryState ReadHistory(DbConnection connection, PhysicalSchemaTargetIdentity target)
     {

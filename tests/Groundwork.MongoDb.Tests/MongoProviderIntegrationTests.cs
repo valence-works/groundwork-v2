@@ -392,7 +392,7 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
-    public void Folded_prefix_uses_the_optimizer_selected_physical_index_without_a_hint()
+    public void StartsWithUsesIndex_for_the_optimizer_selected_folded_physical_index_without_a_hint()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString),

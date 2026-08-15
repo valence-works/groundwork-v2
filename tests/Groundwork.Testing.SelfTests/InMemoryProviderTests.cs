@@ -6,6 +6,42 @@ namespace Groundwork.Testing.SelfTests;
 
 public sealed class InMemoryProviderTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("stale-search-key-v0")]
+    [InlineData("prefix-groundwork-ascii-lower-v1-suffix")]
+    public void Search_key_query_mapping_refuses_unknown_or_malformed_algorithm_ids(string? algorithmId)
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("malformed-search-key-mapping"),
+            Name = "malformed_search_key_mapping",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "status", Type = PortableType.String, Collation = PortableCollation.OrdinalIgnoreCase },
+                new ColumnDefinition { Name = "__groundwork_search_status", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            DerivedColumns =
+            [
+                new DerivedColumnDefinition
+                {
+                    Name = "__groundwork_search_status",
+                    SourceColumn = "status",
+                    Projection = PortableProjection.BoundarySearchKey,
+                    AlgorithmId = algorithmId
+                }
+            ]
+        };
+
+        var failure = Assert.Throws<InvalidOperationException>(() => SearchKeyQueryMappings.For(unit));
+
+        Assert.Contains("algorithm", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("rebuild", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Folded_starts_with_is_served_by_the_hidden_key_and_matches_null_contract()
     {

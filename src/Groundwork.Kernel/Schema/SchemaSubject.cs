@@ -188,15 +188,7 @@ public sealed class SchemaSubject
     private static string CanonicalDerivedColumn(DerivedColumnDefinition column) =>
         SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString(), column.AlgorithmId]);
 
-    private static string CanonicalIndex(IndexDefinition index) =>
-        SchemaFingerprint.Canonicalize(
-        [
-            index.Name,
-            index.IsUnique.ToString(CultureInfo.InvariantCulture),
-            index.MissingValues.ToString(),
-            index.SchemaVersion.ToString(CultureInfo.InvariantCulture),
-            .. index.Columns.Select(column => $"{column.Column}:{column.Direction}")
-        ]);
+    private static string CanonicalIndex(IndexDefinition index) => CanonicalIndexPayload.From(index).Canonical;
 }
 
 /// <summary>Provider-owned schema materialization metadata carried through the neutral plan.</summary>
