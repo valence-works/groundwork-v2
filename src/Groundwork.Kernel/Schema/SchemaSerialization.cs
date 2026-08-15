@@ -1,0 +1,178 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Groundwork.Kernel.Schema;
+
+/// <summary>Compiles a first-class subject and provider metadata into one schema target.</summary>
+public static class PhysicalSchemaTargetCompiler
+{
+    public static PhysicalSchemaTarget Compile(
+        SchemaSubject subject,
+        ProviderIdentity provider,
+        IEnumerable<ProviderPhysicalSchemaDefinition>? providerDefinitions = null)
+    {
+        ArgumentNullException.ThrowIfNull(subject);
+        ArgumentNullException.ThrowIfNull(provider);
+        return new PhysicalSchemaTarget(subject, provider, providerDefinitions);
+    }
+}
+
+/// <summary>Canonical JSON persistence for the CAS schema history snapshot.</summary>
+public static class PhysicalSchemaAppliedStateSerializer
+{
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = false,
+        Converters = { new PortableDefaultJsonConverter(), new JsonStringEnumConverter() }
+    };
+
+    public static string Serialize(PhysicalSchemaAppliedState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        var payload = new StatePayload
+        {
+            Definition = state.Snapshot.Subject.Definition,
+            Evolution = state.Snapshot.Subject.Evolution,
+            Provider = state.Provider,
+            TargetFingerprint = state.TargetFingerprint,
+            PlannedAt = state.PlannedAt,
+            AppliedAt = state.AppliedAt,
+            SemanticOperations = state.Snapshot.SemanticOperations.ToArray(),
+            ProviderDefinitions = state.Snapshot.ProviderDefinitions.ToArray(),
+            AppliedOperations = state.AppliedOperations.ToArray()
+        };
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    public static PhysicalSchemaAppliedState Deserialize(string json)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+        var payload = JsonSerializer.Deserialize<StatePayload>(json, Options)
+            ?? throw new ArgumentException("Applied schema state JSON is empty.", nameof(json));
+        if (payload.Definition is null || payload.Provider is null || payload.Evolution is null)
+            throw new ArgumentException("Applied schema state JSON is missing its subject or provider.", nameof(json));
+
+        var subject = new SchemaSubject(payload.Definition, payload.Evolution);
+        var target = new PhysicalSchemaTarget(subject, payload.Provider, payload.ProviderDefinitions ?? []);
+        if (!string.Equals(target.Fingerprint, payload.TargetFingerprint, StringComparison.Ordinal))
+            throw new InvalidOperationException("Applied schema state target fingerprint does not match its subject snapshot.");
+        var snapshot = new PhysicalSchemaAppliedSnapshot(
+            subject,
+            payload.SemanticOperations ?? [],
+            payload.ProviderDefinitions ?? []);
+        var state = new PhysicalSchemaAppliedState(
+            target,
+            payload.PlannedAt,
+            payload.AppliedAt,
+            snapshot,
+            payload.AppliedOperations ?? []);
+        if (!string.Equals(Serialize(state), json, StringComparison.Ordinal))
+            throw new InvalidOperationException("Applied schema state JSON is not in canonical form.");
+        return state;
+    }
+
+    private sealed class StatePayload
+    {
+        public StorageUnit? Definition { get; set; }
+
+        public SchemaEvolutionMetadata? Evolution { get; set; }
+
+        public ProviderIdentity? Provider { get; set; }
+
+        public string? TargetFingerprint { get; set; }
+
+        public DateTimeOffset PlannedAt { get; set; }
+
+        public DateTimeOffset AppliedAt { get; set; }
+
+        public PhysicalSchemaAppliedOperation[]? SemanticOperations { get; set; }
+
+        public ProviderPhysicalSchemaDefinition[]? ProviderDefinitions { get; set; }
+
+        public PhysicalSchemaAppliedOperation[]? AppliedOperations { get; set; }
+    }
+
+    private sealed class PortableDefaultJsonConverter : JsonConverter<PortableDefault>
+    {
+        public override PortableDefault Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options)
+        {
+            using var document = JsonDocument.ParseValue(ref reader);
+            var root = document.RootElement;
+            var kind = root.GetProperty("kind").GetString()
+                ?? throw new JsonException("A portable default requires a kind.");
+            var value = root.GetProperty("value");
+            return new PortableDefault(kind switch
+            {
+                "null" => null,
+                "string" => value.GetString(),
+                "boolean" => value.GetBoolean(),
+                "int32" => value.GetInt32(),
+                "int64" => value.GetInt64(),
+                "decimal" => value.GetDecimal(),
+                "double" => value.GetDouble(),
+                "timestamp" => value.GetDateTimeOffset(),
+                "datetime" => value.GetDateTime(),
+                "guid" => value.GetGuid(),
+                "binary" => value.GetBytesFromBase64(),
+                "json" => ReadJson(value),
+                _ => throw new JsonException($"Unknown portable default kind '{kind}'.")
+            });
+        }
+
+        public override void Write(
+            Utf8JsonWriter writer,
+            PortableDefault value,
+            JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("kind", Kind(value.Value));
+            writer.WritePropertyName("value");
+            if (value.Value is null)
+                writer.WriteNullValue();
+            else if (value.Value is byte[] bytes)
+                writer.WriteBase64StringValue(bytes);
+            else
+                JsonSerializer.Serialize(writer, value.Value, value.Value.GetType(), options);
+            writer.WriteEndObject();
+        }
+
+        private static string Kind(object? value) => value switch
+        {
+            null => "null",
+            string or char => "string",
+            bool => "boolean",
+            byte or sbyte or short or ushort or int or uint => "int32",
+            long or ulong => "int64",
+            decimal => "decimal",
+            float or double => "double",
+            DateTimeOffset => "timestamp",
+            DateTime => "datetime",
+            Guid => "guid",
+            byte[] => "binary",
+            System.Collections.IDictionary or System.Collections.IEnumerable => "json",
+            _ => throw new JsonException($"Unsupported portable default type '{value.GetType()}'.")
+        };
+
+        private static object? ReadJson(JsonElement value) => value.ValueKind switch
+        {
+            JsonValueKind.Null => null,
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Number when value.TryGetInt32(out var int32) => int32,
+            JsonValueKind.Number when value.TryGetInt64(out var int64) => int64,
+            JsonValueKind.Number when value.TryGetDecimal(out var number) => number,
+            JsonValueKind.Number => value.GetDouble(),
+            JsonValueKind.Array => value.EnumerateArray().Select(ReadJson).ToList(),
+            JsonValueKind.Object => value.EnumerateObject().ToDictionary(
+                property => property.Name,
+                property => ReadJson(property.Value),
+                StringComparer.Ordinal),
+            _ => throw new JsonException($"Unsupported JSON default token '{value.ValueKind}'.")
+        };
+    }
+}
