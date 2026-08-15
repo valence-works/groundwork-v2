@@ -128,8 +128,7 @@ public sealed class EventLogConformanceTests
                 return new StorageValues(copy);
             },
             static _ => new StorageKey(new Dictionary<string, object?>(StringComparer.Ordinal) { ["seq"] = -1L }),
-            "message",
-            static status => status is WriteOutcomeStatus.Upserted or WriteOutcomeStatus.Inserted);
+            "message");
     }
 
     private static void AssertEventLog(IStorageProviderFactory factory, string connectionString)

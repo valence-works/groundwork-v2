@@ -81,7 +81,7 @@ public static class ConformanceSuite
                 Require(session.Update(scenario.AttachKey(scenario.Values("one", "updated", "unique"), scenario.Key("one", firstOutcome))).Status == WriteOutcomeStatus.Updated,
                     "update did not report Updated");
                 var upsertOutcome = session.Upsert(scenario.Values("two", "second", "other"));
-                Require(scenario.AcceptsUpsertStatus(upsertOutcome.Status),
+                Require(upsertOutcome.Status == WriteOutcomeStatus.Upserted,
                     "upsert did not report Upserted");
                 Require(session.Delete(scenario.Key("two", upsertOutcome)).Status == WriteOutcomeStatus.Deleted,
                     "delete did not report Deleted");

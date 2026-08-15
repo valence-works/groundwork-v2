@@ -251,13 +251,6 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
-    public void Default_conformance_scenario_keeps_exact_upsert_contract()
-    {
-        Assert.True(ConformanceScenario.Default.AcceptsUpsertStatus(WriteOutcomeStatus.Upserted));
-        Assert.False(ConformanceScenario.Default.AcceptsUpsertStatus(WriteOutcomeStatus.Inserted));
-    }
-
-    [Fact]
     public void Catalog_is_read_from_provider_state_and_schema_apply_is_idempotent()
     {
         var factory = new InMemoryProviderFactory();

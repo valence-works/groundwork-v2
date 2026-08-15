@@ -16,8 +16,7 @@ public sealed class ConformanceScenario
         Func<string, WriteOutcome, StorageKey> key,
         Func<StorageValues, StorageKey, StorageValues> attachKey,
         Func<string, StorageKey> missingKey,
-        string valueColumn,
-        Func<WriteOutcomeStatus, bool>? acceptsUpsertStatus = null)
+        string valueColumn)
     {
         Global = global ?? throw new ArgumentNullException(nameof(global));
         Scoped = scoped ?? throw new ArgumentNullException(nameof(scoped));
@@ -25,7 +24,6 @@ public sealed class ConformanceScenario
         Key = key ?? throw new ArgumentNullException(nameof(key));
         AttachKey = attachKey ?? throw new ArgumentNullException(nameof(attachKey));
         MissingKey = missingKey ?? throw new ArgumentNullException(nameof(missingKey));
-        AcceptsUpsertStatus = acceptsUpsertStatus ?? (status => status == WriteOutcomeStatus.Upserted);
         ArgumentException.ThrowIfNullOrWhiteSpace(valueColumn);
         if (!global.Columns.Any(column => string.Equals(column.Name, valueColumn, StringComparison.Ordinal)) ||
             !scoped.Columns.Any(column => string.Equals(column.Name, valueColumn, StringComparison.Ordinal)))
@@ -51,8 +49,6 @@ public sealed class ConformanceScenario
     public Func<StorageValues, StorageKey, StorageValues> AttachKey { get; }
 
     public Func<string, StorageKey> MissingKey { get; }
-
-    public Func<WriteOutcomeStatus, bool> AcceptsUpsertStatus { get; }
 
     /// <summary>The original shipped #237 probe, retained as the default scenario.</summary>
     public static ConformanceScenario Default { get; } = CreateDefault();
