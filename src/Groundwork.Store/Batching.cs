@@ -608,7 +608,7 @@ internal sealed class BatchContext
     }
 }
 
-/// <summary>Testing-layer wrapper that makes staged-key reads flush before delegating.</summary>
+/// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
 internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly IStorageSession inner;

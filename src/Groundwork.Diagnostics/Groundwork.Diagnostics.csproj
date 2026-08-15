@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Diagnostics</PackageId>
-    <Description>Opt-in diagnostics and native plan evidence for Groundwork provider tests and CI.</Description>
+    <Description>Opt-in native query-plan evidence diagnostics for Groundwork providers.</Description>
   </PropertyGroup>
 
 </Project>

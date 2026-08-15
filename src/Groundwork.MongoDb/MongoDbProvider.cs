@@ -992,7 +992,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
     private void AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options)
     {
         var logicalIndex = query.ExpectedIndex;
-        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(logicalIndex)) return;
+        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(logicalIndex)) return;
         if (transactionSession is not null)
             throw new InvalidOperationException(
                 "MongoDB explain-assert cannot run inside a transaction; execute the differential query outside a unit of work.");
@@ -1023,7 +1023,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         var explain = state.Context.Database.RunCommand(new BsonDocumentCommand<BsonDocument>(explainCommand));
         var rawPlan = explain.ToJson(new JsonWriterSettings { Indent = true });
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex!);
-        ExplainAssertTestMode.AssertChosenIndex(
+        ExplainAssertionMode.AssertChosenIndex(
             "MongoDB", logicalIndex!, physicalIndex, query.Hint is not null, rawPlan,
             MongoExplainPlanInspector.ChoseIndex(explain, physicalIndex));
     }

@@ -3,7 +3,6 @@ using Microsoft.Data.Sqlite;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Records;
-using Groundwork.Records.TestingAdapter;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
@@ -90,8 +89,9 @@ public sealed class RecordsProviderProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB records proof.");
-        using var connection = new MongoDbProviderFactory().Create(connectionString!);
-        var nativeConnection = Assert.IsType<MongoDbProviderConnection>(connection);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        using var nativeConnection = Assert.IsType<MongoDbProviderConnection>(
+            new MongoDbProviderFactory().Create(connectionString!));
         var table = RecordTestFixture.CustomerTable("records_mongo_" + Guid.NewGuid().ToString("N"));
         Assert.True(connection.Schema.Apply(table.Definition).Applied);
         AssertTypedCrud(table.Open(connection), table, "mongo@example.test");

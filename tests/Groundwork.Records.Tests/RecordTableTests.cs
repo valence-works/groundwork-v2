@@ -1,6 +1,5 @@
 using Groundwork.Kernel;
 using Groundwork.Records;
-using Groundwork.Records.TestingAdapter;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
 using Groundwork.Store;

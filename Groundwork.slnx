@@ -10,9 +10,6 @@
   <Folder Name="/src/Groundwork.Records/">
     <Project Path="src/Groundwork.Records/Groundwork.Records.csproj" />
   </Folder>
-  <Folder Name="/src/Groundwork.Records.TestingAdapter/">
-    <Project Path="src/Groundwork.Records.TestingAdapter/Groundwork.Records.TestingAdapter.csproj" />
-  </Folder>
   <Folder Name="/src/Groundwork.Testing/">
     <Project Path="src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </Folder>

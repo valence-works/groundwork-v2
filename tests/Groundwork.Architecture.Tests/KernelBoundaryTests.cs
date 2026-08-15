@@ -87,6 +87,29 @@ public sealed class KernelBoundaryTests
             Environment.NewLine + string.Join(Environment.NewLine, violations));
     }
 
+    [Fact]
+    public void Store_public_api_is_production_neutral_and_has_no_testing_dependency()
+    {
+        using var universe = AssemblyUniverse.Load();
+        var store = universe.Assemblies.Single(assembly =>
+            string.Equals(assembly.GetName().Name, "Groundwork.Store", StringComparison.Ordinal));
+        var forbidden = new[] { "Conformance", "Fixture", "Probe", "TestMode", "TestAdapter" };
+        var vocabularyViolations = PublicSignatures(store)
+            .Where(signature => forbidden.Any(token =>
+                signature.Contains(token, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(signature => signature, StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(vocabularyViolations.Length == 0,
+            "Groundwork.Store public signatures must not expose testing vocabulary:" +
+            Environment.NewLine + string.Join(Environment.NewLine, vocabularyViolations));
+
+        var testingReferences = universe.NonBclReferenceClosure(store)
+            .Where(reference => reference.Name.StartsWith("Groundwork.Testing", StringComparison.Ordinal))
+            .Select(reference => reference.Path)
+            .ToArray();
+        Assert.Empty(testingReferences);
+    }
+
     private static bool IsKernelSubstrateOrProvider(Assembly assembly)
     {
         var name = assembly.GetName().Name;
