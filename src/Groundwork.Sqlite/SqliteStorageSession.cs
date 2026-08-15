@@ -427,7 +427,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         if (mutation == Mutation.Upsert)
             return Upsert(values, existing, columns, exactOutcome, options);
         var sets = supplied.Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
-            .Select(column => $"{Quote(column.Name)}=@{column.Name}").ToArray();
+            .Select(column => $"{Quote(column.Name)}=@{column.Name}").ToList();
         var parameters = BuildParameters(values.Values, supplied);
         if (mutation == Mutation.Insert)
         {
@@ -443,18 +443,28 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         foreach (var pair in keyParameters) parameters[pair.Key] = pair.Value;
         if (VersionColumnDefinition is not null)
         {
-            sets = sets.Append($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1").ToArray();
+            sets.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1");
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion)
             {
                 where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
                 parameters["@expected"] = options.Precondition.Version!.Value;
             }
         }
-        if (sets.Length == 0) return new WriteOutcome(WriteOutcomeStatus.Updated, existing?.Version);
-        using var update = Command($"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};");
+        if (sets.Count == 0)
+        {
+            var noOpColumn = LogicalKeyColumns[0];
+            sets.Add($"{Quote(noOpColumn)}={Quote(noOpColumn)}");
+        }
+        var sql = $"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};";
+        using var update = Command(sql);
         AddParameters(update, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("sqlite.update", sql, IsProbe: false));
         var affected = update.ExecuteNonQuery();
-        if (affected == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+        if (affected == 0)
+            return new WriteOutcome(Unit.Concurrency.IsNone
+                ? WriteOutcomeStatus.NotFound
+                : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
         return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
     });
 
@@ -612,6 +622,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             parameters["@expected"] = options.Precondition.Version!.Value;
         using var command = Command(sql);
         AddParameters(command, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("sqlite.upsert", sql, IsProbe: false));
         try
         {
             command.ExecuteNonQuery();

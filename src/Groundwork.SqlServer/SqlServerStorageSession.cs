@@ -476,6 +476,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         ValidateExpected(options, existing, mutation);
         if (mutation == Mutation.Upsert)
         {
+            if (Unit.Concurrency.IsNone) return UpsertNoneCore(values.Values, options);
             if (existing is null) return InsertCore(values.Values);
             return UpdateCore(values.Values, existing, options);
         }
@@ -523,6 +524,55 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
     }
 
+    private WriteOutcome UpsertNoneCore(IReadOnlyDictionary<string, object?> values, WriteOptions? options)
+    {
+        var supplied = UserColumns.Where(column => values.ContainsKey(column.Name)).ToArray();
+        var columns = supplied.ToList();
+        var parameters = BuildParameters(values, supplied);
+        if (ScopeColumnDefinition is not null)
+        {
+            columns.Add(ScopeColumnDefinition);
+            parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
+        }
+
+        var sql = RenderNoneUpsertSql(Unit, columns);
+        using var command = Command(sql);
+        AddParameters(command, parameters);
+        options?.Observer?.Observe(new WritePathEvent("sqlserver.upsert", sql, IsProbe: false));
+        try
+        {
+            command.ExecuteNonQuery();
+            return new WriteOutcome(WriteOutcomeStatus.Upserted);
+        }
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
+        {
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
+        }
+    }
+
+    internal static string RenderNoneUpsertSql(
+        StorageUnit unit,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        var sourceColumns = string.Join(", ", columns.Select(column => Quote(column.Name)));
+        var match = string.Join(" AND ", unit.Key.Columns.Select(column =>
+            $"target.{Quote(column)}=source.{Quote(column)}"));
+        var updates = columns
+            .Where(column => !unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                             column.Name != SqlServerSchemaCoordinator.ScopeColumn &&
+                             column.Name != "createdAt" &&
+                             column.Name != SqlServerSchemaCoordinator.VersionColumn)
+            .Select(column => $"target.{Quote(column.Name)}=source.{Quote(column.Name)}")
+            .ToList();
+        if (updates.Count == 0)
+            updates.Add($"target.{Quote(unit.Key.Columns[0])}=target.{Quote(unit.Key.Columns[0])}");
+
+        return $"MERGE {Quote(unit.Name)} WITH (HOLDLOCK) AS target " +
+               $"USING (VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))})) AS source ({sourceColumns}) ON {match} " +
+               $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", updates)} " +
+               $"WHEN NOT MATCHED BY TARGET THEN INSERT ({sourceColumns}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))});";
+    }
+
     private WriteOutcome UpdateCore(IReadOnlyDictionary<string, object?> values, StoredEntry? existing, WriteOptions? options)
     {
         var supplied = UserColumns.Where(column => values.ContainsKey(column.Name) && !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal)).ToArray();
@@ -539,12 +589,22 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
             }
         }
-        if (sets.Count == 0) return new WriteOutcome(WriteOutcomeStatus.Updated, existing?.Version);
-        using var command = Command($"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};");
+        if (sets.Count == 0)
+        {
+            var noOpColumn = LogicalKeyColumns[0];
+            sets.Add($"{Quote(noOpColumn)}={Quote(noOpColumn)}");
+        }
+        var sql = $"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};";
+        using var command = Command(sql);
         AddParameters(command, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("sqlserver.update", sql, IsProbe: false));
         try
         {
-            if (command.ExecuteNonQuery() == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+            if (command.ExecuteNonQuery() == 0)
+                return new WriteOutcome(Unit.Concurrency.IsNone
+                    ? WriteOutcomeStatus.NotFound
+                    : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
             return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
         }
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))

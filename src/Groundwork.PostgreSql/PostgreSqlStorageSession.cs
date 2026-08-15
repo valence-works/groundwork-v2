@@ -497,11 +497,20 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             }
         }
         if (sets.Count == 0)
-            return new WriteOutcome(WriteOutcomeStatus.Updated, existing?.Version);
-        using var command = Command($"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};");
+        {
+            var noOpColumn = Unit.Key.Columns.First(column =>
+                column != PostgreSqlSchemaCoordinator.ScopeColumn);
+            sets.Add($"{Quote(noOpColumn)}={Quote(noOpColumn)}");
+        }
+        var sql = $"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};";
+        using var command = Command(sql);
         AddParameters(command, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("postgresql.update", sql, IsProbe: false));
         if (command.ExecuteNonQuery() == 0)
-            return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+            return new WriteOutcome(Unit.Concurrency.IsNone
+                ? WriteOutcomeStatus.NotFound
+                : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
         return new WriteOutcome(WriteOutcomeStatus.Updated,
             VersionColumn is null ? null : existing!.Version + 1);
     }
@@ -540,6 +549,11 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         AddParameters(command, physical);
         if (exactOutcome && VersionColumn is not null)
             Add(command, "expected", options?.Precondition.Version);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent(
+                exactOutcome ? "postgresql.conditional-upsert" : "postgresql.upsert",
+                sql,
+                IsProbe: false));
         try
         {
             if (!exactOutcome)

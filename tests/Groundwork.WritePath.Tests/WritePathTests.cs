@@ -103,6 +103,70 @@ public sealed class WritePathTests
     }
 
     [Fact]
+    public void SQLite_none_key_only_update_uses_one_native_statement_and_reports_affected_rows()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-none-key-only-update", ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Values("existing", "first", DateTimeOffset.UnixEpoch));
+
+        var existingObserver = new WritePathObserver();
+        var existing = session.Update(KeyOnlyValues("existing"), new WriteOptions { Observer = existingObserver });
+        var missingObserver = new WritePathObserver();
+        var missing = session.Update(KeyOnlyValues("missing"), new WriteOptions { Observer = missingObserver });
+
+        Assert.Equal(WriteOutcomeStatus.Updated, existing.Status);
+        Assert.Equal(WriteOutcomeStatus.NotFound, missing.Status);
+        AssertSingleUpdateWithoutProbe(existingObserver);
+        AssertSingleUpdateWithoutProbe(missingObserver);
+    }
+
+    [Fact]
+    public void SQLite_none_update_of_missing_row_reports_not_found()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-none-missing-update", ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+        var observer = new WritePathObserver();
+
+        var outcome = connection.OpenSession(unit, StorageAccess.Global).Update(
+            Values("missing", "value", DateTimeOffset.UnixEpoch),
+            new WriteOptions { Observer = observer });
+
+        Assert.Equal(WriteOutcomeStatus.NotFound, outcome.Status);
+        AssertSingleUpdateWithoutProbe(observer);
+    }
+
+    [Fact]
+    public void SQLite_none_provider_writes_use_one_native_statement_and_upsert_overwrites()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        AssertNoneProviderWrites(connection, "sqlite");
+    }
+
+    [SkippableFact]
+    public void PostgreSQL_none_provider_writes_use_one_native_statement_and_report_not_found()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL write-path tests.");
+        using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
+        AssertNoneProviderWrites(connection, "postgresql");
+    }
+
+    [SkippableFact]
+    public void SQLServer_none_provider_writes_use_one_native_statement_and_upsert_overwrites()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server write-path tests.");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        AssertNoneProviderWrites(connection, "sqlserver");
+    }
+
+    [Fact]
     public void Concurrency_declaration_and_preconditions_are_explicit_and_system_owned()
     {
         var optimistic = ConcurrencyDeclaration.Optimistic("revision");
@@ -494,6 +558,51 @@ public sealed class WritePathTests
             ["value"] = value,
             ["createdAt"] = createdAt
         });
+
+    private static StorageValues KeyOnlyValues(string id) =>
+        new(new Dictionary<string, object?> { ["id"] = id });
+
+    private static void AssertNoneProviderWrites(IStorageProviderConnection connection, string provider)
+    {
+        var unit = Unit(provider + "-none-native-writes", ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var createdAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        session.Insert(Values("existing", "first", createdAt));
+
+        var upsertObserver = new WritePathObserver();
+        var upsert = session.Upsert(
+            Values("existing", "second", createdAt.AddDays(1)),
+            new WriteOptions { Observer = upsertObserver });
+        var updateObserver = new WritePathObserver();
+        var update = session.Update(KeyOnlyValues("existing"), new WriteOptions { Observer = updateObserver });
+        var missingObserver = new WritePathObserver();
+        var missing = session.Update(KeyOnlyValues("missing"), new WriteOptions { Observer = missingObserver });
+
+        Assert.Equal(WriteOutcomeStatus.Upserted, upsert.Status);
+        var upsertCommand = Assert.Single(upsertObserver.Commands);
+        Assert.False(upsertCommand.IsProbe);
+        Assert.DoesNotContain("SELECT", upsertCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        if (provider == "sqlserver")
+            Assert.StartsWith("MERGE", upsertCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(WriteOutcomeStatus.Updated, update.Status);
+        Assert.Equal(WriteOutcomeStatus.NotFound, missing.Status);
+        AssertSingleUpdateWithoutProbe(updateObserver);
+        AssertSingleUpdateWithoutProbe(missingObserver);
+
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "existing" }));
+        Assert.NotNull(stored);
+        Assert.Equal("second", stored!.Values.Values["value"]);
+        Assert.Equal(createdAt, stored.Values.Values["createdAt"]);
+    }
+
+    private static void AssertSingleUpdateWithoutProbe(WritePathObserver observer)
+    {
+        var command = Assert.Single(observer.Commands);
+        Assert.False(command.IsProbe);
+        Assert.Contains("UPDATE", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SELECT", command.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
 
     [SkippableFact]
     public void MongoDB_provider_sequence_conditional_upsert_refuses_before_any_command()
