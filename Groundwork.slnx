@@ -3,6 +3,9 @@
   <Folder Name="/src/Groundwork.Kernel/">
     <Project Path="src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Records/">
+    <Project Path="src/Groundwork.Records/Groundwork.Records.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
