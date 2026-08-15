@@ -113,21 +113,6 @@ public sealed record LatestPerKey
     public ColumnRef Timestamp { get; }
 }
 
-public sealed record ScanAcceptance
-{
-    private ScanAcceptance(bool allowed, string? reason)
-    {
-        Allowed = allowed;
-        Reason = reason;
-    }
-
-    public bool Allowed { get; }
-    public string? Reason { get; }
-
-    public static ScanAcceptance Refuse { get; } = new(false, null);
-    public static ScanAcceptance Allow(string reason) => new(true, string.IsNullOrWhiteSpace(reason) ? throw new ArgumentException("A scan acceptance reason is required.", nameof(reason)) : reason);
-}
-
 public sealed record QueryRequest
 {
     public QueryRequest(

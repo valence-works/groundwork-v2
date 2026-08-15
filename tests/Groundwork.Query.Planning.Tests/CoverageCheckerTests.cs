@@ -226,6 +226,66 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
+    public void Covered_query_with_accept_scan_is_a_stale_marker_error()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [],
+            Projection.All,
+            Paging.None,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-0007",
+                "admin report",
+                "billing",
+                new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero)));
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_status", Status.Name)]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-901", result.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Runtime_enforcement_allows_only_an_active_acceptance_for_an_uncovered_query()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Substring(Status, "open", Anchor.Contains),
+            [],
+            Projection.All,
+            Paging.None);
+
+        var exception = Assert.Throws<QueryCoverageException>(() =>
+            QueryCoverageEnforcer.EnsureCovered(request, [Index("ix_status", Status.Name)], DateTimeOffset.UtcNow));
+        Assert.Equal("GW-COVER-016", exception.Code);
+
+        var accepted = new QueryRequest(
+            Table,
+            request.Where,
+            [],
+            Projection.All,
+            Paging.None,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-0008",
+                "admin report",
+                "billing",
+                new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero)));
+
+        QueryCoverageEnforcer.EnsureCovered(
+            accepted,
+            [Index("ix_status", Status.Name)],
+            new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        var expired = Assert.Throws<QueryCoverageException>(() =>
+            QueryCoverageEnforcer.EnsureCovered(
+                accepted,
+                [Index("ix_status", Status.Name)],
+                new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero)));
+        Assert.Equal("GW-COVER-903", expired.Code);
+    }
+
+    [Fact]
     public void An_unbounded_count_is_refused_but_a_bounded_count_with_a_key_is_covered()
     {
         var unbounded = Check(

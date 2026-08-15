@@ -150,6 +150,17 @@ internal static class QueryResolver
                 continue;
             }
 
+            if (name == "AcceptScan")
+            {
+                if (state.AcceptedScan is not null ||
+                    !TryParseAcceptScan(invocation, model, out var acceptance))
+                    return QueryResolution.Unresolved(
+                        "AcceptScan requires compile-time id, reason, owner, and yyyy-MM-dd expiry arguments",
+                        invocation);
+                state.AcceptedScan = acceptance;
+                continue;
+            }
+
             return QueryResolution.Unresolved($"method '{name}' is outside the closed query surface", invocation);
         }
 
@@ -222,6 +233,7 @@ internal static class QueryResolver
         state.Order.AddRange(initialRequest.Order);
         state.Offset = initialRequest.Paging.Offset;
         state.Limit = initialRequest.Paging.Limit;
+        state.AcceptedScan = initialRequest.AcceptedScan;
         var optional = new List<Predicate>();
         foreach (var ifStatement in assignments)
         {
@@ -285,9 +297,54 @@ internal static class QueryResolver
                 state.Order.ToImmutableArray(),
                 Projection.All,
                 paging,
-                result);
+                result,
+                acceptedScan: state.AcceptedScan);
         }
     }
+
+    private static bool TryParseAcceptScan(
+        InvocationExpressionSyntax invocation,
+        SemanticModel model,
+        out ScanAcceptance acceptance)
+    {
+        acceptance = null!;
+        var arguments = invocation.ArgumentList.Arguments;
+        var idExpression = GetAcceptArgument(arguments, "id", 0);
+        var reasonExpression = GetAcceptArgument(arguments, "reason", 1);
+        var ownerExpression = GetAcceptArgument(arguments, "owner", 2);
+        var expiryExpression = GetAcceptArgument(arguments, "expiresOn", 3);
+        if (arguments.Count != 4 ||
+            idExpression is null || reasonExpression is null || ownerExpression is null || expiryExpression is null ||
+            !TryGetString(idExpression, model, out var id) ||
+            !TryGetString(reasonExpression, model, out var reason) ||
+            !TryGetString(ownerExpression, model, out var owner) ||
+            !TryGetString(expiryExpression, model, out var expiry) ||
+            !DateTime.TryParseExact(
+                expiry,
+                "yyyy-MM-dd",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None,
+                out var date))
+            return false;
+
+        try
+        {
+            acceptance = ScanAcceptance.Allow(id, reason, owner, new DateTimeOffset(date, TimeSpan.Zero));
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static ExpressionSyntax? GetAcceptArgument(
+        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        string name,
+        int position) =>
+        arguments.FirstOrDefault(argument =>
+            string.Equals(argument.NameColon?.Name.Identifier.ValueText, name, StringComparison.Ordinal))?.Expression ??
+        arguments.ElementAtOrDefault(position)?.Expression;
 
     private static List<InvocationExpressionSyntax> GetInvocationChain(ExpressionSyntax expression)
     {
@@ -565,6 +622,11 @@ internal static class QueryResolver
             value = text;
             return true;
         }
+        if (model.GetSymbolInfo(expression).Symbol is IFieldSymbol { IsConst: true, ConstantValue: string constText })
+        {
+            value = constText;
+            return true;
+        }
         value = string.Empty;
         return false;
     }
@@ -622,6 +684,7 @@ internal static class QueryResolver
         public List<OrderTerm> Order { get; } = new();
         public int? Offset { get; set; }
         public int? Limit { get; set; }
+        public ScanAcceptance? AcceptedScan { get; set; }
     }
 
 }

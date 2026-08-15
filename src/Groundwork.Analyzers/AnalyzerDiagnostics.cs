@@ -16,6 +16,11 @@ internal static class AnalyzerDiagnostics
             ["GW-COVER-006"] = Create("GW_COVER_006", "Query is not covered by a declared index", "{0}"),
             ["GW-COVER-009"] = Create("GW_COVER_009", "Sparse index coverage is not proven", "{0}"),
             ["GW-COVER-016"] = Create("GW_COVER_016", "Query shape is not portable", "{0}"),
+            ["GW-COVER-901"] = Create("GW_COVER_901", "Accepted scan is stale", "{0}", DiagnosticSeverity.Error),
+            ["GW-COVER-902"] = Create("GW_COVER_902", "Accepted scans are not enabled", "{0}", DiagnosticSeverity.Error),
+            ["GW-COVER-903"] = Create("GW_COVER_903", "Accepted scan has expired", "{0}", DiagnosticSeverity.Error),
+            ["GW-COVER-904"] = Create("GW_COVER_904", "Accepted scan is expiring", "{0}", DiagnosticSeverity.Warning),
+            ["GW-COVER-905"] = Create("GW_COVER_905", "Accepted scan inventory", "{0}", DiagnosticSeverity.Info),
         };
 
     public static DiagnosticDescriptor Unresolvable { get; } = new(
@@ -30,11 +35,15 @@ internal static class AnalyzerDiagnostics
     public static DiagnosticDescriptor For(string code) =>
         Descriptors.TryGetValue(code, out var descriptor) ? descriptor : Descriptors["GW-COVER-006"];
 
-    private static DiagnosticDescriptor Create(string id, string title, string message) => new(
+    private static DiagnosticDescriptor Create(
+        string id,
+        string title,
+        string message,
+        DiagnosticSeverity severity = DiagnosticSeverity.Error) => new(
         id,
         title,
         message,
         "Groundwork.QueryCoverage",
-        DiagnosticSeverity.Error,
+        severity,
         isEnabledByDefault: true);
 }
