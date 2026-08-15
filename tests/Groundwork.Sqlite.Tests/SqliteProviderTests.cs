@@ -14,7 +14,8 @@ public sealed class SqliteProviderTests
     private sealed class LinqTicket
     {
         public string Id { get; set; } = string.Empty;
-        public string Value { get; set; } = string.Empty;
+        public string Display { get; set; } = string.Empty;
+        public string Code = string.Empty;
     }
 
     [Fact]
@@ -25,21 +26,25 @@ public sealed class SqliteProviderTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("linq-tickets"), Name = "linq-tickets",
-            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "Value", Type = PortableType.String }],
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }, new() { Name = "code_col", Type = PortableType.String }],
             Key = new KeyDefinition { Columns = ["Id"] }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
-        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["Value"] = "hit" })).Status);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["value_col"] = "hit", ["code_col"] = "C1" })).Status);
 
         var query = new GwQueryDatabase(new SqliteLinqExecutor(session)).Table<LinqTicket>(
             new GwTableModel<LinqTicket>("linq-tickets", [
                 new GwColumn<LinqTicket>(nameof(LinqTicket.Id), "Id", QueryType.String, false),
-                new GwColumn<LinqTicket>(nameof(LinqTicket.Value), "Value", QueryType.String)
-            ])).Where(ticket => ticket.Value == "hit");
+                new GwColumn<LinqTicket>(nameof(LinqTicket.Display), "value_col", QueryType.String),
+                new GwColumn<LinqTicket>(nameof(LinqTicket.Code), "code_col", QueryType.String)
+            ])).Where(ticket => ticket.Display == "hit");
         var rows = await query.ToListAsync();
         var row = Assert.Single(rows);
         Assert.Equal("a", row.Id);
+        Assert.Equal("hit", row.Display);
+        Assert.Equal("C1", row.Code);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => query.Select(ticket => new { ticket.Id }).ToListAsync());
     }
 
     [Fact]

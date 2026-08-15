@@ -23,6 +23,7 @@ public sealed class LinqFrontEndTests
         public bool IsOpen { get; set; }
         public decimal Amount { get; set; }
         public int OtherTenant { get; set; }
+        public int Marker { get; set; }
         public IReadOnlyList<int> TagIds { get; set; } = Array.Empty<int>();
         public long LongValue { get; set; }
         public DateTimeOffset? OptionalAt { get; set; }
@@ -36,6 +37,7 @@ public sealed class LinqFrontEndTests
         new GwColumn<Ticket>(nameof(Ticket.IsOpen), nameof(Ticket.IsOpen), QueryType.Boolean, false),
         new GwColumn<Ticket>(nameof(Ticket.Amount), nameof(Ticket.Amount), QueryType.Decimal, false, DecimalPrecision: 18, DecimalScale: 4),
         new GwColumn<Ticket>(nameof(Ticket.OtherTenant), nameof(Ticket.OtherTenant), QueryType.Int32, false),
+        new GwColumn<Ticket>(nameof(Ticket.Marker), nameof(Ticket.Marker), QueryType.Int32, false),
         new GwColumn<Ticket>(nameof(Ticket.LongValue), nameof(Ticket.LongValue), QueryType.Int64, false),
         new GwColumn<Ticket>(nameof(Ticket.OptionalAt), nameof(Ticket.OptionalAt), QueryType.DateTimeOffset, true)
     }, new[] { new GwElementSet<Ticket>(nameof(Ticket.TagIds), "tag_ids", QueryType.Int32) });
@@ -101,7 +103,7 @@ public sealed class LinqFrontEndTests
 
     private sealed class RecordingExecutor : IGwQueryExecutor
     {
-        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<T>>(Array.Empty<T>());
+        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<T>>(Array.Empty<T>());
         public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(1L);
         public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(true);
     }
@@ -125,6 +127,19 @@ public sealed class LinqFrontEndTests
         Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-107");
         Assert.Equal(0, sideEffectReads);
     }
+
+    [Fact]
+    public void Closed_accessor_cache_reuses_only_the_field_getter_and_reads_fresh_closures()
+    {
+        var before = ExpressionLowerer.ClosedAccessorCompilationCount;
+        var first = Assert.IsType<Predicate.Equal>(ExpressionLowerer.Lower(ClosedTenant(7), Tickets));
+        var second = Assert.IsType<Predicate.Equal>(ExpressionLowerer.Lower(ClosedTenant(8), Tickets));
+        Assert.Equal(7, first.Value.Value);
+        Assert.Equal(8, second.Value.Value);
+        Assert.Equal(1, ExpressionLowerer.ClosedAccessorCompilationCount - before);
+    }
+
+    private static Expression<Func<Ticket, bool>> ClosedTenant(int value) => ticket => ticket.TenantId == value;
 
     [Fact]
     public void Explicit_string_comparison_and_date_parts_lower()
@@ -175,7 +190,7 @@ public sealed class LinqFrontEndTests
         });
         var predicate = ExpressionLowerer.Lower(ExternalFragments.IsOpen, model);
         Assert.IsType<Predicate.Equal>(predicate);
-        Expression<Func<ExternalTicket, bool>> unmarked = ticket => ExternalFragments.UnmarkedTerm(ticket);
+        Expression<Func<ExternalTicket, bool>> unmarked = ticket => ExternalFragments.Unmarked.Compile()(ticket);
         var rejected = ExpressionLowerer.Diagnose(unmarked, model);
         Assert.Contains(rejected, diagnostic => diagnostic.Code == "GW-LINQ-107");
     }

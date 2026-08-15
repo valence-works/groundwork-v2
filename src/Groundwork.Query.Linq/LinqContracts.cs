@@ -7,7 +7,7 @@ using Groundwork.Query.Model;
 namespace Groundwork.Query.Linq;
 
 /// <summary>Marks a static expression-producing member as syntactically inlineable by the lowerer.</summary>
-[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
 public sealed class GwQueryFragmentAttribute : Attribute
 {
 }
@@ -16,7 +16,12 @@ public sealed class GwQueryFragmentAttribute : Attribute
 [AttributeUsage(AttributeTargets.Property | AttributeTargets.Field, AllowMultiple = false, Inherited = true)]
 public sealed class GwStringComparisonAttribute : Attribute
 {
-    public GwStringComparisonAttribute(StringComparison comparison) => Comparison = comparison;
+    public GwStringComparisonAttribute(StringComparison comparison)
+    {
+        if (comparison is not StringComparison.Ordinal and not StringComparison.OrdinalIgnoreCase)
+            throw new ArgumentOutOfRangeException(nameof(comparison), "Only Ordinal and OrdinalIgnoreCase are portable.");
+        Comparison = comparison;
+    }
     public StringComparison Comparison { get; }
 }
 
@@ -138,7 +143,7 @@ public sealed class LinqTerminal<TResult>
 /// <summary>Provider adapter seam for async terminal execution; the LINQ package performs no I/O.</summary>
 public interface IGwQueryExecutor
 {
-    Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default);
     Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default);
     Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default);
 }
@@ -146,7 +151,7 @@ public interface IGwQueryExecutor
 public static class GwQueryAsyncExtensions
 {
     public static Task<IReadOnlyList<T>> ToListAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default) =>
-        (executor ?? throw new ArgumentNullException(nameof(executor))).ToListAsync<T>(query.ToQueryRequest(), cancellationToken);
+        (executor ?? throw new ArgumentNullException(nameof(executor))).ToListAsync<T>(query.ToQueryRequest(), null, cancellationToken);
 
     public static Task<long> CountAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default) =>
         (executor ?? throw new ArgumentNullException(nameof(executor))).CountAsync(query.Count().Request, cancellationToken);

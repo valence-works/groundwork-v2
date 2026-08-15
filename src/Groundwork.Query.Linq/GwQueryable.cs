@@ -80,8 +80,10 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
 
     public LinqTerminal<T> ToList() => new(ToQueryRequest());
     public Task<IReadOnlyList<T>> ToListAsync(CancellationToken cancellationToken = default) =>
-        (executor ?? throw new InvalidOperationException("Configure GwQueryDatabase with an IGwQueryExecutor before using ToListAsync."))
-            .ToListAsync<T>(ToQueryRequest(), cancellationToken);
+        model is null
+            ? throw new InvalidOperationException("Configured async execution of Select projections requires an adapter-specific materializer.")
+            : (executor ?? throw new InvalidOperationException("Configure GwQueryDatabase with an IGwQueryExecutor before using ToListAsync."))
+                .ToListAsync<T>(ToQueryRequest(), model, cancellationToken);
 
     public LinqTerminal<long> Count() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.None, ResultShape.TotalCount.Instance, state.LatestPerKey, state.AcceptedScan));
 

@@ -73,9 +73,17 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Linq_analyzer_rejects_unsupported_string_policy_on_fields()
+    {
+        const string source = "using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { [AttributeUsage(AttributeTargets.Field)] public sealed class GwStringComparisonAttribute : Attribute { public GwStringComparisonAttribute(StringComparison comparison) { } } public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { [Groundwork.Query.Linq.GwStringComparison((StringComparison)1)] public string Name = \"\"; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Name.StartsWith(\"x\", StringComparison.Ordinal)); } }";
+        var diagnostics = await AnalyzeLinq(source);
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_108");
+    }
+
+    [Fact]
     public async Task Linq_analyzer_accepts_external_fragments_but_rejects_unmarked_helpers()
     {
-        const string source = "using System; using System.Linq.Expressions; using Groundwork.Query.Linq.Fragments; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public static class Unmarked { public static bool IsOpen(ExternalTicket ticket) => ticket.IsOpen; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<ExternalTicket> table) { table.Where(ticket => ExternalFragments.IsOpenTerm(ticket)); table.Where(ticket => Unmarked.IsOpen(ticket)); } }";
+        const string source = "using System; using System.Linq.Expressions; using Groundwork.Query.Linq.Fragments; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } public void WhereIf(bool enabled, Expression<Func<T, bool>> predicate) { } } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<ExternalTicket> table) { table.Where(ExternalFragments.IsOpen); table.WhereIf(true, ExternalFragments.Unmarked); } }";
         var diagnostics = await AnalyzeLinq(source);
         Assert.DoesNotContain(diagnostics, item => item.GetMessage().Contains("ExternalFragments", StringComparison.Ordinal));
         Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_107");
@@ -84,9 +92,16 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Linq_analyzer_accepts_membership_and_equality_element_sets()
     {
-        const string source = "using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => ids.Contains(ticket.Id) && ticket.Tags.Any(value => value == ticket.Id) && ticket.Tags.All(value => value == ticket.Id)); } }";
+        const string source = "using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => ids.Contains(ticket.Id) && Enumerable.Contains(ids, ticket.Id) && ticket.Tags.Any(value => value == ticket.Id) && ticket.Tags.All(value => value == ticket.Id)); } }";
         var diagnostics = await AnalyzeLinq(source);
         Assert.DoesNotContain(diagnostics, item => item.Id is "GW_LINQ_107" or "GW_LINQ_108");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_rejects_unlisted_enumerable_composition()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Tags.Select(value => value).Any()); } }");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_107");
     }
 
     [Fact]

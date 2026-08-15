@@ -23,8 +23,8 @@ public sealed class LinqCorpusTests
         ["GW-LINQ-109"] = "use `DateTimeOffset.UtcNow`",
         ["GW-LINQ-110"] = "the value has more scale/range than `decimal(10,2)`"
     };
-    private sealed record CorpusShape(string Spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> Build, string? ExpectedDiagnostic, Type? ExpectedAst);
-    public sealed record CorpusCase(string Spelling, int Value, string? ExpectedDiagnostic, Type? ExpectedAst, Expression<Func<LinqFrontEndTests.Ticket, bool>> Expression);
+    private sealed record CorpusShape(string Spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> Build, string? ExpectedDiagnostic, string? ExpectedSpan, string? ExpectedSignature);
+    public sealed record CorpusCase(string Spelling, int Value, string? ExpectedDiagnostic, string? ExpectedSpan, string? ExpectedSignature, Expression<Func<LinqFrontEndTests.Ticket, bool>> Expression);
     public static IReadOnlyList<object[]> Corpus => Cases.Select(item => new object[] { item }).ToArray();
 
     [Fact]
@@ -56,23 +56,21 @@ public sealed class LinqCorpusTests
         var diagnostics = ExpressionLowerer.Diagnose(item.Expression, LinqFrontEndTests.Tickets);
         if (item.ExpectedDiagnostic is not null)
         {
-            Assert.Contains(diagnostics, diagnostic => diagnostic.Code == item.ExpectedDiagnostic);
+            var diagnostic = Assert.Single(diagnostics);
+            Assert.Equal(item.ExpectedDiagnostic, diagnostic.Code);
+            Assert.Equal(item.ExpectedSpan, SpanIdentity(diagnostic.Span));
             return;
         }
         Assert.Empty(diagnostics);
         var lowered = ExpressionLowerer.Lower(item.Expression, LinqFrontEndTests.Tickets);
-        if (item.Value == 0)
-            Assert.IsType(item.ExpectedAst!, lowered);
-        else
-            Assert.Contains(lowered.GetType(), new[] { typeof(Predicate.And), typeof(Predicate.Or), typeof(Predicate.Equal), typeof(Predicate.Range), typeof(Predicate.Not), typeof(Predicate.In), typeof(Predicate.ElementOf), typeof(Predicate.Substring), typeof(Predicate.StartsWith) });
-        Assert.StartsWith(lowered.GetType().Name, AstSignature(lowered), StringComparison.Ordinal);
+        Assert.Equal(item.ExpectedSignature, AstSignature(lowered));
     }
 
     private static IReadOnlyList<CorpusCase> Cases => Shapes.SelectMany(shape => Enumerable.Range(0, 5).Select(value =>
     {
         var expression = Variant(shape.Build(value), value);
-        var expectedAst = shape.ExpectedDiagnostic is null ? ExpectedVariantAst(shape.ExpectedAst!, value) : null;
-        return new CorpusCase(string.Format(CultureInfo.InvariantCulture, shape.Spelling, value) + VariantSuffix(value), value, shape.ExpectedDiagnostic, expectedAst, expression);
+        var expectedSignature = shape.ExpectedDiagnostic is null ? VariantSignature(shape.ExpectedSignature!, value) : null;
+        return new CorpusCase(string.Format(CultureInfo.InvariantCulture, shape.Spelling, value) + VariantSuffix(value), value, shape.ExpectedDiagnostic, shape.ExpectedSpan, expectedSignature, expression);
     })).ToArray();
 
     private static Expression<Func<LinqFrontEndTests.Ticket, bool>> Variant(Expression<Func<LinqFrontEndTests.Ticket, bool>> source, int variant)
@@ -80,10 +78,10 @@ public sealed class LinqCorpusTests
         var body = variant switch
         {
             0 => source.Body,
-            1 => Expression.AndAlso(source.Body, ElementSetMatch(source.Parameters[0], 100 + variant, all: false)),
-            2 => Expression.OrElse(source.Body, ElementSetMatch(source.Parameters[0], 200 + variant, all: true)),
-            3 => Expression.AndAlso(source.Body, ElementSetMatch(source.Parameters[0], 300 + variant, all: true)),
-            _ => Expression.OrElse(source.Body, ElementSetMatch(source.Parameters[0], 400 + variant, all: false))
+            1 => Expression.AndAlso(source.Body, Expression.Equal(Expression.Property(source.Parameters[0], nameof(LinqFrontEndTests.Ticket.Marker)), Expression.Constant(100 + variant))),
+            2 => Expression.AndAlso(source.Body, Expression.GreaterThan(Expression.Property(source.Parameters[0], nameof(LinqFrontEndTests.Ticket.Marker)), Expression.Constant(200 + variant))),
+            3 => Expression.AndAlso(source.Body, Expression.LessThan(Expression.Property(source.Parameters[0], nameof(LinqFrontEndTests.Ticket.Marker)), Expression.Constant(300 + variant))),
+            _ => Expression.AndAlso(source.Body, Expression.NotEqual(Expression.Property(source.Parameters[0], nameof(LinqFrontEndTests.Ticket.Marker)), Expression.Constant(400 + variant)))
         };
         return Expression.Lambda<Func<LinqFrontEndTests.Ticket, bool>>(body, source.Parameters);
     }
@@ -91,26 +89,10 @@ public sealed class LinqCorpusTests
     private static string VariantSuffix(int variant) => variant switch
     {
         0 => string.Empty,
-        1 => " && ticket.TagIds.Any(value => value == " + (100 + variant).ToString(CultureInfo.InvariantCulture) + ")",
-        2 => " || ticket.TagIds.All(value => value == " + (200 + variant).ToString(CultureInfo.InvariantCulture) + ")",
-        3 => " && ticket.TagIds.All(value => value == " + (300 + variant).ToString(CultureInfo.InvariantCulture) + ")",
-        _ => " || ticket.TagIds.Any(value => value == " + (400 + variant).ToString(CultureInfo.InvariantCulture) + ")"
-    };
-
-    private static Expression ElementSetMatch(ParameterExpression parameter, int value, bool all)
-    {
-        var tags = Expression.Property(parameter, nameof(LinqFrontEndTests.Ticket.TagIds));
-        var item = Expression.Parameter(typeof(int), "value");
-        return Expression.Call(
-            typeof(Enumerable), all ? nameof(Enumerable.All) : nameof(Enumerable.Any), new[] { typeof(int) }, tags,
-            Expression.Lambda<Func<int, bool>>(Expression.Equal(item, Expression.Constant(value)), item));
-    }
-
-    private static Type ExpectedVariantAst(Type expected, int variant) => variant switch
-    {
-        0 => expected,
-        2 or 4 => typeof(Predicate.Or),
-        _ => typeof(Predicate.And)
+        1 => " && ticket.Marker == " + (100 + variant).ToString(CultureInfo.InvariantCulture),
+        2 => " && ticket.Marker > " + (200 + variant).ToString(CultureInfo.InvariantCulture),
+        3 => " && ticket.Marker < " + (300 + variant).ToString(CultureInfo.InvariantCulture),
+        _ => " && ticket.Marker != " + (400 + variant).ToString(CultureInfo.InvariantCulture)
     };
 
     private static string ExpressionShape(Expression expression)
@@ -144,22 +126,46 @@ public sealed class LinqCorpusTests
 
     private static string AstSignature(Predicate predicate) => predicate switch
     {
-        Predicate.Equal equal => $"Equal:{equal.Column.Name}:{equal.Value.Kind}",
-        Predicate.Range range => $"Range:{range.Column.Name}:{range.Lower?.IsInclusive}:{range.Upper?.IsInclusive}",
+        Predicate.Equal => "Equal",
+        Predicate.Range => "Range",
         Predicate.Not not => "Not(" + AstSignature(not.Inner) + ")",
-        Predicate.And and => "And(" + string.Join(',', and.Terms.Select(AstSignature)) + ")",
-        Predicate.Or or => "Or(" + string.Join(',', or.Terms.Select(AstSignature)) + ")",
-        Predicate.In membership => $"In:{membership.Column.Name}:{membership.Values.Length}",
-        Predicate.ElementOf element => $"ElementOf:{element.Set.Name}:{element.Quantifier}",
-        Predicate.Substring substring => $"Substring:{substring.Column.Name}:{substring.Anchor}",
-        Predicate.StartsWith starts => $"StartsWith:{starts.Column.Name}",
+        Predicate.And and => "And(" + string.Join(',', and.Terms.Select(AstSignature).OrderBy(value => value, StringComparer.Ordinal)) + ")",
+        Predicate.Or or => "Or(" + string.Join(',', or.Terms.Select(AstSignature).OrderBy(value => value, StringComparer.Ordinal)) + ")",
+        Predicate.In => "In",
+        Predicate.ElementOf => "ElementOf",
+        Predicate.Substring => "Substring",
+        Predicate.StartsWith => "StartsWith",
         _ => predicate.GetType().Name
+    };
+
+    private static string VariantSignature(string baseSignature, int variant)
+    {
+        if (variant == 0) return baseSignature;
+        var extra = variant switch
+        {
+            1 => "Equal",
+            2 or 3 => "Range",
+            _ => "Not(Equal)"
+        };
+        var terms = baseSignature.StartsWith("And(", StringComparison.Ordinal)
+            ? baseSignature[4..^1].Split(',', StringSplitOptions.RemoveEmptyEntries).Append(extra)
+            : new[] { baseSignature, extra };
+        return "And(" + string.Join(',', terms.OrderBy(value => value, StringComparer.Ordinal)) + ")";
+    }
+
+    private static string SpanIdentity(Expression expression) => expression switch
+    {
+        MethodCallExpression call => "Call:" + call.Method.Name,
+        MemberExpression member => "Member:" + member.Member.Name,
+        BinaryExpression binary => "Binary:" + binary.NodeType,
+        ConstantExpression constant => "Constant:" + constant.Type.Name,
+        _ => expression.NodeType.ToString()
     };
 
     private static string GenerateCorpusTable()
     {
         var builder = new StringBuilder("| Decision | Corpus forms |\n| --- | --- |\n");
-        var accepted = Cases.Where(item => item.ExpectedDiagnostic is null).Select(item => item.ExpectedAst!.Name).Distinct(StringComparer.Ordinal).OrderBy(item => item, StringComparer.Ordinal);
+        var accepted = Cases.Where(item => item.ExpectedDiagnostic is null).Select(item => item.ExpectedSignature!).Distinct(StringComparer.Ordinal).OrderBy(item => item, StringComparer.Ordinal);
         var rejected = Cases.Where(item => item.ExpectedDiagnostic is not null).Select(item => item.ExpectedDiagnostic!).Distinct(StringComparer.Ordinal).OrderBy(item => item, StringComparer.Ordinal);
         builder.Append("| Accepted ASTs | ").Append(string.Join(", ", accepted)).Append(" |\n");
         builder.Append("| Rejected diagnostics | ").Append(string.Join(", ", rejected)).Append(" |\n");
@@ -206,30 +212,46 @@ public sealed class LinqCorpusTests
         Shape("ticket.TenantId + {0} > 2", value => ticket => ticket.TenantId + value > 2, "GW-LINQ-102"),
         Shape("ticket.Status!.StartsWith(\"x{0}\")", value => ticket => ticket.Status!.StartsWith("x" + value), "GW-LINQ-108"),
         Shape("IsOpen(ticket)", value => ticket => IsOpen(ticket), "GW-LINQ-107"),
-        Shape("ticket.Status!.ToLower() == \"x\" && ticket.IsOpen == ({0} >= 0)", value => ticket => ticket.Status!.ToLower() == "x" && ticket.IsOpen == (value >= 0), "GW-LINQ-101"),
-        Shape("ticket.Status!.Length > {0}", value => ticket => ticket.Status!.Length > value, "GW-LINQ-101"),
-        Shape("ticket.CreatedAt.UtcDateTime == DateTime.UtcNow", value => ticket => ticket.CreatedAt.UtcDateTime == DateTime.UtcNow, "GW-LINQ-104"),
+        Shape("ticket.Status!.ToLower() == \"x\" && ticket.IsOpen == ({0} >= 0)", value => ticket => ticket.Status!.ToLower() == "x" && ticket.IsOpen == (value >= 0), "GW-LINQ-101", "Binary:Equal"),
+        Shape("ticket.Status!.Length > {0}", value => ticket => ticket.Status!.Length > value, "GW-LINQ-101", "Binary:GreaterThan"),
+        Shape("ticket.CreatedAt.UtcDateTime == DateTime.UtcNow", value => ticket => ticket.CreatedAt.UtcDateTime == DateTime.UtcNow, "GW-LINQ-104", "Binary:Equal"),
         Shape("ticket.TagIds.Any(value => value > {0})", value => ticket => ticket.TagIds.Any(item => item > value), "GW-LINQ-106"),
-        Shape("ticket.TagIds.All(value => value > {0})", value => ticket => ticket.TagIds.All(item => item > value), "GW-LINQ-106"),
-        Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.CurrentCulture)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.CurrentCulture), "GW-LINQ-108"),
+        Shape("ticket.TagIds.All(value => value > {0})", value => ticket => ticket.TagIds.All(item => item > value), "GW-LINQ-106", "Call:All"),
+        Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.CurrentCulture)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.CurrentCulture), "GW-LINQ-108", "Call:Contains"),
         Shape("ticket.CreatedAt == DateTimeOffset.Now", value => ticket => ticket.CreatedAt == DateTimeOffset.Now, "GW-LINQ-109"),
-        Shape("ticket.CreatedAt >= DateTimeOffset.Now", value => ticket => ticket.CreatedAt >= DateTimeOffset.Now, "GW-LINQ-109"),
+        Shape("ticket.CreatedAt >= DateTimeOffset.Now", value => ticket => ticket.CreatedAt >= DateTimeOffset.Now, "GW-LINQ-109", "Member:Now"),
         Shape("ticket.Amount == 1.23456m + {0}m", value => ticket => ticket.Amount == 1.23456m + value, "GW-LINQ-110"),
         Shape("ticket.OtherTenant == ticket.TenantId", value => ticket => ticket.OtherTenant == ticket.TenantId, "GW-LINQ-103"),
         Shape("ticket.TenantId * {0} > 2", value => ticket => ticket.TenantId * value > 2, "GW-LINQ-102"),
-        Shape("ticket.Status!.Substring(0, {0}) == \"x\"", value => ticket => ticket.Status!.Substring(0, value) == "x", "GW-LINQ-101"),
-        Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.OrdinalIgnoreCase)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.OrdinalIgnoreCase), "GW-LINQ-108"),
+        Shape("ticket.Status!.Substring(0, {0}) == \"x\"", value => ticket => ticket.Status!.Substring(0, value) == "x", "GW-LINQ-101", "Binary:Equal"),
+        Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.OrdinalIgnoreCase)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.OrdinalIgnoreCase), "GW-LINQ-108", "Call:Contains"),
         Shape("ticket.TenantId / ({0} + 1) > 0", value => ticket => ticket.TenantId / (value + 1) > 0, "GW-LINQ-102"),
-        Shape("ticket.TagIds.Any(value => value != {0})", value => ticket => ticket.TagIds.Any(item => item != value), "GW-LINQ-106"),
+        Shape("ticket.TagIds.Any(value => value != {0})", value => ticket => ticket.TagIds.Any(item => item != value), "GW-LINQ-106", "Call:Any"),
         Shape("ticket.CreatedAt.Year != ({0} + 2026)", value => ticket => ticket.CreatedAt.Year != value + 2026, typeof(Predicate.Range)),
         Shape("ticket.CreatedAt.Date <= new DateTime({0} + 2026, 1, 1)", value => ticket => ticket.CreatedAt.Date <= new DateTime(value + 2026, 1, 1), typeof(Predicate.Range)),
-        Shape("ticket.OtherTenant > ticket.TenantId", value => ticket => ticket.OtherTenant > ticket.TenantId, "GW-LINQ-103"),
+        Shape("ticket.OtherTenant > ticket.TenantId", value => ticket => ticket.OtherTenant > ticket.TenantId, "GW-LINQ-103", "Binary:GreaterThan"),
         Shape("ticket.TagIds.GroupBy(value => value).Any()", value => ticket => ticket.TagIds.GroupBy(item => item).Any(), "GW-LINQ-105"),
         Shape("ticket.IsOpen == (0 == {0})", value => ticket => ticket.IsOpen == (0 == value), typeof(Predicate.Equal)),
     };
 
-    private static CorpusShape Shape(string spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> build, Type expectedAst) => new(spelling, build, null, expectedAst);
-    private static CorpusShape Shape(string spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> build, string expectedDiagnostic) => new(spelling, build, expectedDiagnostic, null);
+    private static CorpusShape Shape(string spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> build, Type expectedAst) => new(spelling, build, null, null, SignatureForType(expectedAst));
+    private static CorpusShape Shape(string spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> build, string expectedDiagnostic) => new(spelling, build, expectedDiagnostic, ExpectedSpanForDiagnostic(expectedDiagnostic), null);
+    private static CorpusShape Shape(string spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> build, string expectedDiagnostic, string expectedSpan) => new(spelling, build, expectedDiagnostic, expectedSpan, null);
+    private static string SignatureForType(Type type) => type == typeof(Predicate.Not) ? "Not(Equal)" : type == typeof(Predicate.And) ? "And(Equal,Equal)" : type == typeof(Predicate.Or) ? "Or(Equal,Equal)" : type.Name;
+    private static string ExpectedSpanForDiagnostic(string code) => code switch
+    {
+        "GW-LINQ-103" => "Binary:Equal",
+        "GW-LINQ-102" => "Binary:GreaterThan",
+        "GW-LINQ-108" => "Call:StartsWith",
+        "GW-LINQ-107" => "Call:IsOpen",
+        "GW-LINQ-101" => "Binary:Equal",
+        "GW-LINQ-104" => "Binary:Equal",
+        "GW-LINQ-106" => "Call:Any",
+        "GW-LINQ-105" => "Call:Any",
+        "GW-LINQ-109" => "Member:Now",
+        "GW-LINQ-110" => "Binary:Equal",
+        _ => throw new InvalidOperationException(code)
+    };
     private static Expression<Func<LinqFrontEndTests.Ticket, bool>> LongAtLeast(int value)
     {
         long threshold = value;

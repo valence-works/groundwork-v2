@@ -24,6 +24,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
         context.RegisterSyntaxNodeAction(AnalyzeLambda, SyntaxKind.SimpleLambdaExpression, SyntaxKind.ParenthesizedLambdaExpression);
+        context.RegisterSyntaxNodeAction(AnalyzeInvocation, SyntaxKind.InvocationExpression);
     }
 
     private static void AnalyzeLambda(SyntaxNodeAnalysisContext context)
@@ -36,6 +37,20 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         visitor.Visit(body);
     }
 
+    private static void AnalyzeInvocation(SyntaxNodeAnalysisContext context)
+    {
+        if (context.Node is not InvocationExpressionSyntax invocation) return;
+        var method = context.SemanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+        if (method?.Name is not ("Where" or "WhereIf")) return;
+        var argumentIndex = method.Name == "WhereIf" ? 1 : 0;
+        if (invocation.ArgumentList.Arguments.Count <= argumentIndex) return;
+        var argument = invocation.ArgumentList.Arguments[argumentIndex].Expression;
+        var symbol = context.SemanticModel.GetSymbolInfo(argument).Symbol;
+        if (symbol is not IPropertySymbol property || !IsValidFragmentProperty(property) && !HasFragmentAttribute(property)) return;
+        if (!IsValidFragmentProperty(property) || !HasFragmentAttribute(property))
+            context.ReportDiagnostic(Diagnostic.Create(AnalyzerDiagnostics.For("GW-LINQ-107"), argument.GetLocation(), "GW-LINQ-107: a query fragment must be an attributed Expression<Func<T, bool>> property"));
+    }
+
     private static bool IsClosedSurfaceLambda(SyntaxNodeAnalysisContext context, LambdaExpressionSyntax lambda)
     {
         foreach (var invocation in lambda.Ancestors().OfType<InvocationExpressionSyntax>())
@@ -43,8 +58,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             if (!invocation.ArgumentList.Arguments.Any(argument => argument.Expression == lambda))
                 continue;
             var method = context.SemanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
-            if (method?.ContainingType?.ToDisplayString().StartsWith("Groundwork.Query.Linq.", StringComparison.Ordinal) == true &&
-                method.Name is "Where" or "WhereIf" or "OrderBy" or "OrderByDescending" or "ThenBy" or "ThenByDescending" or "Select" or "LatestPer")
+            if (IsClosedSurfaceMethod(method))
                 return true;
         }
 
@@ -58,6 +72,15 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
 
     private static bool HasFragmentAttribute(ISymbol symbol) => symbol.GetAttributes().Any(attribute =>
         attribute.AttributeClass?.Name is "GwQueryFragmentAttribute" or "GwQueryFragment");
+
+    private static bool IsClosedSurfaceMethod(IMethodSymbol? method) => method?.ContainingType?.ToDisplayString().StartsWith("Groundwork.Query.Linq.", StringComparison.Ordinal) == true &&
+        method.Name is "Where" or "WhereIf" or "OrderBy" or "OrderByDescending" or "ThenBy" or "ThenByDescending" or "Select" or "LatestPer";
+
+    private static bool IsValidFragmentProperty(IPropertySymbol property)
+    {
+        if (property.Type is not INamedTypeSymbol expression || expression.Name != "Expression" || expression.TypeArguments.Length != 1) return false;
+        return expression.TypeArguments[0] is INamedTypeSymbol func && func.Name == "Func" && func.TypeArguments.Length == 2 && func.TypeArguments[1].SpecialType == SpecialType.System_Boolean;
+    }
 
     private sealed class Visitor : CSharpSyntaxWalker
     {
@@ -83,7 +106,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             {
                 var declared = DeclaredStringComparison(node);
                 var supplied = context.SemanticModel.GetConstantValue(node.ArgumentList.Arguments[1].Expression).Value?.ToString();
-                if (declared is not null && supplied is not null && !string.Equals(declared, supplied, StringComparison.Ordinal))
+                if (declared is not null && (declared == "Unsupported" || supplied is null || !string.Equals(declared, supplied, StringComparison.Ordinal)))
                     Report("GW-LINQ-108", node, $"GW-LINQ-108: string matching must agree with the column's declared folding; use StringComparison.{declared}");
             }
             else if (name is "ToLower" or "ToUpper" or "Substring" or "Trim")
@@ -98,7 +121,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             {
                 // Approved BCL instant arithmetic remains a closed term.
             }
-            else if (symbol is not null && symbol.ContainingType?.SpecialType == SpecialType.None && !HasFragmentAttribute(symbol) && !IsKnownQueryMethod(symbol))
+            else if (symbol is not null && symbol.ContainingType?.SpecialType == SpecialType.None && !HasFragmentAttribute(symbol) && !IsKnownQueryMethod(symbol, node))
                 Report("GW-LINQ-107", node, "GW-LINQ-107: opaque helpers are not portable; mark it `[GwQueryFragment]`");
             base.VisitInvocationExpression(node);
         }
@@ -156,7 +179,24 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         private bool HasDistinctMemberOperands(ExpressionSyntax left, ExpressionSyntax right) => left is MemberAccessExpressionSyntax && right is MemberAccessExpressionSyntax && HasLambdaParameter(left) && HasLambdaParameter(right);
         private bool IsStringInvocation(InvocationExpressionSyntax node) => node.Expression is MemberAccessExpressionSyntax member && context.SemanticModel.GetTypeInfo(member.Expression).Type?.SpecialType == SpecialType.System_String;
         private static bool IsEquality(CSharpSyntaxNode node) => node is BinaryExpressionSyntax binary && binary.IsKind(SyntaxKind.EqualsExpression);
-        private static bool IsKnownQueryMethod(IMethodSymbol symbol) => symbol.ContainingType?.ToDisplayString().StartsWith("System.Linq.Enumerable", StringComparison.Ordinal) == true;
+        private static bool IsKnownQueryMethod(IMethodSymbol symbol, InvocationExpressionSyntax node)
+        {
+            if (symbol.ContainingType?.ToDisplayString() != "System.Linq.Enumerable") return false;
+            if (symbol.Name == "Contains")
+            {
+                var containsCollection = symbol.IsStatic
+                    ? node.ArgumentList.Arguments.FirstOrDefault()?.Expression
+                    : (node.Expression as MemberAccessExpressionSyntax)?.Expression;
+                return containsCollection is IdentifierNameSyntax or MemberAccessExpressionSyntax or ArrayCreationExpressionSyntax or ImplicitArrayCreationExpressionSyntax;
+            }
+            if (symbol.Name is not ("Any" or "All")) return false;
+            if (node.ArgumentList.Arguments.Count == 0) return false;
+            var elementCollection = symbol.IsStatic
+                ? node.ArgumentList.Arguments[0].Expression
+                : (node.Expression as MemberAccessExpressionSyntax)?.Expression;
+            var lambda = node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression as LambdaExpressionSyntax;
+            return elementCollection is MemberAccessExpressionSyntax && lambda is not null && IsEquality(lambda.Body);
+        }
         private void ReportStringComparison(InvocationExpressionSyntax node, string message)
         {
             var declared = DeclaredStringComparison(node);
@@ -174,11 +214,12 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         {
             if (node.Expression is not MemberAccessExpressionSyntax member) return null;
             var symbol = context.SemanticModel.GetSymbolInfo(member.Expression).Symbol;
-            var property = symbol as IPropertySymbol;
-            var attribute = property?.GetAttributes().FirstOrDefault(item => item.AttributeClass?.Name is "GwStringComparisonAttribute" or "GwStringComparison");
-            return attribute?.ConstructorArguments.FirstOrDefault().Value is int value
-                ? value switch { 4 => "Ordinal", 5 => "OrdinalIgnoreCase", _ => null }
-                : null;
+            var declaredMember = symbol as ISymbol;
+            var attribute = declaredMember?.GetAttributes().FirstOrDefault(item => item.AttributeClass?.Name is "GwStringComparisonAttribute" or "GwStringComparison");
+            if (attribute is null) return null;
+            return attribute.ConstructorArguments.FirstOrDefault().Value is int value
+                ? value switch { 4 => "Ordinal", 5 => "OrdinalIgnoreCase", _ => "Unsupported" }
+                : "Unsupported";
         }
         private void Report(string code, SyntaxNode node, string message) => context.ReportDiagnostic(Diagnostic.Create(AnalyzerDiagnostics.For(code), node.GetLocation(), message));
     }

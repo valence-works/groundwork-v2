@@ -12,8 +12,10 @@ namespace Groundwork.Query.Linq;
 public static class ExpressionLowerer
 {
     private static readonly ConcurrentDictionary<string, Lazy<ClosedAccessorPlan>> ClosedAccessors = new(StringComparer.Ordinal);
+    private static int closedAccessorCompilations;
 
     internal static int ClosedAccessorCount => ClosedAccessors.Count;
+    internal static int ClosedAccessorCompilationCount => Volatile.Read(ref closedAccessorCompilations);
 
     public static Predicate Lower<T>(Expression<Func<T, bool>> expression, GwTableModel<T> model)
     {
@@ -55,7 +57,7 @@ public static class ExpressionLowerer
         {
             var key = ClosedShapeKey(expression);
             var accessor = ClosedAccessors.GetOrAdd(key, _ => new Lazy<ClosedAccessorPlan>(
-                () => new ClosedAccessorPlan(),
+                () => new ClosedAccessorPlan(expression),
                 LazyThreadSafetyMode.ExecutionAndPublication));
             return accessor.Value.Read(expression);
         }
@@ -79,9 +81,69 @@ public static class ExpressionLowerer
 
     private sealed class ClosedAccessorPlan
     {
-        // A cached structural plan deliberately interprets only the closed-value grammar. It
-        // never compiles or invokes arbitrary user expression trees.
-        public object? Read(Expression expression) => ReadClosed(expression);
+        private readonly Func<object, object?>? closureFieldAccessor;
+
+        public ClosedAccessorPlan(Expression expression)
+        {
+            if (!TryClosureFieldChain(expression, out var root, out var rewritten)) return;
+            var parameter = Expression.Parameter(typeof(object), "closure");
+            var body = new ClosureRootReplacer(root!, parameter).Visit(rewritten)!;
+            closureFieldAccessor = Expression.Lambda<Func<object, object?>>(Expression.Convert(body, typeof(object)), parameter).Compile();
+            Interlocked.Increment(ref closedAccessorCompilations);
+        }
+
+        // The only compiled code is a typed getter for a validated compiler closure field chain.
+        // Surrounding expressions are interpreted by ReadClosed and cannot execute user code.
+        public object? Read(Expression expression)
+        {
+            if (closureFieldAccessor is not null && TryClosureRoot(expression, out var root) && root.Value is not null)
+                return closureFieldAccessor(root.Value);
+            return ReadClosed(expression);
+        }
+
+        private static bool TryClosureFieldChain(Expression expression, out ConstantExpression? root, out Expression rewritten)
+        {
+            root = null;
+            rewritten = expression;
+            var current = Unwrap(expression);
+            while (current is MemberExpression member && member.Member is FieldInfo field && field.DeclaringType?.Name.Contains("DisplayClass", StringComparison.Ordinal) == true)
+            {
+                current = Unwrap(member.Expression!);
+                if (member.Expression is ConstantExpression constant && constant.Type.Name.Contains("DisplayClass", StringComparison.Ordinal))
+                {
+                    root = constant;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool TryClosureRoot(Expression expression, out ConstantExpression root)
+        {
+            ConstantExpression? foundRoot = null;
+            new ClosureRootFinder(value => foundRoot = value).Visit(expression);
+            root = foundRoot!;
+            return foundRoot is not null;
+        }
+
+        private sealed class ClosureRootFinder : ExpressionVisitor
+        {
+            private readonly Action<ConstantExpression> found;
+            public ClosureRootFinder(Action<ConstantExpression> found) => this.found = found;
+            protected override Expression VisitConstant(ConstantExpression node)
+            {
+                if (node.Type.Name.Contains("DisplayClass", StringComparison.Ordinal)) found(node);
+                return node;
+            }
+        }
+
+        private sealed class ClosureRootReplacer : ExpressionVisitor
+        {
+            private readonly ConstantExpression source;
+            private readonly ParameterExpression replacement;
+            public ClosureRootReplacer(ConstantExpression source, ParameterExpression replacement) { this.source = source; this.replacement = replacement; }
+            protected override Expression VisitConstant(ConstantExpression node) => node == source ? Expression.Convert(replacement, source.Type) : node;
+        }
     }
 
     private static string ClosedShapeKey(Expression expression)
