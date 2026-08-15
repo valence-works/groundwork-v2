@@ -31,10 +31,16 @@ comments, and type wrapper are not included in that headline metric.
   trigger, and partition arguments.
 - `Aggregate(...)` exposes a closed aggregation DSL for `GroupBy`, `Min`, `Max`, `Sum`,
   `SetUnion`, and `FirstBy`.
+- `ConformanceScenario` makes the shipped `ConformanceSuite` reusable by an externally authored
+  storage family, including generated-key and row-value mapping; the EventLog fixture invokes
+  the full suite on all five local providers and retains its capability-specific proofs.
 - The aggregation session adapter now scans only columns required by the declared profile and
   key, so an unrelated JSON column does not make a valid aggregation unexecutable.
 
 Records keeps only a compatibility forwarding wrapper; it does not maintain a second declaration
 implementation. The event-log conformance fixture exercises schema application, catalog indexes,
 provider sequences, idempotent append replay, explicit retention, named aggregation, and scoped
-isolation on InMemory, SQLite, PostgreSQL, SQL Server, and MongoDB.
+isolation on InMemory, SQLite, PostgreSQL, SQL Server, and MongoDB. MongoDB's transaction wrapper
+also closes an already-aborted transaction after a duplicate-key outcome so the suite can assert
+the portable `UniqueViolation` result and continue; configured replica-set failures are not
+skipped.

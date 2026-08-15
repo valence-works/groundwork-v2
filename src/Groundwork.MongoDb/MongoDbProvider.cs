@@ -2210,6 +2210,17 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
             try
             {
                 var result = operation(transactional);
+                if (result is MongoWriteOutcome { Status: MongoWriteOutcomeStatus.UniqueViolation })
+                {
+                    // A duplicate-key write aborts the Mongo transaction immediately. Return
+                    // the provider-neutral outcome without attempting commitTransaction on the
+                    // already-aborted transaction; callers must be able to continue their
+                    // conformance sequence with a fresh write transaction.
+                    try { session.AbortTransaction(); }
+                    catch (MongoException) { }
+                    operationCompleted = true;
+                    return result;
+                }
                 operationCompleted = true;
                 CommitTransactionWithRetry(session);
                 return result;

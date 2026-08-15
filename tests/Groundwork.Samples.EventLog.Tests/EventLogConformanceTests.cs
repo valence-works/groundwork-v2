@@ -19,6 +19,7 @@ public sealed class EventLogConformanceTests
     [Fact]
     public void InMemory_event_log_runs_schema_sequence_idempotency_retention_aggregation_and_scope_contracts()
     {
+        AssertShippedConformance(new InMemoryProviderFactory(), "memory://event-log-conformance-" + Guid.NewGuid().ToString("N"));
         AssertEventLog(new InMemoryProviderFactory(), "event-log-inmemory");
     }
 
@@ -28,6 +29,7 @@ public sealed class EventLogConformanceTests
         var path = Path.Combine(Path.GetTempPath(), "groundwork-event-log-" + Guid.NewGuid().ToString("N") + ".db");
         try
         {
+            AssertShippedConformance(new SqliteProviderFactory(), $"Data Source={path}");
             AssertEventLog(new SqliteProviderFactory(), $"Data Source={path}");
         }
         finally
@@ -41,6 +43,7 @@ public sealed class EventLogConformanceTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION for event-log conformance.");
+        AssertShippedConformance(new PostgreSqlProviderFactory(), connectionString!);
         AssertEventLog(new PostgreSqlProviderFactory(), connectionString!);
     }
 
@@ -49,6 +52,7 @@ public sealed class EventLogConformanceTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION for event-log conformance.");
+        AssertShippedConformance(new SqlServerProviderFactory(), connectionString!);
         AssertEventLog(new SqlServerProviderFactory(), connectionString!);
     }
 
@@ -57,14 +61,75 @@ public sealed class EventLogConformanceTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION for event-log conformance.");
-        try
+        AssertShippedConformance(new MongoDbTestingFactory(), connectionString!);
+        AssertEventLog(new MongoDbTestingFactory(), connectionString!);
+    }
+
+    private static void AssertShippedConformance(IStorageProviderFactory factory, string connectionString)
+    {
+        var report = ConformanceSuite.Run(factory, connectionString, CreateConformanceScenario());
+        Assert.True(report.Passed, string.Join(Environment.NewLine,
+            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+    }
+
+    private static ConformanceScenario CreateConformanceScenario()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var template = EventLogDeclaration.LogRecords;
+        var indexes = template.Indexes
+            .Append(new IndexDefinition
+            {
+                Name = "conformance-unique-level",
+                Columns = [new IndexColumn("level")],
+                IsUnique = true
+            })
+            .ToArray();
+
+        StorageUnit CreateUnit(string role, ScopePolicy scope, ConcurrencyDeclaration concurrency)
         {
-            AssertEventLog(new MongoDbTestingFactory(), connectionString!);
+            var columns = concurrency.IsOptimistic
+                ? template.Columns.Append(new ColumnDefinition
+                {
+                    Name = concurrency.TokenColumn!,
+                    Type = PortableType.Int64,
+                    IsNullable = false,
+                    Default = new PortableDefault(0L)
+                }).ToArray()
+                : template.Columns;
+            return template with
+            {
+                Id = new StorageUnitId($"event-log-conformance-{role}-{suffix}"),
+                Name = $"event_log_conformance_{role}_{suffix}",
+                Columns = columns,
+                Indexes = indexes,
+                Scope = scope,
+                Concurrency = concurrency
+            };
         }
-        catch (InvalidOperationException exception) when (exception.Message.Contains("transaction", StringComparison.OrdinalIgnoreCase))
-        {
-            Skip.If(true, "MongoDB event-log conformance requires a transaction-capable deployment.");
-        }
+
+        return new ConformanceScenario(
+            CreateUnit("global", ScopePolicy.Global, ConcurrencyDeclaration.None),
+            CreateUnit("scoped", ScopePolicy.Scoped, ConcurrencyDeclaration.Optimistic()),
+            static (id, value, unique) => new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["traceId"] = id,
+                ["level"] = unique ?? value,
+                ["occurredAt"] = DateTimeOffset.UnixEpoch.AddSeconds(1),
+                ["message"] = value
+            }),
+            static (_, outcome) => new StorageKey(new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["seq"] = outcome.GeneratedValue<long>("seq")
+            }),
+            static (values, key) =>
+            {
+                var copy = values.Values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                copy["seq"] = key.Values["seq"];
+                return new StorageValues(copy);
+            },
+            static _ => new StorageKey(new Dictionary<string, object?>(StringComparer.Ordinal) { ["seq"] = -1L }),
+            "message",
+            static status => status is WriteOutcomeStatus.Upserted or WriteOutcomeStatus.Inserted);
     }
 
     private static void AssertEventLog(IStorageProviderFactory factory, string connectionString)
