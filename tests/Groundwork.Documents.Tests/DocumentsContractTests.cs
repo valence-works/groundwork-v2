@@ -278,6 +278,24 @@ public sealed class DocumentsContractTests
                     .Project(document => document.Customer.Name)
                     .Build()).Diagnostics,
             diagnostic => diagnostic.Code == "GW-DOC-DECL-009" && diagnostic.Message.Contains("ShouldSerialize", StringComparison.Ordinal));
+
+        var invalidResolver = new DefaultJsonTypeInfoResolver();
+        invalidResolver.Modifiers.Add(typeInfo =>
+        {
+            if (typeInfo.Type == typeof(Invoice))
+            {
+                Property(typeInfo, nameof(Invoice.Id)).Name = "duplicate";
+                Property(typeInfo, nameof(Invoice.Customer)).Name = "duplicate";
+            }
+        });
+        Assert.Contains(
+            Assert.Throws<DocumentDeclarationException>(() =>
+                DocumentUnit.For<Invoice>("invoice", "metadata_invalid")
+                    .JsonOptions(new JsonSerializerOptions { TypeInfoResolver = invalidResolver })
+                    .Id(document => document.Id)
+                    .Project(document => document.Customer.Name)
+                    .Build()).Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DOC-DECL-009" && diagnostic.Message.Contains("JsonTypeInfo", StringComparison.Ordinal));
     }
 
     private static JsonPropertyInfo Property(JsonTypeInfo typeInfo, string memberName) =>

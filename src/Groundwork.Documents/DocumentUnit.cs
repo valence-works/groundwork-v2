@@ -472,14 +472,15 @@ public sealed class DocumentUnitBuilder<T>
         };
 
         JsonPropertyInfo? contractMember = null;
+        string? contractFailure = null;
         try
         {
             var typeInfo = options.GetTypeInfo(member.DeclaringType!);
             contractMember = typeInfo.Properties.FirstOrDefault(property => Equals(property.AttributeProvider, member));
         }
-        catch (NotSupportedException)
+        catch (Exception exception) when (exception is NotSupportedException or InvalidOperationException)
         {
-            // Report the unsupported effective contract below as one declaration diagnostic.
+            contractFailure = exception.Message;
         }
 
         var customConditional = contractMember?.ShouldSerialize is not null &&
@@ -491,7 +492,9 @@ public sealed class DocumentUnitBuilder<T>
                 ? "Remove the conditional ignore/ShouldSerialize rule or mark the selected member with JsonIgnoreCondition.Never."
                 : readOnlyIgnored
                     ? "Disable the matching IgnoreReadOnly option or make the selected member writable."
-                    : "Include the member in the effective JsonTypeInfo contract (for fields, enable IncludeFields or add JsonInclude).";
+                    : contractFailure is not null
+                        ? $"Fix the invalid JsonTypeInfo contract: {contractFailure}"
+                        : "Include the member in the effective JsonTypeInfo contract (for fields, enable IncludeFields or add JsonInclude).";
             diagnostics.Add(new(
                 "GW-DOC-DECL-009",
                 $"Selected member '{member.Name}' can be omitted by the effective JSON contract. {correctiveAction}",
