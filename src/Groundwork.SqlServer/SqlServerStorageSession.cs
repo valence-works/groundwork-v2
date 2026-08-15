@@ -426,7 +426,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
-        ValidateValues(values.Values, mutation == Mutation.Insert);
+        ValidateValues(values.Values, mutation == Mutation.Insert,
+            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
         if (SequenceColumnDefinition is not null &&
             (mutation is Mutation.Insert or Mutation.Upsert) &&
             !values.Values.ContainsKey(SequenceColumnDefinition.Name))
@@ -443,6 +444,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         var existing = ReadCore(key);
         if (mutation == Mutation.Insert && existing is not null) return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (mutation == Mutation.Update && existing is null) return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        if (mutation == Mutation.Upsert && SequenceColumnDefinition is not null &&
+            values.Values.ContainsKey(SequenceColumnDefinition.Name) && existing is null)
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
         ValidateExpected(options, existing, mutation);
         if (mutation == Mutation.Upsert)
         {
@@ -499,7 +503,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = (1L, VersionColumnDefinition);
         if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
         var output = SequenceColumnDefinition is null ? string.Empty : $" OUTPUT INSERTED.{Quote(SequenceColumnDefinition.Name)}";
-        using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
+        var sql = columns.Count == 0
+            ? $"INSERT INTO {Quote(Unit.Name)}{output} DEFAULT VALUES;"
+            : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});";
+        using var command = Command(sql);
         AddParameters(command, parameters);
         try
         {
@@ -702,14 +709,17 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         return new StoredEntry(new StorageValues(values), version);
     }
 
-    private void ValidateValues(IReadOnlyDictionary<string, object?> values, bool requireAllNonNullable)
+    private void ValidateValues(
+        IReadOnlyDictionary<string, object?> values,
+        bool requireAllNonNullable,
+        bool allowGeneratedLocator = false)
     {
         var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
         if (unknown is not null) throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
         foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
-            if (values.ContainsKey(generated.Name))
-                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by SQL Server and cannot be supplied or updated.", nameof(values));
+            if (values.ContainsKey(generated.Name) && !allowGeneratedLocator)
+                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by SQL Server; it may only be supplied as the locator for Update or Upsert.", nameof(values));
         if (requireAllNonNullable)
             foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
             {

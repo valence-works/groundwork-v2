@@ -2,19 +2,24 @@
 
 `ColumnGeneration.ProviderSequence` declares one provider-assigned `Int64`
 column. The column must be non-nullable and the sole primary-key column of its
-storage unit. Groundwork rejects caller-supplied values (`GW-PORT-005` for an
-invalid declaration and an argument refusal for a generated value in a write).
+storage unit. Groundwork rejects caller-assigned values (`GW-PORT-005` for an
+invalid declaration and an argument refusal when `Insert` supplies the key).
 
 Successful direct `Insert` and `Upsert` outcomes expose the assigned value in
 `WriteOutcome.GeneratedValues`, keyed by column name. Exact batched outcomes
 carry the same map in every `RowWriteOutcome`; aggregate commits expose counts
 only. A generated value is never synthesized from a caller payload or from a
-read-after-write.
+read-after-write. `Update` and `Upsert` may supply an already-generated key as
+a locator. The key is excluded from mutation; locator `Upsert` updates the
+existing row and returns `NotFound` rather than inserting when the key does not
+exist. Omitting the key from `Upsert` requests a new generated row.
 
-Values are strictly increasing for committed allocations under concurrent
-inserts. Gaps are valid: a failed or rolled-back allocation does not make a
-later value invalid, and callers must not assume density. The value is the
-identity used to read the committed row.
+Allocation is strictly increasing: whenever allocation A occurs before
+allocation B in a provider's serialization order, A's value is lower than B's.
+Concurrent transactions can commit or become visible in a different order, so
+the numeric value is not a commit-order timestamp. Gaps are valid: a failed or
+rolled-back allocation does not make a later value invalid, and callers must
+not assume density. The value is the identity used to read the committed row.
 
 ## Provider realization
 
@@ -22,7 +27,9 @@ identity used to read the committed row.
   it from `RETURNING`.
 - SQL Server uses `IDENTITY(1,1)` and reads it from `OUTPUT INSERTED`.
 - SQLite uses the valid inline declaration `INTEGER PRIMARY KEY AUTOINCREMENT`
-  (the generated column is the sole key column) and reads it from `RETURNING`.
+  (the generated column is the sole physical key column) and reads it from
+  `RETURNING`. For scoped units the generated value remains unit-wide; scope is
+  an access predicate, not an additional physical primary-key column.
 - MongoDB uses `findAndModify`/`FindOneAndUpdate` on the kernel-owned
   `__groundwork_sequences` counter collection. The counter update and row write
   are in the same transaction. This costs one additional counter command per
@@ -30,9 +37,15 @@ identity used to read the committed row.
   `groundwork.column.provider-sequence`.
 
 MongoDB sequence use requires a transaction-capable replica set or sharded
-deployment. A standalone deployment refuses admission before schema or row
-writes; callers should surface that refusal through capability/fit checks rather
-than retrying the write.
+deployment. `IMongoProviderConnection.ProviderSequenceFit` reports
+`ProviderFit.Unsupported` on a standalone deployment, and the generic testing
+adapter omits the sequence capability from its runtime advertisement. Schema
+admission and writes retain the same early refusal as defense in depth.
+For direct writes, transient conflicts in Groundwork's internally owned
+transaction replay the complete counter-and-row operation; an unknown commit
+result retries only the commit operation. Explicit units of work remain
+caller-owned and surface body conflicts because replaying later caller actions
+would be unsafe.
 
 Relational providers do not need a separate sequence command. Their exact batch
 paths use row-attributed fallback when generated identities cannot be mapped

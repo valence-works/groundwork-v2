@@ -12,14 +12,14 @@ namespace Groundwork.StreamCapabilities.Tests;
 public sealed class ProviderSequenceProofTests
 {
     [Fact]
-    public void InMemory_provider_sequence_is_monotonic_and_returned_in_exact_outcomes()
+    public void InMemory_provider_sequence_allocation_is_monotonic_and_returned_in_exact_outcomes()
     {
         using var connection = new InMemoryProviderFactory().Create("stream-sequence-inmemory");
         AssertSequence(connection, "inmemory");
     }
 
     [Fact]
-    public void SQLite_provider_sequence_is_monotonic_and_returned_in_exact_outcomes()
+    public void SQLite_provider_sequence_allocation_is_monotonic_and_returned_in_exact_outcomes()
     {
         var path = Path.Combine(Path.GetTempPath(), "groundwork-stream-sequence-" + Guid.NewGuid().ToString("N") + ".db");
         try
@@ -34,7 +34,7 @@ public sealed class ProviderSequenceProofTests
     }
 
     [SkippableFact]
-    public void PostgreSQL_provider_sequence_is_monotonic_and_returned_in_exact_outcomes()
+    public void PostgreSQL_provider_sequence_allocation_is_monotonic_and_returned_in_exact_outcomes()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run the PostgreSQL sequence proof.");
@@ -43,7 +43,7 @@ public sealed class ProviderSequenceProofTests
     }
 
     [SkippableFact]
-    public void SQLServer_provider_sequence_is_monotonic_and_returned_in_exact_outcomes()
+    public void SQLServer_provider_sequence_allocation_is_monotonic_and_returned_in_exact_outcomes()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server sequence proof.");
@@ -65,10 +65,15 @@ public sealed class ProviderSequenceProofTests
         catch (InvalidOperationException exception) when (exception.Message.Contains("transaction", StringComparison.OrdinalIgnoreCase))
         {
             // A standalone MongoDB deployment is an honest capability refusal, before any row write.
+            Assert.DoesNotContain(connection.Capabilities,
+                descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence);
             return;
         }
 
+        Assert.Contains(connection.Capabilities,
+            descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence);
         AssertSequenceWrites(connection, unit);
+        AssertSequenceOnlyInsert(connection, "mongodb");
     }
 
     [Fact]
@@ -77,6 +82,10 @@ public sealed class ProviderSequenceProofTests
         Assert.Equal("groundwork.column.provider-sequence", BatchWriteCapabilities.ProviderSequence.Value);
         Assert.Equal(0, BatchWriteCapabilities.ProviderSequenceDescriptor.AdditionalProviderCommandsPerWrite);
         Assert.Equal(1, MongoCapabilities.ProviderSequenceDescriptor.AdditionalProviderCommandsPerWrite);
+        Assert.Contains("commit order may differ", BatchWriteCapabilities.ProviderSequenceDescriptor.Description,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("commit order may differ", MongoCapabilities.ProviderSequenceDescriptor.Description,
+            StringComparison.OrdinalIgnoreCase);
         Assert.Contains("counter", MongoCapabilities.ProviderSequenceDescriptor.Description, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -85,6 +94,28 @@ public sealed class ProviderSequenceProofTests
         var unit = SequenceUnit("stream-sequence-" + provider + "-" + Guid.NewGuid().ToString("N"));
         Assert.True(connection.Schema.Apply(unit).Applied);
         AssertSequenceWrites(connection, unit);
+        AssertSequenceOnlyInsert(connection, provider);
+    }
+
+    private static void AssertSequenceOnlyInsert(IStorageProviderConnection connection, string provider)
+    {
+        var name = "stream-sequence-only-" + provider + "-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        connection.Schema.Apply(unit);
+
+        var outcome = connection.OpenSession(unit, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?>()));
+
+        Assert.Equal(1L, outcome.GeneratedValue<long>("sequence"));
     }
 
     private static void AssertSequenceWrites(IStorageProviderConnection connection, StorageUnit unit)
@@ -97,6 +128,31 @@ public sealed class ProviderSequenceProofTests
         var firstValue = first.GeneratedValue<long>("sequence");
         var secondValue = second.GeneratedValue<long>("sequence");
         Assert.True(firstValue < secondValue);
+
+        var updated = session.Update(new StorageValues(new Dictionary<string, object?>
+        {
+            ["sequence"] = firstValue,
+            ["payload"] = "updated"
+        }));
+        var locatedUpsert = session.Upsert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["sequence"] = firstValue,
+            ["payload"] = "upserted-existing"
+        }));
+        var missingUpsert = session.Upsert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["sequence"] = 99_999L,
+            ["payload"] = "must-not-insert"
+        }));
+        Assert.Equal(WriteOutcomeStatus.Updated, updated.Status);
+        Assert.Equal(WriteOutcomeStatus.Updated, locatedUpsert.Status);
+        Assert.Empty(updated.GeneratedValues);
+        Assert.Empty(locatedUpsert.GeneratedValues);
+        Assert.Equal(WriteOutcomeStatus.NotFound, missingUpsert.Status);
+        Assert.Equal("upserted-existing", session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["sequence"] = firstValue }))!.Values.Values["payload"]);
+        Assert.Throws<ArgumentException>(() => session.Insert(new StorageValues(
+            new Dictionary<string, object?> { ["sequence"] = 99_999L, ["payload"] = "assigned" })));
 
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
         work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["payload"] = "third" })));

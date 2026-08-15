@@ -318,7 +318,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
-        ValidateValues(values.Values, mutation == Mutation.Insert);
+        ValidateValues(values.Values, mutation == Mutation.Insert,
+            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
 
         // A provider sequence has no caller-visible key until the insert commits. Treat an
         // upsert without a generated key as an insert; accepting a synthetic read here would
@@ -337,11 +338,16 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (mutation == Mutation.Update && existing is null)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        if (mutation == Mutation.Upsert && SequenceColumn is not null &&
+            values.Values.ContainsKey(SequenceColumn.Name) && existing is null)
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
         ValidateExpected(options, existing, mutation);
         return mutation switch
         {
             Mutation.Insert => InsertCore(values),
             Mutation.Update => UpdateCore(values, key, existing!, options),
+            Mutation.Upsert when SequenceColumn is not null && values.Values.ContainsKey(SequenceColumn.Name) =>
+                UpdateCore(values, key, existing!, options),
             Mutation.Upsert => UpsertCore(values, key, existing, options, exactOutcome: false),
             Mutation.ConditionalUpsert => UpsertCore(values, key, existing, options, exactOutcome: true),
             _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null)
@@ -443,7 +449,10 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var physical = PhysicalValues(values.Values, includeVersion: VersionColumn is not null);
         var columns = physical.Keys.ToArray();
         var returning = SequenceColumn is null ? string.Empty : $" RETURNING {Quote(SequenceColumn.Name)};";
-        using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column))}){returning}");
+        var sql = columns.Length == 0
+            ? $"INSERT INTO {Quote(Unit.Name)} DEFAULT VALUES{returning}"
+            : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column))}){returning}";
+        using var command = Command(sql);
         AddParameters(command, physical);
         try
         {
@@ -626,15 +635,18 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         return index is null ? null : new PostgreSqlDialect().IndexFilter(index);
     }
 
-    private void ValidateValues(IReadOnlyDictionary<string, object?> values, bool requireAllNonNullable)
+    private void ValidateValues(
+        IReadOnlyDictionary<string, object?> values,
+        bool requireAllNonNullable,
+        bool allowGeneratedLocator = false)
     {
         var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
         if (unknown is not null)
             throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
         foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
-            if (values.ContainsKey(generated.Name))
-                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by PostgreSQL and cannot be supplied or updated.", nameof(values));
+            if (values.ContainsKey(generated.Name) && !allowGeneratedLocator)
+                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by PostgreSQL; it may only be supplied as the locator for Update or Upsert.", nameof(values));
         if (!requireAllNonNullable)
             return;
         foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))

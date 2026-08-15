@@ -353,10 +353,19 @@ public interface IStorageSession
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
 
+    /// <summary>
+    /// Inserts a row. A ProviderSequence key must be omitted and is returned through
+    /// <see cref="WriteOutcome.GeneratedValues"/>.
+    /// </summary>
     WriteOutcome Insert(StorageValues values, WriteOptions? options = null);
 
+    /// <summary>A ProviderSequence key is accepted only as the immutable row locator.</summary>
     WriteOutcome Update(StorageValues values, WriteOptions? options = null);
 
+    /// <summary>
+    /// With ProviderSequence, an omitted key inserts a generated row. A supplied key is
+    /// an immutable locator: it updates an existing row or returns NotFound, never inserts it.
+    /// </summary>
     WriteOutcome Upsert(StorageValues values, WriteOptions? options = null);
 
     WriteOutcome Delete(StorageKey key, WriteOptions? options = null);

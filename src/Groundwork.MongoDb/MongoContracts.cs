@@ -279,10 +279,19 @@ public interface IMongoStorageSession
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
 
+    /// <summary>
+    /// Inserts a row. A ProviderSequence key must be omitted and is returned through
+    /// <see cref="MongoWriteOutcome.GeneratedValues"/>.
+    /// </summary>
     MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null);
 
+    /// <summary>A ProviderSequence key is accepted only as the immutable row locator.</summary>
     MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null);
 
+    /// <summary>
+    /// With ProviderSequence, an omitted key inserts a generated row. A supplied key is
+    /// an immutable locator: it updates an existing row or returns NotFound, never inserts it.
+    /// </summary>
     MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
     /// <summary>
@@ -309,6 +318,13 @@ public interface IMongoProviderConnection : IDisposable
     IMongoProviderCatalog Catalog { get; }
 
     IMongoSchemaCoordinator Schema { get; }
+
+    /// <summary>
+    /// Reports whether this deployment can provide transactional sequence allocation.
+    /// Standalone MongoDB returns <see cref="ProviderFit.Unsupported"/> rather than
+    /// advertising a capability that will fail later during schema application.
+    /// </summary>
+    ProviderFit ProviderSequenceFit { get; }
 
     /// <summary>Reads native admission evidence without applying or repairing schema.</summary>
     MongoSchemaAdmissionReport InspectSchema(StorageUnit unit, MongoStorageAccess access);

@@ -259,11 +259,14 @@ public sealed class MongoProviderIntegrationTests
             .RunCommand<BsonDocument>(new BsonDocument("hello", 1));
         if (!hello.Contains("setName") && !string.Equals(hello.GetValue("msg", "").AsString, "isdbgrid", StringComparison.Ordinal))
         {
+            var fit = Assert.IsType<ProviderFit.Unsupported>(connection.ProviderSequenceFit);
+            Assert.Contains(MongoCapabilities.ProviderSequence, fit.MissingRequirements);
             var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
             Assert.Contains("transaction-capable", refusal.Message, StringComparison.OrdinalIgnoreCase);
             return;
         }
 
+        Assert.IsType<ProviderFit.Supported>(connection.ProviderSequenceFit);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         var result = session.Insert(new MongoStorageValues(new Dictionary<string, object?> { ["payload"] = "sequence" }));

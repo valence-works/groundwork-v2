@@ -18,14 +18,23 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
 
     public ISchemaCoordinator Schema { get; } = new MongoTestingSchema(inner.Schema);
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
-        "MongoDB", nativeBatch: true,
-        exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
-        batchCost: "uses unordered BulkWrite for aggregate commits")
-        .Select(descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence
-            ? MongoCapabilities.ProviderSequenceDescriptor
-            : descriptor)
-        .ToArray();
+    public IReadOnlyList<CapabilityDescriptor> Capabilities
+    {
+        get
+        {
+            var descriptors = BatchWriteCapabilities.ForProvider(
+                "MongoDB", nativeBatch: true,
+                exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
+                batchCost: "uses unordered BulkWrite for aggregate commits");
+            return descriptors
+                .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ProviderSequence ||
+                                     inner.ProviderSequenceFit is ProviderFit.Supported)
+                .Select(descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence
+                    ? MongoCapabilities.ProviderSequenceDescriptor
+                    : descriptor)
+                .ToArray();
+        }
+    }
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access) =>
         new MongoTestingSession(inner.OpenSession(unit, ToNative(access)));

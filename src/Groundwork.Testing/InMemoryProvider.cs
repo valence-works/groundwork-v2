@@ -906,16 +906,13 @@ internal static class Mutation
         bool exactOutcome = false,
         bool preserveCreatedAt = false)
     {
-        ValidateValues(state.Unit, values.Values);
+        ValidateValues(state.Unit, values.Values, kind);
         var sequence = state.Unit.Columns.FirstOrDefault(column =>
             column.Generation == ColumnGeneration.ProviderSequence);
         var generated = new Dictionary<string, object?>(StringComparer.Ordinal);
         var sourceValues = values.Values;
-        if (sequence is not null && sourceValues.ContainsKey(sequence.Name))
-            throw new ArgumentException(
-                $"ProviderSequence column '{sequence.Name}' is assigned by the in-memory provider and cannot be supplied or updated.",
-                nameof(values));
-        if (sequence is not null && (kind is MutationKind.Insert or MutationKind.Upsert))
+        var hasSequenceLocator = sequence is not null && sourceValues.ContainsKey(sequence.Name);
+        if (sequence is not null && !hasSequenceLocator && (kind is MutationKind.Insert or MutationKind.Upsert))
         {
             var copy = sourceValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var value = checked(++state.Sequence);
@@ -930,6 +927,8 @@ internal static class Mutation
         if (kind == MutationKind.Insert && existing is not null)
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (kind == MutationKind.Update && existing is null)
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        if (kind == MutationKind.Upsert && hasSequenceLocator && existing is null)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
 
         var expected = options?.ExpectedVersion;
@@ -956,6 +955,7 @@ internal static class Mutation
         {
             MutationKind.Insert => WriteOutcomeStatus.Inserted,
             MutationKind.Update => WriteOutcomeStatus.Updated,
+            MutationKind.Upsert when hasSequenceLocator => WriteOutcomeStatus.Updated,
             MutationKind.Upsert when exactOutcome && existing is null => WriteOutcomeStatus.Inserted,
             MutationKind.Upsert when exactOutcome => WriteOutcomeStatus.Updated,
             _ => WriteOutcomeStatus.Upserted
@@ -1067,7 +1067,10 @@ internal static class Mutation
         return string.Join("|", parts);
     }
 
-    private static void ValidateValues(StorageUnit unit, IReadOnlyDictionary<string, object?> values)
+    private static void ValidateValues(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> values,
+        MutationKind kind)
     {
         var known = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.Where(key => !known.Contains(key)).OrderBy(key => key, StringComparer.Ordinal).FirstOrDefault();
@@ -1078,8 +1081,8 @@ internal static class Mutation
         {
             if (column.Generation == ColumnGeneration.ProviderSequence)
             {
-                if (values.ContainsKey(column.Name))
-                    throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by the in-memory provider and cannot be supplied.", nameof(values));
+                if (kind == MutationKind.Insert && values.ContainsKey(column.Name))
+                    throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by the in-memory provider and cannot be supplied for Insert.", nameof(values));
                 continue;
             }
             if (!values.TryGetValue(column.Name, out var value) || value is null)

@@ -256,6 +256,26 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Generated_key_declarations_use_collision_free_reference_identity_until_assigned()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("generated-coalescing-identity"),
+            Name = "GeneratedCoalescingIdentity",
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        var first = RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>()));
+        var second = RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>()));
+
+        Assert.NotSame(first.CoalescingIdentity, second.CoalescingIdentity);
+        Assert.Same(first.CoalescingIdentity, first.CoalescingIdentity);
+    }
+
+    [Fact]
     public void Batched_identity_is_collision_free_for_composite_delimiter_values()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://batched-composite-identity");

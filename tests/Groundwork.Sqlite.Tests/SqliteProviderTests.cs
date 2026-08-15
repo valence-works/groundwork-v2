@@ -54,6 +54,54 @@ public sealed class SqliteProviderTests
         Assert.Equal([1L, 2L], report.Outcomes.Select(outcome => outcome.Outcome.GeneratedValue<long>("sequence")));
     }
 
+    [Fact]
+    public void Scoped_provider_sequence_is_unit_wide_and_scope_isolates_reads()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = SequenceUnit("sqlite-scoped-sequence-" + Guid.NewGuid().ToString("N")) with
+        {
+            Scope = ScopePolicy.Scoped
+        };
+        connection.Schema.Apply(unit);
+
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("first")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("second")));
+        var firstSequence = first.Insert(Values("first")).GeneratedValue<long>("sequence");
+        var secondSequence = second.Insert(Values("second")).GeneratedValue<long>("sequence");
+
+        Assert.Equal(1L, firstSequence);
+        Assert.Equal(2L, secondSequence);
+        Assert.NotNull(first.Read(Key(firstSequence)));
+        Assert.Null(first.Read(Key(secondSequence)));
+        Assert.NotNull(second.Read(Key(secondSequence)));
+        Assert.Null(second.Read(Key(firstSequence)));
+    }
+
+    [Fact]
+    public void Provider_sequence_only_insert_uses_default_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var name = "sqlite-sequence-only-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        connection.Schema.Apply(unit);
+
+        var inserted = connection.OpenSession(unit, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?>()));
+
+        Assert.Equal(1L, inserted.GeneratedValue<long>("sequence"));
+    }
+
     private sealed class LinqTicket
     {
         public string Id { get; set; } = string.Empty;
@@ -323,6 +371,12 @@ public sealed class SqliteProviderTests
         ],
         Key = new KeyDefinition { Columns = ["sequence"] }
     };
+
+    private static StorageValues Values(string payload) => new(
+        new Dictionary<string, object?> { ["payload"] = payload });
+
+    private static StorageKey Key(long sequence) => new(
+        new Dictionary<string, object?> { ["sequence"] = sequence });
 
     private sealed class TemporaryStore : IDisposable
     {

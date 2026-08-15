@@ -25,7 +25,7 @@ public static class MongoCapabilities
     public static CapabilityDescriptor ProviderSequenceDescriptor { get; } = new(
         ProviderSequence,
         "Provider-assigned monotonic sequence",
-        "MongoDB allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; each inserted row/coalesced exact write uses one additional counter command.",
+        "MongoDB monotonically allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; concurrent commit order may differ and each inserted row/coalesced exact write uses one additional counter command.",
         EvidenceGatedByDefault: true,
         OwningModule: "groundwork-mongodb",
         AdditionalProviderCommandsPerWrite: 1);
@@ -64,6 +64,10 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
     public IMongoProviderCatalog Catalog { get; }
 
     public IMongoSchemaCoordinator Schema { get; }
+
+    public ProviderFit ProviderSequenceFit => state.Context.SupportsTransactions()
+        ? new ProviderFit.Supported()
+        : new ProviderFit.Unsupported([MongoCapabilities.ProviderSequence]);
 
     /// <summary>Provides read-only access to the native database for catalog/evidence tests.</summary>
     public IMongoDatabase Database => state.Context.Database;
@@ -1042,11 +1046,12 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             column.Generation == ColumnGeneration.ProviderSequence);
         var generatedValues = new Dictionary<string, object?>(StringComparer.Ordinal);
         var keyValues = values.Values;
-        if (sequence is not null && keyValues.ContainsKey(sequence.Name))
+        var hasSequenceLocator = sequence is not null && keyValues.ContainsKey(sequence.Name);
+        if (hasSequenceLocator && kind == MutationKind.Insert)
             throw new ArgumentException(
-                $"ProviderSequence column '{sequence.Name}' is assigned by MongoDB and cannot be supplied or updated.",
+                $"ProviderSequence column '{sequence!.Name}' is assigned by MongoDB and cannot be supplied for Insert.",
                 nameof(values));
-        if (sequence is not null && (kind is MutationKind.Insert or MutationKind.Upsert))
+        if (sequence is not null && !hasSequenceLocator && (kind is MutationKind.Insert or MutationKind.Upsert))
         {
             var copied = keyValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var generated = NextSequence(sequence, options?.Observer);
@@ -1061,6 +1066,8 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         if (kind == MutationKind.Insert && existing is not null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, existingVersion);
         if (kind == MutationKind.Update && existing is null)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
+        if (kind == MutationKind.Upsert && hasSequenceLocator && existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
         if (!ConcurrencyAllows(existing, existingVersion, options, kind))
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion);
@@ -1103,7 +1110,8 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 else
                 {
                     var result = ReplaceOne(filter, document,
-                        isUpsert: Unit.Concurrency != ConcurrencyDeclaration.Optimistic || existing is null);
+                        isUpsert: !hasSequenceLocator &&
+                                  (Unit.Concurrency != ConcurrencyDeclaration.Optimistic || existing is null));
                     inserted = result.UpsertedId is not null;
                     if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic && result.MatchedCount == 0)
                         return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
@@ -1124,6 +1132,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         {
             MutationKind.Insert => MongoWriteOutcomeStatus.Inserted,
             MutationKind.Update => MongoWriteOutcomeStatus.Updated,
+            MutationKind.Upsert when hasSequenceLocator => MongoWriteOutcomeStatus.Updated,
             _ => MongoWriteOutcomeStatus.Upserted
         };
         if (exactOutcome && kind == MutationKind.Upsert)
@@ -1476,21 +1485,56 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             return operation(this);
 
         state.Context.RequireTransactions("ProviderSequence");
-        using var session = state.Context.StartSession();
-        session.StartTransaction();
-        var transactional = new MongoStorageSession(state, applied, Access, collection, session);
-        try
+        MongoException? lastTransientFailure = null;
+        for (var attempt = 0; attempt < 5; attempt++)
         {
-            var result = operation(transactional);
-            session.CommitTransaction();
-            transactional.Close();
-            return result;
+            using var session = state.Context.StartSession();
+            session.StartTransaction();
+            var transactional = new MongoStorageSession(state, applied, Access, collection, session);
+            var operationCompleted = false;
+            try
+            {
+                var result = operation(transactional);
+                operationCompleted = true;
+                CommitTransactionWithRetry(session);
+                return result;
+            }
+            catch (MongoException exception) when (
+                exception.HasErrorLabel("TransientTransactionError") && attempt < 4)
+            {
+                lastTransientFailure = exception;
+            }
+            finally
+            {
+                if (!operationCompleted && session.IsInTransaction)
+                {
+                    try { session.AbortTransaction(); }
+                    catch (MongoException) { }
+                }
+                transactional.Close();
+            }
         }
-        catch
+
+        if (lastTransientFailure is not null)
+            throw lastTransientFailure;
+        throw new InvalidOperationException("MongoDB ProviderSequence transaction retries were exhausted.");
+    }
+
+    internal static void CommitTransactionWithRetry(IClientSessionHandle session)
+    {
+        for (var attempt = 0; ; attempt++)
         {
-            session.AbortTransaction();
-            transactional.Close();
-            throw;
+            try
+            {
+                session.CommitTransaction();
+                return;
+            }
+            catch (MongoException exception) when (
+                exception.HasErrorLabel("UnknownTransactionCommitResult") && attempt < 4)
+            {
+                // The transaction body must not be replayed when only the commit result is
+                // unknown. Retrying commit is the MongoDB-prescribed resolution.
+            }
         }
     }
 
@@ -1542,7 +1586,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
         ThrowIfTerminal();
         try
         {
-            session.CommitTransaction();
+            MongoStorageSession.CommitTransactionWithRetry(session);
             terminal = true;
             CloseSessions();
         }
