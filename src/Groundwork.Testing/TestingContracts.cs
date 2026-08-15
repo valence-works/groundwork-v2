@@ -126,6 +126,11 @@ public enum WriteOutcomeStatus
     ConcurrencyConflict
 }
 
+/// <summary>
+/// Result of a storage write. <see cref="Status"/> is returned immediately; for a
+/// conservative conditional-upsert conflict, <see cref="Detail"/> performs at most
+/// one cached disambiguating read.
+/// </summary>
 public sealed record WriteOutcome
 {
     private readonly Lazy<WriteOutcomeDetail> detail;
@@ -157,10 +162,15 @@ public sealed record WriteOutcome
         Func<WriteOutcomeDetail> resolveDetail) =>
         new(provisionalStatus, version, resolveDetail);
 
+    /// <summary>Immediate/provisional status of the provider-native write.</summary>
     public WriteOutcomeStatus Status { get; }
 
     public long? Version { get; }
 
+    /// <summary>
+    /// Resolves failure detail lazily and caches the result. Successful outcomes already
+    /// have complete detail and do not issue a read.
+    /// </summary>
     public WriteOutcomeDetail Detail => detail.Value;
 
     public string? UniqueIndexName => Detail.UniqueIndexName;

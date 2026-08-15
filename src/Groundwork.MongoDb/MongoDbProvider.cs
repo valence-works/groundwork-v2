@@ -823,6 +823,20 @@ internal sealed class MongoStorageSession : IMongoStorageSession
     {
         ArgumentNullException.ThrowIfNull(values);
         ThrowIfDisposed();
+
+        // A provider sequence is allocated by a separate FindOneAndUpdate command.
+        // ConditionalUpsertOne is deliberately a one-command primitive, so accepting
+        // this declaration here would silently violate its round-trip contract (and
+        // would require a transaction for correctness).  Keep the refusal before the
+        // transaction wrapper so the rejected operation emits no Mongo command.
+        var sequence = Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.ProviderSequence);
+        if (sequence is not null)
+        {
+            throw new NotSupportedException(
+                $"MongoDB conditional upsert cannot use ProviderSequence column '{sequence.Name}': sequence allocation requires a separate MongoDB command and transaction. Use Insert/Upsert or remove ProviderSequence for this one-command operation.");
+        }
+
         return ExecuteWithTransactionIfNeeded(transactional =>
             transactional.ConditionalUpsertOne(values, options));
     }
@@ -872,7 +886,10 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         if (setOnInsert.ElementCount != 0)
             update["$setOnInsert"] = setOnInsert;
 
-        var commandDescription = "updateOne(" + filter.ToJson() + "," + update.ToJson() + ",upsert:true)";
+        // Observer text is diagnostic metadata, not a command recorder. Never include
+        // identity, filter, or document values because they may contain PII/secrets.
+        var commandDescription =
+            "MongoDB.UpdateOne(upsert:true; filter=identity+version; update=$set/$inc/$setOnInsert)";
         options?.Observer?.Observe(new WritePathEvent("mongodb.conditional-upsert", commandDescription, IsProbe: false));
         try
         {

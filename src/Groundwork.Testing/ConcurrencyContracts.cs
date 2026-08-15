@@ -514,6 +514,10 @@ public sealed class StorageProviderConcurrencyFactory : IConcurrencyProviderFact
 /// <summary>Optional extension implemented by a provider's testing adapter.</summary>
 public interface IConcurrencyStorageSession
 {
+    /// <summary>
+    /// Executes one provider-native conditional upsert. Providers do not pre-read the
+    /// stored row; createdAt is insert-only and conflict detail is available lazily.
+    /// </summary>
     WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null);
 }
 

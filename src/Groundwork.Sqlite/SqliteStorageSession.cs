@@ -213,7 +213,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         }
         catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
         {
-            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, indexName);
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName));
         }
     }
 
@@ -228,6 +228,21 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
                     : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
             });
+
+    private string? LogicalIndexName(string? reportedName)
+    {
+        if (string.IsNullOrWhiteSpace(reportedName))
+            return reportedName;
+
+        // SQLite reports the table/column tuple rather than the named index. Match
+        // that tuple to the declared unique index and return the logical declaration.
+        return Unit.Indexes.FirstOrDefault(index =>
+            index.IsUnique &&
+            reportedName.Contains(Unit.Name, StringComparison.Ordinal) &&
+            index.Columns.All(column =>
+                reportedName.Contains("." + column.Column, StringComparison.Ordinal)))?.Name
+            ?? reportedName;
+    }
 
     private WriteOutcome Upsert(
         StorageValues values,

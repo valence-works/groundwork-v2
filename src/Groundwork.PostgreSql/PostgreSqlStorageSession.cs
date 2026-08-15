@@ -154,7 +154,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         }
         catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out var indexName))
         {
-            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, indexName);
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName));
         }
     }
 
@@ -169,6 +169,18 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
                     : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
             });
+
+    private string? LogicalIndexName(string? physicalName)
+    {
+        if (string.IsNullOrWhiteSpace(physicalName))
+            return physicalName;
+
+        return Unit.Indexes.FirstOrDefault(index =>
+            string.Equals(
+                PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
+                physicalName,
+                StringComparison.Ordinal))?.Name ?? physicalName;
+    }
 
     private WriteOutcome InsertCore(StorageValues values)
     {

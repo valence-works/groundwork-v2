@@ -201,6 +201,18 @@ jobs:
         run: dotnet test tests/Groundwork.WritePath.Tests/Groundwork.WritePath.Tests.csproj --no-restore --configuration Release
       - name: Measure W1 SQLite round trips
         run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --workload upsert --n 1
+      - name: Measure W1 PostgreSQL round trips
+        env:
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --provider postgresql --workload upsert --n 1
+      - name: Measure W1 SQL Server round trips
+        env:
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --provider sqlserver --workload upsert --n 1
+      - name: Measure W1 MongoDB round trips
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w1bench?replicaSet=w2rs&directConnection=true
+        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --provider mongodb --workload upsert --n 1
 
   postgresql-provider:
     runs-on: ubuntu-latest

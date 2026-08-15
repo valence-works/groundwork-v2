@@ -102,7 +102,7 @@ internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorage
             {
                 options?.Observer?.Observe(new WritePathEvent(
                     "mongodb.write-probe",
-                    "findOne({_id: ...})",
+                    "MongoDB.FindOne(identity)",
                     IsProbe: true));
                 var key = new MongoStorageKey(values.Values);
                 var existing = inner.Read(key);

@@ -89,7 +89,10 @@ static (IStorageProviderConnection Provider, string ConnectionString, string? Te
 
 static StorageUnit Unit(string provider) => new()
 {
-    Id = new StorageUnitId("w1-benchmark-" + provider),
+    // Keep each process independent: the table name is randomized and the schema
+    // subject must be randomized with it so a second run cannot collide with the
+    // first run's persisted declaration metadata.
+    Id = new StorageUnitId("w1-benchmark-" + provider + "-" + Guid.NewGuid().ToString("N")),
     Name = "w1_benchmark_" + provider + "_" + Guid.NewGuid().ToString("N"),
     Columns =
     [

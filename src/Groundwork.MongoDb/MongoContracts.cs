@@ -252,6 +252,11 @@ public interface IMongoStorageSession
 
     MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
+    /// <summary>
+    /// Executes the provider-native conditional upsert as one MongoDB update command.
+    /// A <see cref="ColumnGeneration.ProviderSequence"/> column is refused because
+    /// allocating that value requires a separate sequence command and transaction.
+    /// </summary>
     MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
     MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null);

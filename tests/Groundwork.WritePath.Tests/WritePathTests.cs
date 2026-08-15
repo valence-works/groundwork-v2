@@ -118,7 +118,7 @@ public sealed class WritePathTests
             new WriteOptions { Observer = observer });
 
         Assert.Equal(WriteOutcomeStatus.UniqueViolation, result.Status);
-        Assert.False(string.IsNullOrWhiteSpace(result.UniqueIndexName));
+        Assert.Equal("ux_value_present", result.UniqueIndexName);
         Assert.Equal(1, observer.RoundTrips);
         Assert.DoesNotContain(observer.Commands, command => command.IsProbe);
     }
@@ -204,7 +204,7 @@ public sealed class WritePathTests
             new WriteOptions { Observer = observer });
 
         Assert.Equal(WriteOutcomeStatus.UniqueViolation, result.Status);
-        Assert.False(string.IsNullOrWhiteSpace(result.UniqueIndexName));
+        Assert.Equal("ux_value_present", result.UniqueIndexName);
         Assert.Equal(1, observer.RoundTrips);
         Assert.DoesNotContain(observer.Commands, command => command.IsProbe);
     }
@@ -226,7 +226,7 @@ public sealed class WritePathTests
             new WriteOptions { Observer = observer });
 
         Assert.Equal(WriteOutcomeStatus.UniqueViolation, result.Status);
-        Assert.False(string.IsNullOrWhiteSpace(result.UniqueIndexName));
+        Assert.Equal("ux_value_present", result.UniqueIndexName);
         Assert.Equal(1, observer.RoundTrips);
         Assert.DoesNotContain(observer.Commands, command => command.IsProbe);
     }
@@ -248,7 +248,7 @@ public sealed class WritePathTests
             new WriteOptions { Observer = observer });
 
         Assert.Equal(WriteOutcomeStatus.UniqueViolation, result.Status);
-        Assert.False(string.IsNullOrWhiteSpace(result.UniqueIndexName));
+        Assert.Equal("ux_value_present", result.UniqueIndexName);
         Assert.Equal(1, observer.RoundTrips);
         Assert.DoesNotContain(observer.Commands, command => command.IsProbe);
     }
@@ -270,6 +270,15 @@ public sealed class WritePathTests
         Assert.Equal(1, inserted.Version);
         Assert.Equal(1, firstObserver.RoundTrips);
         Assert.DoesNotContain(firstObserver.Commands, command => command.IsProbe);
+        if (provider == "mongodb")
+        {
+            var commandText = Assert.Single(firstObserver.Commands).CommandText;
+            Assert.Equal(
+                "MongoDB.UpdateOne(upsert:true; filter=identity+version; update=$set/$inc/$setOnInsert)",
+                commandText);
+            Assert.DoesNotContain("first", commandText, StringComparison.Ordinal);
+            Assert.DoesNotContain("one", commandText, StringComparison.Ordinal);
+        }
         Assert.DoesNotContain(firstObserver.Commands, command =>
             command.CommandText?.Contains("SELECT FOR UPDATE", StringComparison.OrdinalIgnoreCase) == true);
         if (provider is "sqlite" or "postgresql")
@@ -344,6 +353,41 @@ public sealed class WritePathTests
             ["value"] = value,
             ["createdAt"] = createdAt
         });
+
+    [SkippableFact]
+    public void MongoDB_provider_sequence_conditional_upsert_refuses_before_any_command()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB write-path tests.");
+        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        var baseUnit = Unit("mongodb-provider-sequence");
+        var unit = baseUnit with
+        {
+            Columns =
+            [
+                ..baseUnit.Columns,
+                new ColumnDefinition
+                {
+                    Name = "sequence",
+                    Type = PortableType.Int64,
+                    IsNullable = false,
+                    Generation = ColumnGeneration.ProviderSequence
+                }
+            ]
+        };
+        connection.Schema.Apply(unit);
+        var observer = new WritePathObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
+
+        var exception = Assert.Throws<NotSupportedException>(() => session.ConditionalUpsert(
+            Values("one", "first", DateTimeOffset.UnixEpoch),
+            new WriteOptions { Observer = observer }));
+
+        Assert.Contains("ProviderSequence", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("one-command", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, observer.RoundTrips);
+        Assert.Empty(observer.Commands);
+    }
 
     private sealed class TemporarySqliteStore : IDisposable
     {

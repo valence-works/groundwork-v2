@@ -261,7 +261,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         {
             return IsPrimaryKeyViolation(indexName)
                 ? DeferredConflict(key, options?.Observer)
-                : new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, indexName);
+                : new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName));
         }
 
         return DeferredConflict(key, options?.Observer);
@@ -270,6 +270,18 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private bool IsPrimaryKeyViolation(string indexName) =>
         indexName.Contains("__groundwork_pk_", StringComparison.OrdinalIgnoreCase) ||
         indexName.Contains("PRIMARY KEY", StringComparison.OrdinalIgnoreCase);
+
+    private string? LogicalIndexName(string? physicalName)
+    {
+        if (string.IsNullOrWhiteSpace(physicalName))
+            return physicalName;
+
+        return Unit.Indexes.FirstOrDefault(index =>
+            string.Equals(
+                SqlServerDialect.PhysicalIndexName(Unit.Name, index.Name),
+                physicalName,
+                StringComparison.OrdinalIgnoreCase))?.Name ?? physicalName;
+    }
 
     private WriteOutcome DeferredConflict(StorageKey key, IWritePathObserver? observer) =>
         WriteOutcome.Deferred(
