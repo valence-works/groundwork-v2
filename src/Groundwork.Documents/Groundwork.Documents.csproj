@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Records/Groundwork.Records.csproj" />
+    <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
     <None Include="README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 

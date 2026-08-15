@@ -1,10 +1,12 @@
 # Groundwork.Documents
 
-`Groundwork.Documents` is an optional typed layer over `Groundwork.Records`.
+`Groundwork.Documents` is an optional typed layer over `Groundwork.Records` and
+the provider-neutral `Groundwork.Store` contracts.
 It composes ordinary kernel `StorageUnit` declarations, stores canonical JSON
 alongside typed projections, and provides versioned JSON upcasting. Providers
 do not receive a document-specific contract: a mapped write is an ordinary
-`RowValues` record containing the same columns and values as any other record.
+`RowWrite` carrying `StorageValues` with the same columns and values as any
+other record.
 
 ## Stable storage contract
 
@@ -13,8 +15,8 @@ declares the typed key column, the required `document` JSON column, and the
 required `schemaVersion` string column. `SharedKind()` additionally declares a
 required `kind` string column. Optimistic concurrency and scope are opt-in
 Kernel declarations; timestamps are not synthesized or persisted by this
-layer. A provider-owned version result is returned separately from
-`DocumentReadResult<T>`.
+layer. A provider-owned version result is carried separately from the JSON
+application fields by `DocumentReadResult<T>`.
 
 `ToRowValues` writes the native ID value (for example, a `Guid` remains a
 `Guid`), canonical JSON, and a stable `vN` schema stamp. A projection writes a
@@ -22,6 +24,17 @@ typed value extracted from its serialized JSON path. Missing or JSON `null`
 values map to `null`; arrays and objects remain `JsonElement` values. The
 `ColumnBinding` list is Documents metadata and is not part of the Kernel
 declaration.
+
+`Insert`, `Update`, `Upsert`, and `Delete` return ordinary `Groundwork.Store`
+`RowWrite` values. The same mapped row values and caller-supplied `WriteOptions`
+are used by `Execute(connection, write, access)`, which opens a provider-neutral
+`IStorageSession`; the caller owns the connection lifetime. No document-specific
+provider command or system-owned concurrency token is introduced.
+
+`SharedKind()` makes `kind` part of the ordinary composite key (`kind`, `id`),
+so equal IDs from distinct kinds cannot collide. Materialization rejects a
+missing or mismatched discriminator and rejects JSON whose typed ID differs from
+the provider row key.
 
 ## Canonical JSON and paths
 

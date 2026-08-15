@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using Groundwork.Kernel;
 using Groundwork.Records;
 using Groundwork.Documents.Serialization;
+using Groundwork.Store;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 namespace Groundwork.Documents;
@@ -46,6 +47,15 @@ public sealed class DocumentDeclarationException : Exception
         Diagnostics = Array.AsReadOnly(diagnostics);
 
     public IReadOnlyList<DocumentDiagnostic> Diagnostics { get; }
+}
+
+/// <summary>Raised when a persisted document row violates its typed identity or discriminator.</summary>
+public sealed class DocumentMaterializationException : InvalidOperationException
+{
+    public DocumentMaterializationException(string code, string message)
+        : base(message) => Code = code ?? throw new ArgumentNullException(nameof(code));
+
+    public string Code { get; }
 }
 
 /// <summary>Starts a typed document declaration without introducing a provider dependency.</summary>
@@ -266,7 +276,7 @@ public sealed class DocumentUnitBuilder<T>
             if (scoped)
                 declaration.Scoped();
 
-            declaration.Key(idColumn!);
+            declaration.Key(sharedKind ? ["kind", idColumn!] : [idColumn!]);
 
             var storageUnit = declaration.Build();
             var policy = new DocumentSchemaVersionPolicy(documentKind, minimumReadableVersion, currentVersion);
@@ -511,8 +521,19 @@ public sealed class DocumentUnit<T>
     public T Materialize(RowValues values)
     {
         ArgumentNullException.ThrowIfNull(values);
+        if (!values.TryGetValue(IdColumn, out var persistedId))
+            throw new DocumentMaterializationException(
+                "GW-DOC-MAT-002",
+                $"Document row for kind '{DocumentKind}' is missing required identity column '{IdColumn}'.");
+        if (sharedKind && (!values.TryGetValue("kind", out var persistedKind) ||
+            !string.Equals(Convert.ToString(persistedKind, System.Globalization.CultureInfo.InvariantCulture), DocumentKind, StringComparison.Ordinal)))
+            throw new DocumentMaterializationException(
+                "GW-DOC-MAT-004",
+                $"Document row discriminator 'kind' does not match document kind '{DocumentKind}'.");
         if (!values.TryGetValue("document", out var content) || content is null)
-            throw new KeyNotFoundException("The document row did not contain the required 'document' JSON column.");
+            throw new DocumentMaterializationException(
+                "GW-DOC-MAT-001",
+                $"Document row for kind '{DocumentKind}' did not contain the required 'document' JSON column.");
         var contentJson = content switch
         {
             string text => text,
@@ -530,7 +551,13 @@ public sealed class DocumentUnit<T>
                 DocumentSchemaVersionFailure.MalformedStamp,
                 $"Document row for kind '{DocumentKind}' contains an invalid 'schemaVersion' metadata value.",
                 DocumentKind);
-        return codec.Deserialize<T>(new VersionedJsonPayload(DocumentKind, schemaVersion, contentJson));
+        var materialized = codec.Deserialize<T>(new VersionedJsonPayload(DocumentKind, schemaVersion, contentJson));
+        var materializedId = idGetter(materialized);
+        if (!IdentityEquals(materializedId, persistedId))
+            throw new DocumentMaterializationException(
+                "GW-DOC-MAT-003",
+                $"Document row for kind '{DocumentKind}' contains JSON identity '{materializedId}' that does not match its '{IdColumn}' column value '{persistedId}'.");
+        return materialized;
     }
 
     public T Read(RowValues values) => Materialize(values);
@@ -541,16 +568,73 @@ public sealed class DocumentUnit<T>
         return new DocumentReadResult<T>(materialized, version);
     }
 
-    public DocumentUnitSession<T> Open(IRecordStore store) =>
-        new(this, store ?? throw new ArgumentNullException(nameof(store)));
-
-    public DocumentUnitSession<T> Use(IRecordStore store) => Open(store);
-
-    internal RowValues KeyValues(T value)
+    /// <summary>Builds the ordinary Store row mutation for a typed document value.</summary>
+    public RowWrite ToRowWrite(T value, RowWriteMode mode, WriteOptions? options = null)
     {
-        var row = ToRowValues(value);
-        return new RowValues(StorageUnit.Key.Columns.ToDictionary(column => column, column => row[column], StringComparer.Ordinal));
+        ArgumentNullException.ThrowIfNull(value);
+        var rowValues = mode == RowWriteMode.Delete
+            ? null
+            : new StorageValues(ToRowValues(value).Values);
+        return mode switch
+        {
+            RowWriteMode.Insert => RowWrite.Insert(StorageUnit, rowValues!, options),
+            RowWriteMode.Update => RowWrite.Update(StorageUnit, rowValues!, options),
+            RowWriteMode.Upsert => RowWrite.Upsert(StorageUnit, rowValues!, options),
+            RowWriteMode.ConditionalUpsert => RowWrite.ConditionalUpsert(StorageUnit, rowValues!, options),
+            RowWriteMode.Delete => RowWrite.Delete(StorageUnit, KeyValues(value), options),
+            _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unsupported document row-write mode.")
+        };
     }
+
+    public RowWrite Insert(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Insert, options);
+
+    public RowWrite Update(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Update, options);
+
+    public RowWrite Upsert(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Upsert, options);
+
+    public RowWrite Delete(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Delete, options);
+
+    /// <summary>Executes a previously mapped row write through the provider-neutral Store seam.</summary>
+    public WriteOutcome Execute(
+        IStorageProviderConnection connection,
+        RowWrite write,
+        StorageAccess? access = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(write);
+        if (!ReferenceEquals(write.Unit, StorageUnit))
+            throw new ArgumentException("The row write belongs to a different storage unit.", nameof(write));
+
+        var session = connection.OpenSession(StorageUnit, access ?? StorageAccess.Global);
+        return write.Mode switch
+        {
+            RowWriteMode.Insert => session.Insert(write.Values!, write.Options),
+            RowWriteMode.Update => session.Update(write.Values!, write.Options),
+            RowWriteMode.Upsert => session.Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert when session is IConcurrencyStorageSession conditional =>
+                conditional.ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => throw new NotSupportedException(
+                "The provider session does not support atomic conditional upsert."),
+            RowWriteMode.Delete => session.Delete(write.Key!, write.Options),
+            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+        };
+    }
+
+    private StorageKey KeyValues(T value)
+    {
+        var key = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            [IdColumn] = idGetter(value)
+        };
+        if (sharedKind)
+            key["kind"] = DocumentKind;
+        return new StorageKey(key);
+    }
+
+    private static bool IdentityEquals(object? materialized, object? persisted) =>
+        materialized is byte[] materializedBytes && persisted is byte[] persistedBytes
+            ? materializedBytes.AsSpan().SequenceEqual(persistedBytes)
+            : Equals(materialized, persisted);
 
     private static object? Extract(JsonElement root, string path, PortableType type)
     {
@@ -580,31 +664,6 @@ public sealed class DocumentUnit<T>
 
 /// <summary>Typed result used when a provider returns a materialized document and its version.</summary>
 public sealed record DocumentReadResult<T>(T Value, long? Version);
-
-/// <summary>Provider-neutral typed mutations over a document unit.</summary>
-public sealed class DocumentUnitSession<T>
-{
-    private readonly DocumentUnit<T> unit;
-    private readonly IRecordStore store;
-
-    internal DocumentUnitSession(DocumentUnit<T> unit, IRecordStore store)
-    {
-        this.unit = unit;
-        this.store = store;
-    }
-
-    public RecordWriteResult Insert(T value, RecordWriteOptions? options = null) =>
-        store.Insert(unit.StorageUnit, unit.ToRowValues(value), options);
-
-    public RecordWriteResult Update(T value, RecordWriteOptions? options = null) =>
-        store.Update(unit.StorageUnit, unit.ToRowValues(value), options);
-
-    public RecordWriteResult Upsert(T value, RecordWriteOptions? options = null) =>
-        store.Upsert(unit.StorageUnit, unit.ToRowValues(value), options);
-
-    public RecordWriteResult Delete(T value, RecordWriteOptions? options = null) =>
-        store.Delete(unit.StorageUnit, unit.KeyValues(value), options);
-}
 
 internal static class DocumentCodecFactory
 {
