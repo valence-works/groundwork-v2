@@ -64,10 +64,22 @@ public sealed class StorageDeclarationBuilder
 
     public StorageDeclarationBuilder Key(params string[] columns) => Wrap(inner.Key(columns));
 
+    /// <summary>Opts the unit into a system-owned Int64 optimistic-concurrency token.</summary>
+    public StorageDeclarationBuilder OptimisticConcurrency(string tokenColumn = "version") =>
+        Wrap(inner.OptimisticConcurrency(tokenColumn));
+
+    /// <summary>Alias for <see cref="OptimisticConcurrency"/>.</summary>
+    public StorageDeclarationBuilder Optimistic(string tokenColumn = "version") =>
+        Wrap(inner.Optimistic(tokenColumn));
+
     public StorageDeclarationBuilder Retention(RetentionDeclaration declaration) => Wrap(inner.Retention(declaration));
 
     public StorageDeclarationBuilder Retention(int keepNewest, string orderBy, RetentionTrigger trigger = RetentionTrigger.Explicit, params string[] partitionColumns) =>
         Wrap(inner.Retention(keepNewest, orderBy, trigger, partitionColumns));
+
+    /// <summary>Compatibility form for declarations that omit an explicit trigger.</summary>
+    public StorageDeclarationBuilder Retention(int keepNewest, string orderBy, params string[] partitionColumns) =>
+        Wrap(inner.Retention(keepNewest, orderBy, partitionColumns));
 
     public StorageDeclarationBuilder KeepNewest(int keepNewest, string orderBy, RetentionTrigger trigger = RetentionTrigger.Explicit, params string[] partitionColumns) =>
         Wrap(inner.KeepNewest(keepNewest, orderBy, trigger, partitionColumns));

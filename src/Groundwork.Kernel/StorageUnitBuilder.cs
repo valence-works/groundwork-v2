@@ -59,6 +59,17 @@ public sealed class StorageDeclarationBuilder
         return this;
     }
 
+    /// <summary>Opts the unit into a system-owned Int64 optimistic-concurrency token.</summary>
+    public StorageDeclarationBuilder OptimisticConcurrency(string tokenColumn = "version")
+    {
+        state.SetOptimisticConcurrency(tokenColumn);
+        return this;
+    }
+
+    /// <summary>Alias for <see cref="OptimisticConcurrency"/>.</summary>
+    public StorageDeclarationBuilder Optimistic(string tokenColumn = "version") =>
+        OptimisticConcurrency(tokenColumn);
+
     public StorageDeclarationBuilder Retention(RetentionDeclaration declaration)
     {
         state.SetRetention(declaration);
@@ -77,6 +88,13 @@ public sealed class StorageDeclarationBuilder
             Trigger = trigger,
             PartitionColumns = partitionColumns ?? []
         });
+
+    /// <summary>Compatibility form for declarations that omit an explicit trigger.</summary>
+    public StorageDeclarationBuilder Retention(
+        int keepNewest,
+        string orderBy,
+        params string[] partitionColumns) =>
+        Retention(keepNewest, orderBy, RetentionTrigger.Explicit, partitionColumns);
 
     public StorageDeclarationBuilder KeepNewest(
         int keepNewest,
@@ -308,6 +326,7 @@ internal sealed class StorageDeclarationState
     private readonly string id;
     private readonly string name;
     private KeyDefinition? key;
+    private ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.None;
     private ScopePolicy scope = ScopePolicy.Global;
     private RetentionDeclaration? retention;
     private AppendIdempotencyDeclaration? appendIdempotency;
@@ -338,6 +357,23 @@ internal sealed class StorageDeclarationState
     }
 
     public void SetKey(IEnumerable<string> columnNames) => key = new KeyDefinition { Columns = SnapshotNames(columnNames, "key") };
+
+    public void SetOptimisticConcurrency(string tokenColumn)
+    {
+        if (string.IsNullOrWhiteSpace(tokenColumn))
+            throw new ArgumentException("A concurrency token column must be non-empty.", nameof(tokenColumn));
+
+        var existing = columns.FindIndex(column => string.Equals(column.Name, tokenColumn, StringComparison.Ordinal));
+        var token = existing < 0
+            ? new ColumnDefinition { Name = tokenColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) }
+            : columns[existing];
+        if (existing < 0)
+            columns.Add(token);
+        else if (token.Type == PortableType.Int64 && !token.IsNullable && token.Default is null)
+            columns[existing] = token with { Default = new PortableDefault(0L) };
+
+        concurrency = ConcurrencyDeclaration.Optimistic(tokenColumn);
+    }
 
     public void AddIndex(string name, IEnumerable<IndexColumn> indexColumns, bool unique)
     {
@@ -376,12 +412,31 @@ internal sealed class StorageDeclarationState
             Indexes = Array.AsReadOnly(indexes.ToArray()),
             AggregationProfiles = Array.AsReadOnly(aggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()),
             Scope = scope,
+            Concurrency = concurrency,
             AppendIdempotency = appendIdempotency,
             Retention = retention
         };
 
-        var diagnostics = ValidateReferences(unit, key is null)
-            .Concat(BuilderPortabilityValidation.Validate(unit, context).Refusals.Select(refusal =>
+        var declarationFindings = ValidateReferences(unit, key is null).ToList();
+        try
+        {
+            ConcurrencyDeclaration.ValidateDeclaration(unit);
+        }
+        catch (ArgumentException exception)
+        {
+            declarationFindings.Add(new DeclarationFinding(
+                "GW-DECL-CONCURRENCY-001",
+                $"The concurrency declaration is invalid: {exception.Message}",
+                "concurrency"));
+        }
+        var validationContext = context is null || context.Retention is not null || retention is null
+            ? context
+            : new PortabilityValidationContext(
+                context.TargetIdentities,
+                retention,
+                context.PriorAppliedMongoCompositeKeyOrder);
+        var diagnostics = declarationFindings
+            .Concat(BuilderPortabilityValidation.Validate(unit, validationContext).Refusals.Select(refusal =>
                 new DeclarationFinding(refusal.Code, refusal.Message, refusal.Path)))
             .ToArray();
         if (diagnostics.Length != 0)
@@ -421,6 +476,13 @@ internal sealed class StorageDeclarationState
                     diagnostics.Add(new("GW-DECL-INDEX-001", $"Index '{index.Name}' column '{column}' is not declared on the storage unit.", $"indexes.{index.Name}.columns[{columnIndex}]"));
                 if (!string.IsNullOrWhiteSpace(column) && !seenIndexColumns.Add(column))
                     diagnostics.Add(new("GW-DECL-INDEX-002", $"Index '{index.Name}' column '{column}' is listed more than once.", $"indexes.{index.Name}.columns"));
+                var declaration = unit.Columns.FirstOrDefault(candidate =>
+                    string.Equals(candidate.Name, column, StringComparison.Ordinal));
+                if (declaration?.Type == PortableType.Json)
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-003",
+                        $"Index '{index.Name}' column '{column}' is JSON and cannot be represented as a portable query index key. Leave the JSON column unindexed or index a declared scalar projection instead.",
+                        $"indexes.{index.Name}.columns[{columnIndex}]"));
             }
         }
 

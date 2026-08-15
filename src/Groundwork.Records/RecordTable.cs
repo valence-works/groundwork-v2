@@ -12,14 +12,6 @@ public static class RecordTable
     public static RecordTableBuilder<T> For<T>(string name) => new(name);
 }
 
-/// <summary>A built typed authoring result whose Definition contains only kernel declarations.</summary>
-public sealed class RecordTable<T>
-{
-    internal RecordTable(KernelStorageUnit definition) => Definition = definition;
-
-    public KernelStorageUnit Definition { get; }
-}
-
 /// <summary>Expression-based authoring state for a CLR row type.</summary>
 public sealed class RecordTableBuilder<T>
 {
@@ -36,6 +28,17 @@ public sealed class RecordTableBuilder<T>
         state.SetKey(MemberNames(selector, allowComposite: true));
         return this;
     }
+
+    /// <summary>Opts the unit into a system-owned Int64 optimistic-concurrency token.</summary>
+    public RecordTableBuilder<T> OptimisticConcurrency(string tokenColumn = "version")
+    {
+        state.SetOptimisticConcurrency(tokenColumn);
+        return this;
+    }
+
+    /// <summary>Alias for <see cref="OptimisticConcurrency"/>.</summary>
+    public RecordTableBuilder<T> Optimistic(string tokenColumn = "version") =>
+        OptimisticConcurrency(tokenColumn);
 
     public RecordTableBuilder<T> Column<TValue>(
         Expression<Func<T, TValue>> selector,

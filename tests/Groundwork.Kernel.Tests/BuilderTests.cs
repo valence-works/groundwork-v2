@@ -215,6 +215,44 @@ public sealed class BuilderTests
     }
 
     [Fact]
+    public void Fluent_build_refuses_regular_and_unique_indexes_over_portable_json()
+    {
+        var regular = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
+            .Declare("bad-json-index", "bad_json_index")
+            .Int32("id", column => column.Required())
+            .Json("payload")
+            .Key("id")
+            .Index("by-payload", "payload")
+            .Build());
+        var unique = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
+            .Declare("bad-unique-json-index", "bad_unique_json_index")
+            .Int32("id", column => column.Required())
+            .Json("payload")
+            .Key("id")
+            .UniqueIndex("by-payload", "payload")
+            .Build());
+
+        Assert.All(new[] { regular, unique }, error => Assert.Contains(
+            error.Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DECL-INDEX-003" &&
+                diagnostic.Path == "indexes.by-payload.columns[0]"));
+    }
+
+    [Fact]
+    public void Fluent_build_allows_portable_json_when_it_is_not_indexed()
+    {
+        var definition = Groundwork.Records.StorageUnit
+            .Declare("json-values", "json_values")
+            .Int32("id", column => column.Required())
+            .Json("payload")
+            .Key("id")
+            .Build();
+
+        Assert.Equal(PortableType.Json, definition.Columns.Single(column => column.Name == "payload").Type);
+        Assert.Empty(definition.Indexes);
+    }
+
+    [Fact]
     public void Committed_customer_sample_stays_within_the_issue_line_targets()
     {
         Assert.Equal("customers", BuilderCustomerSample.Customer.Name);
