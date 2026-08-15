@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Groundwork.Kernel;
 using Xunit;
 
@@ -144,6 +145,57 @@ public sealed class AggregationProfileTests
         var row = Assert.Single(AggregationExecutor.Execute(unit, profile, rows).Rows);
 
         Assert.Equal("right", row["first"]);
+    }
+
+    [Fact]
+    public void SetUnion_aliases_are_not_orderable_outputs()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "label", Type = PortableType.String });
+        var profile = Profile(new Aggregate.SetUnion("labels", "label", 2));
+
+        var exception = Assert.Throws<AggregationValidationException>(() => AggregationExecutor.Execute(
+            unit,
+            profile,
+            [new Dictionary<string, object?> { ["group"] = "g", ["label"] = "a" }],
+            new AggregationQuery("summary") { OrderBy = "labels" }));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-QUERY-005");
+    }
+
+    [Fact]
+    public void Captured_profiles_cannot_be_mutated_through_read_only_interfaces()
+    {
+        var source = Profile(new Aggregate.SetUnion("labels", "label", 2)) with
+        {
+            AllowedPredicates =
+            [
+                new AggregationPredicateAllowance
+                {
+                    Alias = "labels",
+                    SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                    {
+                        AggregationPredicateOperator.Contains
+                    }
+                }
+            ]
+        };
+        var snapshot = AggregationProfileSnapshot.Capture(source);
+
+        var groups = Assert.IsAssignableFrom<IList<string>>(snapshot.GroupByColumns);
+        Assert.Throws<NotSupportedException>(() => groups[0] = "changed");
+        var aggregates = Assert.IsAssignableFrom<IList<Aggregate>>(snapshot.Aggregates);
+        Assert.Throws<NotSupportedException>(() => aggregates[0] = new Aggregate.Min("other", "label"));
+        var allowances = Assert.IsAssignableFrom<IList<AggregationPredicateAllowance>>(snapshot.AllowedPredicates);
+        Assert.Throws<NotSupportedException>(() => allowances[0] = new AggregationPredicateAllowance
+        {
+            Alias = "other",
+            SupportedPredicates = ImmutableHashSet<AggregationPredicateOperator>.Empty
+        });
+        var supported = Assert.IsAssignableFrom<ISet<AggregationPredicateOperator>>(
+            snapshot.AllowedPredicates[0].SupportedPredicates);
+        Assert.Throws<NotSupportedException>(() => supported.Add(AggregationPredicateOperator.Equal));
     }
 
     private static StorageUnit Unit(params ColumnDefinition[] columns) => new()

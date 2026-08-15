@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
@@ -71,13 +72,13 @@ public static class AggregationProfileSnapshot
         return new AggregationProfile
         {
             Name = profile.Name,
-            GroupByColumns = (profile.GroupByColumns ?? []).ToArray(),
-            Aggregates = (profile.Aggregates ?? []).Select(Capture).ToArray(),
-            AllowedPredicates = (profile.AllowedPredicates ?? []).Select(allowance => new AggregationPredicateAllowance
+            GroupByColumns = ImmutableArray.CreateRange(profile.GroupByColumns ?? []),
+            Aggregates = ImmutableArray.CreateRange((profile.Aggregates ?? []).Select(Capture)),
+            AllowedPredicates = ImmutableArray.CreateRange((profile.AllowedPredicates ?? []).Select(allowance => new AggregationPredicateAllowance
             {
                 Alias = allowance.Alias,
-                SupportedPredicates = allowance.SupportedPredicates.ToHashSet()
-            }).ToArray(),
+                SupportedPredicates = allowance.SupportedPredicates.ToImmutableHashSet()
+            })),
             MaxGroups = profile.MaxGroups,
             MaxInputRows = profile.MaxInputRows
         };
@@ -376,10 +377,7 @@ public static class AggregationExecutor
         ArgumentNullException.ThrowIfNull(rows);
         AggregationProfileValidator.Validate(unit, profile);
         query ??= AggregationQuery.For(profile.Name);
-        if (!string.Equals(query.ProfileName, profile.Name, StringComparison.Ordinal))
-            throw new AggregationValidationException([new("GW-AGG-QUERY-001", $"Profile '{query.ProfileName}' is not the selected declaration.", "profileName")]);
-        if (query.PostPredicate is not null)
-            ValidatePredicateValues(unit, profile, query.PostPredicate);
+        ValidateQuery(unit, profile, query);
 
         var input = new List<IReadOnlyDictionary<string, object?>>(Math.Min(profile.MaxInputRows, 4096));
         foreach (var row in rows)
@@ -407,7 +405,7 @@ public static class AggregationExecutor
         }
 
         var output = groups.Values.Select(group => Reduce(unit, profile, group.Rows)).ToList();
-        ValidateQuery(profile, query, output);
+        ApplyPostPredicate(profile, query, output);
         if (query.OrderBy is not null)
         {
             if (!IsDeclaredOutput(profile, query.OrderBy))
@@ -533,7 +531,36 @@ public static class AggregationExecutor
         return 0;
     }
 
-    private static void ValidateQuery(AggregationProfile profile, AggregationQuery query, List<AggregationRow> output)
+    public static void ValidateQuery(StorageUnit unit, AggregationProfile profile, AggregationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(query);
+        AggregationProfileValidator.Validate(unit, profile);
+        if (!string.Equals(query.ProfileName, profile.Name, StringComparison.Ordinal))
+            throw new AggregationValidationException([new("GW-AGG-QUERY-001", $"Profile '{query.ProfileName}' is not the selected declaration.", "profileName")]);
+
+        if (query.OrderBy is not null)
+        {
+            var aggregate = profile.Aggregates.FirstOrDefault(candidate => candidate.Alias == query.OrderBy);
+            if (aggregate is Aggregate.SetUnion)
+                throw new AggregationValidationException([new("GW-AGG-QUERY-005", $"SetUnion output '{query.OrderBy}' cannot be used as an order key.", "orderBy")]);
+            if (!IsDeclaredOutput(profile, query.OrderBy))
+                throw new AggregationValidationException([new("GW-AGG-QUERY-002", $"Order alias '{query.OrderBy}' is not declared by profile '{profile.Name}'.", "orderBy")]);
+        }
+        if (query.PostPredicate is not null)
+        {
+            ValidatePredicateValues(unit, profile, query.PostPredicate);
+            ValidatePredicateShape(query.PostPredicate,
+                profile.AllowedPredicates.ToDictionary(item => item.Alias, StringComparer.Ordinal));
+        }
+        if (query.Take is <= 0)
+            throw new AggregationValidationException([new("GW-AGG-QUERY-003", "Aggregation Take must be positive when specified.", "take")]);
+        if (query.Take is int take && take > profile.MaxGroups)
+            throw new AggregationBudgetExceededException("GW-AGG-BOUND-006", $"Aggregation Take={take} exceeds MaxGroups={profile.MaxGroups}.");
+    }
+
+    private static void ApplyPostPredicate(AggregationProfile profile, AggregationQuery query, List<AggregationRow> output)
     {
         if (query.PostPredicate is null) return;
         var allowances = profile.AllowedPredicates.ToDictionary(item => item.Alias, StringComparer.Ordinal);

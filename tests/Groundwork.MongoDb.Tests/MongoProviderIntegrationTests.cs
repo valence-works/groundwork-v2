@@ -11,6 +11,112 @@ namespace Groundwork.MongoDb.Tests;
 
 public sealed class MongoProviderIntegrationTests
 {
+    [Fact]
+    public void SetUnion_budget_probe_counts_distinct_values_without_materializing_addToSet()
+    {
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.SetUnion("labels", "label", 1)]
+        };
+
+        var stages = MongoStorageSession.RenderSetBudgetProbe(profile, (Aggregate.SetUnion)profile.Aggregates[0]);
+        var pipeline = string.Join("\n", stages.Select(stage => stage.ToJson()));
+
+        Assert.DoesNotContain("$addToSet", pipeline, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_aggregation_set_probe_count", pipeline, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_aggregation_set_probe_value", pipeline, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void Native_set_union_refuses_MaxValues_before_materializing_the_result()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-budget-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_aggregation_budget_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false },
+                new() { Name = "label", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.SetUnion("labels", "label", 1)]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one", ["group"] = "g", ["label"] = "one"
+        }));
+        session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "two", ["group"] = "g", ["label"] = "two"
+        }));
+
+        var exception = Assert.Throws<AggregationBudgetExceededException>(() =>
+            session.Aggregate(new AggregationQuery("summary")));
+
+        Assert.Equal("GW-AGG-BOUND-007", exception.Code);
+    }
+
+    [Fact]
+    public void Aggregation_fingerprint_sorts_allowance_entries_like_the_kernel()
+    {
+        var baseUnit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-fingerprint"),
+            Name = "mongo_aggregation_fingerprint",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "amount", Type = PortableType.Int64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var first = baseUnit with
+        {
+            AggregationProfiles = [FingerprintProfile(["total", "minimum"])]
+        };
+        var reordered = baseUnit with
+        {
+            AggregationProfiles = [FingerprintProfile(["minimum", "total"])]
+        };
+
+        Assert.Equal(SchemaIdentity.Fingerprint(first), SchemaIdentity.Fingerprint(reordered));
+
+        static AggregationProfile FingerprintProfile(IReadOnlyList<string> aliases) => new()
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates =
+            [
+                new Aggregate.Sum("total", "amount"),
+                new Aggregate.Min("minimum", "amount")
+            ],
+            AllowedPredicates = aliases.Select(alias => new AggregationPredicateAllowance
+            {
+                Alias = alias,
+                SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                {
+                    AggregationPredicateOperator.Equal
+                }
+            }).ToArray()
+        };
+    }
+
     [SkippableFact]
     public void Provider_passes_the_shipped_conformance_suite()
     {

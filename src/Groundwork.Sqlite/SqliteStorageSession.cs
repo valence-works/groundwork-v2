@@ -69,7 +69,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
     {
         ArgumentNullException.ThrowIfNull(query);
-        if (query.PostPredicate is not null || Unit.Scope != ScopePolicy.Global)
+        if (Unit.Scope != ScopePolicy.Global)
             return AggregationSessionExecutor.Execute(this, query);
         return RelationalAggregationExecutor.Execute(
             connection,

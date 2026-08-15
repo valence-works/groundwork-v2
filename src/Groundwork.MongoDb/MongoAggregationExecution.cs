@@ -13,6 +13,8 @@ internal sealed partial class MongoStorageSession
     private const string SumCountPrefix = "__groundwork_aggregation_sum_count_";
     private const string MinValuePrefix = "__groundwork_aggregation_min_value_";
     private const string MaxValuePrefix = "__groundwork_aggregation_max_value_";
+    private const string SetProbeValueField = "__groundwork_aggregation_set_probe_value";
+    private const string SetProbeCountField = "__groundwork_aggregation_set_probe_count";
 
     private AggregationResult ExecuteNativeAggregation(
         AggregationProfile profile,
@@ -42,6 +44,7 @@ internal sealed partial class MongoStorageSession
         AggregationProfile profile,
         AggregationQuery query)
     {
+        AggregationExecutor.ValidateQuery(Unit, profile, query);
         VerifyNativeAggregationBudgets(profile);
         var stages = new List<BsonDocument>
         {
@@ -135,16 +138,12 @@ internal sealed partial class MongoStorageSession
             }
         }
         stages.Add(new BsonDocument("$project", projection));
+        if (query.PostPredicate is not null)
+            stages.Add(new BsonDocument("$match", RenderPredicate(query.PostPredicate, profile)));
 
         var sortOutput = new BsonDocument();
         if (query.OrderBy is not null)
         {
-            if (!profile.GroupByColumns.Contains(query.OrderBy, StringComparer.Ordinal) &&
-                !profile.Aggregates.Any(aggregate => aggregate.Alias == query.OrderBy))
-                throw new AggregationValidationException([new(
-                    "GW-AGG-QUERY-002",
-                    $"Order alias '{query.OrderBy}' is not declared by profile '{profile.Name}'.",
-                    "orderBy")]);
             sortOutput[query.OrderBy] = query.OrderDirection == KernelSortDirection.Descending ? -1 : 1;
         }
         else
@@ -229,43 +228,57 @@ internal sealed partial class MongoStorageSession
                 "GW-AGG-BOUND-004",
                 $"Aggregation profile '{profile.Name}' refused more than MaxInputRows={profile.MaxInputRows}; input was not truncated.");
 
-        var identity = new BsonDocument();
+        var groupIdentity = new BsonDocument();
         foreach (var column in profile.GroupByColumns)
-            identity[column] = Field(column);
-        var group = new BsonDocument { ["_id"] = identity };
-        foreach (var set in profile.Aggregates.OfType<Aggregate.SetUnion>())
-            group[SetValuesField(set.Alias)] = new BsonDocument("$addToSet", Field(set.Column));
-        var projection = new BsonDocument();
-        foreach (var set in profile.Aggregates.OfType<Aggregate.SetUnion>())
-        {
-            projection[SetCountField(set.Alias)] = new BsonDocument("$size", new BsonDocument("$filter", new BsonDocument
-            {
-                ["input"] = Field(SetValuesField(set.Alias)),
-                ["as"] = "value",
-                ["cond"] = new BsonDocument("$ne", new BsonArray { "$$value", BsonNull.Value })
-            }));
-        }
-        var stages = new List<BsonDocument>
-        {
-            new("$limit", (long)profile.MaxInputRows + 1L),
-            new("$group", group),
-            new("$limit", (long)profile.MaxGroups + 1L)
-        };
-        if (projection.ElementCount != 0)
-            stages.Add(new BsonDocument("$project", projection));
-        var groups = RunAggregationPipeline(stages);
+            groupIdentity[column] = Field(column);
+        var groups = RunAggregationPipeline(
+        [
+            new BsonDocument("$limit", (long)profile.MaxInputRows + 1L),
+            new BsonDocument("$group", new BsonDocument { ["_id"] = groupIdentity }),
+            new BsonDocument("$limit", (long)profile.MaxGroups + 1L)
+        ]);
         if (groups.Count > profile.MaxGroups)
             throw new AggregationBudgetExceededException(
                 "GW-AGG-BOUND-005",
                 $"Aggregation profile '{profile.Name}' refused more than MaxGroups={profile.MaxGroups}; groups were not truncated.");
-        foreach (var document in groups)
+
         foreach (var set in profile.Aggregates.OfType<Aggregate.SetUnion>())
         {
-            if (document.GetValue(SetCountField(set.Alias), 0).ToInt64() > set.MaxValues)
+            var evidence = RunAggregationPipeline(RenderSetBudgetProbe(profile, set));
+            if (evidence.Count != 0)
                 throw new AggregationBudgetExceededException(
                     "GW-AGG-BOUND-007",
                     $"SetUnion '{set.Alias}' refused more than MaxValues={set.MaxValues}; values were not truncated.");
         }
+    }
+
+    internal static IReadOnlyList<BsonDocument> RenderSetBudgetProbe(
+        AggregationProfile profile,
+        Aggregate.SetUnion set)
+    {
+        var distinctIdentity = new BsonDocument();
+        foreach (var column in profile.GroupByColumns)
+            distinctIdentity[column] = new BsonString("$" + column);
+        distinctIdentity[SetProbeValueField] = new BsonString("$" + set.Column);
+
+        var groupByDistinct = new BsonDocument();
+        foreach (var column in profile.GroupByColumns)
+            groupByDistinct[column] = new BsonString("$_id." + column);
+        return
+        [
+            new BsonDocument("$limit", (long)profile.MaxInputRows + 1L),
+            new BsonDocument("$match", new BsonDocument(set.Column,
+                new BsonDocument("$ne", BsonNull.Value))),
+            new BsonDocument("$group", new BsonDocument { ["_id"] = distinctIdentity }),
+            new BsonDocument("$group", new BsonDocument
+            {
+                ["_id"] = groupByDistinct,
+                [SetProbeCountField] = new BsonDocument("$sum", 1)
+            }),
+            new BsonDocument("$match", new BsonDocument(SetProbeCountField,
+                new BsonDocument("$gt", set.MaxValues))),
+            new BsonDocument("$limit", 1L)
+        ];
     }
 
     private List<BsonDocument> RunAggregationPipeline(IEnumerable<BsonDocument> stages)
@@ -275,6 +288,61 @@ internal sealed partial class MongoStorageSession
         return (transactionSession is null
             ? collection.Aggregate(pipeline, options)
             : collection.Aggregate(transactionSession, pipeline, options)).ToList();
+    }
+
+    private BsonDocument RenderPredicate(AggregationPredicate predicate, AggregationProfile profile) => predicate switch
+    {
+        AggregationPredicate.All all => new BsonDocument("$and",
+            new BsonArray(all.Predicates.Select(child => RenderPredicate(child, profile)))),
+        AggregationPredicate.Any any => new BsonDocument("$or",
+            new BsonArray(any.Predicates.Select(child => RenderPredicate(child, profile)))),
+        AggregationPredicate.Comparison comparison => RenderComparison(comparison, profile),
+        _ => throw new AggregationValidationException([new("GW-AGG-PRED-006", "The aggregation predicate is not renderable.", "postPredicate")])
+    };
+
+    private BsonDocument RenderComparison(
+        AggregationPredicate.Comparison comparison,
+        AggregationProfile profile)
+    {
+        var values = comparison.Values!;
+        var encoded = values.Select(value => EncodePredicateValue(profile, comparison.Alias, value)).ToArray();
+        var condition = comparison.Operator switch
+        {
+            AggregationPredicateOperator.Equal => encoded[0],
+            AggregationPredicateOperator.In => new BsonDocument("$in", new BsonArray(encoded)),
+            AggregationPredicateOperator.RangeInclusive => new BsonDocument
+            {
+                ["$gte"] = encoded[0],
+                ["$lte"] = encoded[1]
+            },
+            AggregationPredicateOperator.Contains => new BsonDocument("$elemMatch", new BsonDocument("$eq", encoded[0])),
+            _ => throw new AggregationValidationException([new("GW-AGG-PRED-009", "The aggregation predicate is not renderable.", "postPredicate")])
+        };
+        return new BsonDocument(comparison.Alias, condition);
+    }
+
+    private BsonValue EncodePredicateValue(AggregationProfile profile, string alias, object? value)
+    {
+        var aggregate = profile.Aggregates.Single(item => item.Alias == alias);
+        var source = aggregate switch
+        {
+            Aggregate.Min min => min.Column,
+            Aggregate.Max max => max.Column,
+            Aggregate.Sum sum => sum.Column,
+            Aggregate.SetUnion set => set.Column,
+            Aggregate.FirstBy first => first.Column,
+            _ => throw new InvalidOperationException("Unknown aggregate declaration.")
+        };
+        var sourceColumn = Unit.Columns.Single(column => column.Name == source);
+        var outputType = aggregate is Aggregate.Sum && sourceColumn.Type is (PortableType.Int32 or PortableType.Int64)
+            ? PortableType.Int64
+            : sourceColumn.Type;
+        return MongoValueCodec.Encode(value, sourceColumn with
+        {
+            Name = alias,
+            Type = outputType,
+            IsNullable = true
+        });
     }
 
     private static BsonDocument NonNullField(string name) =>
@@ -292,8 +360,6 @@ internal sealed partial class MongoStorageSession
     private static string SumCountField(string alias) => SumCountPrefix + alias;
 
     private static string SetValuesField(string alias) => SetValuesPrefix + alias;
-
-    private static string SetCountField(string alias) => "__groundwork_aggregation_set_count_" + alias;
 
     private static object? Decode(BsonValue value, ColumnDefinition column) =>
         value.IsBsonNull ? null : MongoValueCodec.Decode(value, column);

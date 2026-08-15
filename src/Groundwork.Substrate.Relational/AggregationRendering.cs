@@ -41,17 +41,7 @@ public static class RelationalAggregationRenderer
         ArgumentNullException.ThrowIfNull(profile);
         AggregationProfileValidator.Validate(unit, profile);
         query ??= AggregationQuery.For(profile.Name);
-        if (!string.Equals(query.ProfileName, profile.Name, StringComparison.Ordinal))
-            throw new AggregationValidationException([new("GW-AGG-QUERY-001", "The selected query profile does not match the declaration.", "profileName")]);
-        if (query.Take is <= 0)
-            throw new AggregationValidationException([new("GW-AGG-QUERY-003", "Aggregation Take must be positive when specified.", "take")]);
-        if (query.Take is int queryTake && queryTake > profile.MaxGroups)
-            throw new AggregationBudgetExceededException("GW-AGG-BOUND-006", $"Aggregation Take={queryTake} exceeds MaxGroups={profile.MaxGroups}.");
-        if (query.OrderBy is not null && !profile.GroupByColumns.Contains(query.OrderBy, StringComparer.Ordinal) &&
-            !profile.Aggregates.Any(aggregate => aggregate.Alias == query.OrderBy))
-            throw new AggregationValidationException([new("GW-AGG-QUERY-002", $"Order alias '{query.OrderBy}' is not declared by profile '{profile.Name}'.", "orderBy")]);
-        if (query.PostPredicate is not null)
-            ValidatePredicateAliases(profile, query.PostPredicate);
+        AggregationExecutor.ValidateQuery(unit, profile, query);
 
         var quote = dialect.QuoteIdentifier;
         var groups = profile.GroupByColumns.Select(quote).ToArray();
@@ -76,7 +66,7 @@ public static class RelationalAggregationRenderer
         var grouped = $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)}";
         var sql = query.PostPredicate is null
             ? $"WITH {ctes} {grouped}"
-            : $"WITH {ctes}, {quote("__groundwork_aggregation_result")} AS ({grouped}) SELECT * FROM {quote("__groundwork_aggregation_result")} WHERE {RenderPredicate(query.PostPredicate, quote)}";
+            : $"WITH {ctes}, {quote("__groundwork_aggregation_result")} AS ({grouped}) SELECT * FROM {quote("__groundwork_aggregation_result")} WHERE {RenderPredicate(dialect, query.PostPredicate, quote)}";
         if (query.OrderBy is not null)
             sql += " ORDER BY " + RenderOrderTerm(
                 dialect,
@@ -229,10 +219,10 @@ public static class RelationalAggregationRenderer
     private static bool IsSqlite(RelationalDialect dialect) =>
         dialect.ProviderName.Contains("SQLite", StringComparison.OrdinalIgnoreCase);
 
-    private static string RenderPredicate(AggregationPredicate predicate, Func<string, string> quote) => predicate switch
+    private static string RenderPredicate(RelationalDialect dialect, AggregationPredicate predicate, Func<string, string> quote) => predicate switch
     {
-        AggregationPredicate.All all => "(" + string.Join(" AND ", all.Predicates.Select(child => RenderPredicate(child, quote))) + ")",
-        AggregationPredicate.Any any => "(" + string.Join(" OR ", any.Predicates.Select(child => RenderPredicate(child, quote))) + ")",
+        AggregationPredicate.All all => "(" + string.Join(" AND ", all.Predicates.Select(child => RenderPredicate(dialect, child, quote))) + ")",
+        AggregationPredicate.Any any => "(" + string.Join(" OR ", any.Predicates.Select(child => RenderPredicate(dialect, child, quote))) + ")",
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.Equal =>
             quote(comparison.Alias) + " = " + Literal(comparison.Values.Single()),
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.In =>
@@ -240,7 +230,7 @@ public static class RelationalAggregationRenderer
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.RangeInclusive =>
             quote(comparison.Alias) + " BETWEEN " + Literal(comparison.Values[0]) + " AND " + Literal(comparison.Values[1]),
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.Contains =>
-            "INSTR(" + quote(comparison.Alias) + ", " + Literal(comparison.Values.Single()) + ") > 0",
+            dialect.RenderAggregationContains(quote(comparison.Alias), Literal(comparison.Values.Single())),
         _ => throw new AggregationValidationException([new("GW-AGG-PRED-009", "The post-reduction predicate is not renderable.", "postPredicate")])
     };
 
@@ -256,21 +246,4 @@ public static class RelationalAggregationRenderer
         _ => throw new AggregationValidationException([new("GW-AGG-PRED-011", "The predicate value is not a portable scalar.", "postPredicate.values")])
     };
 
-    private static void ValidatePredicateAliases(AggregationProfile profile, AggregationPredicate predicate)
-    {
-        var aliases = profile.AllowedPredicates.ToDictionary(item => item.Alias, StringComparer.Ordinal);
-        switch (predicate)
-        {
-            case AggregationPredicate.All all:
-                foreach (var child in all.Predicates) ValidatePredicateAliases(profile, child);
-                break;
-            case AggregationPredicate.Any any:
-                foreach (var child in any.Predicates) ValidatePredicateAliases(profile, child);
-                break;
-            case AggregationPredicate.Comparison comparison:
-                if (!aliases.TryGetValue(comparison.Alias, out var allowance) || !allowance.SupportedPredicates.Contains(comparison.Operator))
-                    throw new AggregationValidationException([new("GW-AGG-PRED-007", $"Predicate '{comparison.Operator}' is not declared for output '{comparison.Alias}'.", "postPredicate")]);
-                break;
-        }
-    }
 }

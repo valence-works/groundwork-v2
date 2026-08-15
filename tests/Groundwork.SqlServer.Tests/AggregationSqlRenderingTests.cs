@@ -35,6 +35,17 @@ public sealed class AggregationSqlRenderingTests
                 new Aggregate.FirstBy("firstLow", "label", "lowOrder"),
                 new Aggregate.FirstBy("firstHigh", "label", "highOrder", SortDirection.Descending)
             ],
+            AllowedPredicates =
+            [
+                new AggregationPredicateAllowance
+                {
+                    Alias = "labels",
+                    SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                    {
+                        AggregationPredicateOperator.Contains
+                    }
+                }
+            ],
             MaxInputRows = 7,
             MaxGroups = 3
         };
@@ -51,5 +62,17 @@ public sealed class AggregationSqlRenderingTests
         Assert.DoesNotContain("NCHAR(31)", sql, StringComparison.Ordinal);
         Assert.Contains("TOP (4)", probe, StringComparison.Ordinal);
         Assert.Contains("COUNT(DISTINCT [label] COLLATE Latin1_General_100_BIN2)", probe, StringComparison.Ordinal);
+
+        var predicateSql = RelationalAggregationRenderer.Render(
+            new SqlServerDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                PostPredicate = new AggregationPredicate.Comparison(
+                    "labels", AggregationPredicateOperator.Contains, ["plain"])
+            }).CommandText;
+        Assert.Contains("OPENJSON([labels])", predicateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSTR(", predicateSql, StringComparison.Ordinal);
     }
 }

@@ -108,6 +108,20 @@ public sealed class AggregationConformanceTests
         var actual = Canonical(session.Aggregate(new AggregationQuery("summary")));
 
         Assert.Equal(expected, actual);
+
+        var containsQuery = new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison(
+                "labels", AggregationPredicateOperator.Contains, ["plain"])
+        };
+        var expectedContains = Canonical(AggregationExecutor.Execute(
+            unit,
+            unit.AggregationProfiles.Single(),
+            FixtureRows(),
+            containsQuery));
+        var actualContains = Canonical(session.Aggregate(containsQuery));
+
+        Assert.Equal(expectedContains, actualContains);
     }
 
     private static StorageUnit FixtureUnit(string identity) => new()
@@ -150,6 +164,14 @@ public sealed class AggregationConformanceTests
                         {
                             AggregationPredicateOperator.Equal,
                             AggregationPredicateOperator.RangeInclusive
+                        }
+                    },
+                    new AggregationPredicateAllowance
+                    {
+                        Alias = "labels",
+                        SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                        {
+                            AggregationPredicateOperator.Contains
                         }
                     }
                 ],

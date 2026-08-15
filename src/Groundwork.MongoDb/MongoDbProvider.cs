@@ -931,7 +931,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         ThrowIfDisposed();
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         AggregationProfileValidator.Validate(Unit, profile);
-        if (Access.Policy != ScopePolicy.Global || query.PostPredicate is not null)
+        if (Access.Policy != ScopePolicy.Global)
             return AggregationSessionExecutor.Execute(Unit, request => Query(request), query);
         return ExecuteNativeAggregation(profile, query);
     }
@@ -2106,8 +2106,9 @@ internal static class SchemaIdentity
         profile.Name,
         string.Join(",", profile.GroupByColumns.OrderBy(column => column, StringComparer.Ordinal)),
         string.Join(",", profile.Aggregates.Select(Aggregate).OrderBy(value => value, StringComparer.Ordinal)),
-        string.Join(",", profile.AllowedPredicates.Select(allowance => allowance.Alias + ":" +
-            string.Join("+", allowance.SupportedPredicates.OrderBy(value => value)))),
+        string.Join(",", profile.AllowedPredicates.OrderBy(allowance => allowance.Alias, StringComparer.Ordinal)
+            .Select(allowance => allowance.Alias + ":" +
+                string.Join("+", allowance.SupportedPredicates.OrderBy(value => value)))),
         profile.MaxGroups,
         profile.MaxInputRows);
 

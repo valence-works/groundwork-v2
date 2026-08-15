@@ -26,6 +26,10 @@ public abstract class RelationalDialect
         AggregationQuery? query = null) =>
         RelationalAggregationRenderer.Render(this, unit, profile, query);
 
+    /// <summary>Renders exact membership for a JSON/array SetUnion output.</summary>
+    public virtual string RenderAggregationContains(string expression, string literal) =>
+        throw new NotSupportedException("A relational dialect must define exact SetUnion membership rendering.");
+
     public abstract string QuoteIdentifier(string identifier);
 
     public abstract string MapType(ColumnDefinition definition);

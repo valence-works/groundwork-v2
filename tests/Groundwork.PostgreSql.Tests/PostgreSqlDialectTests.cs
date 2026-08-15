@@ -13,6 +13,51 @@ public sealed class PostgreSqlDialectTests
     private readonly PostgreSqlDialect dialect = new();
 
     [Fact]
+    public void Aggregation_contains_uses_array_membership_not_string_substring_search()
+    {
+        var unit = AggregationUnit();
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.SetUnion("labels", "label", 2)],
+            AllowedPredicates =
+            [
+                new AggregationPredicateAllowance
+                {
+                    Alias = "labels",
+                    SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                    {
+                        AggregationPredicateOperator.Contains
+                    }
+                }
+            ]
+        };
+
+        var sql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison(
+                "labels", AggregationPredicateOperator.Contains, ["plain"])
+        }).CommandText;
+
+        Assert.Contains("= ANY(\"labels\")", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSTR(", sql, StringComparison.Ordinal);
+    }
+
+    private static StorageUnit AggregationUnit() => new()
+    {
+        Id = new StorageUnitId("aggregation-predicate-render"),
+        Name = "aggregation_predicate_render",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, IsNullable = false },
+            new() { Name = "group", Type = PortableType.String },
+            new() { Name = "label", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    [Fact]
     public void Index_ddl_spells_out_normalized_null_ordering()
     {
         var index = new IndexDefinition
