@@ -65,3 +65,28 @@ jobs:
           test "${{ job.services.postgres.id }}" != ""
           test "${{ job.services.sqlserver.id }}" != ""
           test "${{ job.services.mongodb.id }}" != ""
+
+  mongo-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Initialize MongoDB replica set
+        run: |
+          docker run --detach --name groundwork-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet p1rs --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec groundwork-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"p1rs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec groundwork-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+      - run: dotnet restore Groundwork.slnx
+      - name: Run MongoDB conformance suite
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p1ci?replicaSet=p1rs&directConnection=true
+        run: dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-restore --configuration Release
