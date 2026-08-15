@@ -220,7 +220,7 @@ internal sealed class SqliteDialect : RelationalDialect
                 continue;
             result.Add(new(indexReader.GetString(2), indexReader.GetInt32(3) == 0 ? SortDirection.Ascending : SortDirection.Descending));
         }
-        return new RelationalIndexMetadata(unique, result, null);
+        return new RelationalIndexMetadata(unique, result, ReadIndexFilter((SqliteConnection)connection, (SqliteTransaction?)transaction, physicalIndex));
     }
 
     public override string? BackfillColumnSql(string table, ColumnDefinition column) =>
@@ -282,6 +282,18 @@ internal sealed class SqliteDialect : RelationalDialect
         while (reader.Read())
             result.Add(reader.GetString(0) + ";");
         return result;
+    }
+
+    private static string? ReadIndexFilter(SqliteConnection connection, SqliteTransaction? transaction, string index)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT sql FROM sqlite_master WHERE type='index' AND name=@name;";
+        AddParameter(command, "@name", index);
+        var sql = command.ExecuteScalar() as string;
+        if (sql is null) return null;
+        var where = SqliteCreateTableSql.FindKeyword(sql, "WHERE");
+        return where < 0 ? null : sql[(where + "WHERE".Length)..].Trim().TrimEnd(';').Trim();
     }
 
     private string UpsertSql(RelationalWriteShape shape)

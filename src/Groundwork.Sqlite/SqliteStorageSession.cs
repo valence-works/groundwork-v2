@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Data;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
@@ -11,6 +12,7 @@ internal sealed class SqliteStorageSession : IStorageSession
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
     private readonly SqliteTransaction? transaction;
+    private SqliteTransaction? activeTransaction;
     private bool closed;
 
     internal SqliteStorageSession(
@@ -49,7 +51,7 @@ internal sealed class SqliteStorageSession : IStorageSession
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
 
-    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => Execute(() =>
+    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
         var existing = ReadCore(key);
         ValidateExpected(options, existing);
@@ -68,7 +70,7 @@ internal sealed class SqliteStorageSession : IStorageSession
 
     internal void Close() => closed = true;
 
-    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => Execute(() =>
+    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
         ValidateValues(values.Values, mutation == Mutation.Insert);
@@ -199,7 +201,7 @@ internal sealed class SqliteStorageSession : IStorageSession
         ThrowIfClosed();
         var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Transaction = transaction;
+        command.Transaction = activeTransaction ?? transaction;
         return command;
     }
 
@@ -215,6 +217,41 @@ internal sealed class SqliteStorageSession : IStorageSession
             if (transaction is not null) return operation();
             lock (owner.Gate) { owner.ThrowIfDisposed(); return operation(); }
         }
+        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
+        {
+            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
+        }
+    }
+
+    private T ExecuteWrite<T>(Func<T> operation)
+    {
+        if (transaction is not null) return Translate(operation);
+        lock (owner.Gate)
+        {
+            owner.ThrowIfDisposed();
+            using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
+            activeTransaction = writeTransaction;
+            try
+            {
+                var result = Translate(operation);
+                writeTransaction.Commit();
+                return result;
+            }
+            catch
+            {
+                writeTransaction.Rollback();
+                throw;
+            }
+            finally
+            {
+                activeTransaction = null;
+            }
+        }
+    }
+
+    private static T Translate<T>(Func<T> operation)
+    {
+        try { return operation(); }
         catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
         {
             return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
