@@ -53,17 +53,13 @@ internal sealed class DeclarationState
             throw new ArgumentException("A concurrency token column must be non-empty.", nameof(tokenColumn));
 
         var existing = columns.FindIndex(column => string.Equals(column.Name, tokenColumn, StringComparison.Ordinal));
-        var token = new ColumnDefinition
-        {
-            Name = tokenColumn,
-            Type = PortableType.Int64,
-            IsNullable = false,
-            Default = new PortableDefault(0L)
-        };
+        var token = existing < 0
+            ? new ColumnDefinition { Name = tokenColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) }
+            : columns[existing];
         if (existing < 0)
             columns.Add(token);
-        else
-            columns[existing] = token;
+        else if (token.Type == PortableType.Int64 && !token.IsNullable && token.Default is null)
+            columns[existing] = token with { Default = new PortableDefault(0L) };
 
         concurrency = ConcurrencyDeclaration.Optimistic(tokenColumn);
     }
@@ -101,7 +97,18 @@ internal sealed class DeclarationState
             Indexes = Array.AsReadOnly(indexes.ToArray())
         };
 
-        var declarationDiagnostics = ValidateReferences(unit, key is null);
+        var declarationDiagnostics = ValidateReferences(unit, key is null).ToList();
+        try
+        {
+            ConcurrencyDeclaration.ValidateDeclaration(unit);
+        }
+        catch (ArgumentException exception)
+        {
+            declarationDiagnostics.Add(new GroundworkDiagnostic(
+                "GW-DECL-CONCURRENCY-001",
+                $"The concurrency declaration is invalid: {exception.Message}",
+                "concurrency"));
+        }
         var result = BuilderPortabilityValidation.Validate(unit, context);
         var diagnostics = declarationDiagnostics
             .Concat(result.Refusals.Select(refusal =>

@@ -41,19 +41,16 @@ public sealed class RecordsProviderProofTests
             using var connection = new SqliteProviderFactory().Create("Data Source=" + path);
             var table = RecordTestFixture.CustomerTable("_records_sqlite_" + Guid.NewGuid().ToString("N"));
             AssertTypedCrud(connection, table, "sqlite@example.test");
-            var catalogTable = RecordTestFixture.CustomerTable(table.Definition.Name + "_plain", optimistic: false);
-            Assert.True(connection.Schema.Apply(catalogTable.Definition).Applied);
             using var catalog = new SqliteConnection("Data Source=" + path);
             catalog.Open();
             using var command = catalog.CreateCommand();
-            command.CommandText = $"PRAGMA table_info([{catalogTable.Definition.Name}]);";
+            command.CommandText = $"PRAGMA table_info([{table.Definition.Name}]);";
             using var reader = command.ExecuteReader();
             var columns = new List<string>();
             while (reader.Read()) columns.Add(reader.GetString(1));
-            Assert.Equal(["id", "name", "email"], columns.Where(name => name != "__groundwork_action"));
+            Assert.Equal(["id", "name", "email", "__groundwork_version"], columns);
             Assert.DoesNotContain(columns, name => name.Contains("json", StringComparison.OrdinalIgnoreCase));
             Assert.DoesNotContain(columns, name => name.Contains("envelope", StringComparison.OrdinalIgnoreCase));
-            Assert.DoesNotContain("__groundwork_version", columns);
         }
         finally
         {
@@ -67,13 +64,11 @@ public sealed class RecordsProviderProofTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL records proof.");
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
-        AssertTypedCrud(connection, RecordTestFixture.CustomerTable("records_pg_" + Guid.NewGuid().ToString("N")), "pg@example.test");
-
-        var catalogTable = RecordTestFixture.CustomerTable("records_pg_plain_" + Guid.NewGuid().ToString("N"), optimistic: false);
-        Assert.True(connection.Schema.Apply(catalogTable.Definition).Applied);
+        var table = RecordTestFixture.CustomerTable("records_pg_" + Guid.NewGuid().ToString("N"));
+        AssertTypedCrud(connection, table, "pg@example.test");
         Assert.Equal(
-            ["id", "name", "email"],
-            ReadPostgreSqlColumns(connectionString!, catalogTable.Definition.Name));
+            ["id", "name", "email", "__groundwork_version"],
+            ReadPostgreSqlColumns(connectionString!, table.Definition.Name));
     }
 
     [SkippableFact]
@@ -82,13 +77,11 @@ public sealed class RecordsProviderProofTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server records proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
-        AssertTypedCrud(connection, RecordTestFixture.CustomerTable("records_sqlserver_" + Guid.NewGuid().ToString("N")), "sqlserver@example.test");
-
-        var catalogTable = RecordTestFixture.CustomerTable("records_sqlserver_plain_" + Guid.NewGuid().ToString("N"), optimistic: false);
-        Assert.True(connection.Schema.Apply(catalogTable.Definition).Applied);
+        var table = RecordTestFixture.CustomerTable("records_sqlserver_" + Guid.NewGuid().ToString("N"));
+        AssertTypedCrud(connection, table, "sqlserver@example.test");
         Assert.Equal(
-            ["id", "name", "email"],
-            ReadSqlServerColumns(connectionString!, catalogTable.Definition.Name));
+            ["id", "name", "email", "__groundwork_version"],
+            ReadSqlServerColumns(connectionString!, table.Definition.Name));
     }
 
     [SkippableFact]
@@ -100,28 +93,15 @@ public sealed class RecordsProviderProofTests
         var nativeConnection = Assert.IsType<MongoDbProviderConnection>(connection);
         var table = RecordTestFixture.CustomerTable("records_mongo_" + Guid.NewGuid().ToString("N"));
         Assert.True(connection.Schema.Apply(table.Definition).Applied);
-        var records = table.Open(connection);
-        var customer = Customer.Create("Ada", "mongo@example.test");
-        var inserted = records.Insert(customer);
-        Assert.Equal(RecordWriteStatus.Inserted, inserted.Status);
-        var updated = records.Update(customer with { Name = "Ada Lovelace" }, RecordWriteOptions.IfVersion(1));
-        Assert.Equal(RecordWriteStatus.Updated, updated.Status);
-        Assert.Equal(2, updated.Version);
-        Assert.Equal(RecordWriteStatus.ConcurrencyConflict,
-            records.Update(customer with { Name = "stale" }, RecordWriteOptions.IfVersion(1)).Status);
-        Assert.Equal("Ada Lovelace", Assert.Single(records.Query(
-            table.Query.Where(row => row.Email == "mongo@example.test")).ToArray()).Name);
-
-        var catalogTable = RecordTestFixture.CustomerTable("records_mongo_plain_" + Guid.NewGuid().ToString("N"), optimistic: false);
-        Assert.True(connection.Schema.Apply(catalogTable.Definition).Applied);
-        var catalogRecords = catalogTable.Open(connection);
+        AssertTypedCrud(table.Open(connection), table, "mongo@example.test");
+        var catalogRecords = table.Open(connection);
         Assert.Equal(RecordWriteStatus.Inserted,
-            catalogRecords.Insert(Customer.Create("Ada", "mongo-plain@example.test")).Status);
+            catalogRecords.Insert(Customer.Create("Catalog", "mongo-catalog@example.test")).Status);
         var document = nativeConnection.Database
-            .GetCollection<BsonDocument>(catalogTable.Definition.Name)
+            .GetCollection<BsonDocument>(table.Definition.Name)
             .Find(FilterDefinition<BsonDocument>.Empty)
             .First();
-        Assert.Equal(["_id", "id", "name", "email"], document.Names);
+        Assert.Equal(["_id", "id", "name", "email", "__groundwork_version"], document.Names);
     }
 
     private static IReadOnlyList<string> ReadPostgreSqlColumns(string connectionString, string tableName)
@@ -170,6 +150,14 @@ public sealed class RecordsProviderProofTests
     {
         Assert.True(connection.Schema.Apply(table.Definition).Applied);
         var records = table.Open(connection);
+        AssertTypedCrud(records, table, email);
+    }
+
+    private static void AssertTypedCrud(
+        RecordTableSession<Customer> records,
+        RecordTable<Customer> table,
+        string email)
+    {
         var customer = Customer.Create("Ada", email);
         var inserted = records.Insert(customer);
         Assert.Equal(RecordWriteStatus.Inserted, inserted.Status);
@@ -182,9 +170,17 @@ public sealed class RecordsProviderProofTests
         var stale = records.Update(customer with { Name = "stale" }, RecordWriteOptions.IfVersion(1));
         Assert.Equal(RecordWriteStatus.ConcurrencyConflict, stale.Status);
 
+        var upserted = records.Upsert(customer with { Name = "Ada Byron" }, RecordWriteOptions.IfVersion(2));
+        Assert.True(upserted.Status is RecordWriteStatus.Upserted or RecordWriteStatus.Updated);
+        Assert.Equal(3, upserted.Version);
+
         var query = table.Query.Where(row => row.Email == email).OrderBy(row => row.Name);
-        var result = records.Query(query);
+        var result = records.Query(query, RecordQueryOptions.UsingIndex("by-email"));
         var match = Assert.Single(result);
-        Assert.Equal("Ada Lovelace", match.Name);
+        Assert.Equal("Ada Byron", match.Name);
+
+        var deleted = records.Delete(customer, RecordWriteOptions.IfVersion(3));
+        Assert.Equal(RecordWriteStatus.Deleted, deleted.Status);
+        Assert.Empty(records.Query(table.Query.Where(row => row.Email == email)));
     }
 }

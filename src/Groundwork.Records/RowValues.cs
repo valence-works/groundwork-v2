@@ -140,5 +140,7 @@ public interface IRecordStore
 
     RecordWriteResult Delete(KernelStorageUnit unit, RowValues key, RecordWriteOptions? options = null);
 
-    RecordQueryResult Query(Groundwork.Query.Model.QueryRequest request);
+    RecordQueryResult Query(
+        Groundwork.Query.Model.QueryRequest request,
+        Groundwork.Query.Model.QueryRenderOptions? options = null);
 }

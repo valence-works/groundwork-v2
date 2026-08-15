@@ -61,9 +61,9 @@ internal sealed class StorageSessionRecordStore(IStorageSession session) : IReco
     public RecordWriteResult Delete(KernelStorageUnit unit, RowValues key, RecordWriteOptions? options = null) =>
         Convert(session.Delete(new StorageKey(key.Values), ToWriteOptions(options)));
 
-    public RecordQueryResult Query(QueryRequest request)
+    public RecordQueryResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
-        var result = session.Query(request);
+        var result = session.Query(request, options);
         return new RecordQueryResult(result.Rows.Select(row => new RowValues(row)).ToArray(), result.TotalCount);
     }
 
@@ -99,9 +99,9 @@ internal sealed class MongoSessionRecordStore(IMongoStorageSession session) : IR
     public RecordWriteResult Delete(KernelStorageUnit unit, RowValues key, RecordWriteOptions? options = null) =>
         Convert(session.Delete(new MongoStorageKey(key.Values), ToWriteOptions(options)));
 
-    public RecordQueryResult Query(QueryRequest request)
+    public RecordQueryResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
-        var result = session.Query(request);
+        var result = session.Query(request, options);
         return new RecordQueryResult(result.Rows.Select(row => new RowValues(row)).ToArray(), result.TotalCount);
     }
 

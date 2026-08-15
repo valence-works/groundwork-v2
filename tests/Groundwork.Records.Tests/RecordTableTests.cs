@@ -13,6 +13,7 @@ public sealed class RecordTableTests
     public void Mapping_compiles_accessors_once_and_round_trips_a_constructor_record()
     {
         var before = RecordTable<Customer>.AccessorCompilationCount;
+        var reflectionBefore = RecordTable<Customer>.AccessorReflectionInspectionCount;
         var table = CustomerTable();
         var afterBuild = RecordTable<Customer>.AccessorCompilationCount;
         var value = Customer.Create("Ada", "ada@example.test");
@@ -23,9 +24,120 @@ public sealed class RecordTableTests
 
         Assert.True(afterBuild >= before);
         Assert.Equal(afterBuild, RecordTable<Customer>.AccessorCompilationCount);
+        Assert.Equal(reflectionBefore, RecordTable<Customer>.AccessorReflectionInspectionCount);
         Assert.Equal(first.Values, second.Values);
         Assert.Equal(value, roundTrip);
         Assert.DoesNotContain("version", first.Values.Keys);
+    }
+
+    [Fact]
+    public void Materializer_populates_every_member_of_mutable_and_mixed_constructor_shapes()
+    {
+        var mutable = RecordTable.For<MutableCustomer>("mutable_customers")
+            .Key(row => row.Id)
+            .Build();
+        var mixed = RecordTable.For<MixedCustomer>("mixed_customers")
+            .Key(row => row.Id)
+            .Build();
+        var id = Guid.NewGuid();
+        var values = new RowValues(new Dictionary<string, object?>
+        {
+            ["id"] = id,
+            ["name"] = "Ada",
+            ["email"] = "ada@example.test"
+        });
+
+        var mutableValue = mutable.FromRowValues(values);
+        var mixedValue = mixed.FromRowValues(values);
+
+        Assert.Equal((id, "Ada", "ada@example.test"), (mutableValue.Id, mutableValue.Name, mutableValue.Email));
+        Assert.Equal((id, "Ada", "ada@example.test"), (mixedValue.Id, mixedValue.Name, mixedValue.Email));
+    }
+
+    [Fact]
+    public void System_owned_version_member_is_excluded_from_queries_and_defaults_without_missing_column_errors()
+    {
+        var table = RecordTable.For<VersionedCustomer>("versioned_" + Guid.NewGuid().ToString("N"))
+            .Key(row => row.Id)
+            .OptimisticConcurrency()
+            .Build();
+        using var connection = new InMemoryProviderFactory().Create("memory://version-member-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(table.Definition).Applied);
+        var records = table.Open(connection);
+        var customer = new VersionedCustomer(Guid.NewGuid(), "Ada", 42);
+
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(customer).Status);
+        var match = Assert.Single(records.Query(table.Query.Where(row => row.Name == "Ada")));
+
+        Assert.Equal(customer.Id, match.Id);
+        Assert.Equal("Ada", match.Name);
+        Assert.Equal(0, match.Version);
+        Assert.DoesNotContain(table.Query.ToQueryRequest().Projection.Columns, column => column.Name == "version");
+    }
+
+    [Fact]
+    public void Build_refuses_optimistic_token_key_and_metadata_conflicts_at_the_declaration_boundary()
+    {
+        var keyConflict = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<VersionedCustomer>("bad_key")
+                .Key(row => row.Version)
+                .OptimisticConcurrency()
+                .Build());
+        var metadataConflict = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<InvalidVersionCustomer>("bad_metadata")
+                .Key(row => row.Id)
+                .OptimisticConcurrency()
+                .Build());
+        var defaultConflict = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<VersionedCustomer>("bad_default")
+                .Key(row => row.Id)
+                .Column(row => row.Version, column => column.Default(7L))
+                .OptimisticConcurrency()
+                .Build());
+
+        Assert.Contains(keyConflict.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-CONCURRENCY-001" && diagnostic.Path == "concurrency");
+        Assert.Contains(metadataConflict.Diagnostics, diagnostic =>
+            diagnostic.Code == "GW-DECL-CONCURRENCY-001" && diagnostic.Message.Contains("non-null Int64 with default 0", StringComparison.Ordinal));
+        Assert.Contains(defaultConflict.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-CONCURRENCY-001");
+    }
+
+    [Fact]
+    public void Typed_partial_projections_materialize_anonymous_and_same_type_shapes_without_omitted_columns()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://projections-" + Guid.NewGuid().ToString("N"));
+        var table = CustomerTable();
+        Assert.True(connection.Schema.Apply(table.Definition).Applied);
+        var records = table.Open(connection);
+        var customer = Customer.Create("Ada", "ada@example.test");
+        const string email = "ada@example.test";
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(customer).Status);
+
+        var anonymous = records.Query(table.Select(
+            table.Query.Where(row => row.Email == email),
+            row => new { row.Id, row.Name }));
+        var sameType = records.Query(table.Select(
+            table.Query.Where(row => row.Email == email),
+            row => new Customer(row.Id, row.Name, "intentionally omitted")));
+
+        Assert.Equal((customer.Id, "Ada"), (Assert.Single(anonymous).Id, Assert.Single(anonymous).Name));
+        Assert.Equal(new Customer(customer.Id, "Ada", "intentionally omitted"), Assert.Single(sameType));
+    }
+
+    [Fact]
+    public void Selected_index_metadata_reaches_the_public_record_store_seam()
+    {
+        var table = CustomerTable();
+        var store = new CapturingRecordStore();
+        var records = table.Open(store);
+
+        _ = records.Query(
+            table.Query.Where(row => row.Email == "ada@example.test"),
+            RecordQueryOptions.UsingIndex("by-email"));
+
+        Assert.Equal("by-email", store.Options?.SelectedIndex);
+        var index = Assert.Single(store.Options!.Indexes);
+        Assert.Equal("by-email", index.Name);
+        Assert.Equal<string>(["email"], index.Columns);
     }
 
     [Fact]
@@ -97,4 +209,35 @@ public sealed class RecordTableTests
     }
 
     private static RecordTable<Customer> CustomerTable() => RecordTestFixture.CustomerTable();
+
+    public sealed class MutableCustomer
+    {
+        public Guid Id { get; set; }
+        public string Name { get; set; } = "unset";
+        public string Email { get; set; } = "unset";
+    }
+
+    public sealed class MixedCustomer(Guid id)
+    {
+        public Guid Id { get; } = id;
+        public string Name { get; set; } = "unset";
+        public string Email { get; set; } = "unset";
+    }
+
+    public sealed record VersionedCustomer(Guid Id, string Name, long Version);
+    public sealed record InvalidVersionCustomer(Guid Id, string Name, string Version);
+
+    private sealed class CapturingRecordStore : IRecordStore
+    {
+        public QueryRenderOptions? Options { get; private set; }
+        public RecordWriteResult Insert(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordWriteResult Update(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordWriteResult Upsert(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordWriteResult Delete(Groundwork.Kernel.StorageUnit unit, RowValues key, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordQueryResult Query(QueryRequest request, QueryRenderOptions? options = null)
+        {
+            Options = options;
+            return new RecordQueryResult([]);
+        }
+    }
 }

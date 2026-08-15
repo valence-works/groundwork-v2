@@ -10,12 +10,16 @@ public sealed partial class RecordTable<T>
 {
     private readonly RecordAccessor<T> accessor;
     private readonly GwTableModel<T> queryModel;
+    private readonly IReadOnlySet<string> optionalReadColumns;
 
     internal RecordTable(KernelStorageUnit definition)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
         accessor = RecordAccessor<T>.Instance;
         queryModel = CreateQueryModel(definition, accessor.Members);
+        optionalReadColumns = definition.Concurrency is { IsOptimistic: true, TokenColumn: { } token }
+            ? new HashSet<string>([token], StringComparer.Ordinal)
+            : EmptyColumns.Instance;
     }
 
     /// <summary>The provider-neutral declaration produced by the typed authoring surface.</summary>
@@ -26,6 +30,9 @@ public sealed partial class RecordTable<T>
 
     /// <summary>Number of compiled accessors for this CLR row type (one per process).</summary>
     public static int AccessorCompilationCount => RecordAccessor<T>.CompilationCount;
+
+    /// <summary>Number of reflection-based member inspections for this CLR row type (one per process).</summary>
+    public static int AccessorReflectionInspectionCount => RecordAccessor<T>.ReflectionInspectionCount;
 
     public RowValues ToRowValues(T value)
     {
@@ -43,7 +50,7 @@ public sealed partial class RecordTable<T>
     public RowValues Map(T value) => ToRowValues(value);
 
     public T FromRowValues(RowValues values) =>
-        accessor.Read(values ?? throw new ArgumentNullException(nameof(values)));
+        accessor.Read(values ?? throw new ArgumentNullException(nameof(values)), optionalReadColumns);
 
     public T Materialize(RowValues values) => FromRowValues(values);
 
@@ -52,7 +59,53 @@ public sealed partial class RecordTable<T>
 
     public RecordTableSession<T> Use(IRecordStore store) => Open(store);
 
-    internal T Read(RowValues values) => accessor.Read(values);
+    /// <summary>
+    /// Creates a typed projection that retains both its provider query and its compiled result shape.
+    /// Only direct record members may supply projected values; constants may be used for intentionally
+    /// omitted members of a same-type shape.
+    /// </summary>
+    public RecordProjection<TResult> Select<TResult>(
+        IGwQueryable<T> query,
+        Expression<Func<T, TResult>> selector)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(selector);
+        ValidateRequest(query.ToQueryRequest());
+        var projected = query.Select(selector);
+        return new RecordProjection<TResult>(this, projected.ToQueryRequest(),
+            RecordProjectionAccessor.Compile(selector, accessor.Members));
+    }
+
+    public RecordProjection<TResult> Project<TResult>(
+        IGwQueryable<T> query,
+        Expression<Func<T, TResult>> selector) => Select(query, selector);
+
+    internal T Read(RowValues values) => accessor.Read(values, optionalReadColumns);
+
+    internal void ValidateRequest(QueryRequest request)
+    {
+        if (!string.Equals(request.Table.Value, Definition.Name, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"A query for table '{request.Table.Value}' cannot be executed by record table '{Definition.Name}'.");
+    }
+
+    internal QueryRenderOptions CreateRenderOptions(RecordQueryOptions? options)
+    {
+        var indexes = Definition.Indexes.Select(index => new QueryIndexDeclaration(
+            index.Name,
+            index.Columns.Select(indexColumn =>
+            {
+                var column = Definition.Columns.Single(declaration =>
+                    string.Equals(declaration.Name, indexColumn.Column, StringComparison.Ordinal));
+                if (!TryGetQueryType(column.Type, out var queryType))
+                    throw new InvalidOperationException(
+                        $"Index '{index.Name}' column '{column.Name}' cannot participate in a typed record query.");
+                return new QueryIndexColumn(column.Name, column.IsNullable, queryType);
+            })));
+        var renderOptions = new QueryRenderOptions(indexes, options?.SelectedIndex);
+        _ = renderOptions.FindSelectedIndex();
+        return renderOptions;
+    }
 
     private static GwTableModel<T> CreateQueryModel(
         KernelStorageUnit definition,
@@ -64,6 +117,9 @@ public sealed partial class RecordTable<T>
             var declaration = definition.Columns.FirstOrDefault(column =>
                 string.Equals(column.Name, member.ColumnName, StringComparison.Ordinal));
             if (declaration is null)
+                continue;
+            if (definition.Concurrency is { IsOptimistic: true, TokenColumn: { } token } &&
+                string.Equals(declaration.Name, token, StringComparison.Ordinal))
                 continue;
             if (!TryGetQueryType(declaration.Type, out var type))
                 continue;
@@ -146,29 +202,48 @@ public sealed class RecordTableSession<T>
         return store.Delete(table.Definition, key, options);
     }
 
-    public IReadOnlyList<T> Query(IGwQueryable<T> query)
+    public IReadOnlyList<T> Query(IGwQueryable<T> query, RecordQueryOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(query);
-        return store.Query(query.ToQueryRequest()).Rows.Select(table.FromRowValues).ToArray();
+        var request = query.ToQueryRequest();
+        table.ValidateRequest(request);
+        return store.Query(request, table.CreateRenderOptions(options)).Rows.Select(table.FromRowValues).ToArray();
     }
 
-    public IReadOnlyList<T> Query(Func<IGwQueryable<T>, IGwQueryable<T>> configure)
+    public IReadOnlyList<T> Query(
+        Func<IGwQueryable<T>, IGwQueryable<T>> configure,
+        RecordQueryOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(configure);
-        return Query(configure(table.Query));
+        return Query(configure(table.Query), options);
+    }
+
+    public IReadOnlyList<TResult> Query<TResult>(
+        RecordProjection<TResult> projection,
+        RecordQueryOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(projection);
+        projection.EnsureOwner(table);
+        return store.Query(projection.Request, table.CreateRenderOptions(options)).Rows
+            .Select(projection.Materialize)
+            .ToArray();
     }
 
     public long Count(IGwQueryable<T> query)
     {
         ArgumentNullException.ThrowIfNull(query);
-        var result = store.Query(query.Count().Request);
+        var request = query.Count().Request;
+        table.ValidateRequest(request);
+        var result = store.Query(request, table.CreateRenderOptions(null));
         return result.TotalCount ?? result.Rows.Count;
     }
 
     public bool Any(IGwQueryable<T> query)
     {
         ArgumentNullException.ThrowIfNull(query);
-        return store.Query(query.Any().Request).Rows.Count != 0;
+        var request = query.Any().Request;
+        table.ValidateRequest(request);
+        return store.Query(request, table.CreateRenderOptions(null)).Rows.Count != 0;
     }
 
     private void ValidateOptions(RecordWriteOptions? options)
@@ -177,4 +252,20 @@ public sealed class RecordTableSession<T>
             throw new InvalidOperationException(
                 $"Storage unit '{table.Definition.Name}' does not declare version machinery.");
     }
+}
+
+/// <summary>Provider-neutral options for a typed Records query.</summary>
+public sealed record RecordQueryOptions
+{
+    public RecordQueryOptions(string? selectedIndex = null)
+    {
+        if (selectedIndex is not null && string.IsNullOrWhiteSpace(selectedIndex))
+            throw new ArgumentException("A selected index cannot be blank.", nameof(selectedIndex));
+        SelectedIndex = selectedIndex;
+    }
+
+    /// <summary>The declared logical index the provider must select or verify in its native plan.</summary>
+    public string? SelectedIndex { get; }
+
+    public static RecordQueryOptions UsingIndex(string name) => new(name);
 }

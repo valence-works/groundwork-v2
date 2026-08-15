@@ -143,7 +143,10 @@ jobs:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/recordsci
+          GW_EXPLAIN_ASSERT: "1"
         run: dotnet test tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj --no-restore --configuration Release
+      - name: Assert Records write and materialization hot paths
+        run: dotnet run --project benchmarks/Groundwork.Benchmarks --configuration Release -- records --n 10000
 
   sqlserver-conformance:
     runs-on: ubuntu-latest

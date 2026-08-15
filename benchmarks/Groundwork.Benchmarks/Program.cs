@@ -122,14 +122,22 @@ static int RunRecordsBenchmark(string[] args)
         .Column(record => record.Name, column => column.MaxLength(200))
         .Build();
     var before = RecordTable<BenchmarkRecord>.AccessorCompilationCount;
+    var reflectionBefore = RecordTable<BenchmarkRecord>.AccessorReflectionInspectionCount;
     var record = new BenchmarkRecord(Guid.NewGuid(), "benchmark");
+    var values = table.ToRowValues(record);
     for (var value = 0; value < count; value++)
+    {
         _ = table.ToRowValues(record);
+        _ = table.FromRowValues(values);
+    }
 
     var compilationDelta = RecordTable<BenchmarkRecord>.AccessorCompilationCount - before;
+    var reflectionDelta = RecordTable<BenchmarkRecord>.AccessorReflectionInspectionCount - reflectionBefore;
     if (compilationDelta != 0)
-        throw new InvalidOperationException($"Records accessors compiled {compilationDelta} times during {count} operations; expected zero hot-path compilations.");
-    Console.WriteLine($"provider=none workload=records mappings={count} accessor_compilations={compilationDelta} reflection_hot_path=false");
+        throw new InvalidOperationException($"Records accessors compiled {compilationDelta} times during {count} writes and materializations; expected zero hot-path compilations.");
+    if (reflectionDelta != 0)
+        throw new InvalidOperationException($"Records inspected members with reflection {reflectionDelta} times during {count} writes and materializations; expected zero hot-path inspections.");
+    Console.WriteLine($"provider=none workload=records writes={count} materializations={count} accessor_compilations={compilationDelta} reflection_inspections={reflectionDelta} reflection_hot_path=false");
     return 0;
 }
 

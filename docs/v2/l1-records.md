@@ -7,13 +7,24 @@ not reference the typed declaration or the CLR row type.
 ## Mapping
 
 `RecordTable<T>.ToRowValues` compiles public property and field accessors once per CLR row type and
-caches them in a closed generic cache. `FromRowValues` uses the matching public constructor (or
-compiled writable-member assignments) to materialize a row. The hot path only invokes delegates and
-does not inspect `MemberInfo`, call `PropertyInfo.GetValue`, or call `Activator`.
+caches them in a closed generic cache. `FromRowValues` chooses a public constructor that can account
+for every read-only member, then applies compiled assignments to every remaining writable member.
+It refuses shapes that cannot initialize every declared member. The hot path only invokes delegates
+and does not inspect `MemberInfo`, call `PropertyInfo.GetValue`, or call `Activator`.
 
 `ToRowValues` omits a system-owned optimistic token even if a CLR type happens to expose a member
 with the same name. Callers provide the expected version through `RecordWriteOptions`; the provider
-returns the next version in `RecordWriteResult`.
+returns the next version in `RecordWriteResult`. The token is likewise excluded from record queries;
+a same-named CLR member materializes as its default value and must not be used as application state.
+The declaration records the logical token (normally `version`), while providers normalize that
+declared machinery to their physical `__groundwork_version` column or field. It is neither an
+envelope nor an additional implicit application column.
+
+Typed partial results use `table.Select(query, selector)` and execute through the same Records
+session. The retained selector compiles a result materializer for direct members, anonymous shapes,
+and intentionally partial same-type constructors/member initializers, so omitted columns are never
+read. `RecordQueryOptions.UsingIndex(name)` carries a declared logical index to the provider for
+native selection/plan verification.
 
 ## Execution boundary
 
@@ -32,4 +43,5 @@ Run the mapping benchmark with:
 dotnet run --project benchmarks/Groundwork.Benchmarks -- records --n 1000
 ```
 
-The command fails if any accessor compilation happens during the 1,000 mapping operations.
+The command exercises both writes and materialization and fails if accessor compilation happens on
+either hot path.
