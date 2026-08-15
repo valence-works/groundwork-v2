@@ -1,5 +1,7 @@
+using System.Collections.Immutable;
 using System.Data;
 using System.Data.Common;
+using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 
 namespace Groundwork.Substrate.Relational;
@@ -134,9 +136,9 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         using var transaction = dialect.BeginTransaction(connection);
         try
         {
-            ValidateTarget(connection, transaction, appliedTarget);
+            var inspection = InspectTarget(connection, transaction, appliedTarget, history);
             transaction.Commit();
-            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+            return inspection;
         }
         catch (InvalidOperationException)
         {
@@ -255,38 +257,119 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         DbTransaction transaction,
         PhysicalSchemaTarget target)
     {
+        var inspection = InspectTarget(connection, transaction, target, PhysicalSchemaHistoryState.Empty);
+        if (inspection.ColumnDrift.Any() || inspection.IndexDrift.Any())
+        {
+            var refusal = inspection.ColumnDrift.FirstOrDefault() ?? inspection.IndexDrift.First();
+            throw new InvalidOperationException(refusal.Message);
+        }
+    }
+
+    private PhysicalSchemaInspectionResult InspectTarget(
+        DbConnection connection,
+        DbTransaction transaction,
+        PhysicalSchemaTarget target,
+        PhysicalSchemaHistoryState history)
+    {
         var table = target.Subject.Name;
         if (!dialect.TableExists(connection, transaction, table))
-            throw new InvalidOperationException($"Relational schema table '{table}' does not exist.");
+        {
+            return new PhysicalSchemaInspectionResult(
+                history,
+                IsAppliedSchemaValid: false,
+                ColumnDrift: [new SchemaRefusal(
+                    "GW-RUNTIME-001",
+                    $"Relational schema table '{table}' does not exist.",
+                    "table")]);
+        }
 
         var columns = dialect.ReadColumns(connection, transaction, table)
             ?? throw new InvalidOperationException($"The relational dialect returned no column catalog for '{table}'.");
+        var columnDrift = new List<SchemaRefusal>();
         foreach (var expected in target.Subject.Columns)
         {
             if (!columns.TryGetValue(expected.Name, out var actual) || actual is null)
-                throw new InvalidOperationException($"Relational schema table '{table}' is missing column '{expected.Name}'.");
-            var expectedKeyOrder = Array.IndexOf(target.Subject.Key.Columns.ToArray(), expected.Name) + 1;
-            if (!string.Equals(actual.Name, expected.Name, StringComparison.Ordinal) ||
-                !string.Equals(actual.StoreType, dialect.MapType(expected), StringComparison.OrdinalIgnoreCase) ||
-                actual.IsNullable != expected.IsNullable ||
-                !string.Equals(actual.DefaultValue, dialect.MapDefault(expected), StringComparison.Ordinal) ||
-                !string.Equals(actual.Collation, dialect.MapCollation(expected), StringComparison.OrdinalIgnoreCase) ||
-                actual.PrimaryKeyOrder != expectedKeyOrder ||
-                actual.IsComputed ||
-                actual.IsPersisted ||
-                actual.ComputedDefinition is not null)
             {
-                throw new InvalidOperationException($"Relational schema column '{table}.{expected.Name}' does not match its declaration.");
+                columnDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-001",
+                    $"Relational schema table '{table}' is missing column '{expected.Name}'.",
+                    $"columns.{expected.Name}"));
+                continue;
+            }
+            var expectedKeyOrder = Array.IndexOf(target.Subject.Key.Columns.ToArray(), expected.Name) + 1;
+            var differences = new List<string>();
+            var expectedType = dialect.MapType(expected);
+            var expectedDefault = dialect.MapDefault(expected);
+            var expectedCollation = dialect.MapCollation(expected);
+            if (!string.Equals(actual.Name, expected.Name, StringComparison.Ordinal))
+                differences.Add($"name '{actual.Name}' != '{expected.Name}'");
+            if (!string.Equals(actual.StoreType, expectedType, StringComparison.OrdinalIgnoreCase))
+                differences.Add($"type '{actual.StoreType}' != '{expectedType}'");
+            if (actual.IsNullable != expected.IsNullable)
+                differences.Add($"nullability {actual.IsNullable} != {expected.IsNullable}");
+            if (!string.Equals(actual.DefaultValue, expectedDefault, StringComparison.Ordinal))
+                differences.Add($"default '{actual.DefaultValue ?? "<none>"}' != '{expectedDefault ?? "<none>"}'");
+            if (!string.Equals(actual.Collation, expectedCollation, StringComparison.OrdinalIgnoreCase))
+                differences.Add($"collation '{actual.Collation ?? "<none>"}' != '{expectedCollation ?? "<none>"}'");
+            if (actual.PrimaryKeyOrder != expectedKeyOrder)
+                differences.Add($"primary-key order {actual.PrimaryKeyOrder} != {expectedKeyOrder}");
+            if (actual.Generation != expected.Generation)
+                differences.Add($"generation {actual.Generation} != {expected.Generation}");
+            if (actual.IsComputed)
+                differences.Add("computed column is true");
+            if (actual.IsPersisted)
+                differences.Add("persisted computed column is true");
+            if (actual.ComputedDefinition is not null)
+                differences.Add($"computed definition '{actual.ComputedDefinition}' is present");
+            if (differences.Count != 0)
+            {
+                columnDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-001",
+                    $"Relational schema column '{table}.{expected.Name}' differs: {string.Join(", ", differences)}.",
+                    $"columns.{expected.Name}"));
             }
         }
 
+        if (target.Subject.DerivedColumns.Length != 0)
+        {
+            var algorithms = dialect.ReadDerivedSearchKeyAlgorithms(connection, transaction, table)
+                ?? throw new InvalidOperationException(
+                    $"The relational dialect returned no search-key algorithm catalog for '{table}'.");
+            foreach (var expected in target.Subject.DerivedColumns)
+            {
+                var expectedAlgorithm = ProjectionAlgorithmId(expected.Projection);
+                if (!algorithms.TryGetValue(expected.Name, out var actualAlgorithm) ||
+                    !string.Equals(actualAlgorithm, expectedAlgorithm, StringComparison.Ordinal))
+                {
+                    columnDrift.Add(new SchemaRefusal(
+                        "GW-RUNTIME-001",
+                        $"Relational persisted search-key algorithm for derived column '{table}.{expected.Name}' differs: " +
+                        $"'{actualAlgorithm ?? "<missing>"}' != '{expectedAlgorithm}'.",
+                        $"columns.{expected.Name}.searchKeyAlgorithm"));
+                }
+            }
+        }
+
+        var indexDrift = new List<SchemaRefusal>();
         foreach (var expectedIndex in target.Subject.Indexes)
         {
             var actual = dialect.ReadIndex(connection, transaction, table, expectedIndex.Name);
             if (actual is null)
-                throw new InvalidOperationException($"Relational schema table '{table}' is missing index '{expectedIndex.Name}'.");
+            {
+                indexDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-002",
+                    $"Relational schema table '{table}' is missing index '{expectedIndex.Name}'.",
+                    $"indexes.{expectedIndex.Name}"));
+                continue;
+            }
             if (actual.IsUnique != expectedIndex.IsUnique)
-                throw new InvalidOperationException($"Relational schema index '{table}.{expectedIndex.Name}' has unexpected uniqueness.");
+            {
+                indexDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-002",
+                    $"Relational schema index '{table}.{expectedIndex.Name}' has unexpected uniqueness.",
+                    $"indexes.{expectedIndex.Name}"));
+                continue;
+            }
             var expectedColumns = expectedIndex.Columns
                 .Select(column => new RelationalIndexColumnMetadata(column.Column, column.Direction))
                 .ToArray();
@@ -296,12 +379,50 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                     NormalizeIndexFilter(dialect.IndexFilter(expectedIndex)),
                     StringComparison.Ordinal))
             {
-                throw new InvalidOperationException($"Relational schema index '{table}.{expectedIndex.Name}' does not match its declaration.");
+                indexDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-002",
+                    $"Relational schema index '{table}.{expectedIndex.Name}' does not match its declaration.",
+                    $"indexes.{expectedIndex.Name}"));
             }
         }
 
-        dialect.ValidateTarget(connection, transaction, target);
+        var inspection = new PhysicalSchemaInspectionResult(
+            history,
+            IsAppliedSchemaValid: columnDrift.Count == 0,
+            columnDrift.ToImmutableArray(),
+            indexDrift.ToImmutableArray());
+
+        if (inspection.IsAppliedSchemaValid)
+        {
+            try
+            {
+                // Provider invariants remain part of the non-mutating open/inspection path. A
+                // provider may reject a catalog shape that the neutral checks cannot describe.
+                dialect.ValidateTarget(connection, transaction, target);
+            }
+            catch (InvalidOperationException exception)
+            {
+                return inspection with
+                {
+                    IsAppliedSchemaValid = false,
+                    ColumnDrift = [new SchemaRefusal(
+                        "GW-RUNTIME-001",
+                        $"Relational provider invariant failed: {exception.Message}",
+                        "provider")]
+                };
+            }
+        }
+
+        return inspection;
     }
+
+    private static string ProjectionAlgorithmId(PortableProjection projection) => projection switch
+    {
+        PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
+        PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
+        PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
+        _ => throw new ArgumentOutOfRangeException(nameof(projection), projection, null)
+    };
 
     private static string? NormalizeIndexFilter(string? filter) =>
         filter is null

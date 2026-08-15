@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 
 namespace Groundwork.MongoDb;
 
@@ -191,6 +192,35 @@ public sealed record MongoSchemaApplyResult(MongoSchemaDiff Diff, bool Applied)
     public bool IsNoOp => Diff.IsEmpty;
 }
 
+/// <summary>
+/// Native MongoDB admission evidence. Column drift prevents a store from opening; index drift
+/// remains observable so a query coverage gate can refuse only shapes that require that index.
+/// Extra native indexes are intentionally absent from <see cref="IndexDrift"/>.
+/// </summary>
+public sealed class MongoSchemaAdmissionReport
+{
+    public MongoSchemaAdmissionReport(
+        StorageUnitId subjectId,
+        IEnumerable<SchemaRefusal>? columnDrift,
+        IEnumerable<SchemaRefusal>? indexDrift)
+    {
+        SubjectId = subjectId;
+        ColumnDrift = Array.AsReadOnly((columnDrift ?? []).ToArray());
+        IndexDrift = Array.AsReadOnly((indexDrift ?? []).ToArray());
+    }
+
+    public StorageUnitId SubjectId { get; }
+
+    public IReadOnlyList<SchemaRefusal> ColumnDrift { get; }
+
+    public IReadOnlyList<SchemaRefusal> IndexDrift { get; }
+
+    public IReadOnlyList<SchemaRefusal> Refusals =>
+        Array.AsReadOnly(ColumnDrift.Concat(IndexDrift).ToArray());
+
+    public bool IsProcessReady => ColumnDrift.Count == 0;
+}
+
 public interface IMongoProviderCatalog
 {
     IReadOnlyList<MongoProviderIndex> ReadIndexes(StorageUnitId storageUnitId);
@@ -236,6 +266,9 @@ public interface IMongoProviderConnection : IDisposable
     IMongoProviderCatalog Catalog { get; }
 
     IMongoSchemaCoordinator Schema { get; }
+
+    /// <summary>Reads native admission evidence without applying or repairing schema.</summary>
+    MongoSchemaAdmissionReport InspectSchema(StorageUnit unit, MongoStorageAccess access);
 
     IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access);
 

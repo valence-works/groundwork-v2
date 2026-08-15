@@ -21,6 +21,27 @@ and `GW-COVER-903` on or after the expiry date, and `GW-COVER-905` inventories t
 owner, and expiry. Providers should call `QueryCoverageEnforcer.EnsureCovered` immediately before
 executing a resolved request so analyzer suppression cannot bypass the runtime gate.
 
+Q10 runtime admission compares the deployed catalog with the compiled physical target. Missing or
+changed columns (including collation and persisted search-key algorithm) are startup-fatal and name
+the column; missing or changed declared indexes are reported separately and only make dependent
+query shapes refuse. Runtime coverage intersects declared indexes with the deployed set, so an
+undeclared database index cannot rescue a query during a rolling deploy. Generated/recognized shapes
+use their verified plan when its index is present; other shapes use the same Q3 checker and are
+cached by `ShapeFingerprint` in a bounded `RuntimeCoverageGate`. Cache eviction emits the
+`groundwork.runtime.coverage.cache.eviction` metric. `RuntimeValueFence` rechecks membership
+cardinality, provider parameter count, and continuation order/plan binding before execution; the
+typed query model enforces value length, decimal precision/scale, and well-formed UTF-16 at
+construction.
+
+The MongoDB provider performs the same inspect-only admission split at `OpenSession`: its public
+`InspectSchema` report classifies missing/invalid BSON fields and persisted derived-column
+algorithm metadata as `GW-RUNTIME-001` column drift, and missing/changed declared native indexes
+as `GW-RUNTIME-002` index drift. Column drift blocks the store; index drift is retained in the
+report and does not block opening. MongoDB currently has no provider query executor wired to the
+Q3 runtime gate, so this release documents that provider gap explicitly: Mongo query endpoints
+must call the shared `RuntimeCoverageGate` before execution to obtain dependent-shape refusal;
+extra native indexes are never used by the admission report to satisfy a declared index.
+
 Q3 refusal codes are preserved in the diagnostic message and include the suggested `[GwIndex(...)]`
 declaration. Roslyn requires compiler-valid diagnostic identifiers, so the emitted IDs use
 `GW_COVER_005`, `GW_COVER_006`, `GW_COVER_009`, `GW_COVER_016`, `GW_COVER_900`, and

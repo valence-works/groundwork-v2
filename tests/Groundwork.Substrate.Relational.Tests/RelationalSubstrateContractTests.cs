@@ -221,6 +221,95 @@ public sealed class RelationalSubstrateContractTests
     }
 
     [Fact]
+    public void Inspect_history_reports_each_concrete_column_difference()
+    {
+        var connection = new TrackingConnection();
+        var dialect = new StubDialect { TableExistsResult = true };
+        dialect.CatalogColumns["id"] = new("id", "integer", true, null, null, 1);
+        var executor = new RelationalSchemaExecutor(() => connection, dialect);
+        var target = CreateTarget();
+        var applied = PhysicalSchemaApplication.Apply(target, executor, DateTimeOffset.UnixEpoch).AppliedState!;
+        dialect.History = PhysicalSchemaHistoryState.FromApplied(applied);
+        dialect.CatalogColumns["id"] = new(
+            "id",
+            "varchar(255)",
+            false,
+            "wrong-default",
+            "wrong-collation",
+            0,
+            IsComputed: true,
+            IsPersisted: true,
+            ComputedDefinition: "generated",
+            Generation: ColumnGeneration.ProviderSequence);
+
+        var inspection = executor.InspectHistory(target);
+
+        var message = inspection.ColumnDrift.Single().Message;
+        Assert.Contains("type", message, StringComparison.Ordinal);
+        Assert.Contains("nullability", message, StringComparison.Ordinal);
+        Assert.Contains("default", message, StringComparison.Ordinal);
+        Assert.Contains("collation", message, StringComparison.Ordinal);
+        Assert.Contains("primary-key order", message, StringComparison.Ordinal);
+        Assert.Contains("generation", message, StringComparison.Ordinal);
+        Assert.Contains("computed", message, StringComparison.Ordinal);
+        Assert.Contains("columns.id", inspection.ColumnDrift.Single().Path, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Inspect_history_checks_persisted_search_key_algorithm_and_provider_invariants()
+    {
+        var connection = new TrackingConnection();
+        var dialect = new StubDialect { TableExistsResult = true };
+        dialect.CatalogColumns["id"] = new("id", "integer", true, null, null, 1);
+        dialect.CatalogColumns["name"] = new("name", "varchar(255)", true, null, null, 0);
+        dialect.CatalogColumns["name_folded"] = new("name_folded", "varchar(255)", false, null, null, 0);
+        var executor = new RelationalSchemaExecutor(() => connection, dialect);
+        var target = new PhysicalSchemaTarget(
+            new SchemaSubject(new StorageUnit
+            {
+                Id = new StorageUnitId("tickets-derived"),
+                Name = "tickets-derived",
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Int64 },
+                    new() { Name = "name", Type = PortableType.String },
+                    new() { Name = "name_folded", Type = PortableType.String, IsNullable = false }
+                ],
+                DerivedColumns =
+                [
+                    new()
+                    {
+                        Name = "name_folded",
+                        SourceColumn = "name",
+                        Projection = PortableProjection.BoundarySearchKey
+                    }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            }),
+            new ProviderIdentity("stub", "1"));
+
+        dialect.DerivedSearchKeyAlgorithms["name_folded"] = PortableStringComparison.SearchKeyAlgorithmId;
+        var applied = PhysicalSchemaApplication.Apply(target, executor, DateTimeOffset.UnixEpoch).AppliedState!;
+        dialect.History = PhysicalSchemaHistoryState.FromApplied(applied);
+        dialect.DerivedSearchKeyAlgorithms["name_folded"] = "old-search-key-v1";
+
+        var inspection = executor.InspectHistory(target);
+
+        Assert.Contains(inspection.ColumnDrift, refusal =>
+            refusal.Path == "columns.name_folded.searchKeyAlgorithm" &&
+            refusal.Message.Contains(PortableStringComparison.SearchKeyAlgorithmId, StringComparison.Ordinal));
+
+        dialect.DerivedSearchKeyAlgorithms["name_folded"] = PortableStringComparison.SearchKeyAlgorithmId;
+        dialect.ThrowOnValidateTarget = true;
+        var providerInspection = executor.InspectHistory(target);
+
+        Assert.Contains(providerInspection.ColumnDrift, refusal =>
+            refusal.Path == "provider" &&
+            refusal.Message.Contains("provider invariant", StringComparison.Ordinal));
+        Assert.Equal(2, dialect.ValidateTargetCalls);
+    }
+
+    [Fact]
     public void Executor_opens_one_connection_and_releases_it_with_the_application_lock()
     {
         var connection = new TrackingConnection();
@@ -266,6 +355,7 @@ public sealed class RelationalSubstrateContractTests
         public int AcquireFenceCalls { get; private set; }
         public int ReadServerSessionIdCalls { get; private set; }
         public bool ThrowOnAcquireFence { get; init; }
+        public bool ThrowOnValidateTarget { get; set; }
         public bool TableExistsResult { get; init; }
         public int TableExistsCalls { get; private set; }
         public int ReadColumnsCalls { get; private set; }
@@ -276,6 +366,7 @@ public sealed class RelationalSubstrateContractTests
         public bool LastPublishHadTransaction { get; private set; }
         public ColumnDefinition? FinalizedColumn { get; private set; }
         public Dictionary<string, RelationalColumnMetadata> CatalogColumns { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> DerivedSearchKeyAlgorithms { get; } = new(StringComparer.Ordinal);
         public PhysicalSchemaHistoryState History { get; set; } = PhysicalSchemaHistoryState.Empty;
 
         public override string ProviderName => "stub";
@@ -358,8 +449,15 @@ public sealed class RelationalSubstrateContractTests
             ReadColumnsCalls++;
             return CatalogColumns;
         }
+        public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(DbConnection connection, DbTransaction transaction, string table) =>
+            DerivedSearchKeyAlgorithms;
         public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction transaction, string table, string index) => null;
-        public override void ValidateTarget(DbConnection connection, DbTransaction transaction, PhysicalSchemaTarget target) => ValidateTargetCalls++;
+        public override void ValidateTarget(DbConnection connection, DbTransaction transaction, PhysicalSchemaTarget target)
+        {
+            ValidateTargetCalls++;
+            if (ThrowOnValidateTarget)
+                throw new InvalidOperationException("stub provider invariant failed");
+        }
 
         public override string? BackfillColumnSql(string table, ColumnDefinition column) => $"BACKFILL {table}.{column.Name}";
     }
