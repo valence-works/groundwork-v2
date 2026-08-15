@@ -45,6 +45,9 @@
   <Folder Name="/src/Groundwork.SqlServer/">
     <Project Path="src/Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.PostgreSql/">
+    <Project Path="src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Analyzers/">
     <Project Path="src/Groundwork.Analyzers/Groundwork.Analyzers.csproj" />
   </Folder>
@@ -57,6 +60,9 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Concurrency.Tests/">
     <Project Path="tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.PostgreSql.Tests/">
+    <Project Path="tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Kernel.Schema.Tests/">
     <Project Path="tests/Groundwork.Kernel.Schema.Tests/Groundwork.Kernel.Schema.Tests.csproj" />
