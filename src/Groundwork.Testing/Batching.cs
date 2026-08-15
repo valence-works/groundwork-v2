@@ -173,10 +173,7 @@ public sealed class RowWrite
     {
         get
         {
-            var values = Key?.Values ?? Values!.Values;
-            if (Unit.Key.Columns.Any(column =>
-                    Unit.Columns.FirstOrDefault(definition => definition.Name == column)?.Generation == ColumnGeneration.ProviderSequence &&
-                    !values.ContainsKey(column)))
+            if (HasUnassignedProviderSequenceKey)
             {
                 // A generated key cannot identify an uncommitted insert. A private object
                 // token gives the declaration collision-free reference identity until the
@@ -185,6 +182,17 @@ public sealed class RowWrite
             }
 
             return Identity;
+        }
+    }
+
+    internal bool HasUnassignedProviderSequenceKey
+    {
+        get
+        {
+            var values = Key?.Values ?? Values!.Values;
+            return Unit.Key.Columns.Any(column =>
+                Unit.Columns.FirstOrDefault(definition => definition.Name == column)?.Generation == ColumnGeneration.ProviderSequence &&
+                !values.ContainsKey(column));
         }
     }
 
@@ -217,6 +225,8 @@ public sealed class RowWrite
     internal bool Matches(StorageKey key)
     {
         ArgumentNullException.ThrowIfNull(key);
+        if (HasUnassignedProviderSequenceKey)
+            return false;
         foreach (var column in Unit.Key.Columns)
         {
             if (!KeyValues.TryGetValue(column, out var left) ||
@@ -443,7 +453,9 @@ internal sealed class BatchContext
     internal IReadOnlyList<RowWriteOutcome> FlushFor(StorageUnit unit, StorageKey key)
     {
         EnsureHealthy();
-        var writes = staged.Where(write => write.Unit.Id == unit.Id && write.Matches(key)).ToArray();
+        var writes = staged.Where(write =>
+            write.Unit.Id == unit.Id &&
+            (write.HasUnassignedProviderSequenceKey || write.Matches(key))).ToArray();
         return writes.Length == 0 ? [] : Flush(writes);
     }
 

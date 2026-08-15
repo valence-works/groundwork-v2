@@ -446,6 +446,33 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Batched_generated_key_insert_flushes_before_a_staged_key_read()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://generated-key-read-barrier");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("generated-key-read-barrier"),
+            Name = "GeneratedKeyReadBarrier",
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "value", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        connection.Schema.Apply(unit);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["value"] = "staged" })));
+
+        var staged = work.OpenSession(unit).Read(new StorageKey(
+            new Dictionary<string, object?> { ["sequence"] = 1L }));
+
+        Assert.Equal("staged", staged!.Values.Values["value"]);
+        var report = work.CommitWithOutcomes();
+        Assert.Equal(1L, Assert.Single(report.Outcomes).Outcome.GeneratedValue<long>("sequence"));
+    }
+
+    [Fact]
     public void Batched_identity_is_collision_free_for_composite_delimiter_values()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://batched-composite-identity");
