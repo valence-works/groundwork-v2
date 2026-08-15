@@ -30,9 +30,9 @@ public sealed class KernelBoundaryTests
 
         var violations = universe.Assemblies
             .Where(IsKernelSubstrateOrProvider)
-            .SelectMany(assembly => assembly.GetReferencedAssemblies()
-                .Where(reference => reference.Name is not null && contractFamilies.Contains(reference.Name))
-                .Select(reference => $"{assembly.GetName().Name} -> {reference.Name}"))
+            .SelectMany(assembly => universe.NonBclReferenceClosure(assembly)
+                .Where(reference => contractFamilies.Contains(reference.Name))
+                .Select(reference => reference.Path))
             .OrderBy(violation => violation, StringComparer.Ordinal)
             .ToArray();
 
@@ -47,9 +47,8 @@ public sealed class KernelBoundaryTests
         using var universe = AssemblyUniverse.Load();
         var violations = universe.Assemblies
             .Where(assembly => IsKernelAssembly(assembly.GetName().Name))
-            .SelectMany(assembly => assembly.GetReferencedAssemblies()
-                .Where(reference => reference.Name is not null && !universe.BclAssemblyNames.Contains(reference.Name))
-                .Select(reference => $"{assembly.GetName().Name} -> {reference.Name}"))
+            .SelectMany(assembly => universe.NonBclReferenceClosure(assembly)
+                .Select(reference => reference.Path))
             .OrderBy(violation => violation, StringComparer.Ordinal)
             .ToArray();
 
@@ -158,8 +157,14 @@ public sealed class KernelBoundaryTests
     {
         var constraints = genericArguments
             .Where(argument => argument.IsGenericParameter)
-            .SelectMany(argument => argument.GetGenericParameterConstraints()
-                .Select(constraint => $" where {argument.Name} : {TypeName(constraint)}"));
+            .Select(argument =>
+            {
+                var types = argument.GetGenericParameterConstraints().Select(TypeName);
+                var parts = new[] { argument.GenericParameterAttributes.ToString() }
+                    .Where(value => value != GenericParameterAttributes.None.ToString())
+                    .Concat(types);
+                return $" where {argument.Name} : {string.Join(", ", parts)}";
+            });
         return string.Concat(constraints);
     }
 
@@ -183,18 +188,52 @@ public sealed class KernelBoundaryTests
 
         public ImmutableHashSet<string> BclAssemblyNames { get; }
 
+        public IEnumerable<AssemblyReference> NonBclReferenceClosure(Assembly root)
+        {
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            var pending = new Queue<(Assembly Assembly, string Path)>();
+            pending.Enqueue((root, root.GetName().Name!));
+
+            while (pending.Count > 0)
+            {
+                var current = pending.Dequeue();
+                foreach (var reference in current.Assembly.GetReferencedAssemblies()
+                             .Where(reference => reference.Name is not null &&
+                                                 !BclAssemblyNames.Contains(reference.Name))
+                             .OrderBy(reference => reference.Name, StringComparer.Ordinal))
+                {
+                    var path = $"{current.Path} -> {reference.Name}";
+                    yield return new AssemblyReference(reference.Name!, path);
+
+                    if (visited.Add(reference.FullName))
+                        pending.Enqueue((context.LoadFromAssemblyName(reference), path));
+                }
+            }
+        }
+
         public static AssemblyUniverse Load()
         {
             var trustedPlatformAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?
                 .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
                 ?? throw new InvalidOperationException("The runtime did not expose trusted platform assemblies.");
-            var groundworkAssemblies = Directory
-                .EnumerateFiles(AppContext.BaseDirectory, "Groundwork*.dll", SearchOption.TopDirectoryOnly)
-                .Where(path => !Path.GetFileNameWithoutExtension(path).EndsWith(".Tests", StringComparison.Ordinal))
+            var outputAssemblies = Directory
+                .EnumerateFiles(AppContext.BaseDirectory, "*.dll", SearchOption.TopDirectoryOnly)
+                .Where(IsManagedAssembly)
                 .OrderBy(path => path, StringComparer.Ordinal)
                 .ToImmutableArray();
+            var groundworkAssemblies = outputAssemblies
+                .Where(path => !Path.GetFileNameWithoutExtension(path).EndsWith(".Tests", StringComparison.Ordinal))
+                .Where(path => Path.GetFileNameWithoutExtension(path).StartsWith("Groundwork.", StringComparison.Ordinal))
+                .ToImmutableArray();
+            if (!groundworkAssemblies.Any(path =>
+                    Path.GetFileNameWithoutExtension(path).StartsWith("Groundwork.Kernel", StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException(
+                    "Architecture assembly discovery found no Groundwork.Kernel assembly; refusing a vacuous pass.");
+            }
+
             var resolver = new PathAssemblyResolver(trustedPlatformAssemblies
-                .Concat(groundworkAssemblies)
+                .Concat(outputAssemblies)
                 .Distinct(StringComparer.Ordinal));
             var context = new MetadataLoadContext(resolver);
             var assemblies = groundworkAssemblies
@@ -212,6 +251,21 @@ public sealed class KernelBoundaryTests
             return new AssemblyUniverse(context, assemblies, bclNames);
         }
 
+        private static bool IsManagedAssembly(string path)
+        {
+            try
+            {
+                _ = AssemblyName.GetAssemblyName(path);
+                return true;
+            }
+            catch (BadImageFormatException)
+            {
+                return false;
+            }
+        }
+
         public void Dispose() => context.Dispose();
     }
+
+    private sealed record AssemblyReference(string Name, string Path);
 }
