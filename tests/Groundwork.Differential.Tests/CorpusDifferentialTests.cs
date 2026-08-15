@@ -20,7 +20,7 @@ public sealed class CorpusDifferentialTests
     private static readonly string ScopedTableName = "g2-scoped-" + Guid.NewGuid().ToString("N");
 
     [SkippableFact]
-    public void Scoped_relational_queries_isolate_rows_counts_and_continuation_tokens()
+    public void Scoped_queries_isolate_rows_counts_and_continuation_tokens_on_all_four_providers()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
         var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
