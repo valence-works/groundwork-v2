@@ -217,6 +217,8 @@ public interface IMongoStorageSession
 
     MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
+    MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null);
+
     MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null);
 }
 

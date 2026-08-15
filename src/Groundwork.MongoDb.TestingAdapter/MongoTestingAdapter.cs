@@ -56,7 +56,7 @@ internal sealed class MongoTestingSchema(IMongoSchemaCoordinator inner) : ISchem
         new SchemaChange((SchemaChangeKind)change.Kind, change.Identity)).ToArray());
 }
 
-internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorageSession
+internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorageSession, IConcurrencyStorageSession
 {
     public StorageUnit Unit => inner.Unit;
 
@@ -76,6 +76,9 @@ internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorage
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
         ToTesting(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
+
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
+        ToTesting(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)));
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) =>
         ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
