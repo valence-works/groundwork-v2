@@ -138,6 +138,10 @@ internal sealed class InMemoryUnitState
     // Compare-and-swap token used by unit-of-work commits.
     internal long Revision { get; set; }
 
+    // ProviderSequence values are unit-wide, matching a relational identity/sequence rather
+    // than a scope partition. Gaps are intentionally allowed when a staged transaction rolls back.
+    internal long Sequence { get; set; }
+
     internal Dictionary<string, Dictionary<string, InMemoryEntry>> Partitions { get; } = [];
 
     internal List<ProviderIndex> PhysicalIndexes { get; } = [];
@@ -146,6 +150,7 @@ internal sealed class InMemoryUnitState
     {
         var clone = new InMemoryUnitState(Unit);
         clone.Revision = Revision;
+        clone.Sequence = Sequence;
         foreach (var partition in Partitions)
         {
             clone.Partitions[partition.Key] = partition.Value.ToDictionary(
@@ -902,7 +907,23 @@ internal static class Mutation
         bool preserveCreatedAt = false)
     {
         ValidateValues(state.Unit, values.Values);
-        var identity = Key(state.Unit, values.Values);
+        var sequence = state.Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.ProviderSequence);
+        var generated = new Dictionary<string, object?>(StringComparer.Ordinal);
+        var sourceValues = values.Values;
+        if (sequence is not null && sourceValues.ContainsKey(sequence.Name))
+            throw new ArgumentException(
+                $"ProviderSequence column '{sequence.Name}' is assigned by the in-memory provider and cannot be supplied or updated.",
+                nameof(values));
+        if (sequence is not null && (kind is MutationKind.Insert or MutationKind.Upsert))
+        {
+            var copy = sourceValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            var value = checked(++state.Sequence);
+            copy[sequence.Name] = value;
+            sourceValues = new StorageValues(copy).Values;
+            generated[sequence.Name] = value;
+        }
+        var identity = Key(state.Unit, sourceValues);
         var entries = GetEntries(state, partition);
         entries.TryGetValue(identity, out var existing);
 
@@ -925,7 +946,7 @@ internal static class Mutation
         if (existing is null && expected is not null && state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
             return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict);
 
-        if (!UniqueIndexesAllow(state.Unit, entries, identity, values.Values))
+        if (!UniqueIndexesAllow(state.Unit, entries, identity, sourceValues))
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version);
 
         long? version = state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic
@@ -939,7 +960,7 @@ internal static class Mutation
             MutationKind.Upsert when exactOutcome => WriteOutcomeStatus.Updated,
             _ => WriteOutcomeStatus.Upserted
         };
-        var storedValues = values.Values;
+        var storedValues = sourceValues;
         if ((exactOutcome || preserveCreatedAt) && existing is not null &&
             existing.Values.TryGetValue("createdAt", out var existingCreatedAt))
         {
@@ -952,7 +973,7 @@ internal static class Mutation
         }
         entries[identity] = new InMemoryEntry(storedValues, version);
         state.Revision = checked(state.Revision + 1);
-        return new WriteOutcome(status, version);
+        return new WriteOutcome(status, version, generatedValues: generated);
     }
 
     internal static WriteOutcome Delete(
@@ -1055,6 +1076,12 @@ internal static class Mutation
 
         foreach (var column in unit.Columns.Where(column => !column.IsNullable))
         {
+            if (column.Generation == ColumnGeneration.ProviderSequence)
+            {
+                if (values.ContainsKey(column.Name))
+                    throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by the in-memory provider and cannot be supplied.", nameof(values));
+                continue;
+            }
             if (!values.TryGetValue(column.Name, out var value) || value is null)
                 throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
         }

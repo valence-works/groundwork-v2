@@ -26,6 +26,21 @@ public abstract class RelationalDialect
 
     public abstract string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey);
 
+    /// <summary>
+    /// Emits a create-table statement with the declaration's provider-sequence column, when
+    /// present. The overload keeps the original provider-authoring contract intact while
+    /// allowing SQLite to spell its inline INTEGER PRIMARY KEY AUTOINCREMENT form.
+    /// </summary>
+    public virtual string CreateTableSql(
+        string table,
+        IReadOnlyList<string> columns,
+        IReadOnlyList<string> primaryKey,
+        string? providerSequenceColumn) =>
+        CreateTableSql(table, columns, primaryKey);
+
+    /// <summary>Optional provider-specific generated-column syntax for an existing column list.</summary>
+    public virtual string? MapGeneration(ColumnDefinition definition) => null;
+
     public abstract string AddColumnSql(string table, string column, string definition);
 
     /// <summary>

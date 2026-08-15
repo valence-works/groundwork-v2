@@ -114,11 +114,41 @@ public enum MongoWriteOutcomeStatus
     ConcurrencyConflict
 }
 
-public sealed record MongoWriteOutcome(
-    MongoWriteOutcomeStatus Status,
-    long? Version = null,
-    string? UniqueIndexName = null)
+public sealed record MongoWriteOutcome
 {
+    public MongoWriteOutcome(
+        MongoWriteOutcomeStatus status,
+        long? version = null,
+        string? uniqueIndexName = null,
+        IReadOnlyDictionary<string, object?>? generatedValues = null)
+    {
+        Status = status;
+        Version = version;
+        UniqueIndexName = uniqueIndexName;
+        GeneratedValues = new ReadOnlyDictionary<string, object?>(
+            (generatedValues ?? new Dictionary<string, object?>())
+                .ToDictionary(pair => pair.Key, pair => MongoStorageValues.CloneValue(pair.Value), StringComparer.Ordinal));
+    }
+
+    public MongoWriteOutcomeStatus Status { get; }
+
+    public long? Version { get; }
+
+    public string? UniqueIndexName { get; }
+
+    public IReadOnlyDictionary<string, object?> GeneratedValues { get; init; } =
+        new ReadOnlyDictionary<string, object?>(new Dictionary<string, object?>(StringComparer.Ordinal));
+
+    public T GeneratedValue<T>(string column)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(column);
+        if (!GeneratedValues.TryGetValue(column, out var value))
+            throw new KeyNotFoundException($"Generated column '{column}' was not returned by this write.");
+        return value is T typed
+            ? typed
+            : throw new InvalidCastException($"Generated column '{column}' returned '{value?.GetType().Name ?? "null"}', not '{typeof(T).Name}'.");
+    }
+
     public bool Succeeded => Status is MongoWriteOutcomeStatus.Inserted or
         MongoWriteOutcomeStatus.Updated or
         MongoWriteOutcomeStatus.Upserted or

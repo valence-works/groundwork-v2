@@ -243,15 +243,16 @@ public sealed class MongoProviderIntegrationTests
     public void Provider_sequence_is_capability_gated_by_mongodb_transactions()
     {
         using var connection = OpenConnection();
-        var unit = TestUnits.Customer with
+        var unit = new StorageUnit
         {
             Id = new StorageUnitId("p1-sequence-" + Guid.NewGuid().ToString("N")),
             Name = "P1Sequence_" + Guid.NewGuid().ToString("N"),
-            Columns = [.. TestUnits.Customer.Columns, new ColumnDefinition
-            {
-                Name = "sequence", Type = PortableType.Int64, IsNullable = false,
-                Generation = ColumnGeneration.ProviderSequence
-            }]
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "payload", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
         };
 
         var hello = Assert.IsType<MongoDbProviderConnection>(connection).Database
@@ -265,9 +266,9 @@ public sealed class MongoProviderIntegrationTests
 
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
-        var result = session.Insert(CustomerValues("sequence", null));
+        var result = session.Insert(new MongoStorageValues(new Dictionary<string, object?> { ["payload"] = "sequence" }));
         Assert.True(result.Succeeded);
-        Assert.Equal(1L, session.Read(Key("sequence"))!.Values.Values["sequence"]);
+        Assert.Equal(1L, result.GeneratedValue<long>("sequence"));
     }
 
     private static MongoStorageValues CustomerValues(string id, string? email) => new(new Dictionary<string, object?>

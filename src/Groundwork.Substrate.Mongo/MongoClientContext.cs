@@ -45,7 +45,7 @@ public sealed class MongoClientContext : IDisposable
         throw new InvalidOperationException(
             $"{feature} requires a transaction-capable MongoDB replica set or sharded deployment; " +
             "standalone MongoDB cannot provide the required atomic commit " +
-            "(capability 'groundwork.storage.provider-sequence').");
+            "(capability 'groundwork.column.provider-sequence').");
     }
 
     public void Dispose()

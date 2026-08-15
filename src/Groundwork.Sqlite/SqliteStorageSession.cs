@@ -137,6 +137,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         ArgumentNullException.ThrowIfNull(writes);
         if (writes.Count == 0)
             return [];
+        if (SequenceColumnDefinition is not null)
+            return ApplyBatchFallback(writes);
 
         // Expected-version writes and deletes need their per-row predicates and
         // conflict details. Keep those semantics exact; unconditional inserts and
@@ -368,6 +370,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     {
         ArgumentNullException.ThrowIfNull(values);
         ValidateValues(values.Values, mutation == Mutation.Insert);
+        if (SequenceColumnDefinition is not null &&
+            (mutation is Mutation.Insert or Mutation.Upsert) &&
+            !values.Values.ContainsKey(SequenceColumnDefinition.Name))
+        {
+            ValidateExpected(options, null, mutation);
+            return InsertCore(values.Values, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted);
+        }
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
             column => column, column => values.Values.TryGetValue(column, out var value) ? value : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
             StringComparer.Ordinal));
@@ -394,9 +403,28 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         {
             if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = 1L;
             if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = Access.Scope!.Value;
-            using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
+            var returning = SequenceColumnDefinition is null ? string.Empty : $" RETURNING {Quote(SequenceColumnDefinition.Name)};";
+            using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}){returning}");
             AddParameters(insert, parameters);
-            try { insert.ExecuteNonQuery(); return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? (long?)null : 1); }
+            try
+            {
+                if (SequenceColumnDefinition is null)
+                {
+                    insert.ExecuteNonQuery();
+                    return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? (long?)null : 1);
+                }
+
+                using var reader = insert.ExecuteReader();
+                if (!reader.Read())
+                    return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
+                return new WriteOutcome(
+                    WriteOutcomeStatus.Inserted,
+                    VersionColumnDefinition is null ? null : 1,
+                    generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        [SequenceColumnDefinition.Name] = FromSqlite(reader.GetValue(0), SequenceColumnDefinition)
+                    });
+            }
             catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
         }
 
@@ -537,6 +565,45 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         return matches.Length == 1 ? matches[0].Name : reportedName;
     }
 
+    private WriteOutcome InsertCore(
+        IReadOnlyDictionary<string, object?> values,
+        WriteOutcomeStatus status)
+    {
+        var supplied = UserColumns.Where(column => values.ContainsKey(column.Name)).ToArray();
+        var columns = supplied.ToList();
+        if (VersionColumnDefinition is not null) columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null) columns.Add(ScopeColumnDefinition);
+        var parameters = BuildParameters(values, supplied);
+        if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = 1L;
+        if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = Access.Scope!.Value;
+        var returning = SequenceColumnDefinition is null ? string.Empty : $" RETURNING {Quote(SequenceColumnDefinition.Name)};";
+        using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}){returning}");
+        AddParameters(command, parameters);
+        try
+        {
+            if (SequenceColumnDefinition is null)
+            {
+                command.ExecuteNonQuery();
+                return new WriteOutcome(status, VersionColumnDefinition is null ? null : 1);
+            }
+
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+                return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
+            return new WriteOutcome(
+                status,
+                VersionColumnDefinition is null ? null : 1,
+                generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    [SequenceColumnDefinition.Name] = FromSqlite(reader.GetValue(0), SequenceColumnDefinition)
+                });
+        }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _))
+        {
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
+        }
+    }
+
     private WriteOutcome Upsert(
         StorageValues values,
         StoredEntry? existing,
@@ -590,10 +657,17 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
         if (unknown is not null) throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
+        foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
+            if (values.ContainsKey(generated.Name))
+                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by SQLite and cannot be supplied or updated.", nameof(values));
         if (requireAllNonNullable)
             foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
+            {
+                if (column.Generation == ColumnGeneration.ProviderSequence)
+                    continue;
                 if (!values.TryGetValue(column.Name, out var value) || value is null)
                     throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
+            }
     }
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
@@ -707,6 +781,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     private ColumnDefinition? ScopeColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.ScopeColumn);
     private ColumnDefinition? VersionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.VersionColumn);
     private ColumnDefinition? ActionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.ActionColumn);
+    private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
     private static string Quote(string value) => SqliteProviderConnection.QuoteIdentifier(value);
     private static object? ToSqlite(object? value, ColumnDefinition definition) => SqliteProviderConnection.ToSqliteValue(value, definition);
 

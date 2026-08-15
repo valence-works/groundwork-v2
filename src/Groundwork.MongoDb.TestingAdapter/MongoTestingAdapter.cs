@@ -21,7 +21,11 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
     public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
         "MongoDB", nativeBatch: true,
         exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
-        batchCost: "uses unordered BulkWrite for aggregate commits");
+        batchCost: "uses unordered BulkWrite for aggregate commits")
+        .Select(descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence
+            ? MongoCapabilities.ProviderSequenceDescriptor
+            : descriptor)
+        .ToArray();
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access) =>
         new MongoTestingSession(inner.OpenSession(unit, ToNative(access)));
@@ -128,7 +132,8 @@ internal sealed class MongoTestingSession(
         : new MongoWriteOptions { ExpectedVersion = options.ExpectedVersion, Observer = options.Observer };
 
     private static WriteOutcome ToTesting(MongoWriteOutcome result) =>
-        new((WriteOutcomeStatus)result.Status, result.Version, result.UniqueIndexName);
+        new((WriteOutcomeStatus)result.Status, result.Version, result.UniqueIndexName,
+            result.GeneratedValues);
 
     private WriteOutcome ToTesting(MongoWriteOutcome result, StorageValues values, WriteOptions? options)
     {

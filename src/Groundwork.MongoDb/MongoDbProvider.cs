@@ -20,14 +20,15 @@ namespace Groundwork.MongoDb;
 /// <summary>The capability declared by MongoDB for provider-assigned sequence columns.</summary>
 public static class MongoCapabilities
 {
-    public static readonly CapabilityId ProviderSequence = new("groundwork.storage.provider-sequence");
+    public static readonly CapabilityId ProviderSequence = new("groundwork.column.provider-sequence");
 
     public static CapabilityDescriptor ProviderSequenceDescriptor { get; } = new(
         ProviderSequence,
         "Provider-assigned monotonic sequence",
-        "MongoDB allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment.",
+        "MongoDB allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; each inserted row/coalesced exact write uses one additional counter command.",
         EvidenceGatedByDefault: true,
-        OwningModule: "groundwork-mongodb");
+        OwningModule: "groundwork-mongodb",
+        AdditionalProviderCommandsPerWrite: 1);
 }
 
 public sealed class MongoCapabilityModule : IGroundworkModule
@@ -1008,7 +1009,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         new() { ExpectedVersion = options.ExpectedVersion, Observer = options.Observer };
 
     private static WriteOutcome ToTesting(MongoWriteOutcome outcome) =>
-        new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName);
+        new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName, outcome.GeneratedValues);
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
@@ -1037,7 +1038,22 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MutationKind kind,
         bool exactOutcome = false)
     {
+        var sequence = Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.ProviderSequence);
+        var generatedValues = new Dictionary<string, object?>(StringComparer.Ordinal);
         var keyValues = values.Values;
+        if (sequence is not null && keyValues.ContainsKey(sequence.Name))
+            throw new ArgumentException(
+                $"ProviderSequence column '{sequence.Name}' is assigned by MongoDB and cannot be supplied or updated.",
+                nameof(values));
+        if (sequence is not null && (kind is MutationKind.Insert or MutationKind.Upsert))
+        {
+            var copied = keyValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            var generated = NextSequence(sequence, options?.Observer);
+            copied[sequence.Name] = generated;
+            keyValues = copied;
+            generatedValues[sequence.Name] = generated;
+        }
         var identity = MongoDocumentMapper.EncodeKey(Unit, keyValues);
         var existing = FindOne(identity);
         var existingVersion = Version(identity, existing);
@@ -1052,11 +1068,14 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         var nextVersion = NextVersion(existingVersion);
         var document = MongoDocumentMapper.EncodeDocument(
             Unit,
-            values.Values,
+            keyValues,
             identity,
             existing,
-            column => NextSequence(column, options?.Observer),
-            preserveCreatedAt: exactOutcome);
+            column => sequence is not null && column.Name == sequence.Name && generatedValues.TryGetValue(column.Name, out var generated)
+                ? Convert.ToInt64(generated, System.Globalization.CultureInfo.InvariantCulture)
+                : NextSequence(column, options?.Observer),
+            preserveCreatedAt: exactOutcome,
+            generatedValues: generatedValues);
         if (nextVersion is not null)
             document[MongoDocumentMapper.VersionField] = nextVersion.Value;
         var inserted = kind == MutationKind.Insert;
@@ -1113,7 +1132,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 ? MongoWriteOutcomeStatus.Inserted
                 : MongoWriteOutcomeStatus.Updated;
         }
-        return new MongoWriteOutcome(status, nextVersion);
+        return new MongoWriteOutcome(status, nextVersion, generatedValues: generatedValues);
     }
 
     private MongoWriteOutcome ConditionalUpsertCore(
@@ -1598,7 +1617,8 @@ internal static class MongoDocumentMapper
         BsonValue identity,
         BsonDocument? existing,
         Func<ColumnDefinition, long> nextSequence,
-        bool preserveCreatedAt = false)
+        bool preserveCreatedAt = false,
+        IReadOnlyDictionary<string, object?>? generatedValues = null)
     {
         var known = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
@@ -1611,10 +1631,12 @@ internal static class MongoDocumentMapper
             var isPresent = values.TryGetValue(column.Name, out var value);
             if (column.Generation == ColumnGeneration.ProviderSequence)
             {
-                if (isPresent && existing is null)
+                var generatedInternally = generatedValues is not null && generatedValues.ContainsKey(column.Name);
+                if (isPresent && existing is null && !generatedInternally)
                     throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by MongoDB and cannot be supplied.", nameof(values));
-                var generated = existing?.GetValue(column.Name, BsonNull.Value) ?? new BsonInt64(nextSequence(column));
-                if (isPresent && existing is not null &&
+                var generated = existing?.GetValue(column.Name, BsonNull.Value) ??
+                    (generatedInternally ? MongoValueCodec.Encode(generatedValues![column.Name], column) : new BsonInt64(nextSequence(column)));
+                if (isPresent && existing is not null && !generatedInternally &&
                     !MongoValueCodec.Encode(value, column).Equals(generated))
                 {
                     throw new ArgumentException(

@@ -7,6 +7,14 @@ namespace Groundwork.Testing;
 /// <summary>Capability descriptors exposed by providers that implement staged writes.</summary>
 public static class BatchWriteCapabilities
 {
+    public static CapabilityId ProviderSequence { get; } = new("groundwork.column.provider-sequence");
+
+    public static CapabilityDescriptor ProviderSequenceDescriptor { get; } = new(
+        ProviderSequence,
+        "Provider-assigned monotonic sequence",
+        "Relational providers assign a durable monotonic Int64 key in the same insert command; no additional provider command is required.",
+        AdditionalProviderCommandsPerWrite: 0);
+
     public static CapabilityId StagedUnitOfWork { get; } = new("groundwork.storage.batched-unit-of-work");
 
     public static CapabilityId PerRowOutcomes { get; } = new("groundwork.storage.batched-outcomes");
@@ -29,7 +37,7 @@ public static class BatchWriteCapabilities
         "Executes grouped writes through the provider's native multi-row command or bulk-write primitive.");
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -38,6 +46,10 @@ public static class BatchWriteCapabilities
         string batchCost) =>
         Array.AsReadOnly(
         [
+            ProviderSequenceDescriptor with
+            {
+                Description = $"{provider} assigns a durable monotonic Int64 key in the insert command; no additional provider command is required."
+            },
             StagedUnitOfWorkDescriptor with
             {
                 Description = $"Stages and coalesces writes for {provider}; {batchCost}."
@@ -140,7 +152,23 @@ public sealed class RowWrite
         ? string.Join("\u001f", Unit.Key.Columns)
         : string.Join("\u001f", Values!.Values.Keys.OrderBy(value => value, StringComparer.Ordinal));
 
-    internal string Identity => IdentityFor(Unit, KeyValues);
+    internal string Identity
+    {
+        get
+        {
+            var values = Key?.Values ?? Values!.Values;
+            if (Unit.Key.Columns.Any(column =>
+                    Unit.Columns.FirstOrDefault(definition => definition.Name == column)?.Generation == ColumnGeneration.ProviderSequence &&
+                    !values.ContainsKey(column)))
+            {
+                // A generated key cannot identify an uncommitted insert. Keep each staged
+                // declaration distinct so provider batching never coalesces two new rows.
+                return "@generated:" + RuntimeHelpers.GetHashCode(this).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            return IdentityFor(Unit, values);
+        }
+    }
 
     internal static string IdentityFor(
         StorageUnit unit,

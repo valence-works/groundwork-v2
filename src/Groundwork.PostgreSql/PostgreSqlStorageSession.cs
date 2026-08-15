@@ -132,6 +132,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         ArgumentNullException.ThrowIfNull(writes);
         if (writes.Count == 0)
             return [];
+        if (SequenceColumn is not null)
+            return ApplyBatchFallback(writes);
         if (writes.Any(write => write.Options.ExpectedVersion is not null))
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
@@ -317,6 +319,18 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     {
         ArgumentNullException.ThrowIfNull(values);
         ValidateValues(values.Values, mutation == Mutation.Insert);
+
+        // A provider sequence has no caller-visible key until the insert commits. Treat an
+        // upsert without a generated key as an insert; accepting a synthetic read here would
+        // both defeat the native identity and make the returned generated value ambiguous.
+        if (SequenceColumn is not null &&
+            (mutation is Mutation.Insert or Mutation.Upsert) &&
+            !values.Values.ContainsKey(SequenceColumn.Name))
+        {
+            ValidateExpected(options, null, mutation);
+            return InsertCore(values, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted);
+        }
+
         var key = KeyFromValues(values.Values);
         var existing = ReadCore(key);
         if (mutation == Mutation.Insert && existing is not null)
@@ -424,16 +438,31 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 StringComparison.Ordinal))?.Name ?? physicalName;
     }
 
-    private WriteOutcome InsertCore(StorageValues values)
+    private WriteOutcome InsertCore(StorageValues values, WriteOutcomeStatus status = WriteOutcomeStatus.Inserted)
     {
         var physical = PhysicalValues(values.Values, includeVersion: VersionColumn is not null);
         var columns = physical.Keys.ToArray();
-        using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column))});");
+        var returning = SequenceColumn is null ? string.Empty : $" RETURNING {Quote(SequenceColumn.Name)};";
+        using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column))}){returning}");
         AddParameters(command, physical);
         try
         {
-            command.ExecuteNonQuery();
-            return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumn is null ? null : 1);
+            if (SequenceColumn is null)
+            {
+                command.ExecuteNonQuery();
+                return new WriteOutcome(status, VersionColumn is null ? null : 1);
+            }
+
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+                return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
+            return new WriteOutcome(
+                status,
+                VersionColumn is null ? null : 1,
+                generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    [SequenceColumn.Name] = FromDatabase(reader.GetValue(0), SequenceColumn)
+                });
         }
         catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out _))
         {
@@ -603,11 +632,18 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
         if (unknown is not null)
             throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
+        foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
+            if (values.ContainsKey(generated.Name))
+                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by PostgreSQL and cannot be supplied or updated.", nameof(values));
         if (!requireAllNonNullable)
             return;
         foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
+        {
+            if (column.Generation == ColumnGeneration.ProviderSequence)
+                continue;
             if (!values.TryGetValue(column.Name, out var value) || value is null)
                 throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
+        }
     }
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
@@ -718,6 +754,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
 
     private IReadOnlyList<ColumnDefinition> UserColumns =>
         Unit.Columns.Where(column => column.Name is not PostgreSqlSchemaCoordinator.ScopeColumn and not PostgreSqlSchemaCoordinator.VersionColumn).ToArray();
+
+    private ColumnDefinition? SequenceColumn => UserColumns.FirstOrDefault(column =>
+        column.Generation == ColumnGeneration.ProviderSequence);
 
     private ColumnDefinition? VersionColumn => Unit.Columns.FirstOrDefault(column => column.Name == PostgreSqlSchemaCoordinator.VersionColumn);
 
