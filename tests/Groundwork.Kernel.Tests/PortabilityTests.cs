@@ -90,6 +90,21 @@ public sealed class PortabilityTests
     }
 
     [Fact]
+    public void Invalid_decimal_precision_is_reported_after_an_unbounded_key_term()
+    {
+        var result = Validate(Unit([
+            Column("name", PortableType.String, nullable: false),
+            Column("amount", PortableType.Decimal, nullable: false, precision: 39, scale: 0)
+        ], indexes: [Index("ix-name-amount", "name", "amount")]));
+
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-PORT-003" &&
+            refusal.Message.Contains("name", StringComparison.Ordinal));
+        var diagnostic = Assert.Single(result.Refusals, refusal => refusal.Code == "GW-PORT-004");
+        Assert.Contains("amount", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("precision 39", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Unique_nullable_included_index_is_refused()
     {
         var result = Validate(Unit([
@@ -115,6 +130,23 @@ public sealed class PortabilityTests
             ]));
 
         Assert.DoesNotContain(result.Refusals, diagnostic => diagnostic.Code == "GW-PORT-001");
+    }
+
+    [Fact]
+    public void Nullable_included_unique_subset_exempts_the_larger_compound_index()
+    {
+        var result = Validate(Unit([
+            Column("tenant", PortableType.String, maxLength: 64),
+            Column("email", PortableType.String, maxLength: 320)
+        ],
+            indexes:
+            [
+                Index("ux-tenant", "tenant", unique: true),
+                Index("ux-tenant-email", "tenant", "email", unique: true)
+            ]));
+
+        var diagnostic = Assert.Single(result.Refusals, refusal => refusal.Code == "GW-PORT-001");
+        Assert.Equal("indexes.ux-tenant", diagnostic.Path);
     }
 
     [Fact]

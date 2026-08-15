@@ -127,7 +127,7 @@ public static class PortabilityValidator
             (other.Columns?.Count ?? 0) < (index.Columns?.Count ?? 0) &&
             (other.Columns ?? []).All(column =>
                 column is not null && column.Column is not null && indexedColumns.Contains(column.Column)) &&
-            !HasNullableIndexedColumn(other, byName));
+            (other.MissingValues != MissingValueBehavior.Excluded || !HasNullableIndexedColumn(other, byName)));
     }
 
     private static bool HasNullableIndexedColumn(
@@ -201,7 +201,7 @@ public static class PortabilityValidator
                 if (indexColumn.Column is null || !byName.TryGetValue(indexColumn.Column, out var column))
                 {
                     canCalculate = false;
-                    break;
+                    continue;
                 }
 
                 if (!TryGetKeyBytes(column, out var width, out var formula))
@@ -219,7 +219,7 @@ public static class PortabilityValidator
                     }
 
                     canCalculate = false;
-                    break;
+                    continue;
                 }
 
                 bytes += width;
