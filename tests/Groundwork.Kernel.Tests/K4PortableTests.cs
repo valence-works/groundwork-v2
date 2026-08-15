@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Reflection;
+using System.Text;
 using Groundwork.Kernel;
 using Xunit;
 
@@ -6,6 +8,10 @@ namespace Groundwork.Kernel.Tests;
 
 public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
 {
+    private static readonly MethodInfo Base62Encode = typeof(ShortIdentityGenerator).Assembly
+        .GetType("Groundwork.Kernel.Base62")!
+        .GetMethod("Encode", BindingFlags.Public | BindingFlags.Static)!;
+
     [Fact]
     public void Capability_ids_are_namespaced_and_case_sensitive()
     {
@@ -95,6 +101,100 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     }
 
     [Fact]
+    public void Capability_validation_preserves_non_blocking_warnings_and_reports_unsupported_fit()
+    {
+        var supported = new ProviderCapabilityReport(
+            new("test", "1"),
+            new HashSet<CapabilityId> { WellKnownCapabilities.AtomicCommit },
+            new HashSet<CapabilityId> { WellKnownCapabilities.AtomicCommit },
+            new[] { "Provider will materialize indexes lazily." });
+        var validator = new ProviderCapabilityValidator();
+
+        var compatible = validator.Validate([WellKnownCapabilities.AtomicCommit], supported);
+        var unsupported = validator.Validate([WellKnownCapabilities.AtomicCommit], supported with
+        {
+            SupportedCapabilities = new HashSet<CapabilityId>(),
+            EvidencedCapabilities = new HashSet<CapabilityId>()
+        });
+
+        Assert.True(compatible.IsCompatible);
+        Assert.Contains(compatible.Issues, issue => issue.Code == "GW-CAP-002");
+        Assert.Empty(compatible.Errors);
+        Assert.False(unsupported.IsCompatible);
+        Assert.Contains(unsupported.Errors, issue => issue.Code == "GW-CAP-004");
+    }
+
+    [Fact]
+    public void Capability_collection_boundaries_snapshot_inputs_and_expose_immutable_views()
+    {
+        var capability = WellKnownCapabilities.AtomicCommit;
+        var supported = new HashSet<CapabilityId> { capability };
+        var evidenced = new HashSet<CapabilityId> { capability };
+        var warnings = new List<string> { "before" };
+        var report = new ProviderCapabilityReport(new("test", "1"), supported, evidenced, warnings);
+        var replacement = new HashSet<CapabilityId> { capability };
+        var reboundReport = report with { SupportedCapabilities = replacement };
+        var policyInput = new HashSet<CapabilityId> { capability };
+        var policy = new WorkloadEvidencePolicy(policyInput);
+        var issueInput = new List<CapabilityValidationIssue>
+        {
+            CapabilityValidationIssue.Warning("GW-CAP-002", "warning", "provider.warnings")
+        };
+        var result = new CapabilityCompatibilityResult(issueInput);
+        var validator = new ProviderCapabilityValidator();
+        var unsupported = Assert.IsType<ProviderFit.Unsupported>(validator.Evaluate(
+            [capability],
+            new ProviderCapabilityReport(new("test", "1"), new HashSet<CapabilityId>(), new HashSet<CapabilityId>(), Array.Empty<string>())));
+        var requiresEvidence = Assert.IsType<ProviderFit.RequiresEvidence>(validator.Evaluate(
+            [capability],
+            new ProviderCapabilityReport(new("test", "1"), new HashSet<CapabilityId> { capability }, new HashSet<CapabilityId>(), Array.Empty<string>())));
+        var catalog = new GroundworkModuleCatalog().Add(new TestModule(
+            new CapabilityDescriptor(new CapabilityId("sample.module.snapshot"), "Snapshot", "Snapshot test.")));
+        var moduleSnapshot = catalog.Modules;
+
+        supported.Clear();
+        evidenced.Clear();
+        warnings.Add("after");
+        replacement.Clear();
+        policyInput.Clear();
+        issueInput.Clear();
+
+        Assert.Contains(capability, report.SupportedCapabilities);
+        Assert.Contains(capability, reboundReport.SupportedCapabilities);
+        Assert.Contains(capability, report.EvidencedCapabilities);
+        Assert.Equal(new[] { "before" }, report.Warnings);
+        Assert.Contains(capability, policy.EvidenceGatedCapabilities);
+        Assert.Single(result.Issues);
+        Assert.Single(moduleSnapshot);
+        var supportedView = Assert.IsAssignableFrom<ISet<CapabilityId>>(report.SupportedCapabilities);
+        Assert.Throws<NotSupportedException>(() => supportedView.Add(new CapabilityId("sample.module.mutation")));
+        var warningView = Assert.IsAssignableFrom<IList<string>>(report.Warnings);
+        Assert.Throws<NotSupportedException>(() => warningView.Add("mutation"));
+        var policyView = Assert.IsAssignableFrom<ISet<CapabilityId>>(policy.EvidenceGatedCapabilities);
+        Assert.Throws<NotSupportedException>(() => policyView.Add(new CapabilityId("sample.module.mutation")));
+        var issueView = Assert.IsAssignableFrom<IList<CapabilityValidationIssue>>(result.Issues);
+        Assert.Throws<NotSupportedException>(() => issueView.Add(
+            CapabilityValidationIssue.Warning("GW-CAP-002", "mutation", "provider.warnings")));
+        var errorsView = Assert.IsAssignableFrom<IList<CapabilityValidationIssue>>(result.Errors);
+        Assert.Throws<NotSupportedException>(() => errorsView.Add(
+            CapabilityValidationIssue.Error("GW-CAP-004", "mutation", "requirements")));
+        var missingView = Assert.IsAssignableFrom<IList<CapabilityId>>(unsupported.MissingRequirements);
+        Assert.Throws<NotSupportedException>(() => missingView.Add(new CapabilityId("sample.module.mutation")));
+        var evidenceView = Assert.IsAssignableFrom<IList<string>>(requiresEvidence.Reasons);
+        Assert.Throws<NotSupportedException>(() => evidenceView.Add("mutation"));
+        var moduleView = Assert.IsAssignableFrom<IList<IGroundworkModule>>(catalog.Modules);
+        Assert.Throws<NotSupportedException>(() => moduleView.Add(new TestModule(
+            new CapabilityDescriptor(new CapabilityId("sample.module.mutation"), "Mutation", "Mutation test."))));
+        var descriptorView = Assert.IsAssignableFrom<IList<CapabilityDescriptor>>(WellKnownCapabilities.All);
+        Assert.Throws<NotSupportedException>(() => descriptorView.Add(
+            new CapabilityDescriptor(new CapabilityId("sample.module.mutation"), "Mutation", "Mutation test.")));
+        var registryDescriptorView = Assert.IsAssignableFrom<IList<CapabilityDescriptor>>(
+            CapabilityRegistry.Default.Descriptors);
+        Assert.Throws<NotSupportedException>(() => registryDescriptorView.Add(
+            new CapabilityDescriptor(new CapabilityId("sample.module.mutation"), "Mutation", "Mutation test.")));
+    }
+
+    [Fact]
     public void Scope_rejects_reserved_missing_malformed_and_overlong_values()
     {
         foreach (var value in new[]
@@ -137,10 +237,24 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     [InlineData(ulong.MaxValue, "LygHa16AHYF")]
     public void Base62_identity_encoding_matches_v1_golden_vectors(ulong value, string expected)
     {
-        var type = typeof(ShortIdentityGenerator).Assembly.GetType("Groundwork.Kernel.Base62")!;
-        var encode = type.GetMethod("Encode", BindingFlags.Public | BindingFlags.Static)!;
+        Assert.Equal(expected, EncodeBase62(value));
+    }
 
-        Assert.Equal(expected, encode.Invoke(null, [value]));
+    [Fact]
+    public void Base62_identity_encoding_preserves_numeric_ordinal_order()
+    {
+        ulong[] values =
+        [
+            0, 1, 61, 62, 1_000, 1UL << 22, 1UL << 41, long.MaxValue, ulong.MaxValue - 1, ulong.MaxValue
+        ];
+
+        for (var left = 0; left < values.Length; left++)
+        for (var right = 0; right < values.Length; right++)
+        {
+            var numeric = values[left].CompareTo(values[right]);
+            var ordinal = string.CompareOrdinal(EncodeBase62(values[left]), EncodeBase62(values[right]));
+            Assert.Equal(Math.Sign(numeric), Math.Sign(ordinal));
+        }
     }
 
     [Fact]
@@ -187,6 +301,68 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         Assert.IsType<SnowflakeIdentityGenerator>(GroundworkIdentityGenerators.Create(
             IdentityGeneratorKind.Snowflake, time, new SnowflakeIdentityGeneratorOptions()));
         Assert.Throws<ArgumentNullException>(() => GroundworkIdentityGenerators.Create(IdentityGeneratorKind.Snowflake));
+    }
+
+    [Fact]
+    public void Short_ids_sort_chronologically_and_reject_times_before_the_epoch()
+    {
+        var time = new TestTimeProvider();
+        var generator = new ShortIdentityGenerator(time);
+        var first = generator.Generate();
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        var second = generator.Generate();
+        time.Advance(TimeSpan.FromSeconds(1));
+        var third = generator.Generate();
+
+        Assert.True(string.CompareOrdinal(first, second) < 0);
+        Assert.True(string.CompareOrdinal(second, third) < 0);
+
+        var beforeEpoch = new TestTimeProvider();
+        beforeEpoch.Advance(TimeSpan.FromDays(-365 * 7));
+        Assert.Throws<InvalidOperationException>(() => new ShortIdentityGenerator(beforeEpoch).Generate());
+    }
+
+    [Fact]
+    public void Uuid_v7_ids_sort_chronologically_and_are_unique_within_one_millisecond()
+    {
+        var time = new TestTimeProvider();
+        var generator = new UuidV7IdentityGenerator(time);
+        var first = generator.Generate();
+        time.Advance(TimeSpan.FromMilliseconds(5));
+        var second = generator.Generate();
+
+        Assert.True(string.CompareOrdinal(first, second) < 0);
+
+        time = new TestTimeProvider();
+        generator = new UuidV7IdentityGenerator(time);
+        var ids = new HashSet<string>();
+        for (var index = 0; index < 1_000; index++)
+            Assert.True(ids.Add(generator.Generate()));
+    }
+
+    [Fact]
+    public void Snowflake_ids_are_strictly_increasing_across_a_full_sequence_and_workers_are_distinct()
+    {
+        var time = new TestTimeProvider();
+        var generator = new SnowflakeIdentityGenerator(time, new SnowflakeIdentityGeneratorOptions { WorkerId = 7 });
+        var ids = new List<string>(4_096);
+        var previous = string.Empty;
+        for (var index = 0; index < 4_096; index++)
+        {
+            var current = generator.Generate();
+            if (index > 0)
+                Assert.True(string.CompareOrdinal(previous, current) < 0);
+            previous = current;
+            ids.Add(current);
+        }
+
+        Assert.Equal(4_096, ids.Distinct().Count());
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        Assert.True(string.CompareOrdinal(previous, generator.Generate()) < 0);
+
+        var workerOne = new SnowflakeIdentityGenerator(new TestTimeProvider(), new SnowflakeIdentityGeneratorOptions { WorkerId = 1 });
+        var workerTwo = new SnowflakeIdentityGenerator(new TestTimeProvider(), new SnowflakeIdentityGeneratorOptions { WorkerId = 2 });
+        Assert.NotEqual(workerOne.Generate(), workerTwo.Generate());
     }
 
     [Theory]
@@ -247,6 +423,95 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     }
 
     [Fact]
+    public void Unicode_keys_exhaustively_guard_runtime_uppercase_mappings_and_order()
+    {
+        const int chunkSize = 65_536;
+        var nonIdentityMappings = new List<(Rune Source, Rune Upper)>();
+        for (var start = 0; start <= 0x10FFFF; start += chunkSize)
+        {
+            var source = new StringBuilder();
+            var expected = new StringBuilder();
+            var end = Math.Min(0x10FFFF, start + chunkSize - 1);
+            for (var scalar = start; scalar <= end; scalar++)
+            {
+                if (!Rune.IsValid(scalar))
+                    continue;
+                var rune = new Rune(scalar);
+                var upper = Rune.ToUpperInvariant(rune);
+                source.Append(rune);
+                expected.Append(StringComparer.OrdinalIgnoreCase.Equals(rune.ToString(), upper.ToString())
+                    ? upper
+                    : rune);
+                if (rune != upper)
+                    nonIdentityMappings.Add((rune, upper));
+            }
+
+            Assert.Equal(
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(expected.ToString()),
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(source.ToString()));
+        }
+
+        foreach (var (source, upper) in nonIdentityMappings)
+        {
+            Assert.Equal(
+                Math.Sign(StringComparer.OrdinalIgnoreCase.Compare(source.ToString(), upper.ToString())),
+                Math.Sign(StringComparer.Ordinal.Compare(
+                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(source.ToString()),
+                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(upper.ToString()))));
+        }
+
+        Assert.NotEqual(
+            PortableStringComparison.CreateUnicodeOrdinalIgnoreCase("ſ"),
+            PortableStringComparison.CreateUnicodeOrdinalIgnoreCase("S"));
+    }
+
+    [Fact]
+    public void Unicode_keys_exhaustively_match_supplementary_case_equivalence_and_order()
+    {
+        var values = new List<string>();
+        var hashBuckets = new Dictionary<int, List<string>>();
+        var equivalencePairCount = 0;
+
+        for (var scalar = 0x10000; scalar <= 0x10FFFF; scalar++)
+        {
+            var rune = new Rune(scalar);
+            if (Rune.GetUnicodeCategory(rune) is not (
+                    UnicodeCategory.UppercaseLetter or
+                    UnicodeCategory.LowercaseLetter or
+                    UnicodeCategory.TitlecaseLetter))
+                continue;
+
+            var value = rune.ToString();
+            values.Add(value);
+            var hash = StringComparer.OrdinalIgnoreCase.GetHashCode(value);
+            if (!hashBuckets.TryGetValue(hash, out var candidates))
+                hashBuckets.Add(hash, candidates = []);
+
+            foreach (var candidate in candidates)
+            {
+                if (!StringComparer.OrdinalIgnoreCase.Equals(candidate, value))
+                    continue;
+                equivalencePairCount++;
+                Assert.Equal(
+                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(candidate),
+                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(value));
+            }
+            candidates.Add(value);
+        }
+
+        Assert.Equal(282, equivalencePairCount);
+        var expectedOrder = values
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        var actualOrder = values
+            .OrderBy(PortableStringComparison.CreateUnicodeOrdinalIgnoreCase, StringComparer.Ordinal)
+            .ThenBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(expectedOrder, actualOrder);
+    }
+
+    [Fact]
     public void Search_keys_preserve_encoded_unit_boundaries()
     {
         const string value = "\u0001\u0002";
@@ -302,4 +567,6 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
 
         public void Advance(TimeSpan delta) => now += delta;
     }
+
+    private static string EncodeBase62(ulong value) => (string)Base62Encode.Invoke(null, [value])!;
 }

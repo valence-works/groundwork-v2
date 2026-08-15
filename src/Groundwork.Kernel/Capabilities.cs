@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.RegularExpressions;
 
 namespace Groundwork.Kernel;
@@ -78,7 +79,7 @@ public sealed class CapabilityRegistry : ICapabilityRegistry
 
     public static CapabilityRegistry Default { get; } = CreateBuilder().Build();
 
-    public IReadOnlyCollection<CapabilityDescriptor> Descriptors => descriptors.Values.ToArray();
+    public IReadOnlyCollection<CapabilityDescriptor> Descriptors => descriptors.Values.ToImmutableArray();
 
     public bool IsRegistered(CapabilityId id) => descriptors.ContainsKey(id);
 
@@ -146,7 +147,7 @@ public sealed class GroundworkModuleCatalog
         return this;
     }
 
-    public IReadOnlyList<IGroundworkModule> Modules => modules;
+    public IReadOnlyList<IGroundworkModule> Modules => modules.ToImmutableArray();
 
     public CapabilityRegistry BuildRegistry()
     {
@@ -163,8 +164,19 @@ public sealed class GroundworkModuleCatalog
     }
 }
 
-public sealed record WorkloadEvidencePolicy(IReadOnlySet<CapabilityId> EvidenceGatedCapabilities)
+public sealed record WorkloadEvidencePolicy
 {
+    public WorkloadEvidencePolicy(IReadOnlySet<CapabilityId> evidenceGatedCapabilities)
+    {
+        ArgumentNullException.ThrowIfNull(evidenceGatedCapabilities);
+        EvidenceGatedCapabilities = evidenceGatedCapabilities.ToImmutableHashSet();
+    }
+
+    public IReadOnlySet<CapabilityId> EvidenceGatedCapabilities { get; }
+
+    public void Deconstruct(out IReadOnlySet<CapabilityId> evidenceGatedCapabilities) =>
+        evidenceGatedCapabilities = EvidenceGatedCapabilities;
+
     public static WorkloadEvidencePolicy Default { get; } = FromRegistry(CapabilityRegistry.Default);
 
     public static WorkloadEvidencePolicy FromRegistry(ICapabilityRegistry registry)
@@ -185,9 +197,31 @@ public abstract record ProviderFit
 
     public sealed record Supported : ProviderFit;
 
-    public sealed record RequiresEvidence(IReadOnlyList<string> Reasons) : ProviderFit;
+    public sealed record RequiresEvidence : ProviderFit
+    {
+        public RequiresEvidence(IReadOnlyList<string> reasons) => Reasons = Snapshot(reasons);
 
-    public sealed record Unsupported(IReadOnlyList<CapabilityId> MissingRequirements) : ProviderFit;
+        public IReadOnlyList<string> Reasons { get; }
+
+        public void Deconstruct(out IReadOnlyList<string> reasons) => reasons = Reasons;
+    }
+
+    public sealed record Unsupported : ProviderFit
+    {
+        public Unsupported(IReadOnlyList<CapabilityId> missingRequirements) =>
+            MissingRequirements = Snapshot(missingRequirements);
+
+        public IReadOnlyList<CapabilityId> MissingRequirements { get; }
+
+        public void Deconstruct(out IReadOnlyList<CapabilityId> missingRequirements) =>
+            missingRequirements = MissingRequirements;
+    }
+
+    private static ImmutableArray<T> Snapshot<T>(IReadOnlyList<T> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        return values.ToImmutableArray();
+    }
 }
 
 public sealed record ProviderIdentity(string Name, string Version)
@@ -195,18 +229,73 @@ public sealed record ProviderIdentity(string Name, string Version)
     public override string ToString() => $"{Name} {Version}";
 }
 
-public sealed record ProviderCapabilityReport(
-    ProviderIdentity Provider,
-    IReadOnlySet<CapabilityId> SupportedCapabilities,
-    IReadOnlySet<CapabilityId> EvidencedCapabilities,
-    IReadOnlyList<string> Warnings)
+public sealed record ProviderCapabilityReport
 {
+    public ProviderCapabilityReport(
+        ProviderIdentity provider,
+        IReadOnlySet<CapabilityId> supportedCapabilities,
+        IReadOnlySet<CapabilityId> evidencedCapabilities,
+        IReadOnlyList<string> warnings)
+    {
+        Provider = provider ?? throw new ArgumentNullException(nameof(provider));
+        SupportedCapabilities = Snapshot(supportedCapabilities);
+        EvidencedCapabilities = Snapshot(evidencedCapabilities);
+        Warnings = Snapshot(warnings);
+    }
+
+    public ProviderIdentity Provider { get; init; }
+    public IReadOnlySet<CapabilityId> SupportedCapabilities
+    {
+        get => supportedCapabilities;
+        init => supportedCapabilities = Snapshot(value);
+    }
+
+    public IReadOnlySet<CapabilityId> EvidencedCapabilities
+    {
+        get => evidencedCapabilities;
+        init => evidencedCapabilities = Snapshot(value);
+    }
+
+    public IReadOnlyList<string> Warnings
+    {
+        get => warnings;
+        init => warnings = Snapshot(value);
+    }
+
+    private IReadOnlySet<CapabilityId> supportedCapabilities = null!;
+    private IReadOnlySet<CapabilityId> evidencedCapabilities = null!;
+    private IReadOnlyList<string> warnings = null!;
+
+    public void Deconstruct(
+        out ProviderIdentity provider,
+        out IReadOnlySet<CapabilityId> supportedCapabilities,
+        out IReadOnlySet<CapabilityId> evidencedCapabilities,
+        out IReadOnlyList<string> warnings)
+    {
+        provider = Provider;
+        supportedCapabilities = SupportedCapabilities;
+        evidencedCapabilities = EvidencedCapabilities;
+        warnings = Warnings;
+    }
+
     public ProviderCapabilityReport WithCapabilities(params CapabilityId[] capabilities) =>
         this with
         {
-            SupportedCapabilities = SupportedCapabilities.Concat(capabilities).ToHashSet(),
-            EvidencedCapabilities = EvidencedCapabilities.Concat(capabilities).ToHashSet()
+            SupportedCapabilities = SupportedCapabilities.Concat(capabilities).ToImmutableHashSet(),
+            EvidencedCapabilities = EvidencedCapabilities.Concat(capabilities).ToImmutableHashSet()
         };
+
+    private static ImmutableHashSet<CapabilityId> Snapshot(IEnumerable<CapabilityId> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        return values.ToImmutableHashSet();
+    }
+
+    private static ImmutableArray<string> Snapshot(IReadOnlyList<string> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        return values.ToImmutableArray();
+    }
 }
 
 public sealed record CapabilityValidationIssue(string Code, string Message, string Target, bool IsError)
@@ -218,11 +307,21 @@ public sealed record CapabilityValidationIssue(string Code, string Message, stri
         new(code, message, target, IsError: false);
 }
 
-public sealed record CapabilityCompatibilityResult(IReadOnlyList<CapabilityValidationIssue> Issues)
+public sealed record CapabilityCompatibilityResult
 {
+    public CapabilityCompatibilityResult(IReadOnlyList<CapabilityValidationIssue> issues)
+    {
+        ArgumentNullException.ThrowIfNull(issues);
+        Issues = issues.ToImmutableArray();
+    }
+
+    public IReadOnlyList<CapabilityValidationIssue> Issues { get; }
+
+    public void Deconstruct(out IReadOnlyList<CapabilityValidationIssue> issues) => issues = Issues;
+
     public bool IsCompatible => Issues.All(issue => !issue.IsError);
 
-    public IReadOnlyList<CapabilityValidationIssue> Errors => Issues.Where(issue => issue.IsError).ToArray();
+    public IReadOnlyList<CapabilityValidationIssue> Errors => Issues.Where(issue => issue.IsError).ToImmutableArray();
 
     public static CapabilityCompatibilityResult Compatible { get; } = new([]);
 }
@@ -249,22 +348,12 @@ public sealed class ProviderCapabilityValidator
         ArgumentNullException.ThrowIfNull(capabilities);
         policy ??= WorkloadEvidencePolicy.FromRegistry(registry);
 
-        var missing = required
-            .Where(requirement => !capabilities.SupportedCapabilities.Contains(requirement))
-            .OrderBy(requirement => requirement.Value, StringComparer.Ordinal)
-            .ToArray();
-        if (missing.Length != 0)
-            return new ProviderFit.Unsupported(missing);
-
-        var needsEvidence = required
-            .Where(requirement => policy.EvidenceGatedCapabilities.Contains(requirement) &&
-                                  !capabilities.EvidencedCapabilities.Contains(requirement))
-            .OrderBy(requirement => requirement.Value, StringComparer.Ordinal)
-            .Select(requirement => EvidenceReason(requirement.Value))
-            .ToArray();
-        return needsEvidence.Length == 0
+        var evaluation = EvaluateRequirements(required, capabilities, policy);
+        return evaluation.Missing.Length != 0
+            ? new ProviderFit.Unsupported(evaluation.Missing)
+            : evaluation.NeedsEvidence.Length == 0
             ? new ProviderFit.Supported()
-            : new ProviderFit.RequiresEvidence(needsEvidence);
+            : new ProviderFit.RequiresEvidence(evaluation.NeedsEvidence);
     }
 
     public CapabilityCompatibilityResult Validate(
@@ -286,31 +375,23 @@ public sealed class ProviderCapabilityValidator
                 "requirements"));
         }
 
-        var evidencePolicy = WorkloadEvidencePolicy.FromRegistry(registry);
-        var missing = required
-            .Where(requirement => !capabilities.SupportedCapabilities.Contains(requirement))
-            .OrderBy(requirement => requirement.Value, StringComparer.Ordinal)
-            .ToArray();
-        if (missing.Length != 0)
+        var evaluation = EvaluateRequirements(
+            required,
+            capabilities,
+            WorkloadEvidencePolicy.FromRegistry(registry));
+        if (evaluation.Missing.Length != 0)
         {
             diagnostics.Add(CapabilityValidationIssue.Error(
                 "GW-CAP-004",
-                $"Provider does not support required capabilities: {string.Join(", ", missing.Select(requirement => requirement.Value))}.",
+                $"Provider does not support required capabilities: {string.Join(", ", evaluation.Missing.Select(requirement => requirement.Value))}.",
                 "requirements"));
         }
 
-        var needsEvidence = required
-            .Where(requirement => capabilities.SupportedCapabilities.Contains(requirement) &&
-                                  evidencePolicy.EvidenceGatedCapabilities.Contains(requirement) &&
-                                  !capabilities.EvidencedCapabilities.Contains(requirement))
-            .OrderBy(requirement => requirement.Value, StringComparer.Ordinal)
-            .Select(requirement => EvidenceReason(requirement.Value))
-            .ToArray();
-        if (needsEvidence.Length != 0)
+        if (evaluation.NeedsEvidence.Length != 0)
         {
             diagnostics.Add(CapabilityValidationIssue.Error(
                 "GW-CAP-013",
-                $"Provider requires evidence before serving the required capabilities: {string.Join(" ", needsEvidence)}",
+                $"Provider requires evidence before serving the required capabilities: {string.Join(" ", evaluation.NeedsEvidence)}",
                 "requirements"));
         }
 
@@ -328,6 +409,29 @@ public sealed class ProviderCapabilityValidator
             .Distinct()
             .ToArray();
 
+    private static CapabilityEvaluation EvaluateRequirements(
+        IReadOnlyList<CapabilityId> required,
+        ProviderCapabilityReport capabilities,
+        WorkloadEvidencePolicy policy)
+    {
+        var missing = required
+            .Where(requirement => !capabilities.SupportedCapabilities.Contains(requirement))
+            .OrderBy(requirement => requirement.Value, StringComparer.Ordinal)
+            .ToImmutableArray();
+        var needsEvidence = required
+            .Where(requirement => capabilities.SupportedCapabilities.Contains(requirement) &&
+                                  policy.EvidenceGatedCapabilities.Contains(requirement) &&
+                                  !capabilities.EvidencedCapabilities.Contains(requirement))
+            .OrderBy(requirement => requirement.Value, StringComparer.Ordinal)
+            .Select(requirement => EvidenceReason(requirement.Value))
+            .ToImmutableArray();
+        return new CapabilityEvaluation(missing, needsEvidence);
+    }
+
+    private sealed record CapabilityEvaluation(
+        ImmutableArray<CapabilityId> Missing,
+        ImmutableArray<string> NeedsEvidence);
+
     private static string EvidenceReason(string requirement) =>
         $"Requirement '{requirement}' is evidence-gated; the provider must supply benchmark or operational evidence before serving it.";
 }
@@ -336,12 +440,10 @@ public static class WellKnownCapabilities
 {
     public static readonly CapabilityId AtomicCommit = new("groundwork.operational.atomic-commit");
 
-    public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-    [
-        new(
+    public static IReadOnlyList<CapabilityDescriptor> All { get; } = ImmutableArray.Create(
+        new CapabilityDescriptor(
             AtomicCommit,
             "Atomic commit",
             "Cross-unit atomic commit across storage units.",
-            EvidenceGatedByDefault: true)
-    ];
+            EvidenceGatedByDefault: true));
 }
