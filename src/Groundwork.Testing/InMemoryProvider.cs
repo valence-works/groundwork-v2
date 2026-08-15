@@ -107,6 +107,7 @@ internal sealed class InMemoryDatabase
     {
         ArgumentNullException.ThrowIfNull(requested);
         ArgumentNullException.ThrowIfNull(access);
+        AggregationProfileValidator.ValidateUnit(requested);
         lock (Gate)
         {
             if (!Units.TryGetValue(requested.Id, out var state))
@@ -217,6 +218,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
+        AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
         {
             return new SchemaDiff(BuildChanges(desired, database.Units.TryGetValue(desired.Id, out var current)
@@ -230,6 +232,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
+        AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
         {
             database.Units.TryGetValue(desired.Id, out var current);
@@ -368,6 +371,20 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
                 throw new SchemaConflictException($"Index '{previous.Name}' was removed non-additively.");
         }
 
+        var previousProfiles = current.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        foreach (var profile in desiredProfiles.Values)
+        {
+            if (!previousProfiles.TryGetValue(profile.Name, out var previous) ||
+                !SchemaIdentity.AggregationProfileEquals(previous, profile))
+                changes.Add(new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, profile.Name));
+        }
+        foreach (var previous in previousProfiles.Values)
+        {
+            if (!desiredProfiles.ContainsKey(previous.Name))
+                changes.Add(new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, previous.Name));
+        }
+
         return changes;
     }
 
@@ -417,6 +434,9 @@ internal static class SchemaIdentity
     internal static bool KeyEquals(KeyDefinition left, KeyDefinition right) =>
         left.Columns.SequenceEqual(right.Columns, StringComparer.Ordinal);
 
+    internal static bool AggregationProfileEquals(AggregationProfile left, AggregationProfile right) =>
+        string.Equals(AggregationProfile(left), AggregationProfile(right), StringComparison.Ordinal);
+
     private static string Column(ColumnDefinition column) => Encode(
         column.Name,
         column.Type,
@@ -436,6 +456,25 @@ internal static class SchemaIdentity
         index.MissingValues,
         index.SchemaVersion,
         string.Join("", index.Columns.Select(column => Encode(column.Column, column.Direction))));
+
+    private static string AggregationProfile(AggregationProfile profile) => Encode(
+        profile.Name,
+        string.Join(",", profile.GroupByColumns.OrderBy(column => column, StringComparer.Ordinal)),
+        string.Join(",", profile.Aggregates.Select(Aggregate).OrderBy(value => value, StringComparer.Ordinal)),
+        string.Join(",", profile.AllowedPredicates.OrderBy(allowance => allowance.Alias, StringComparer.Ordinal)
+            .Select(allowance => allowance.Alias + ":" + string.Join("+", allowance.SupportedPredicates.OrderBy(value => value)))),
+        profile.MaxGroups,
+        profile.MaxInputRows);
+
+    private static string Aggregate(Aggregate aggregate) => aggregate switch
+    {
+        Aggregate.Min min => $"min:{min.Alias}:{min.Column}",
+        Aggregate.Max max => $"max:{max.Alias}:{max.Column}",
+        Aggregate.Sum sum => $"sum:{sum.Alias}:{sum.Column}",
+        Aggregate.SetUnion set => $"setUnion:{set.Alias}:{set.Column}:{set.MaxValues}",
+        Aggregate.FirstBy first => $"firstBy:{first.Alias}:{first.Column}:{first.OrderColumn}:{first.Direction}",
+        _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
+    };
 
     private static string Encode(params object?[] parts) => string.Join(";", parts.Select(part =>
     {

@@ -13,6 +13,89 @@ namespace Groundwork.Sqlite.Tests;
 public sealed class SqliteProviderTests
 {
     [Fact]
+    public void Native_aggregation_predicates_preserve_typed_null_bool_datetime_guid_and_binary_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var instant = new DateTimeOffset(2024, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var identifier = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-typed-sqlite"),
+            Name = "aggregation_typed_sqlite",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false },
+                new() { Name = "flag", Type = PortableType.Boolean },
+                new() { Name = "moment", Type = PortableType.DateTimeOffset },
+                new() { Name = "identifier", Type = PortableType.Guid },
+                new() { Name = "payload", Type = PortableType.Binary },
+                new() { Name = "order", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates =
+                    [
+                        new Aggregate.FirstBy("firstFlag", "flag", "order"),
+                        new Aggregate.FirstBy("firstMoment", "moment", "order"),
+                        new Aggregate.FirstBy("firstIdentifier", "identifier", "order"),
+                        new Aggregate.FirstBy("firstPayload", "payload", "order")
+                    ],
+                    AllowedPredicates = new[] { "firstFlag", "firstMoment", "firstIdentifier", "firstPayload" }
+                        .Select(alias => new AggregationPredicateAllowance
+                        {
+                            Alias = alias,
+                            SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                            {
+                                AggregationPredicateOperator.Equal,
+                                AggregationPredicateOperator.In
+                            }
+                        }).ToArray()
+                }
+            ]
+        };
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one", ["group"] = "g", ["flag"] = null, ["moment"] = instant,
+            ["identifier"] = identifier, ["payload"] = new byte[] { 1, 2 }, ["order"] = 1L
+        }));
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "two", ["group"] = "g", ["flag"] = true, ["moment"] = instant.AddDays(1),
+            ["identifier"] = Guid.NewGuid(), ["payload"] = new byte[] { 3, 4 }, ["order"] = 2L
+        }));
+
+        Assert.Single(session.Aggregate(new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstFlag", AggregationPredicateOperator.Equal, [(object?)null])
+        }).Rows);
+        Assert.Single(session.Aggregate(new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstFlag", AggregationPredicateOperator.In, [(object?)null, true])
+        }).Rows);
+        Assert.Single(session.Aggregate(new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstMoment", AggregationPredicateOperator.Equal, [instant])
+        }).Rows);
+        Assert.Single(session.Aggregate(new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstIdentifier", AggregationPredicateOperator.Equal, [identifier])
+        }).Rows);
+        Assert.Single(session.Aggregate(new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstPayload", AggregationPredicateOperator.Equal, [new byte[] { 1, 2 }])
+        }).Rows);
+    }
+
+    [Fact]
     public void Native_aggregation_preserves_separator_values_and_independent_FirstBy_orders()
     {
         using var store = TemporaryStore.Create();

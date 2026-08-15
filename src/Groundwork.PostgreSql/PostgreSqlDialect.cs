@@ -19,6 +19,15 @@ public sealed class PostgreSqlDialect : RelationalDialect
     public override string RenderAggregationContains(string expression, string literal) =>
         $"{literal} = ANY({expression})";
 
+    public override string RenderAggregationLiteral(object? value, PortableType type) => value switch
+    {
+        bool boolean => boolean ? "TRUE" : "FALSE",
+        DateTimeOffset instant => instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
+        Guid guid => $"CAST('{guid:D}' AS uuid)",
+        byte[] bytes => $"decode('{Convert.ToHexString(bytes)}', 'hex')",
+        _ => base.RenderAggregationLiteral(value, type)
+    };
+
     public override bool CreateTableIncludesColumns => true;
 
     public override string QuoteIdentifier(string identifier) =>

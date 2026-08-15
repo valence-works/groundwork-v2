@@ -58,6 +58,99 @@ public sealed class PostgreSqlDialectTests
     };
 
     [Fact]
+    public void Aggregation_FirstBy_supports_boolean_values_with_null_preservation()
+    {
+        var unit = AggregationUnit() with
+        {
+            Columns =
+            [
+                ..AggregationUnit().Columns,
+                new ColumnDefinition { Name = "flag", Type = PortableType.Boolean },
+                new ColumnDefinition { Name = "order", Type = PortableType.Int64, IsNullable = false }
+            ]
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.FirstBy("firstFlag", "flag", "order")]
+        };
+
+        var sql = dialect.RenderAggregation(unit, profile).CommandText;
+
+        Assert.Contains("SELECT first_input.\"flag\"", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.Contains("firstFlag", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Aggregation_predicates_use_postgres_typed_literals_and_null_membership()
+    {
+        var unit = AggregationUnit() with
+        {
+            Columns =
+            [
+                ..AggregationUnit().Columns,
+                new ColumnDefinition { Name = "flag", Type = PortableType.Boolean },
+                new ColumnDefinition { Name = "moment", Type = PortableType.DateTimeOffset },
+                new ColumnDefinition { Name = "identifier", Type = PortableType.Guid },
+                new ColumnDefinition { Name = "payload", Type = PortableType.Binary },
+                new ColumnDefinition { Name = "order", Type = PortableType.Int64, IsNullable = false }
+            ]
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates =
+            [
+                new Aggregate.FirstBy("firstFlag", "flag", "order"),
+                new Aggregate.FirstBy("firstMoment", "moment", "order"),
+                new Aggregate.FirstBy("firstIdentifier", "identifier", "order"),
+                new Aggregate.FirstBy("firstPayload", "payload", "order")
+            ],
+            AllowedPredicates = new[] { "firstFlag", "firstMoment", "firstIdentifier", "firstPayload" }.Select(alias => new AggregationPredicateAllowance
+            {
+                Alias = alias,
+                SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                {
+                    AggregationPredicateOperator.Equal,
+                    AggregationPredicateOperator.In
+                }
+            }).ToArray()
+        };
+        var instant = new DateTimeOffset(2024, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var identifier = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
+
+        var nullSql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstFlag", AggregationPredicateOperator.Equal, [(object?)null])
+        }).CommandText;
+        var inSql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstFlag", AggregationPredicateOperator.In, [(object?)null, true])
+        }).CommandText;
+        var momentSql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstMoment", AggregationPredicateOperator.Equal, [instant])
+        }).CommandText;
+        var guidSql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstIdentifier", AggregationPredicateOperator.Equal, [identifier])
+        }).CommandText;
+        var binarySql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison("firstPayload", AggregationPredicateOperator.Equal, [new byte[] { 1, 2 }])
+        }).CommandText;
+
+        Assert.Contains("\"firstFlag\" IS NULL", nullSql, StringComparison.Ordinal);
+        Assert.Contains("(\"firstFlag\" IN (TRUE) OR \"firstFlag\" IS NULL)", inSql, StringComparison.Ordinal);
+        Assert.Contains(instant.UtcTicks.ToString(), momentSql, StringComparison.Ordinal);
+        Assert.Contains("CAST('00112233-4455-6677-8899-aabbccddeeff' AS uuid)", guidSql, StringComparison.Ordinal);
+        Assert.Contains("decode('0102', 'hex')", binarySql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Index_ddl_spells_out_normalized_null_ordering()
     {
         var index = new IndexDefinition

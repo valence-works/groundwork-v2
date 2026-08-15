@@ -400,7 +400,8 @@ public enum SchemaChangeKind
     CreateStorageUnit,
     AddColumn,
     CreateIndex,
-    AddDerivedColumn
+    AddDerivedColumn,
+    UpdateAggregationProfile
 }
 
 public sealed record SchemaChange(SchemaChangeKind Kind, string Identity);

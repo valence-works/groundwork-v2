@@ -58,15 +58,16 @@ public static class RelationalAggregationRenderer
         var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: true);
 
         var selections = new List<string>(groups);
-        selections.AddRange(profile.Aggregates.Select(aggregate => RenderAggregate(dialect, quote, unit, aggregate)));
+        const string groupedAlias = "__groundwork_aggregation_grouped";
+        selections.AddRange(profile.Aggregates.Select(aggregate => RenderAggregate(dialect, quote, unit, profile, groupedAlias, aggregate)));
         selections.AddRange(profile.Aggregates.OfType<Aggregate.SetUnion>().Select(set =>
             $"{RenderSetCount(dialect, quote(set.Column))} AS {quote(SetCountAlias(set.Alias))}"));
         selections.Add($"MAX({quote(InputCount)}) AS {quote(InputCount)}");
         selections.Add($"COUNT(*) OVER() AS {quote(GroupCount)}");
-        var grouped = $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)}";
+        var grouped = $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input AS {quote(groupedAlias)} GROUP BY {string.Join(", ", groups)}";
         var sql = query.PostPredicate is null
             ? $"WITH {ctes} {grouped}"
-            : $"WITH {ctes}, {quote("__groundwork_aggregation_result")} AS ({grouped}) SELECT * FROM {quote("__groundwork_aggregation_result")} WHERE {RenderPredicate(dialect, query.PostPredicate, quote)}";
+            : $"WITH {ctes}, {quote("__groundwork_aggregation_result")} AS ({grouped}) SELECT * FROM {quote("__groundwork_aggregation_result")} WHERE {RenderPredicate(dialect, unit, profile, query.PostPredicate, quote)}";
         if (query.OrderBy is not null)
             sql += " ORDER BY " + RenderOrderTerm(
                 dialect,
@@ -163,6 +164,8 @@ public static class RelationalAggregationRenderer
         RelationalDialect dialect,
         Func<string, string> quote,
         StorageUnit unit,
+        AggregationProfile profile,
+        string groupedAlias,
         Aggregate aggregate)
     {
         var expression = aggregate switch
@@ -171,7 +174,7 @@ public static class RelationalAggregationRenderer
             Aggregate.Max max => $"MAX({quote(max.Column)})",
             Aggregate.Sum sum => RenderSum(dialect, quote, unit, sum),
             Aggregate.SetUnion set => RenderSetUnion(dialect, quote, set),
-            Aggregate.FirstBy first => $"MAX(CASE WHEN {quote(FirstRankAlias(first.Alias))} = 1 THEN {quote(first.Column)} END)",
+            Aggregate.FirstBy first => RenderFirstBy(dialect, quote, profile, groupedAlias, first),
             _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
         };
         return expression + " AS " + quote(aggregate.Alias);
@@ -219,31 +222,97 @@ public static class RelationalAggregationRenderer
     private static bool IsSqlite(RelationalDialect dialect) =>
         dialect.ProviderName.Contains("SQLite", StringComparison.OrdinalIgnoreCase);
 
-    private static string RenderPredicate(RelationalDialect dialect, AggregationPredicate predicate, Func<string, string> quote) => predicate switch
+    private static string RenderFirstBy(
+        RelationalDialect dialect,
+        Func<string, string> quote,
+        AggregationProfile profile,
+        string groupedAlias,
+        Aggregate.FirstBy first)
     {
-        AggregationPredicate.All all => "(" + string.Join(" AND ", all.Predicates.Select(child => RenderPredicate(dialect, child, quote))) + ")",
-        AggregationPredicate.Any any => "(" + string.Join(" OR ", any.Predicates.Select(child => RenderPredicate(dialect, child, quote))) + ")",
+        var correlations = profile.GroupByColumns.Select(column =>
+            $"(first_input.{quote(column)} = {quote(groupedAlias)}.{quote(column)} OR (first_input.{quote(column)} IS NULL AND {quote(groupedAlias)}.{quote(column)} IS NULL))");
+        var where = string.Join(" AND ", correlations.Append(
+            $"first_input.{quote(FirstRankAlias(first.Alias))} = 1"));
+        var value = $"first_input.{quote(first.Column)}";
+        return IsSqlServer(dialect)
+            ? $"(SELECT TOP (1) {value} FROM __groundwork_aggregation_input AS first_input WHERE {where})"
+            : $"(SELECT {value} FROM __groundwork_aggregation_input AS first_input WHERE {where} LIMIT 1)";
+    }
+
+    private static string RenderPredicate(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationPredicate predicate,
+        Func<string, string> quote) => predicate switch
+    {
+        AggregationPredicate.All all => "(" + string.Join(" AND ", all.Predicates.Select(child => RenderPredicate(dialect, unit, profile, child, quote))) + ")",
+        AggregationPredicate.Any any => "(" + string.Join(" OR ", any.Predicates.Select(child => RenderPredicate(dialect, unit, profile, child, quote))) + ")",
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.Equal =>
-            quote(comparison.Alias) + " = " + Literal(comparison.Values.Single()),
+            RenderEqual(dialect, unit, profile, comparison, quote),
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.In =>
-            quote(comparison.Alias) + " IN (" + string.Join(", ", comparison.Values.Select(Literal)) + ")",
+            RenderIn(dialect, unit, profile, comparison, quote),
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.RangeInclusive =>
-            quote(comparison.Alias) + " BETWEEN " + Literal(comparison.Values[0]) + " AND " + Literal(comparison.Values[1]),
+            quote(comparison.Alias) + " BETWEEN " + Literal(dialect, unit, profile, comparison.Alias, comparison.Values[0]) + " AND " + Literal(dialect, unit, profile, comparison.Alias, comparison.Values[1]),
         AggregationPredicate.Comparison comparison when comparison.Operator == AggregationPredicateOperator.Contains =>
-            dialect.RenderAggregationContains(quote(comparison.Alias), Literal(comparison.Values.Single())),
+            dialect.RenderAggregationContains(quote(comparison.Alias), Literal(dialect, unit, profile, comparison.Alias, comparison.Values.Single())),
         _ => throw new AggregationValidationException([new("GW-AGG-PRED-009", "The post-reduction predicate is not renderable.", "postPredicate")])
     };
 
-    private static string Literal(object? value) => value switch
+    private static string RenderEqual(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationPredicate.Comparison comparison,
+        Func<string, string> quote)
     {
-        null => "NULL",
-        string text => "'" + text.Replace("'", "''", StringComparison.Ordinal) + "'",
-        bool boolean => boolean ? "1" : "0",
-        DateTimeOffset instant => "'" + instant.UtcDateTime.ToString("O", CultureInfo.InvariantCulture) + "'",
-        Guid guid => "'" + guid.ToString("D") + "'",
-        byte[] bytes => "X'" + Convert.ToHexString(bytes) + "'",
-        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "NULL",
-        _ => throw new AggregationValidationException([new("GW-AGG-PRED-011", "The predicate value is not a portable scalar.", "postPredicate.values")])
-    };
+        var expression = quote(comparison.Alias);
+        return comparison.Values.Single() is null
+            ? expression + " IS NULL"
+            : expression + " = " + Literal(dialect, unit, profile, comparison.Alias, comparison.Values.Single());
+    }
+
+    private static string RenderIn(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationPredicate.Comparison comparison,
+        Func<string, string> quote)
+    {
+        var expression = quote(comparison.Alias);
+        var values = comparison.Values.Where(value => value is not null).ToArray();
+        var hasNull = comparison.Values.Any(value => value is null);
+        var nonNull = values.Length == 0
+            ? string.Empty
+            : expression + " IN (" + string.Join(", ", values.Select(value => Literal(dialect, unit, profile, comparison.Alias, value))) + ")";
+        return hasNull
+            ? values.Length == 0 ? expression + " IS NULL" : "(" + nonNull + " OR " + expression + " IS NULL)"
+            : nonNull;
+    }
+
+    private static string Literal(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        string alias,
+        object? value) => dialect.RenderAggregationLiteral(value, OutputType(unit, profile, alias));
+
+    private static PortableType OutputType(StorageUnit unit, AggregationProfile profile, string alias)
+    {
+        var aggregate = profile.Aggregates.Single(item => item.Alias == alias);
+        var source = aggregate switch
+        {
+            Aggregate.Min min => min.Column,
+            Aggregate.Max max => max.Column,
+            Aggregate.Sum sum => sum.Column,
+            Aggregate.SetUnion set => set.Column,
+            Aggregate.FirstBy first => first.Column,
+            _ => throw new InvalidOperationException("Unknown aggregate declaration.")
+        };
+        var sourceType = unit.Columns.Single(column => column.Name == source).Type;
+        return aggregate is Aggregate.Sum && sourceType is (PortableType.Int32 or PortableType.Int64)
+            ? PortableType.Int64
+            : sourceType;
+    }
 
 }

@@ -11,6 +11,37 @@ namespace Groundwork.MongoDb.Tests;
 
 public sealed class MongoProviderIntegrationTests
 {
+    [SkippableFact]
+    public void Schema_admission_refuses_invalid_aggregation_before_persistence()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-invalid-aggregation-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_invalid_aggregation_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "flag", Type = PortableType.Boolean }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "invalid",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Sum("total", "flag")]
+                }
+            ]
+        };
+
+        var exception = Assert.Throws<AggregationValidationException>(() => connection.Schema.Apply(unit));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-TYPE-001");
+    }
+
     [Fact]
     public void SetUnion_budget_probe_counts_distinct_values_without_materializing_addToSet()
     {

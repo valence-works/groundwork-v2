@@ -138,6 +138,7 @@ internal sealed class MongoProviderState
     {
         ArgumentNullException.ThrowIfNull(declaration);
         declaration = SearchKeyProjection.Expand(declaration);
+        AggregationProfileValidator.ValidateUnit(declaration);
         ValidateScope(declaration, access);
         lock (gate)
         {
@@ -265,6 +266,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     public MongoSchemaDiff Diff(StorageUnit desired)
     {
         desired = SearchKeyProjection.Expand(desired);
+        AggregationProfileValidator.ValidateUnit(desired);
         ValidateDeclaration(desired);
         state.TryGet(desired.Id, out var current);
         var previousKeyOrder = current?.Declaration.Key.Columns ?? ReadSchemaKeyOrder(desired.Id);
@@ -287,6 +289,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     public MongoSchemaApplyResult Apply(StorageUnit desired)
     {
         desired = SearchKeyProjection.Expand(desired);
+        AggregationProfileValidator.ValidateUnit(desired);
         ValidateDeclaration(desired);
         var portability = PortabilityValidator.Validate(desired, new PortabilityValidationContext(["mongodb"]));
         if (!portability.IsPortable)
