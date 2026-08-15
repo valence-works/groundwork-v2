@@ -16,13 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Remove="K5SchemaEvolutionTests.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
-    <ProjectReference Include="../../src/Groundwork.Records/Groundwork.Records.csproj" />
-    <ProjectReference Include="../Groundwork.Kernel.ExternalModule/Groundwork.Kernel.ExternalModule.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
 
 </Project>
