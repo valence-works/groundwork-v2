@@ -1,15 +1,21 @@
+using System.Linq.Expressions;
 using Groundwork.Kernel;
 using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.PostgreSql;
+using Groundwork.Query.Linq;
+using Groundwork.Query.Model;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
 
-if (args.Length == 0 || !string.Equals(args[0], "roundtrips", StringComparison.OrdinalIgnoreCase))
+if (args.Length == 0 || (args[0] is not "roundtrips" and not "linq"))
 {
-    Console.Error.WriteLine("Usage: roundtrips --workload upsert --n <count> [--provider sqlite|postgresql|sqlserver|mongodb]");
+    Console.Error.WriteLine("Usage: roundtrips --workload upsert --n <count> [--provider sqlite|postgresql|sqlserver|mongodb] | linq --n <count>");
     return 2;
 }
+
+if (string.Equals(args[0], "linq", StringComparison.OrdinalIgnoreCase))
+    return RunLinqBenchmark(args);
 
 var workload = Option(args, "--workload") ?? "upsert";
 var count = int.TryParse(Option(args, "--n"), out var parsed) && parsed > 0 ? parsed : 1;
@@ -69,6 +75,31 @@ static string? Option(string[] args, string name)
     return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
 }
 
+static int RunLinqBenchmark(string[] args)
+{
+    var count = int.TryParse(Option(args, "--n"), out var parsed) && parsed > 0 ? parsed : 1000;
+    var model = new GwTableModel<BenchmarkTicket>("benchmark_tickets", new[]
+    {
+        new GwColumn<BenchmarkTicket>(nameof(BenchmarkTicket.Id), nameof(BenchmarkTicket.Id), QueryType.Int32, false)
+    });
+    var before = ExpressionLowerer.ClosedAccessorCompilationCount;
+    for (var value = 0; value < count; value++)
+    {
+        var predicate = ExpressionLowerer.Lower(ClosedPredicate(value), model);
+        var equal = predicate as Predicate.Equal ?? throw new InvalidOperationException("LINQ benchmark did not lower to equality.");
+        if (!Equals(equal.Value.Value, value))
+            throw new InvalidOperationException($"LINQ closure value was stale: expected {value}, got {equal.Value.Value}.");
+    }
+
+    var compilationDelta = ExpressionLowerer.ClosedAccessorCompilationCount - before;
+    if (compilationDelta != 1)
+        throw new InvalidOperationException($"LINQ closure accessor compiled {compilationDelta} times; expected exactly once.");
+    Console.WriteLine($"provider=none workload=linq closures={count} accessor_compilations={compilationDelta} values=fresh");
+    return 0;
+}
+
+static Expression<Func<BenchmarkTicket, bool>> ClosedPredicate(int value) => ticket => ticket.Id == value;
+
 static (IStorageProviderConnection Provider, string ConnectionString, string? TemporaryDirectory) CreateProvider(string name) =>
     name.ToLowerInvariant() switch
     {
@@ -103,3 +134,8 @@ static StorageUnit Unit(string provider) => new()
     Key = new KeyDefinition { Columns = ["id"] },
     Concurrency = ConcurrencyDeclaration.Optimistic
 };
+
+sealed class BenchmarkTicket
+{
+    public int Id { get; set; }
+}

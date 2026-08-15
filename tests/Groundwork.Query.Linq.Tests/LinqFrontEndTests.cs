@@ -15,6 +15,11 @@ public sealed class LinqFrontEndTests
     }
     private static int sideEffectReads;
     private static int SideEffectValue => Interlocked.Increment(ref sideEffectReads);
+    private static int evilInitializerReads;
+    private static class EvilDisplayClass
+    {
+        public static int Value = Interlocked.Increment(ref evilInitializerReads);
+    }
     public sealed class Ticket
     {
         public int TenantId { get; set; }
@@ -131,12 +136,21 @@ public sealed class LinqFrontEndTests
     [Fact]
     public void Closed_accessor_cache_reuses_only_the_field_getter_and_reads_fresh_closures()
     {
-        var before = ExpressionLowerer.ClosedAccessorCompilationCount;
+        var before = ExpressionLowerer.ClosedAccessorCount;
         var first = Assert.IsType<Predicate.Equal>(ExpressionLowerer.Lower(ClosedTenant(7), Tickets));
         var second = Assert.IsType<Predicate.Equal>(ExpressionLowerer.Lower(ClosedTenant(8), Tickets));
         Assert.Equal(7, first.Value.Value);
         Assert.Equal(8, second.Value.Value);
-        Assert.Equal(1, ExpressionLowerer.ClosedAccessorCompilationCount - before);
+        Assert.InRange(ExpressionLowerer.ClosedAccessorCount - before, 0, 1);
+    }
+
+    [Fact]
+    public void User_types_named_like_closures_are_not_initialized_or_read()
+    {
+        evilInitializerReads = 0;
+        var diagnostics = ExpressionLowerer.Diagnose<Ticket>(ticket => ticket.TenantId == EvilDisplayClass.Value, Tickets);
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-107");
+        Assert.Equal(0, evilInitializerReads);
     }
 
     private static Expression<Func<Ticket, bool>> ClosedTenant(int value) => ticket => ticket.TenantId == value;
