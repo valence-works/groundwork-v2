@@ -3,7 +3,6 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Groundwork.Documents;
 using Groundwork.Documents.Serialization;
-using Groundwork.Documents.Store;
 using Groundwork.Kernel;
 using Groundwork.Records;
 using Xunit;
@@ -50,6 +49,76 @@ public sealed class DocumentsContractTests
     }
 
     [Fact]
+    public void Enum_projection_matches_the_actual_json_converter_encoding()
+    {
+        var numeric = DocumentUnit.For<EnumDocument>("enum", "enum_numeric")
+            .Id(document => document.Id)
+            .Project(document => document.Status)
+            .Build();
+        var numericRow = numeric.ToRowValues(new EnumDocument(Guid.NewGuid(), OrderStatus.Paid));
+        Assert.Equal(PortableType.Int32, Assert.Single(numeric.Bindings).Type);
+        Assert.Equal(1, numericRow["status"]);
+
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        var text = DocumentUnit.For<EnumDocument>("enum", "enum_text")
+            .JsonOptions(options)
+            .Id(document => document.Id)
+            .Project(document => document.Status)
+            .Build();
+        var textRow = text.ToRowValues(new EnumDocument(Guid.NewGuid(), OrderStatus.Paid));
+        Assert.Equal(PortableType.String, Assert.Single(text.Bindings).Type);
+        Assert.Equal("paid", textRow["status"]);
+    }
+
+    [Fact]
+    public void Json_options_are_resolved_at_build_regardless_of_call_order()
+    {
+        var before = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        before.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        var after = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        after.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+
+        var optionsFirst = DocumentUnit.For<EnumDocument>("enum", "options_first")
+            .JsonOptions(before)
+            .Id(document => document.Id)
+            .Project(document => document.Status)
+            .Build();
+        var optionsLast = DocumentUnit.For<EnumDocument>("enum", "options_last")
+            .Id(document => document.Id)
+            .Project(document => document.Status)
+            .JsonOptions(after)
+            .Build();
+
+        Assert.Equal(optionsFirst.Bindings, optionsLast.Bindings);
+        Assert.Equal(optionsFirst.ToRowValues(new EnumDocument(Guid.NewGuid(), OrderStatus.Paid))["status"],
+            optionsLast.ToRowValues(new EnumDocument(Guid.NewGuid(), OrderStatus.Paid))["status"]);
+        Assert.Equal(PortableType.String, Assert.Single(optionsLast.Bindings).Type);
+    }
+
+    [Fact]
+    public void Generic_and_property_enum_converters_match_projection_encoding()
+    {
+        var genericOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        genericOptions.Converters.Add(new JsonStringEnumConverter<OrderStatus>(JsonNamingPolicy.CamelCase));
+        var generic = DocumentUnit.For<EnumDocument>("enum", "generic_enum")
+            .JsonOptions(genericOptions)
+            .Id(document => document.Id)
+            .Project(document => document.Status)
+            .Build();
+
+        var attributed = DocumentUnit.For<AttributedEnumDocument>("enum", "attributed_enum")
+            .Id(document => document.Id)
+            .Project(document => document.Status)
+            .Build();
+
+        Assert.Equal(PortableType.String, Assert.Single(generic.Bindings).Type);
+        Assert.Equal("paid", generic.ToRowValues(new EnumDocument(Guid.NewGuid(), OrderStatus.Paid))["status"]);
+        Assert.Equal(PortableType.String, Assert.Single(attributed.Bindings).Type);
+        Assert.Equal("Paid", attributed.ToRowValues(new AttributedEnumDocument(Guid.NewGuid(), OrderStatus.Paid))["status"]);
+    }
+
+    [Fact]
     public void Materialize_round_trips_a_plain_row_and_keeps_the_kernel_unit_document_free()
     {
         var unit = DocumentUnit.For<Invoice>("invoice", "invoices")
@@ -72,6 +141,28 @@ public sealed class DocumentsContractTests
     }
 
     [Fact]
+    public void Optimistic_document_writes_return_provider_version_results_without_mapping_the_system_token()
+    {
+        var unit = DocumentUnit.For<EnumDocument>("enum", "versioned_enum")
+            .Id(document => document.Id)
+            .Project(document => document.Status)
+            .OptimisticConcurrency()
+            .Build();
+        var store = new CapturingRecordStore(new RecordWriteResult(RecordWriteStatus.Updated, 7));
+        var session = unit.Open(store);
+        var value = new EnumDocument(Guid.NewGuid(), OrderStatus.Paid);
+
+        var result = session.Update(value, RecordWriteOptions.IfVersion(6));
+
+        Assert.Equal(7, result.Version);
+        Assert.DoesNotContain("version", store.LastValues!.Values.Keys);
+        Assert.Equal(6, store.LastOptions!.ExpectedVersion);
+        var read = unit.Read(store.LastValues, result.Version);
+        Assert.Equal(value, read.Value);
+        Assert.Equal(7, read.Version);
+    }
+
+    [Fact]
     public void Ambiguous_projection_and_unprojected_index_have_actionable_diagnostics()
     {
         var duplicate = Assert.Throws<DocumentDeclarationException>(() =>
@@ -88,6 +179,61 @@ public sealed class DocumentsContractTests
                 .Index("by-name", invoice => invoice.Customer.Name)
                 .Build());
         Assert.Contains(missing.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-005");
+
+        var jsonIndex = Assert.Throws<DocumentDeclarationException>(() =>
+            DocumentUnit.For<Invoice>("invoice", "invoices")
+                .Id(invoice => invoice.Id)
+                .Project(invoice => invoice.Tags)
+                .Index("by-tags", invoice => invoice.Tags)
+                .Build());
+        Assert.Contains(jsonIndex.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-006");
+    }
+
+    [Fact]
+    public void Unsupported_unsigned_enum_projection_has_an_actionable_diagnostic()
+    {
+        var exception = Assert.Throws<DocumentDeclarationException>(() =>
+            DocumentUnit.For<UnsignedEnumDocument>("enum", "unsigned_enum")
+                .Id(document => document.Id)
+                .Project(document => document.Status)
+                .Build());
+
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-007");
+    }
+
+    [Fact]
+    public void Unsupported_enum_converter_output_has_an_actionable_diagnostic()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new BooleanEnumConverter());
+
+        var exception = Assert.Throws<DocumentDeclarationException>(() =>
+            DocumentUnit.For<EnumDocument>("enum", "unsupported_converter")
+                .JsonOptions(options)
+                .Id(document => document.Id)
+                .Project(document => document.Status)
+                .Build());
+
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-008");
+    }
+
+    [Fact]
+    public void Materialize_rejects_a_row_without_the_required_schema_stamp()
+    {
+        var unit = DocumentUnit.For<EnumDocument>("enum", "missing_stamp")
+            .Id(document => document.Id)
+            .Build();
+
+        var row = new RowValues(new Dictionary<string, object?>
+        {
+            ["id"] = Guid.NewGuid(),
+            ["document"] = "{\"id\":\"00000000-0000-0000-0000-000000000000\",\"status\":0}"
+        });
+
+        var exception = Assert.Throws<DocumentSchemaVersionException>(() => unit.Materialize(row));
+
+        Assert.Equal(DocumentSchemaVersionFailure.MalformedStamp, exception.Failure);
+        Assert.Contains("schemaVersion", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -104,17 +250,33 @@ public sealed class DocumentsContractTests
                 (_, version) => "v" + version),
             new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
-        var value = codec.Deserialize<NamedDocument>(new DocumentEnvelope(
-            "invoice", "id-1", "v1", 4, "{\"oldName\":\"Ada\",\"id\":\"00000000-0000-0000-0000-000000000000\"}", DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch));
+        var value = codec.Deserialize<NamedDocument>(new VersionedJsonPayload(
+            "invoice", "v1", "{\"oldName\":\"Ada\",\"id\":\"00000000-0000-0000-0000-000000000000\"}"));
 
         Assert.Equal("Ada", value.DisplayName);
-        var future = Assert.Throws<DocumentSchemaVersionException>(() => codec.Deserialize<NamedDocument>(new DocumentEnvelope(
-            "invoice", "id-1", "v4", 4, "{}", DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)));
+        var future = Assert.Throws<DocumentSchemaVersionException>(() => codec.Deserialize<NamedDocument>(new VersionedJsonPayload(
+            "invoice", "v4", "{}")));
         Assert.Equal(DocumentSchemaVersionFailure.Future, future.Failure);
     }
 
     private sealed record Invoice(Guid Id, Customer Customer, decimal Total, IReadOnlyList<string> Tags);
     private sealed record Customer(string Name, string? Phone);
+    private sealed record EnumDocument(Guid Id, OrderStatus Status);
+    private sealed record AttributedEnumDocument(
+        Guid Id,
+        [property: JsonConverter(typeof(JsonStringEnumConverter))] OrderStatus Status);
+    private sealed record UnsignedEnumDocument(Guid Id, UnsignedOrderStatus Status);
+    private enum OrderStatus { Pending, Paid }
+    private enum UnsignedOrderStatus : uint { Pending, Paid }
+
+    private sealed class BooleanEnumConverter : JsonConverter<OrderStatus>
+    {
+        public override OrderStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+            reader.GetBoolean() ? OrderStatus.Paid : OrderStatus.Pending;
+
+        public override void Write(Utf8JsonWriter writer, OrderStatus value, JsonSerializerOptions options) =>
+            writer.WriteBooleanValue(value == OrderStatus.Paid);
+    }
 
     private sealed record NamedDocument(
         Guid Id,
@@ -129,6 +291,25 @@ public sealed class DocumentsContractTests
             content[target] = content[source]?.DeepClone();
             content.Remove(source);
             return content;
+        }
+    }
+
+    private sealed class CapturingRecordStore(RecordWriteResult result) : IRecordStore
+    {
+        public RowValues? LastValues { get; private set; }
+        public RecordWriteOptions? LastOptions { get; private set; }
+
+        public RecordWriteResult Insert(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => Capture(values, options);
+        public RecordWriteResult Update(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => Capture(values, options);
+        public RecordWriteResult Upsert(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => Capture(values, options);
+        public RecordWriteResult Delete(Groundwork.Kernel.StorageUnit unit, RowValues key, RecordWriteOptions? options = null) => Capture(key, options);
+        public RecordQueryResult Query(Groundwork.Query.Model.QueryRequest request, Groundwork.Query.Model.QueryRenderOptions? options = null) => new([]);
+
+        private RecordWriteResult Capture(RowValues values, RecordWriteOptions? options)
+        {
+            LastValues = values;
+            LastOptions = options;
+            return result;
         }
     }
 }

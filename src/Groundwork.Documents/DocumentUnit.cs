@@ -62,6 +62,7 @@ public sealed class DocumentUnitBuilder<T>
     private readonly string name;
     private readonly List<ProjectedMember> projections = [];
     private readonly List<IndexMember> indexes = [];
+    private readonly List<IDocumentJsonUpcaster> upcasters = [];
     private Func<T, object?>? idSelector;
     private MemberInfo? idMember;
     private Action<ColumnBuilder>? idConfiguration;
@@ -94,16 +95,10 @@ public sealed class DocumentUnitBuilder<T>
         Action<ColumnBuilder>? configure = null)
     {
         var memberPath = MemberPath(selector);
-        var path = string.Join('.', memberPath.Members.Select(JsonName));
-        var column = memberPath.Column;
-        if (projections.Any(existing => string.Equals(existing.Path, path, StringComparison.Ordinal)))
-            throw Invalid("GW-DOC-DECL-002", $"JSON path '{path}' is projected more than once.", "projections");
-
         projections.Add(new ProjectedMember(
-            path,
-            column,
-            selector.Compile(),
-            ToPortableType(typeof(TValue)),
+            memberPath.Members,
+            memberPath.Column,
+            typeof(TValue),
             configure));
         return this;
     }
@@ -116,10 +111,9 @@ public sealed class DocumentUnitBuilder<T>
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(indexName);
         var memberPath = MemberPath(selector);
-        var path = string.Join('.', memberPath.Members.Select(JsonName));
         if (indexes.Any(existing => string.Equals(existing.Name, indexName, StringComparison.Ordinal)))
             throw Invalid("GW-DOC-DECL-004", $"Index '{indexName}' is declared more than once.", $"indexes.{indexName}");
-        indexes.Add(new IndexMember(indexName, path, direction));
+        indexes.Add(new IndexMember(indexName, memberPath.Members, direction));
         return this;
     }
 
@@ -159,6 +153,14 @@ public sealed class DocumentUnitBuilder<T>
         return this;
     }
 
+    /// <summary>Adds one contiguous historical JSON migration step for this document kind.</summary>
+    public DocumentUnitBuilder<T> Upcaster(IDocumentJsonUpcaster upcaster)
+    {
+        ArgumentNullException.ThrowIfNull(upcaster);
+        upcasters.Add(upcaster);
+        return this;
+    }
+
     /// <summary>Uses the supplied options for canonical JSON serialization and materialization.</summary>
     public DocumentUnitBuilder<T> JsonOptions(JsonSerializerOptions options)
     {
@@ -175,6 +177,11 @@ public sealed class DocumentUnitBuilder<T>
 
         var idColumn = idMember is null ? null : LowerFirst(idMember.Name);
         var bindings = new List<ColumnBinding>();
+        var resolvedProjections = projections.Select(projection => new ResolvedProjection(
+            string.Join('.', projection.Members.Select(JsonName)),
+            projection.Column,
+            ToPortableType(projection.ValueType, projection.Members),
+            projection.Configure)).ToArray();
         var occupiedColumns = new HashSet<string>(StringComparer.Ordinal)
         {
             "document",
@@ -188,8 +195,13 @@ public sealed class DocumentUnitBuilder<T>
         if (idColumn is not null && !occupiedColumns.Add(idColumn))
             diagnostics.Add(new("GW-DOC-DECL-003", $"The id column '{idColumn}' collides with a reserved document column.", "id"));
 
-        foreach (var projection in projections)
+        foreach (var projection in resolvedProjections)
         {
+            if (bindings.Any(binding => string.Equals(binding.Path, projection.Path, StringComparison.Ordinal)))
+            {
+                diagnostics.Add(new("GW-DOC-DECL-002", $"JSON path '{projection.Path}' is projected more than once.", "projections"));
+                continue;
+            }
             if (!occupiedColumns.Add(projection.Column))
             {
                 diagnostics.Add(new(
@@ -204,10 +216,17 @@ public sealed class DocumentUnitBuilder<T>
 
         foreach (var index in indexes)
         {
-            if (!projections.Any(projection => string.Equals(projection.Path, index.Path, StringComparison.Ordinal)))
+            var indexPath = string.Join('.', index.Members.Select(JsonName));
+            var projection = resolvedProjections.FirstOrDefault(candidate => string.Equals(candidate.Path, indexPath, StringComparison.Ordinal));
+            if (projection is null)
                 diagnostics.Add(new(
                     "GW-DOC-DECL-005",
-                    $"Index '{index.Name}' targets path '{index.Path}', which has no projected column. Declare Project() first.",
+                    $"Index '{index.Name}' targets path '{indexPath}', which has no projected column. Declare Project() first.",
+                    $"indexes.{index.Name}"));
+            else if (projection.Type == PortableType.Json)
+                diagnostics.Add(new(
+                    "GW-DOC-DECL-006",
+                    $"Index '{index.Name}' targets JSON path '{indexPath}', but JSON projections are not portable index keys. Project a scalar value instead.",
                     $"indexes.{index.Name}"));
         }
 
@@ -217,23 +236,22 @@ public sealed class DocumentUnitBuilder<T>
         try
         {
             var declaration = Groundwork.Kernel.StorageUnit.Declare(name, name);
-            var idType = ToPortableType(idMember!.GetMemberType());
+            var idType = ToPortableType(idMember!.GetMemberType(), new[] { idMember! });
             declaration.Column(idColumn!, idType, ConfigureColumn(idType, ConfigureRequired(idConfiguration)));
             declaration.Json("document", column => column.Required());
             declaration.String("schemaVersion", column => column.Required());
             if (sharedKind)
                 declaration.String("kind", column => column.Required());
 
-            foreach (var projection in projections)
+            foreach (var projection in resolvedProjections)
             {
                 declaration.Column(projection.Column, projection.Type, ConfigureColumn(projection.Type, projection.Configure));
             }
 
             foreach (var index in indexes)
             {
-                var projection = projections.Single(projection => projection.Path == index.Path);
-                if (projection.Type == PortableType.Json)
-                    continue;
+                var indexPath = string.Join('.', index.Members.Select(JsonName));
+                var projection = resolvedProjections.Single(projection => projection.Path == indexPath);
             declaration.Index(index.Name, builder =>
             {
                 if (index.Direction == SortDirection.Descending)
@@ -252,7 +270,7 @@ public sealed class DocumentUnitBuilder<T>
 
             var storageUnit = declaration.Build();
             var policy = new DocumentSchemaVersionPolicy(documentKind, minimumReadableVersion, currentVersion);
-            var codec = DocumentCodecFactory.Create(policy, jsonOptions);
+            var codec = DocumentCodecFactory.Create(policy, upcasters, jsonOptions);
             return new DocumentUnit<T>(
                 documentKind,
                 storageUnit,
@@ -319,7 +337,7 @@ public sealed class DocumentUnitBuilder<T>
             throw new ArgumentException("A document projection must select a property or field path rooted at its document parameter.", nameof(selector));
 
         members.Reverse();
-        return new MemberPath(string.Empty, LowerFirst(members[^1].Name), members);
+        return new MemberPath(LowerFirst(members[^1].Name), members);
     }
 
     private static Expression Unwrap(Expression expression)
@@ -330,7 +348,7 @@ public sealed class DocumentUnitBuilder<T>
         return expression;
     }
 
-    private PortableType ToPortableType(Type type)
+    private PortableType ToPortableType(Type type, IReadOnlyList<MemberInfo>? members = null)
     {
         type = Nullable.GetUnderlyingType(type) ?? type;
         if (type == typeof(string)) return PortableType.String;
@@ -343,12 +361,62 @@ public sealed class DocumentUnitBuilder<T>
         if (type == typeof(byte[])) return PortableType.Binary;
         if (type == typeof(JsonElement) || type == typeof(JsonDocument) || type == typeof(object)) return PortableType.Json;
         if (type.IsEnum)
-            return jsonOptions?.Converters.Any(converter => converter is JsonStringEnumConverter) == true
-                ? PortableType.String
-                : Enum.GetUnderlyingType(type) == typeof(long) ? PortableType.Int64 : PortableType.Int32;
+        {
+            var underlying = Enum.GetUnderlyingType(type);
+            if (underlying == typeof(uint) || underlying == typeof(ulong))
+                throw Invalid("GW-DOC-DECL-007", $"Enum '{type.FullName}' uses unsupported unsigned underlying type '{underlying.Name}'. Use a signed enum or project it as JSON.", "projections");
+            return EnumPortableType(type, members);
+        }
         if (type.IsArray || typeof(System.Collections.IEnumerable).IsAssignableFrom(type))
             return PortableType.Json;
         return PortableType.Json;
+    }
+
+    private PortableType EnumPortableType(Type enumType, IReadOnlyList<MemberInfo>? members)
+    {
+        JsonConverter? propertyConverter = null;
+        var propertyConverterAttribute = members?.LastOrDefault()?.GetCustomAttribute<JsonConverterAttribute>();
+        if (propertyConverterAttribute is not null)
+        {
+            try
+            {
+                propertyConverter = propertyConverterAttribute.CreateConverter(enumType) ??
+                    (propertyConverterAttribute.ConverterType is { } converterType
+                        ? Activator.CreateInstance(converterType) as JsonConverter
+                        : null);
+                if (propertyConverter is null)
+                    throw new InvalidOperationException("The converter attribute did not create a JsonConverter instance.");
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException and not OperationCanceledException)
+            {
+                throw Invalid("GW-DOC-DECL-008", $"The JSON converter on enum '{enumType.FullName}' could not be created: {exception.Message}", "projections");
+            }
+        }
+
+        var options = jsonOptions is null
+            ? new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            : new JsonSerializerOptions(jsonOptions);
+        if (propertyConverter is not null)
+            options.Converters.Insert(0, propertyConverter);
+
+        JsonValueKind kind;
+        try
+        {
+            var json = JsonSerializer.Serialize(Enum.ToObject(enumType, 0), enumType, options);
+            using var document = JsonDocument.Parse(json);
+            kind = document.RootElement.ValueKind;
+        }
+        catch (Exception exception) when (exception is JsonException or NotSupportedException or InvalidOperationException)
+        {
+            throw Invalid("GW-DOC-DECL-008", $"The JSON converter for enum '{enumType.FullName}' could not be inspected: {exception.Message}", "projections");
+        }
+
+        return kind switch
+        {
+            JsonValueKind.String => PortableType.String,
+            JsonValueKind.Number => Enum.GetUnderlyingType(enumType) == typeof(long) ? PortableType.Int64 : PortableType.Int32,
+            _ => throw Invalid("GW-DOC-DECL-008", $"The JSON converter for enum '{enumType.FullName}' emits {kind}, but document projections support only string or integral JSON values.", "projections")
+        };
     }
 
     private static string LowerFirst(string value) => value.Length == 0 ? value : char.ToLowerInvariant(value[0]) + value[1..];
@@ -367,20 +435,24 @@ public sealed class DocumentUnitBuilder<T>
         new([new DocumentDiagnostic(code, message, path)]);
 
     private sealed record ProjectedMember(
-        string Path,
+        IReadOnlyList<MemberInfo> Members,
         string Column,
-        Delegate Getter,
-        PortableType Type,
+        Type ValueType,
         Action<ColumnBuilder>? Configure);
 
-    private sealed record IndexMember(string Name, string Path, SortDirection Direction);
+    private sealed record IndexMember(string Name, IReadOnlyList<MemberInfo> Members, SortDirection Direction);
+
+    private sealed record ResolvedProjection(
+        string Path,
+        string Column,
+        PortableType Type,
+        Action<ColumnBuilder>? Configure);
 }
 
 /// <summary>Built document contract whose storage declaration is an ordinary kernel unit.</summary>
 public sealed class DocumentUnit<T>
 {
     private readonly Func<T, object?> idGetter;
-    private readonly IReadOnlyDictionary<string, ColumnBinding> bindingsByColumn;
     private readonly bool sharedKind;
     private readonly VersionedJsonDocumentCodec codec;
     private readonly JsonSerializerOptions? jsonOptions;
@@ -403,7 +475,6 @@ public sealed class DocumentUnit<T>
         this.sharedKind = sharedKind;
         this.codec = codec;
         this.jsonOptions = jsonOptions;
-        bindingsByColumn = Bindings.ToDictionary(binding => binding.Column, StringComparer.Ordinal);
     }
 
     public string DocumentKind { get; }
@@ -449,9 +520,16 @@ public sealed class DocumentUnit<T>
             JsonElement element => element.GetRawText(),
             _ => JsonSerializer.Serialize(content, jsonOptions)
         };
-        var schemaVersion = values.TryGetValue("schemaVersion", out var stamp) && stamp is not null
-            ? Convert.ToString(stamp, System.Globalization.CultureInfo.InvariantCulture)!
-            : "v1";
+        if (!values.TryGetValue("schemaVersion", out var stamp) || stamp is null)
+            throw new DocumentSchemaVersionException(
+                DocumentSchemaVersionFailure.MalformedStamp,
+                $"Document row for kind '{DocumentKind}' is missing required 'schemaVersion' metadata.",
+                DocumentKind);
+        var schemaVersion = Convert.ToString(stamp, System.Globalization.CultureInfo.InvariantCulture)!
+            ?? throw new DocumentSchemaVersionException(
+                DocumentSchemaVersionFailure.MalformedStamp,
+                $"Document row for kind '{DocumentKind}' contains an invalid 'schemaVersion' metadata value.",
+                DocumentKind);
         return codec.Deserialize<T>(new VersionedJsonPayload(DocumentKind, schemaVersion, contentJson));
     }
 
@@ -532,17 +610,18 @@ internal static class DocumentCodecFactory
 {
     internal static VersionedJsonDocumentCodec Create(
         DocumentSchemaVersionPolicy policy,
+        IEnumerable<IDocumentJsonUpcaster> upcasters,
         JsonSerializerOptions? options) =>
         new(
             [policy],
-            [],
+            upcasters,
             new DocumentSchemaVersionFormat(
                 (_, stamp) => stamp.StartsWith('v') && int.TryParse(stamp.AsSpan(1), out var version) ? version : null,
                 (_, version) => "v" + version.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             options ?? new JsonSerializerOptions(JsonSerializerDefaults.Web));
 }
 
-internal sealed record MemberPath(string Path, string Column, IReadOnlyList<MemberInfo> Members);
+internal sealed record MemberPath(string Column, IReadOnlyList<MemberInfo> Members);
 
 internal static class MemberInfoExtensions
 {

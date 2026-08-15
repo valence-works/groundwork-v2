@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Groundwork.Documents.Store;
 
 namespace Groundwork.Documents.Serialization;
 
@@ -45,36 +44,12 @@ public sealed class VersionedJsonDocumentCodec
         return new VersionedJsonContent(stamp, Canonicalize(raw));
     }
 
-    public SaveDocumentRequest CreateSaveRequest<TDocument>(string documentKind, string id, TDocument document, long? expectedVersion = null)
+    public bool IsCurrentVersion(VersionedJsonPayload payload)
     {
-        var serialized = Serialize(documentKind, document);
-        return new SaveDocumentRequest(documentKind, id, serialized.SchemaVersion, serialized.ContentJson, expectedVersion);
-    }
-
-    public bool IsCurrentVersion(DocumentEnvelope envelope)
-    {
-        ArgumentNullException.ThrowIfNull(envelope);
-        var policy = registry.GetPolicy(envelope.DocumentKind);
-        return versionFormat.Parse(envelope.DocumentKind, envelope.Id, envelope.SchemaVersion,
+        ArgumentNullException.ThrowIfNull(payload);
+        var policy = registry.GetPolicy(payload.DocumentKind);
+        return versionFormat.Parse(payload.DocumentKind, "(row)", payload.SchemaVersion,
             policy.MinimumReadableVersion, policy.CurrentVersion) == policy.CurrentVersion;
-    }
-
-    public TDocument Deserialize<TDocument>(DocumentEnvelope envelope)
-    {
-        ArgumentNullException.ThrowIfNull(envelope);
-        var policy = registry.GetPolicy(envelope.DocumentKind);
-        var version = ReadSupportedVersion(envelope, policy);
-        if (version == policy.CurrentVersion)
-            return DeserializeContent<TDocument>(envelope, policy, version, envelope.ContentJson);
-        JsonObject content;
-        try
-        {
-            content = JsonNode.Parse(envelope.ContentJson, documentOptions: documentOptions) as JsonObject
-                ?? throw InvalidContent(envelope, policy, version, "does not contain a JSON object and cannot be upcasted");
-        }
-        catch (JsonException exception) { throw InvalidContent(envelope, policy, version, "does not contain valid JSON and cannot be upcasted", exception); }
-        var upcasted = registry.UpcastToCurrent(envelope.DocumentKind, version, content);
-        return DeserializeContent<TDocument>(envelope, policy, version, upcasted);
     }
 
     /// <summary>Deserializes a typed payload without inventing an identity or timestamp.</summary>
@@ -111,22 +86,6 @@ public sealed class VersionedJsonDocumentCodec
             registry.UpcastToCurrent(payload.DocumentKind, version, content));
     }
 
-    private TDocument DeserializeContent<TDocument>(DocumentEnvelope envelope, DocumentSchemaVersionPolicy policy, int version, string content)
-    {
-        try { return JsonSerializer.Deserialize<TDocument>(content, jsonOptions) ?? throw InvalidContent(envelope, policy, version, "deserialized to null content"); }
-        catch (DocumentSchemaVersionException) { throw; }
-        catch (Exception exception) when (exception is JsonException or NotSupportedException)
-        { throw InvalidContent(envelope, policy, version, "could not be deserialized", exception); }
-    }
-
-    private TDocument DeserializeContent<TDocument>(DocumentEnvelope envelope, DocumentSchemaVersionPolicy policy, int version, JsonObject content)
-    {
-        try { return content.Deserialize<TDocument>(jsonOptions) ?? throw InvalidContent(envelope, policy, version, "upcasted to null content"); }
-        catch (DocumentSchemaVersionException) { throw; }
-        catch (Exception exception) when (exception is JsonException or NotSupportedException)
-        { throw InvalidContent(envelope, policy, version, "could not be deserialized after upcasting", exception); }
-    }
-
     private TDocument DeserializePayloadContent<TDocument>(VersionedJsonPayload payload, DocumentSchemaVersionPolicy policy, int version, string content)
     {
         try { return JsonSerializer.Deserialize<TDocument>(content, jsonOptions) ?? throw InvalidPayloadContent(payload, policy, version, "deserialized to null content"); }
@@ -143,26 +102,6 @@ public sealed class VersionedJsonDocumentCodec
         { throw InvalidPayloadContent(payload, policy, version, "could not be deserialized after upcasting", exception); }
     }
 
-    private int ReadSupportedVersion(DocumentEnvelope envelope, DocumentSchemaVersionPolicy policy)
-    {
-        var version = versionFormat.Parse(envelope.DocumentKind, envelope.Id, envelope.SchemaVersion,
-            policy.MinimumReadableVersion, policy.CurrentVersion);
-        if (version < policy.MinimumReadableVersion)
-            throw new DocumentSchemaVersionException(DocumentSchemaVersionFailure.TooOld,
-                $"Document '{envelope.Id}' of kind '{envelope.DocumentKind}' carries schema version {version}, below minimum readable version {policy.MinimumReadableVersion}.",
-                envelope.DocumentKind, envelope.Id, envelope.SchemaVersion, version, policy.MinimumReadableVersion, policy.CurrentVersion);
-        if (version > policy.CurrentVersion)
-            throw new DocumentSchemaVersionException(DocumentSchemaVersionFailure.Future,
-                $"Document '{envelope.Id}' of kind '{envelope.DocumentKind}' carries future schema version {version}; this build supports up to {policy.CurrentVersion}.",
-                envelope.DocumentKind, envelope.Id, envelope.SchemaVersion, version, policy.MinimumReadableVersion, policy.CurrentVersion);
-        return version;
-    }
-
-    private static DocumentSchemaVersionException InvalidContent(DocumentEnvelope envelope, DocumentSchemaVersionPolicy policy, int version, string detail, Exception? inner = null) =>
-        new(DocumentSchemaVersionFailure.InvalidContent,
-            $"Document '{envelope.Id}' of kind '{envelope.DocumentKind}' at schema version {version} {detail}.",
-            envelope.DocumentKind, envelope.Id, envelope.SchemaVersion, version, policy.MinimumReadableVersion, policy.CurrentVersion, inner);
-
     private static DocumentSchemaVersionException InvalidPayloadContent(VersionedJsonPayload payload, DocumentSchemaVersionPolicy policy, int version, string detail, Exception? inner = null) =>
         new(DocumentSchemaVersionFailure.InvalidContent,
             $"A document of kind '{payload.DocumentKind}' at schema version {version} {detail}.",
@@ -175,7 +114,12 @@ public sealed class VersionedJsonDocumentCodec
         {
             var node = JsonNode.Parse(json, documentOptions: documentOptions)
                 ?? throw new JsonException("Document JSON was null.");
-            return CanonicalNode(node).ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+            if (node is not JsonObject)
+                throw new JsonException("A canonical document must be a JSON object.");
+            var canonicalOptions = jsonOptions is null
+                ? new JsonSerializerOptions { WriteIndented = false }
+                : new JsonSerializerOptions(jsonOptions) { WriteIndented = false };
+            return CanonicalNode(node).ToJsonString(canonicalOptions);
         }
         catch (JsonException exception)
         {
@@ -203,10 +147,3 @@ public sealed class VersionedJsonDocumentCodec
         return node.DeepClone();
     }
 }
-
-public sealed record SaveDocumentRequest(
-    string DocumentKind,
-    string Id,
-    string SchemaVersion,
-    string ContentJson,
-    long? ExpectedVersion = null);
