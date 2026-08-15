@@ -33,10 +33,12 @@ public static class RelationalSql
     public static string FinalizeColumn(
         RelationalDialect dialect,
         string table,
-        string column)
+        ColumnDefinition column)
     {
         ArgumentNullException.ThrowIfNull(dialect);
-        return dialect.FinalizeColumnSql(table, column);
+        ArgumentNullException.ThrowIfNull(column);
+        dialect.Validate(column);
+        return dialect.FinalizeColumnSql(table, column.Name, column);
     }
 
     public static string CreateIndex(

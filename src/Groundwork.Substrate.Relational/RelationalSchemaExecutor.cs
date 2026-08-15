@@ -70,15 +70,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         ArgumentNullException.ThrowIfNull(operation);
         var lease = RequireLock(target, applicationLock);
         lease.Verify();
-        using var transaction = lease.Connection.BeginTransaction();
-        dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
-        ExecuteOperation(lease.Connection, transaction, operation);
-        dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
-        transaction.Commit();
-        return new PhysicalSchemaOperationAcknowledgement(
-            operation.Identity,
-            operation.Fingerprint,
-            DateTimeOffset.UtcNow);
+        return ApplyOperationBatchCore(lease, target, [operation])[0];
     }
 
     public IReadOnlyList<PhysicalSchemaOperationAcknowledgement> ApplyOperationBatch(
@@ -87,7 +79,12 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         IPhysicalSchemaApplicationLock applicationLock)
     {
         ArgumentNullException.ThrowIfNull(operations);
-        return operations.Select(operation => ApplyOperation(target, operation, applicationLock)).ToArray();
+        var snapshot = operations.ToArray();
+        if (snapshot.Any(operation => operation is null))
+            throw new ArgumentException("A schema operation batch cannot contain null operations.", nameof(operations));
+        var lease = RequireLock(target, applicationLock);
+        lease.Verify();
+        return ApplyOperationBatchCore(lease, target, snapshot);
     }
 
     public void PublishAppliedState(
@@ -96,15 +93,28 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         IPhysicalSchemaApplicationLock applicationLock)
     {
         ArgumentNullException.ThrowIfNull(state);
-        if (expectedAppliedTargetFingerprint is not null &&
-            !string.Equals(expectedAppliedTargetFingerprint, state.TargetFingerprint, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("The applied schema fingerprint does not match the expected fingerprint.");
-        }
-
         var lease = RequireLock(state.TargetIdentity, applicationLock);
         lease.Verify();
-        dialect.PublishHistory(lease.Connection, state);
+        using var transaction = lease.Connection.BeginTransaction();
+        try
+        {
+            dialect.AssertFence(lease.Connection, transaction, state.TargetIdentity, lease.Owner, lease.Fence);
+            dialect.PublishHistory(
+                lease.Connection,
+                transaction,
+                state.TargetIdentity,
+                state,
+                expectedAppliedTargetFingerprint,
+                lease.Owner,
+                lease.Fence);
+            dialect.AssertFence(lease.Connection, transaction, state.TargetIdentity, lease.Owner, lease.Fence);
+            transaction.Commit();
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
     }
 
     public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target)
@@ -113,7 +123,26 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         using var connection = OpenConnection();
         dialect.EnsureInfrastructure(connection);
         var history = dialect.ReadHistory(connection, target.Identity);
-        return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+        if (history.AppliedState is null)
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+
+        var applied = history.AppliedState;
+        var appliedTarget = new PhysicalSchemaTarget(
+            applied.Snapshot.Subject,
+            applied.Provider,
+            applied.Snapshot.ProviderDefinitions);
+        using var transaction = connection.BeginTransaction();
+        try
+        {
+            ValidateTarget(connection, transaction, appliedTarget);
+            transaction.Commit();
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+        }
+        catch (InvalidOperationException)
+        {
+            transaction.Rollback();
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: false);
+        }
     }
 
     public bool TryMapUniqueViolation(DbException exception, out string indexName)
@@ -143,7 +172,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                     "BackfillColumn");
                 break;
             case FinalizeColumnOperation finalize:
-                Execute(connection, transaction, RelationalSql.FinalizeColumn(dialect, finalize.Subject.Name, finalize.Column.Name));
+                Execute(connection, transaction, RelationalSql.FinalizeColumn(dialect, finalize.Subject.Name, finalize.Column));
                 break;
             case CreatePhysicalIndexOperation createIndex:
                 Execute(connection, transaction, RelationalSql.CreateIndex(dialect, createIndex.Subject.Name, createIndex.Index));
@@ -156,7 +185,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                 dialect.ApplyProviderDefinition(connection, transaction, applyProvider.Definition);
                 break;
             case ValidatePhysicalSchemaOperation validate:
-                dialect.ValidateTarget(connection, transaction, validate.Target);
+                ValidateTarget(connection, transaction, validate.Target);
                 break;
             case PublishAppliedStateOperation:
                 break;
@@ -183,6 +212,97 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             throw new NotSupportedException($"The relational dialect does not implement {operation}.");
         Execute(connection, transaction, sql);
     }
+
+    private IReadOnlyList<PhysicalSchemaOperationAcknowledgement> ApplyOperationBatchCore(
+        RelationalApplicationLock lease,
+        PhysicalSchemaTargetIdentity target,
+        IReadOnlyList<PhysicalSchemaOperation> operations)
+    {
+        using var transaction = lease.Connection.BeginTransaction();
+        var acknowledgements = new List<PhysicalSchemaOperationAcknowledgement>(operations.Count);
+        try
+        {
+            dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
+            foreach (var operation in operations)
+            {
+                dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
+                ExecuteOperation(lease.Connection, transaction, operation);
+                acknowledgements.Add(new PhysicalSchemaOperationAcknowledgement(
+                    operation.Identity,
+                    operation.Fingerprint,
+                    DateTimeOffset.UtcNow));
+            }
+
+            dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
+            transaction.Commit();
+            return acknowledgements;
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
+    }
+
+    private void ValidateTarget(
+        DbConnection connection,
+        DbTransaction transaction,
+        PhysicalSchemaTarget target)
+    {
+        var table = target.Subject.Name;
+        if (!dialect.TableExists(connection, transaction, table))
+            throw new InvalidOperationException($"Relational schema table '{table}' does not exist.");
+
+        var columns = dialect.ReadColumns(connection, transaction, table)
+            ?? throw new InvalidOperationException($"The relational dialect returned no column catalog for '{table}'.");
+        foreach (var expected in target.Subject.Columns)
+        {
+            if (!columns.TryGetValue(expected.Name, out var actual) || actual is null)
+                throw new InvalidOperationException($"Relational schema table '{table}' is missing column '{expected.Name}'.");
+            var expectedKeyOrder = Array.IndexOf(target.Subject.Key.Columns.ToArray(), expected.Name) + 1;
+            if (!string.Equals(actual.Name, expected.Name, StringComparison.Ordinal) ||
+                !string.Equals(actual.StoreType, dialect.MapType(expected), StringComparison.OrdinalIgnoreCase) ||
+                actual.IsNullable != expected.IsNullable ||
+                !string.Equals(actual.DefaultValue, dialect.MapDefault(expected), StringComparison.Ordinal) ||
+                !string.Equals(actual.Collation, dialect.MapCollation(expected), StringComparison.OrdinalIgnoreCase) ||
+                actual.PrimaryKeyOrder != expectedKeyOrder ||
+                actual.IsComputed ||
+                actual.IsPersisted ||
+                actual.ComputedDefinition is not null)
+            {
+                throw new InvalidOperationException($"Relational schema column '{table}.{expected.Name}' does not match its declaration.");
+            }
+        }
+
+        foreach (var expectedIndex in target.Subject.Indexes)
+        {
+            var actual = dialect.ReadIndex(connection, transaction, table, expectedIndex.Name);
+            if (actual is null)
+                throw new InvalidOperationException($"Relational schema table '{table}' is missing index '{expectedIndex.Name}'.");
+            if (actual.IsUnique != expectedIndex.IsUnique)
+                throw new InvalidOperationException($"Relational schema index '{table}.{expectedIndex.Name}' has unexpected uniqueness.");
+            var expectedColumns = expectedIndex.Columns
+                .Select(column => new RelationalIndexColumnMetadata(column.Column, column.Direction))
+                .ToArray();
+            if (!actual.Columns.SequenceEqual(expectedColumns) ||
+                !string.Equals(
+                    NormalizeIndexFilter(actual.Filter),
+                    NormalizeIndexFilter(dialect.IndexFilter(expectedIndex)),
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Relational schema index '{table}.{expectedIndex.Name}' does not match its declaration.");
+            }
+        }
+
+        dialect.ValidateTarget(connection, transaction, target);
+    }
+
+    private static string? NormalizeIndexFilter(string? filter) =>
+        filter is null
+            ? null
+            : new string(filter.Where(character =>
+                !char.IsWhiteSpace(character) &&
+                character is not ('"' or '[' or ']' or '`' or '(' or ')')).ToArray());
 
     private DbConnection OpenConnection()
     {
@@ -239,7 +359,7 @@ public sealed class RelationalApplicationLock : IPhysicalSchemaApplicationLock
 
     public PhysicalSchemaTargetIdentity Target { get; }
 
-    public DbConnection Connection { get; }
+    internal DbConnection Connection { get; }
 
     internal string Owner { get; }
 

@@ -25,7 +25,12 @@ public abstract class RelationalDialect
 
     public abstract string AddColumnSql(string table, string column, string definition);
 
-    public abstract string FinalizeColumnSql(string table, string column);
+    /// <summary>
+    /// Emits the provider-specific finalization for a column that has already been backfilled.
+    /// The complete declaration is supplied because providers such as SQL Server need the type,
+    /// nullability, and collation when changing the temporary column definition.
+    /// </summary>
+    public abstract string FinalizeColumnSql(string table, string column, ColumnDefinition definition);
 
     public abstract string CreateIndexSql(string table, IndexDefinition index, string? filter);
 
@@ -68,9 +73,21 @@ public abstract class RelationalDialect
         DbConnection connection,
         PhysicalSchemaTargetIdentity target);
 
+    /// <summary>
+    /// Atomically publishes applied history using the supplied transaction and fence.
+    /// <paramref name="expectedAppliedTargetFingerprint"/> is the previously durable target
+    /// fingerprint (or <see langword="null"/> when no history row is expected), not the new
+    /// fingerprint. Providers must perform the compare-and-swap against that value and throw when
+    /// it no longer matches.
+    /// </summary>
     public abstract void PublishHistory(
         DbConnection connection,
-        PhysicalSchemaAppliedState state);
+        DbTransaction transaction,
+        PhysicalSchemaTargetIdentity target,
+        PhysicalSchemaAppliedState state,
+        string? expectedAppliedTargetFingerprint,
+        string owner,
+        long fence);
 
     public abstract bool TableExists(
         DbConnection connection,
@@ -142,12 +159,31 @@ public sealed record RelationalWriteShape
     {
         Table = Require(table, nameof(table));
         Columns = Snapshot(columns, nameof(columns));
-        KeyColumns = Snapshot(keyColumns, nameof(keyColumns));
-        UpdateColumns = Snapshot(updateColumns, nameof(updateColumns));
+        KeyColumns = SnapshotNames(keyColumns, nameof(keyColumns));
+        UpdateColumns = SnapshotNames(updateColumns, nameof(updateColumns));
         if (Columns.Count == 0)
             throw new ArgumentException("A write shape requires at least one column.", nameof(columns));
         if (KeyColumns.Count == 0)
             throw new ArgumentException("A write shape requires at least one key column.", nameof(keyColumns));
+
+        var columnNames = Columns.Select(column => column.Name).ToArray();
+        if (columnNames.Distinct(StringComparer.Ordinal).Count() != columnNames.Length)
+            throw new ArgumentException("A write shape cannot contain duplicate columns.", nameof(columns));
+        var parameterNames = Columns.Select(column => column.ParameterName).ToArray();
+        if (parameterNames.Distinct(StringComparer.Ordinal).Count() != parameterNames.Length)
+            throw new ArgumentException("A write shape cannot contain duplicate parameter names.", nameof(columns));
+
+        var available = columnNames.ToHashSet(StringComparer.Ordinal);
+        if (KeyColumns.Distinct(StringComparer.Ordinal).Count() != KeyColumns.Count)
+            throw new ArgumentException("A write shape cannot contain duplicate key columns.", nameof(keyColumns));
+        if (UpdateColumns.Distinct(StringComparer.Ordinal).Count() != UpdateColumns.Count)
+            throw new ArgumentException("A write shape cannot contain duplicate update columns.", nameof(updateColumns));
+        if (KeyColumns.Any(column => !available.Contains(column)))
+            throw new ArgumentException("Every key column must be present in columns.", nameof(keyColumns));
+        if (UpdateColumns.Any(column => !available.Contains(column)))
+            throw new ArgumentException("Every update column must be present in columns.", nameof(updateColumns));
+        if (KeyColumns.Any(UpdateColumns.Contains))
+            throw new ArgumentException("Key columns cannot also be update columns.", nameof(updateColumns));
     }
 
     public string Table { get; }
@@ -158,8 +194,25 @@ public sealed record RelationalWriteShape
 
     public IReadOnlyList<string> UpdateColumns { get; }
 
-    private static IReadOnlyList<T> Snapshot<T>(IEnumerable<T> values, string parameterName) =>
-        new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName)).ToArray());
+    private static IReadOnlyList<RelationalWriteColumn> Snapshot(
+        IEnumerable<RelationalWriteColumn> values,
+        string parameterName)
+    {
+        var snapshot = (values ?? throw new ArgumentNullException(parameterName)).ToArray();
+        if (snapshot.Any(column => column is null))
+            throw new ArgumentException("A write shape cannot contain null columns.", parameterName);
+        return new ReadOnlyCollection<RelationalWriteColumn>(snapshot);
+    }
+
+    private static IReadOnlyList<string> SnapshotNames(
+        IEnumerable<string> values,
+        string parameterName)
+    {
+        var snapshot = (values ?? throw new ArgumentNullException(parameterName)).ToArray();
+        if (snapshot.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("A write shape cannot contain empty column names.", parameterName);
+        return new ReadOnlyCollection<string>(snapshot);
+    }
 
     private static string Require(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value)
