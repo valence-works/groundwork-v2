@@ -9,6 +9,9 @@
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Substrate.Relational/">
+    <Project Path="src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
+  </Folder>
   <Folder Name="/tests/" />
   <Folder Name="/tests/Groundwork.Kernel.Schema.Tests/">
     <Project Path="tests/Groundwork.Kernel.Schema.Tests/Groundwork.Kernel.Schema.Tests.csproj" />
@@ -24,5 +27,8 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Query.Model.Tests/">
     <Project Path="tests/Groundwork.Query.Model.Tests/Groundwork.Query.Model.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Substrate.Relational.Tests/">
+    <Project Path="tests/Groundwork.Substrate.Relational.Tests/Groundwork.Substrate.Relational.Tests.csproj" />
   </Folder>
 </Solution>
