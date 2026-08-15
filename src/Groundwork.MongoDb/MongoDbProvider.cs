@@ -756,7 +756,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             values.Values,
             identity,
             existing,
-            column => NextSequence(column),
+            column => NextSequence(column, options?.Observer),
             preserveCreatedAt: exactOutcome);
         if (nextVersion is not null)
             document[MongoDocumentMapper.VersionField] = nextVersion.Value;
@@ -851,7 +851,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             values.Values,
             identity,
             existing: null,
-            column => NextSequence(column));
+            column => NextSequence(column, options?.Observer));
         var filter = new BsonDocument("_id", identity);
         var optimistic = Unit.Concurrency == ConcurrencyDeclaration.Optimistic;
         if (optimistic)
@@ -989,8 +989,17 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             ? checked((current ?? 0) + 1)
             : null;
 
-    private long NextSequence(ColumnDefinition column) =>
-        state.Sequences.FindOneAndUpdate(
+    private long NextSequence(ColumnDefinition column, IWritePathObserver? observer = null)
+    {
+        // Keep sequence allocation visible to the same diagnostic seam as the write.
+        // ConditionalUpsert rejects this path before it can occur, preserving its
+        // one-command contract; ordinary generated writes still report the extra
+        // provider command instead of hiding it from accounting.
+        observer?.Observe(new WritePathEvent(
+            "mongodb.provider-sequence",
+            "MongoDB.FindOneAndUpdate(sequence)",
+            IsProbe: false));
+        return state.Sequences.FindOneAndUpdate(
             transactionSession,
             new BsonDocument("_id", Unit.Id.Value + ":" + column.Name),
             Builders<BsonDocument>.Update.Inc("value", 1),
@@ -999,6 +1008,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
                 IsUpsert = true,
                 ReturnDocument = ReturnDocument.After
             })!["value"].ToInt64();
+    }
 
     private void PersistVersion(BsonValue identity, long? version)
     {
