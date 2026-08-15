@@ -119,7 +119,8 @@ public static class QueryCoverageChecker
             ? "Nearest index: <none>."
             : "Nearest index '" + nearest.Name + "' (" + Describe(nearest) + ").";
         return "Query on '" + request.Table.Value + "' is not index-covered. " + reason + " " +
-               nearestText + " Add: " + suggested.Declaration + " Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", \"reason\").";
+               nearestText + " Add: " + suggested.Declaration +
+               " Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").";
     }
 
     private static Refusal? CheckIndex(QueryRequest request, ConstraintSet constraints, CoverageIndex index)

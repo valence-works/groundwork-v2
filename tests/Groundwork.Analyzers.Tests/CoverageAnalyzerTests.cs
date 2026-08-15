@@ -171,7 +171,7 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
-    public async Task Accepted_uncovered_query_emits_inventory_with_reason_and_owner()
+    public async Task AcceptScan_uncovered_query_emits_inventory_with_reason_and_owner()
     {
         var source = WithSchema(SchemaWithIndex("ix_other", "other ASC"), allowAcceptedScans: true) +
                      QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", reason: \"admin report\", owner: \"billing\", expiresOn: \"2027-01-01\").QueryAsync();");
@@ -186,7 +186,7 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
-    public async Task Accepted_scan_on_covered_query_is_a_build_error()
+    public async Task AcceptScan_on_covered_query_is_a_build_error()
     {
         var source = WithSchema(SchemaWithIndex("ix_status", "status ASC"), allowAcceptedScans: true) +
                      QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
@@ -197,7 +197,7 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
-    public async Task Accepted_scan_without_assembly_opt_in_is_a_build_error()
+    public async Task AcceptScan_without_assembly_opt_in_is_a_build_error()
     {
         var source = WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
                      QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
@@ -209,7 +209,7 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
-    public async Task Accepted_scan_expiry_warns_then_errors_at_the_expiry_date()
+    public async Task AcceptScan_expiry_warns_then_errors_at_the_expiry_date()
     {
         var source = WithSchema(SchemaWithIndex("ix_other", "other ASC"), allowAcceptedScans: true) +
                      QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
