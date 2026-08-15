@@ -103,6 +103,18 @@ jobs:
 
   concurrency-conformance:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine3.22
+        env:
+          POSTGRES_PASSWORD: groundwork
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -129,10 +141,36 @@ jobs:
             echo '- InMemory: executed (reference adapter)'
             echo '- SQLite: executed (in-process adapter)'
             echo '- MongoDB: executed (live replica set)'
-            echo '- PostgreSQL: not executed — W2 adapter is not yet present'
+            echo '- PostgreSQL: executed (live service)'
             echo '- SQL Server: not executed — W2 adapter is not yet present'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Run W2 concurrency conformance
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w2ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
         run: dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj --no-restore --configuration Release
+
+  postgresql-provider:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine3.22
+        env:
+          POSTGRES_PASSWORD: groundwork
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore Groundwork.slnx
+      - name: Run PostgreSQL provider conformance
+        env:
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+        run: dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj --no-restore --configuration Release

@@ -1,8 +1,10 @@
 using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.Kernel;
+using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
 using MongoDB.Driver;
+using Npgsql;
 using Xunit;
 
 namespace Groundwork.Concurrency.Tests;
@@ -79,6 +81,40 @@ public sealed class ConcurrencyHarnessTests
             });
 
         Assert.True(report.Passed, Describe(report));
+    }
+
+    [SkippableTheory]
+    [InlineData(1, false, false)]
+    [InlineData(1, false, true)]
+    [InlineData(1, true, false)]
+    [InlineData(1, true, true)]
+    [InlineData(1000, false, false)]
+    [InlineData(1000, false, true)]
+    [InlineData(1000, true, false)]
+    [InlineData(1000, true, true)]
+    public void PostgreSql_holds_the_named_invariants_for_each_live_shape(
+        int keyCount,
+        bool includePartialUniqueIndex,
+        bool optimistic)
+    {
+        using var store = PostgreSqlStore.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("postgresql", new PostgreSqlProviderFactory()),
+            store.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 32,
+                KeyCount = keyCount,
+                RepeatCount = 2,
+                Seed = 9245 + (keyCount == 1000 ? 100 : 0) +
+                    (includePartialUniqueIndex ? 10 : 0) + (optimistic ? 1 : 0),
+                Concurrency = optimistic ? ConcurrencyKind.Optimistic : ConcurrencyKind.None,
+                IncludePartialUniqueIndex = includePartialUniqueIndex
+            });
+
+        Assert.True(report.Passed, Describe(report));
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
     }
 
     [Fact]
@@ -205,6 +241,56 @@ internal sealed class TemporarySqliteStore : IDisposable
         catch (IOException)
         {
         }
+    }
+}
+
+internal sealed class PostgreSqlStore : IDisposable
+{
+    private PostgreSqlStore(string adminConnectionString, string schema, string connectionString)
+    {
+        this.adminConnectionString = adminConnectionString;
+        this.schema = schema;
+        ConnectionString = connectionString;
+    }
+
+    private readonly string adminConnectionString;
+    private readonly string schema;
+
+    public string ConnectionString { get; }
+
+    public static PostgreSqlStore OpenOrSkip()
+    {
+        var baseConnection = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(baseConnection),
+            "Set GROUNDWORK_POSTGRES_CONNECTION to run the live PostgreSQL W2 harness.");
+        var schema = "w2_" + Guid.NewGuid().ToString("N");
+        using var admin = new NpgsqlConnection(baseConnection);
+        try
+        {
+            admin.Open();
+        }
+        catch (Exception exception)
+        {
+            Skip.If(true, $"PostgreSQL is unavailable: {exception.Message}");
+            throw;
+        }
+
+        using (var command = admin.CreateCommand())
+        {
+            command.CommandText = $"CREATE SCHEMA \"{schema}\";";
+            command.ExecuteNonQuery();
+        }
+        var builder = new NpgsqlConnectionStringBuilder(baseConnection) { SearchPath = schema };
+        return new PostgreSqlStore(baseConnection, schema, builder.ConnectionString);
+    }
+
+    public void Dispose()
+    {
+        using var admin = new NpgsqlConnection(adminConnectionString);
+        admin.Open();
+        using var command = admin.CreateCommand();
+        command.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE;";
+        command.ExecuteNonQuery();
     }
 }
 

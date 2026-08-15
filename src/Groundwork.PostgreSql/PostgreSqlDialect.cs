@@ -1,0 +1,453 @@
+using System.Data;
+using System.Data.Common;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
+using Groundwork.Substrate.Relational;
+using Npgsql;
+
+namespace Groundwork.PostgreSql;
+
+/// <summary>PostgreSQL SQL and catalog mapping for the shared relational executor.</summary>
+public sealed class PostgreSqlDialect : RelationalDialect
+{
+    public override string ProviderName => "PostgreSQL";
+
+    public override bool CreateTableIncludesColumns => true;
+
+    public override string QuoteIdentifier(string identifier) =>
+        $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+    public override string MapType(ColumnDefinition definition) => definition.Type switch
+    {
+        PortableType.String => definition.MaxLength is { } length ? $"character varying({length})" : "text",
+        PortableType.Int32 => "integer",
+        PortableType.Int64 => "bigint",
+        PortableType.Decimal => $"numeric({definition.Precision ?? throw new ArgumentException($"Decimal column '{definition.Name}' requires precision.")},{definition.Scale ?? 0})",
+        PortableType.Boolean => "boolean",
+        // PostgreSQL timestamps have microsecond precision; the kernel contract preserves UTC ticks.
+        PortableType.DateTimeOffset => "bigint",
+        PortableType.Guid => "uuid",
+        PortableType.Binary => "bytea",
+        PortableType.Json => "jsonb",
+        _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Type, null)
+    };
+
+    public override string? MapCollation(ColumnDefinition definition) => definition.Type switch
+    {
+        PortableType.String => definition.Collation switch
+        {
+            null or PortableCollation.Ordinal => "\"C\"",
+            PortableCollation.OrdinalIgnoreCase => throw new NotSupportedException(
+                "PostgreSQL does not provide the portable OrdinalIgnoreCase collation."),
+            PortableCollation.UnicodeOrdinalIgnoreCase => throw new NotSupportedException(
+                "PostgreSQL does not provide the portable UnicodeOrdinalIgnoreCase collation."),
+            _ => throw new ArgumentOutOfRangeException(nameof(definition))
+        },
+        _ when definition.Collation is not null => throw new ArgumentException(
+            $"PostgreSQL collation is only valid for String column '{definition.Name}'.", nameof(definition)),
+        _ => null
+    };
+
+    public override string? MapDefault(ColumnDefinition definition) => definition.Default is null
+        ? null
+        : Literal(definition.Default.Value, definition.Type);
+
+    public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey) =>
+        $"CREATE TABLE IF NOT EXISTS {QuoteIdentifier(table)} ({string.Join(", ", columns)}" +
+        (primaryKey.Count == 0 ? ");" : $", PRIMARY KEY ({string.Join(", ", primaryKey.Select(QuoteIdentifier))}));");
+
+    public override string AddColumnSql(string table, string column, string definition)
+    {
+        // The shared planner adds a new non-null column, backfills it, and then finalizes
+        // nullability. PostgreSQL must stage that column as nullable when existing rows exist.
+        var staged = definition.Replace(" NOT NULL DEFAULT", " NULL DEFAULT", StringComparison.Ordinal);
+        if (staged.EndsWith(" NOT NULL", StringComparison.Ordinal))
+            staged = staged[..^" NOT NULL".Length] + " NULL";
+        return $"ALTER TABLE {QuoteIdentifier(table)} ADD COLUMN {staged};";
+    }
+
+    public override string FinalizeColumnSql(string table, string column, ColumnDefinition definition) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} SET NOT NULL;";
+
+    public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
+    {
+        var unique = index.IsUnique ? "UNIQUE " : string.Empty;
+        var columns = string.Join(", ", index.Columns.Select(column =>
+            $"{QuoteIdentifier(column.Column)} " +
+            (column.Direction == SortDirection.Descending ? "DESC NULLS LAST" : "ASC NULLS FIRST")));
+        var sql = $"CREATE {unique}INDEX IF NOT EXISTS {QuoteIdentifier(PhysicalIndexName(table, index.Name))} ON {QuoteIdentifier(table)} ({columns})" +
+            (filter is null ? ";" : $" WHERE {filter};");
+        return sql;
+    }
+
+    public override string DropIndexSql(string table, string index) =>
+        $"DROP INDEX IF EXISTS {QuoteIdentifier(PhysicalIndexName(table, index))};";
+
+    public override string ConditionalUpsertSql(RelationalWriteShape shape) =>
+        ConditionalUpsertSql(shape, null);
+
+    /// <summary>Emits an upsert with an optional partial-index inference predicate.</summary>
+    public string ConditionalUpsertSql(RelationalWriteShape shape, string? conflictPredicate)
+    {
+        ArgumentNullException.ThrowIfNull(shape);
+        var columns = string.Join(", ", shape.Columns.Select(column => QuoteIdentifier(column.Name)));
+        var values = string.Join(", ", shape.Columns.Select(column => "@" + column.ParameterName));
+        var conflict = $"({string.Join(", ", shape.KeyColumns.Select(QuoteIdentifier))})" +
+            (conflictPredicate is null ? string.Empty : $" WHERE {conflictPredicate}");
+        var updates = shape.UpdateColumns.Count == 0
+            ? "DO NOTHING"
+            : "DO UPDATE SET " + string.Join(", ", shape.UpdateColumns.Select(column =>
+                $"{QuoteIdentifier(column)} = EXCLUDED.{QuoteIdentifier(column)}"));
+        return $"INSERT INTO {QuoteIdentifier(shape.Table)} ({columns}) VALUES ({values}) ON CONFLICT {conflict} {updates};";
+    }
+
+    public override string BatchInsertSql(RelationalWriteShape shape, int batchSize)
+    {
+        ArgumentNullException.ThrowIfNull(shape);
+        if (batchSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(batchSize));
+        var columns = string.Join(", ", shape.Columns.Select(column => QuoteIdentifier(column.Name)));
+        return $"INSERT INTO {QuoteIdentifier(shape.Table)} ({columns}) VALUES " +
+            string.Join(", ", Enumerable.Range(0, batchSize).Select(row =>
+                $"({string.Join(", ", shape.Columns.Select(column => $"@{column.ParameterName}_{row}"))})")) + ";";
+    }
+
+    public override object? ConvertValue(object? value, ColumnDefinition definition) => value switch
+    {
+        null => DBNull.Value,
+        DateTimeOffset timestamp => timestamp.ToUniversalTime().Ticks,
+        decimal decimalValue => decimalValue,
+        byte[] bytes => bytes.ToArray(),
+        JsonDocument document => document.RootElement.GetRawText(),
+        JsonElement element => element.GetRawText(),
+        _ when definition.Type == PortableType.Json && value is not string => JsonSerializer.Serialize(value),
+        _ => value
+    };
+
+    public override void Validate(ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (definition.MaxLength is <= 0 || definition.Precision is <= 0 or > 38 || definition.Scale is < 0 ||
+            definition.Precision is not null && definition.Scale is not null && definition.Scale > definition.Precision)
+            throw new ArgumentException($"Invalid PostgreSQL declaration metadata for column '{definition.Name}'.", nameof(definition));
+        if (definition.Type == PortableType.Decimal && definition.Precision is null)
+            throw new ArgumentException($"Decimal column '{definition.Name}' requires precision.", nameof(definition));
+    }
+
+    public override bool TryMapUniqueViolation(DbException exception, out string indexName)
+    {
+        if (exception is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } postgres)
+        {
+            indexName = postgres.ConstraintName ?? string.Empty;
+            return true;
+        }
+        indexName = string.Empty;
+        return false;
+    }
+
+    public override void AcquireApplicationLock(DbConnection connection, string resource)
+    {
+        using var command = Command(connection, null,
+            "SELECT pg_advisory_lock(hashtextextended(@resource, 0));");
+        Add(command, "resource", resource);
+        command.ExecuteNonQuery();
+    }
+
+    public override void ReleaseApplicationLock(DbConnection connection, string resource)
+    {
+        using var command = Command(connection, null,
+            "SELECT pg_advisory_unlock(hashtextextended(@resource, 0));");
+        Add(command, "resource", resource);
+        command.ExecuteNonQuery();
+    }
+
+    public override bool VerifyApplicationLock(DbConnection connection, string resource)
+    {
+        using var command = Command(connection, null, """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_locks
+                WHERE locktype = 'advisory' AND pid = pg_catalog.pg_backend_pid() AND granted
+                  AND objsubid = 1
+                  AND classid::bigint = ((pg_catalog.hashtextextended(@resource, 0) >> 32) & 4294967295)
+                  AND objid::bigint = (pg_catalog.hashtextextended(@resource, 0) & 4294967295)
+            );
+            """);
+        Add(command, "resource", resource);
+        return Convert.ToBoolean(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    public override long ReadServerSessionId(DbConnection connection)
+    {
+        using var command = Command(connection, null, "SELECT pg_catalog.pg_backend_pid();");
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    public override long AcquireFence(
+        DbConnection connection,
+        PhysicalSchemaTargetIdentity target,
+        string owner)
+    {
+        using var command = Command(connection, null, """
+            INSERT INTO "__groundwork_schema_locks" ("subject_id", "provider_name", "owner_id", "fence")
+            VALUES (@subject, @provider, @owner, 1)
+            ON CONFLICT ("subject_id", "provider_name") DO UPDATE
+            SET "owner_id" = EXCLUDED."owner_id",
+                "fence" = "__groundwork_schema_locks"."fence" + 1
+            RETURNING "fence";
+            """);
+        Add(command, "subject", target.SubjectId.Value);
+        Add(command, "provider", target.ProviderName);
+        Add(command, "owner", owner);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    public override void AssertFence(
+        DbConnection connection,
+        DbTransaction transaction,
+        PhysicalSchemaTargetIdentity target,
+        string owner,
+        long fence)
+    {
+        using var command = Command(connection, transaction, """
+            SELECT 1 FROM "__groundwork_schema_locks"
+            WHERE "subject_id"=@subject AND "provider_name"=@provider
+              AND "owner_id"=@owner AND "fence"=@fence FOR UPDATE;
+            """);
+        Add(command, "subject", target.SubjectId.Value);
+        Add(command, "provider", target.ProviderName);
+        Add(command, "owner", owner);
+        Add(command, "fence", fence);
+        if (command.ExecuteScalar() is null)
+            throw new InvalidOperationException($"PostgreSQL schema fence {fence} is no longer owned for '{target}'.");
+    }
+
+    public override DbTransaction BeginTransaction(DbConnection connection) =>
+        connection.BeginTransaction(IsolationLevel.ReadCommitted);
+
+    public override void EnsureInfrastructure(DbConnection connection)
+    {
+        using var command = Command(connection, null, """
+            CREATE TABLE IF NOT EXISTS "__groundwork_schema_history" (
+                "subject_id" text NOT NULL,
+                "provider_name" text NOT NULL,
+                "target_fingerprint" text NOT NULL,
+                "state_json" text NOT NULL,
+                PRIMARY KEY ("subject_id", "provider_name")
+            );
+            CREATE TABLE IF NOT EXISTS "__groundwork_schema_locks" (
+                "subject_id" text NOT NULL,
+                "provider_name" text NOT NULL,
+                "owner_id" text NOT NULL,
+                "fence" bigint NOT NULL,
+                PRIMARY KEY ("subject_id", "provider_name")
+            );
+            """);
+        command.ExecuteNonQuery();
+    }
+
+    public override PhysicalSchemaHistoryState ReadHistory(
+        DbConnection connection,
+        PhysicalSchemaTargetIdentity target)
+    {
+        using var command = Command(connection, null,
+            "SELECT \"state_json\" FROM \"__groundwork_schema_history\" WHERE \"subject_id\"=@subject AND \"provider_name\"=@provider;");
+        Add(command, "subject", target.SubjectId.Value);
+        Add(command, "provider", target.ProviderName);
+        var json = command.ExecuteScalar() as string;
+        return json is null
+            ? PhysicalSchemaHistoryState.Empty
+            : PhysicalSchemaHistoryState.FromApplied(PhysicalSchemaAppliedStateSerializer.Deserialize(json));
+    }
+
+    public override void PublishHistory(
+        DbConnection connection,
+        DbTransaction transaction,
+        PhysicalSchemaTargetIdentity target,
+        PhysicalSchemaAppliedState state,
+        string? expectedAppliedTargetFingerprint,
+        string owner,
+        long fence)
+    {
+        AssertFence(connection, transaction, target, owner, fence);
+        using var read = Command(connection, transaction,
+            "SELECT \"target_fingerprint\" FROM \"__groundwork_schema_history\" WHERE \"subject_id\"=@subject AND \"provider_name\"=@provider;");
+        Add(read, "subject", target.SubjectId.Value);
+        Add(read, "provider", target.ProviderName);
+        var actual = read.ExecuteScalar() as string;
+        if (!string.Equals(actual, expectedAppliedTargetFingerprint, StringComparison.Ordinal))
+            throw new InvalidOperationException($"PostgreSQL schema history CAS failed for '{target}'.");
+
+        using var command = Command(connection, transaction, actual is null
+            ? "INSERT INTO \"__groundwork_schema_history\" (\"subject_id\",\"provider_name\",\"target_fingerprint\",\"state_json\") VALUES (@subject,@provider,@fingerprint,@json);"
+            : "UPDATE \"__groundwork_schema_history\" SET \"target_fingerprint\"=@fingerprint,\"state_json\"=@json WHERE \"subject_id\"=@subject AND \"provider_name\"=@provider;");
+        Add(command, "subject", target.SubjectId.Value);
+        Add(command, "provider", target.ProviderName);
+        Add(command, "fingerprint", state.TargetFingerprint);
+        Add(command, "json", PhysicalSchemaAppliedStateSerializer.Serialize(state));
+        if (command.ExecuteNonQuery() != 1)
+            throw new InvalidOperationException($"PostgreSQL schema history publish affected an unexpected number of rows for '{target}'.");
+    }
+
+    public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+    {
+        using var command = Command(connection, transaction, "SELECT to_regclass(@table) IS NOT NULL;");
+        Add(command, "table", table);
+        return Convert.ToBoolean(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table)
+    {
+        using var command = Command(connection, transaction, """
+            SELECT a.attname,
+                   format_type(a.atttypid, a.atttypmod),
+                   NOT a.attnotnull,
+                   pg_get_expr(ad.adbin, ad.adrelid),
+                   COALESCE(coll.collname, ''),
+                   COALESCE(array_position(con.conkey, a.attnum), 0)
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+            LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation
+            LEFT JOIN pg_catalog.pg_constraint con ON con.conrelid = c.oid AND con.contype = 'p'
+            WHERE n.nspname = current_schema() AND c.relname=@table AND a.attnum > 0 AND NOT a.attisdropped
+            ORDER BY a.attnum;
+            """);
+        Add(command, "table", table);
+        using var reader = command.ExecuteReader();
+        var result = new Dictionary<string, RelationalColumnMetadata>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var collation = reader.GetString(4);
+            result[reader.GetString(0)] = new(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetBoolean(2),
+                reader.IsDBNull(3) ? null : NormalizeDefault(reader.GetString(3)),
+                collation.Length == 0 ? null : QuoteIdentifier(collation),
+                reader.GetInt32(5));
+        }
+        return result;
+    }
+
+    public override RelationalIndexMetadata? ReadIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        string index)
+    {
+        var physicalName = PhysicalIndexName(table, index);
+        var metadata = ReadIndexByName(connection, transaction, table, physicalName);
+        // A manually created logical-name index is still inspected so schema validation
+        // reports a precise drift (for example, wrong NULL ordering) instead of "missing".
+        return metadata ?? (physicalName == index
+            ? null
+            : ReadIndexByName(connection, transaction, table, index));
+    }
+
+    private RelationalIndexMetadata? ReadIndexByName(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        string index)
+    {
+        using var command = Command(connection, transaction, """
+            SELECT i.indisunique,
+                   a.attname,
+                   (i.indoption[s.ordinality - 1] & 1) <> 0,
+                   (i.indoption[s.ordinality - 1] & 2) <> 0,
+                   pg_get_expr(i.indpred, i.indrelid)
+            FROM pg_catalog.pg_class t
+            JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
+            JOIN pg_catalog.pg_index i ON i.indrelid=t.oid
+            JOIN pg_catalog.pg_class ix ON ix.oid=i.indexrelid
+            LEFT JOIN LATERAL unnest(i.indkey) WITH ORDINALITY s(attnum, ordinality) ON true
+            LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=t.oid AND a.attnum=s.attnum
+            WHERE n.nspname=current_schema() AND t.relname=@table AND ix.relname=@index
+            ORDER BY s.ordinality;
+            """);
+        Add(command, "table", table);
+        Add(command, "index", index);
+        using var reader = command.ExecuteReader();
+        var columns = new List<RelationalIndexColumnMetadata>();
+        var found = false;
+        var unique = false;
+        string? filter = null;
+        while (reader.Read())
+        {
+            found = true;
+            unique = reader.GetBoolean(0);
+            if (!reader.IsDBNull(1))
+                columns.Add(new(
+                    reader.GetString(1),
+                    reader.GetBoolean(2) ? SortDirection.Descending : SortDirection.Ascending,
+                    reader.GetBoolean(3)));
+            if (!reader.IsDBNull(4))
+                filter = reader.GetString(4);
+        }
+        return found ? new RelationalIndexMetadata(unique, columns, filter) : null;
+    }
+
+    public override string? BackfillColumnSql(string table, ColumnDefinition column) =>
+        column.Default is null
+            ? null
+            : $"UPDATE {QuoteIdentifier(table)} SET {QuoteIdentifier(column.Name)}={MapDefault(column)} WHERE {QuoteIdentifier(column.Name)} IS NULL;";
+
+    private static DbCommand Command(DbConnection connection, DbTransaction? transaction, string sql)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        return command;
+    }
+
+    private static void Add(DbCommand command, string name, object? value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@" + name;
+        parameter.Value = value ?? DBNull.Value;
+        command.Parameters.Add(parameter);
+    }
+
+    private static string NormalizeDefault(string value) =>
+        value.Replace("::text", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("::character varying", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("::jsonb", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("::uuid", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("::bigint", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("::integer", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("::boolean", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Trim();
+
+    private static string Literal(object? value, PortableType type) => value is null ? "NULL" : type switch
+    {
+        PortableType.String => $"'{Escape(Convert.ToString(value, CultureInfo.InvariantCulture)!)}'",
+        PortableType.Int32 or PortableType.Int64 => Convert.ToString(value, CultureInfo.InvariantCulture)!,
+        PortableType.Decimal => Convert.ToDecimal(value, CultureInfo.InvariantCulture).ToString("G29", CultureInfo.InvariantCulture),
+        PortableType.Boolean => value is bool boolean && boolean ? "TRUE" : "FALSE",
+        PortableType.DateTimeOffset => value is DateTimeOffset timestamp ? timestamp.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) : Convert.ToString(value, CultureInfo.InvariantCulture)!,
+        PortableType.Guid => $"'{value}'::uuid",
+        PortableType.Binary => $"decode('{Convert.ToHexString((byte[])value)}', 'hex')",
+        PortableType.Json => $"'{Escape(value is string text ? text : JsonSerializer.Serialize(value))}'::jsonb",
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
+
+    private static string Escape(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+
+    private static string PhysicalIndexName(string table, string index)
+    {
+        var logical = $"{table}__{index}";
+        if (logical.Length <= 63)
+            return logical;
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(logical)))[..10].ToLowerInvariant();
+        return logical[..(63 - hash.Length - 1)] + "_" + hash;
+    }
+}
