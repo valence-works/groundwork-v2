@@ -79,6 +79,24 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Pinned_logical_index_resolves_to_the_provider_physical_name()
+    {
+        var options = new QueryRenderOptions([
+            new QueryIndexDeclaration("ix_customers_id", ["id"], QueryIndexPinning.Pinned)])
+        {
+            PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["ix_customers_id"] = "__groundwork_ix_customers_ix_customers_id"
+            }
+        };
+        var command = new SqlServerQueryRenderer().Render(
+            Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 7L)), [], Paging.None, ResultShape.Rows.Instance), options);
+
+        Assert.True(command.IndexHintApplied);
+        Assert.Contains("INDEX([__groundwork_ix_customers_ix_customers_id])", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Sparse_pinned_index_refuses_a_nullable_match_but_not_a_contradiction()
     {
         var options = new QueryRenderOptions([
@@ -164,6 +182,45 @@ public sealed class QueryRendererTests
         Assert.DoesNotContain("__groundwork_total_count", rowsPipeline, StringComparison.Ordinal);
         Assert.Contains("__groundwork_total_count", totalPipeline, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void All_four_renderers_emit_q2_search_and_element_set_leaves_without_case_folding()
+    {
+        var contains = Request(new Predicate.Substring(Name, "ice", Anchor.Contains), [], Paging.None, ResultShape.Rows.Instance);
+        var endsWith = Request(new Predicate.Substring(Name, "ce", Anchor.EndsWith), [], Paging.None, ResultShape.Rows.Instance);
+        var elementOf = Request(
+            new Predicate.ElementOf(new ElementSetRef("tags", QueryType.String), [QueryConstant.Of("Alice")], SetQuantifier.Any),
+            [], Paging.None, ResultShape.Rows.Instance);
+
+        var renderers = new object[]
+        {
+            new SqliteQueryRenderer(),
+            new PostgreSqlQueryRenderer(),
+            new SqlServerQueryRenderer(),
+            new MongoQueryRenderer()
+        };
+        foreach (var renderer in renderers)
+        {
+            Assert.Null(Record.Exception(() => Render(renderer, contains)));
+            Assert.Null(Record.Exception(() => Render(renderer, endsWith)));
+            Assert.Null(Record.Exception(() => Render(renderer, elementOf)));
+        }
+
+        var sql = new SqlServerQueryRenderer().Render(contains);
+        Assert.DoesNotContain("LOWER", sql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("UPPER", sql.CommandText, StringComparison.OrdinalIgnoreCase);
+        var mongo = new MongoQueryRenderer().Render(contains);
+        Assert.DoesNotContain("i]", mongo.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    private static object Render(object renderer, QueryRequest request) => renderer switch
+    {
+        SqliteQueryRenderer sqlite => sqlite.Render(request),
+        PostgreSqlQueryRenderer postgres => postgres.Render(request),
+        SqlServerQueryRenderer sqlServer => sqlServer.Render(request),
+        MongoQueryRenderer mongo => mongo.Render(request),
+        _ => throw new ArgumentOutOfRangeException(nameof(renderer))
+    };
 
     private static QueryRequest Request(Predicate predicate, IEnumerable<OrderTerm> order, Paging paging, ResultShape result) =>
         new(Table, predicate, order.ToImmutableArray(), Projection.All, paging, result);

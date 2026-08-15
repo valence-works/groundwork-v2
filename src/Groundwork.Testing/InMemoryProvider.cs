@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Testing;
 
@@ -449,6 +450,25 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         {
             ThrowIfDisposed();
             return Mutation.Read(CurrentState(), partition, key);
+        }
+    }
+
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        lock (database.Gate)
+        {
+            ThrowIfDisposed();
+            var rows = CurrentState().Partitions.TryGetValue(partition, out var entries)
+                ? entries.Values
+                    .Where(entry => PortableQuerySemantics.Evaluate(request.Where, entry.Values))
+                    .Select(entry => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(entry.Values, StringComparer.Ordinal))
+                    .ToArray()
+                : Array.Empty<IReadOnlyDictionary<string, object?>>();
+            return QueryResultMaterializer.Materialize(request, suppliedOptions, rows);
         }
     }
 

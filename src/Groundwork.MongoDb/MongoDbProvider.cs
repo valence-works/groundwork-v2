@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.Query.Model;
 using Groundwork.Substrate.Mongo;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -689,6 +690,62 @@ internal sealed class MongoStorageSession : IMongoStorageSession
     public StorageUnit Unit { get; }
 
     public MongoStorageAccess Access { get; }
+
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var renderOptions = suppliedOptions with
+        {
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
+        };
+        var executionRequest = QueryRequestExecution.ForPage(request, renderOptions);
+        var command = new MongoQueryRenderer().Render(executionRequest, renderOptions);
+        List<BsonDocument> documents;
+        if (command.Pipeline.Length != 0)
+        {
+            var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
+            documents = (transactionSession is null
+                ? collection.Aggregate(pipeline, new AggregateOptions { Hint = command.Hint })
+                : collection.Aggregate(transactionSession, pipeline, new AggregateOptions { Hint = command.Hint })).ToList();
+        }
+        else
+        {
+            var findOptions = new FindOptions<BsonDocument>
+            {
+                Sort = command.Sort.ElementCount == 0 ? null : command.Sort,
+                Projection = command.Projection.ElementCount == 0 ? null : command.Projection,
+                Skip = command.Skip,
+                Limit = command.Limit,
+                Hint = command.Hint
+            };
+            documents = (transactionSession is null
+                ? collection.FindSync(command.Filter, findOptions)
+                : collection.FindSync(transactionSession, command.Filter, findOptions)).ToList();
+        }
+
+        var rows = documents.Select(document =>
+        {
+            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var column in Unit.Columns)
+            {
+                if (document.TryGetValue(column.Name, out var value))
+                    row[column.Name] = MongoValueCodec.Decode(value, column);
+            }
+            if (document.TryGetValue("__groundwork_total_count", out var count))
+                row["__groundwork_total_count"] = count.ToInt64();
+            return (IReadOnlyDictionary<string, object?>)row;
+        }).ToArray();
+        return QueryResultMaterializer.Materialize(
+            request,
+            suppliedOptions,
+            rows,
+            suppliedOptions.FindPinnedIndex()?.Name,
+            command.Hint is not null);
+    }
 
     public MongoStoredEntry? Read(MongoStorageKey key)
     {

@@ -21,7 +21,10 @@ command. A pinned index that excludes null values is refused when the predicate 
 excluded null, except for match-none. This preserves the v1 sparse-index safety rule.
 
 `ResultShape.Rows` never adds a count expression. `ResultShape.TotalCount` adds the provider
-window-count projection. `In` values are capped at 1,000 by default (`GW-QUERY-015`), and every
+window-count projection. Provider sessions expose this through the public `IStorageSession.Query`
+operation, returning immutable rows, an optional `TotalCount`, and a bound next continuation token.
+The execution layer may project identity columns and null-rank fields internally; they are removed
+before materialization. `In` values are capped at 1,000 by default (`GW-QUERY-015`), and every
 rendered parameter, including cursor and page parameters, is checked against the provider budget
 (SQLite 999, SQL Server 2,100, PostgreSQL 65,535). No renderer emits database-side case folding;
 non-ordinal text policies are refused by the normalized semantic contract.

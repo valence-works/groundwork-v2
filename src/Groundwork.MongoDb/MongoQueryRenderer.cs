@@ -1,5 +1,6 @@
 using Groundwork.Query.Model;
 using MongoDB.Bson;
+using System.Text.RegularExpressions;
 
 namespace Groundwork.MongoDb;
 
@@ -34,7 +35,7 @@ public sealed class MongoQueryRenderer
             IReadOnlyList<QueryConstant> cursor;
             try
             {
-                cursor = QueryContinuationToken.Decode(request.Paging.ContinuationToken, order.Select(term => term.Column).ToArray());
+                cursor = QueryContinuationToken.Decode(request.Paging.ContinuationToken, request, options);
             }
             catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
             {
@@ -71,24 +72,15 @@ public sealed class MongoQueryRenderer
             projection,
             request.Paging.Offset,
             request.Paging.Limit,
-            selectedIndex?.Name,
+            selectedIndex is null ? null : options.ResolvePhysicalIndexName(selectedIndex.Name),
             request.Result.IncludesTotalCount,
             matchNone,
             order.Select(term => term.Column.Name).ToArray(),
             pipeline);
     }
 
-    private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options)
-    {
-        var terms = request.Order.ToList();
-        foreach (var tieBreak in options.TieBreakColumns)
-        {
-            if (terms.Any(term => string.Equals(term.Column.Name, tieBreak.Name, StringComparison.Ordinal)))
-                continue;
-            terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
-        }
-        return terms;
-    }
+    private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
+        options.GetEffectiveOrder(request);
 
     private static BsonDocument RenderPredicate(Predicate predicate, int inValueLimit, string table)
     {
@@ -131,6 +123,19 @@ public sealed class MongoQueryRenderer
                         _ => throw new ArgumentOutOfRangeException(nameof(compare.Op), compare.Op, null)
                     },
                     new BsonArray { "$" + compare.Left.Name, "$" + compare.Right.Name }));
+            case Predicate.ElementOf elementOf:
+                if (elementOf.Set.Type is null)
+                    throw new QueryRenderException("GW-SEM-TYPE-007", "An element set must declare its exact element type before rendering.");
+                if (elementOf.Values.Length == 0)
+                    return elementOf.Quantifier == SetQuantifier.Any ? MatchNone() : new BsonDocument();
+                var values = new BsonArray(elementOf.Values.Select(ToBson));
+                return new BsonDocument(elementOf.Set.Name,
+                    new BsonDocument(elementOf.Quantifier == SetQuantifier.Any ? "$in" : "$all", values));
+            case Predicate.Substring substring when substring.Anchor is Anchor.Contains or Anchor.EndsWith:
+                return new BsonDocument(substring.Column.Name,
+                    new BsonRegularExpression(
+                        Regex.Escape(substring.Needle) + (substring.Anchor == Anchor.EndsWith ? "$" : string.Empty),
+                        string.Empty));
             case Predicate.Not not:
                 return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, inValueLimit, table) });
             case Predicate.And and:
@@ -142,8 +147,6 @@ public sealed class MongoQueryRenderer
                     ? MatchNone()
                     : new BsonDocument("$or", new BsonArray(or.Terms.Select(term => RenderPredicate(term, inValueLimit, table))));
             case Predicate.StartsWith:
-            case Predicate.Substring:
-            case Predicate.ElementOf:
                 throw new QueryRenderException("GW-QUERY-030", "This normalized predicate requires a provider-independent persisted projection and cannot be rendered directly.");
             default:
                 throw new QueryRenderException("GW-QUERY-030", "The predicate node is outside the closed native query surface.");
@@ -248,8 +251,20 @@ public sealed class MongoQueryRenderer
         }
         if (sort.ElementCount != 0)
             stages.Add(new BsonDocument("$sort", sort));
-        if (!projection.Equals(new BsonDocument()))
-            stages.Add(new BsonDocument("$project", projection));
+        if (projection.ElementCount != 0)
+        {
+            var effectiveProjection = projection.DeepClone();
+            if (includesTotalCount)
+                effectiveProjection["__groundwork_total_count"] = 1;
+            stages.Add(new BsonDocument("$project", effectiveProjection));
+        }
+        else if (order.Count != 0)
+        {
+            var cleanup = new BsonDocument();
+            for (var index = 0; index < order.Count; index++)
+                cleanup.Add("_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
+            stages.Add(new BsonDocument("$project", cleanup));
+        }
         if (paging.Offset is int offset)
             stages.Add(new BsonDocument("$skip", offset));
         if (paging.Limit is int limit)

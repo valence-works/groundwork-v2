@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Data.Common;
 using Groundwork.Query.Model;
 
 namespace Groundwork.Substrate.Relational;
@@ -33,6 +34,43 @@ public sealed class RelationalQueryCommand
     public string? SelectedIndex { get; }
     public bool IndexHintApplied { get; }
     public ImmutableArray<string> AppliedOrder { get; }
+}
+
+/// <summary>Executes a rendered relational command while leaving value decoding to the provider.</summary>
+public static class RelationalQueryResultReader
+{
+    public static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
+        DbConnection connection,
+        RelationalQueryCommand query,
+        Func<string, object?, object?> decode)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(decode);
+        using var command = connection.CreateCommand();
+        command.CommandText = query.CommandText;
+        foreach (var value in query.Parameters)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "@" + value.Name;
+            parameter.Value = value.Value ?? DBNull.Value;
+            command.Parameters.Add(parameter);
+        }
+        using var reader = command.ExecuteReader();
+        var rows = new List<IReadOnlyDictionary<string, object?>>();
+        while (reader.Read())
+        {
+            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+            for (var index = 0; index < reader.FieldCount; index++)
+            {
+                var name = reader.GetName(index);
+                var value = reader.IsDBNull(index) ? null : reader.GetValue(index);
+                row[name] = decode(name, value);
+            }
+            rows.Add(row);
+        }
+        return rows;
+    }
 }
 
 /// <summary>
@@ -86,7 +124,8 @@ public abstract class RelationalQueryRenderer
             {
                 cursor = QueryContinuationToken.Decode(
                     request.Paging.ContinuationToken,
-                    effectiveOrder.Select(term => term.Column).ToArray());
+                    request,
+                    options);
             }
             catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
             {
@@ -117,7 +156,7 @@ public abstract class RelationalQueryRenderer
 
         var from = dialect.QuoteIdentifier(request.Table.Value);
         if (indexHintApplied)
-            from += " " + RenderIndexHint(selectedIndex!.Name);
+            from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(selectedIndex!.Name));
         var sql = "SELECT " + selection + " FROM " + from + " WHERE " + where;
         if (effectiveOrder.Count != 0)
         {
@@ -183,17 +222,8 @@ public abstract class RelationalQueryRenderer
         return text;
     }
 
-    private IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options)
-    {
-        var terms = request.Order.ToList();
-        foreach (var tieBreak in options.TieBreakColumns)
-        {
-            if (terms.Any(term => string.Equals(term.Column.Name, tieBreak.Name, StringComparison.Ordinal)))
-                continue;
-            terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
-        }
-        return terms;
-    }
+    private IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
+        options.GetEffectiveOrder(request);
 
     private string RenderPredicate(
         Predicate predicate,
@@ -221,6 +251,17 @@ public abstract class RelationalQueryRenderer
                 return RenderRange(range, parameters, ref parameterIndex);
             case Predicate.ColumnCompare compare:
                 return RenderColumnCompare(compare);
+            case Predicate.Substring substring:
+            {
+                var parameter = AddElementParameter(substring.Column.Type, substring.Needle, parameters, ref parameterIndex);
+                var expression = RenderColumn(substring.Column);
+                var operation = substring.Anchor == Anchor.Contains
+                    ? RenderContains(expression, parameter)
+                    : RenderEndsWith(expression, parameter);
+                return "(" + expression + " IS NOT NULL AND " + operation + ")";
+            }
+            case Predicate.ElementOf elementOf:
+                return RenderElementOf(elementOf, parameters, ref parameterIndex);
             case Predicate.Not not:
                 return "NOT (" + RenderPredicate(not.Inner, parameters, ref parameterIndex, inValueLimit, table) + ")";
             case Predicate.And and:
@@ -242,15 +283,13 @@ public abstract class RelationalQueryRenderer
                 return "(" + string.Join(" OR ", terms) + ")";
             }
             case Predicate.StartsWith:
-            case Predicate.Substring:
-            case Predicate.ElementOf:
                 throw new QueryRenderException("GW-QUERY-030", "This normalized predicate requires a provider-independent persisted projection and cannot be rendered directly.");
             default:
                 throw new QueryRenderException("GW-QUERY-030", "The predicate node is outside the closed native query surface.");
         }
     }
 
-    private string RenderEquality(
+    protected virtual string RenderEquality(
         ColumnRef column,
         QueryConstant value,
         ICollection<QueryRenderParameter> parameters,
@@ -263,7 +302,7 @@ public abstract class RelationalQueryRenderer
         return "(" + expression + " IS NOT NULL AND " + expression + " = @" + name + ")";
     }
 
-    private string RenderMembership(
+    protected virtual string RenderMembership(
         Predicate.In membership,
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex)
@@ -283,7 +322,7 @@ public abstract class RelationalQueryRenderer
         return parts.Count == 1 ? parts[0] : "(" + string.Join(" OR ", parts) + ")";
     }
 
-    private string RenderRange(Predicate.Range range, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
+    protected virtual string RenderRange(Predicate.Range range, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
     {
         var expression = RenderColumn(range.Column);
         var parts = new List<string> { expression + " IS NOT NULL" };
@@ -337,7 +376,7 @@ public abstract class RelationalQueryRenderer
         return alternatives.Count == 1 ? alternatives[0] : "(" + string.Join(" OR ", alternatives) + ")";
     }
 
-    private string RenderCursorEquality(ColumnRef column, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
+    protected virtual string RenderCursorEquality(ColumnRef column, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
     {
         var expression = RenderColumn(column);
         if (value.Kind == QueryConstantKind.Null)
@@ -346,7 +385,7 @@ public abstract class RelationalQueryRenderer
         return "(" + expression + " IS NOT NULL AND " + expression + " = @" + name + ")";
     }
 
-    private string RenderAfter(OrderTerm term, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
+    protected virtual string RenderAfter(OrderTerm term, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
     {
         var expression = RenderColumn(term.Column);
         var nullsFirst = term.NullOrder == NullOrder.First;
@@ -368,10 +407,35 @@ public abstract class RelationalQueryRenderer
         return "CASE WHEN " + expression + " IS NULL THEN " + nullRank + " ELSE " + nonNullRank + " END ASC, " + expression + " " + direction;
     }
 
-    private string AddParameter(ColumnRef column, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
+    protected virtual string RenderContains(string expression, string parameter) =>
+        throw new QueryRenderException("GW-QUERY-030", "This provider has no ordinal substring operation.");
+
+    protected virtual string RenderEndsWith(string expression, string parameter) =>
+        throw new QueryRenderException("GW-QUERY-030", "This provider has no ordinal suffix operation.");
+
+    protected virtual string RenderElementOf(
+        Predicate.ElementOf elementOf,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (elementOf.Set.Type is not QueryType)
+            throw new QueryRenderException("GW-SEM-TYPE-007", "An element set must declare its exact element type before rendering.");
+        if (elementOf.Values.Length == 0)
+            return elementOf.Quantifier == SetQuantifier.Any ? "1 = 0" : "1 = 1";
+        throw new QueryRenderException("GW-QUERY-030", $"ElementOf on '{elementOf.Set.Name}' requires a provider array representation; values were typed but no native array operation is available.");
+    }
+
+    protected string AddParameter(ColumnRef column, QueryConstant value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
     {
         var name = "p" + parameterIndex++;
         parameters.Add(new QueryRenderParameter(name, column.Type, AdaptParameter(column.Type, value.Value)));
+        return name;
+    }
+
+    protected string AddElementParameter(QueryType type, object? value, ICollection<QueryRenderParameter> parameters, ref int parameterIndex)
+    {
+        var name = "p" + parameterIndex++;
+        parameters.Add(new QueryRenderParameter(name, type, AdaptParameter(type, value)));
         return name;
     }
 

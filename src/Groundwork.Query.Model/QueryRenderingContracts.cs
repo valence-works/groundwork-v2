@@ -112,6 +112,7 @@ public sealed record QueryRenderOptions
         TieBreakColumns = (tieBreakColumns ?? Array.Empty<ColumnRef>()).ToImmutableArray();
         if (TieBreakColumns.Any(column => column is null))
             throw new ArgumentException("Tie-break columns cannot contain null references.", nameof(tieBreakColumns));
+        PhysicalIndexNames = ImmutableDictionary<string, string>.Empty.WithComparers(StringComparer.Ordinal);
     }
 
     /// <summary>Provider defaults are used unless a declaration explicitly requests pinning.</summary>
@@ -122,8 +123,28 @@ public sealed record QueryRenderOptions
     /// <summary>Declared identity columns appended to the requested order for deterministic paging.</summary>
     public ImmutableArray<ColumnRef> TieBreakColumns { get; }
 
+    /// <summary>Provider-resolved physical names for declared logical indexes.</summary>
+    public IReadOnlyDictionary<string, string> PhysicalIndexNames { get; init; }
+
     /// <summary>The maximum number of distinct values in one <c>In</c> predicate.</summary>
     public int InValueLimit { get; init; } = 1_000;
+
+    public string ResolvePhysicalIndexName(string logicalName) =>
+        PhysicalIndexNames.TryGetValue(logicalName, out var physicalName) ? physicalName : logicalName;
+
+    /// <summary>Returns the requested order followed by the declared identity tie-break columns.</summary>
+    public ImmutableArray<OrderTerm> GetEffectiveOrder(QueryRequest request)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        var terms = request.Order.ToList();
+        foreach (var tieBreak in TieBreakColumns)
+        {
+            if (terms.Any(term => string.Equals(term.Column.Name, tieBreak.Name, StringComparison.Ordinal)))
+                continue;
+            terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
+        }
+        return terms.ToImmutableArray();
+    }
 
     public QueryIndexDeclaration? FindPinnedIndex()
     {
@@ -159,12 +180,26 @@ public sealed record QueryRenderParameter
 public static class QueryContinuationToken
 {
     private const string Prefix = "q1.";
+    private const string BoundPrefix = "q2.";
 
     public static string Encode(IEnumerable<QueryConstant> values)
     {
         if (values is null)
             throw new ArgumentNullException(nameof(values));
         return Prefix + string.Join(".", values.Select(value => EncodeValue(value ?? throw new ArgumentException("Continuation values cannot contain null references.", nameof(values)))));
+    }
+
+    /// <summary>Encodes a cursor bound to the query shape and its effective identity order.</summary>
+    public static string Encode(QueryRequest request, QueryRenderOptions options, IEnumerable<QueryConstant> values)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (options is null) throw new ArgumentNullException(nameof(options));
+        var snapshot = (values ?? throw new ArgumentNullException(nameof(values))).ToArray();
+        var order = options.GetEffectiveOrder(request);
+        if (snapshot.Length != order.Length)
+            throw new ArgumentException("A continuation must contain one value per effective order term.", nameof(values));
+        var binding = request.ContinuationFingerprint + "|" + string.Join(";", order.Select(OrderBinding));
+        return BoundPrefix + EncodeText(binding) + "." + string.Join(".", snapshot.Select(value => EncodeValue(value ?? throw new ArgumentException("Continuation values cannot contain null references.", nameof(values)))));
     }
 
     public static IReadOnlyList<QueryConstant> Decode(string token, IReadOnlyList<ColumnRef> columns)
@@ -182,11 +217,43 @@ public static class QueryContinuationToken
         return encoded.Select((item, index) => DecodeValue(item, columns[index])).ToArray();
     }
 
+    /// <summary>Decodes and verifies a cursor against the request shape and effective order.</summary>
+    public static IReadOnlyList<QueryConstant> Decode(string token, QueryRequest request, QueryRenderOptions options)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (options is null) throw new ArgumentNullException(nameof(options));
+        if (string.IsNullOrWhiteSpace(token))
+            throw new ArgumentException("A continuation token cannot be blank.", nameof(token));
+        if (!token.StartsWith(BoundPrefix, StringComparison.Ordinal))
+            return Decode(token, options.GetEffectiveOrder(request).Select(term => term.Column).ToArray());
+
+        var parts = token.Substring(BoundPrefix.Length).Split('.');
+        var order = options.GetEffectiveOrder(request);
+        if (parts.Length != order.Length + 1)
+            throw new FormatException("The continuation token does not contain one value per effective order term.");
+        var expectedBinding = request.ContinuationFingerprint + "|" + string.Join(";", order.Select(OrderBinding));
+        if (!string.Equals(DecodeText(parts[0]), expectedBinding, StringComparison.Ordinal))
+            throw new FormatException("The continuation token belongs to a different query shape or identity order.");
+        return parts.Skip(1).Select((item, index) => DecodeValue(item, order[index].Column)).ToArray();
+    }
+
     private static string EncodeValue(QueryConstant value)
     {
         var bytes = Encoding.UTF8.GetBytes(value.ToCanonicalString());
         return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
+
+    private static string EncodeText(string value) => Convert.ToBase64String(Encoding.UTF8.GetBytes(value)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static string DecodeText(string value)
+    {
+        var padded = value.Replace('-', '+').Replace('_', '/');
+        padded += new string('=', (4 - padded.Length % 4) % 4);
+        return Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+    }
+
+    private static string OrderBinding(OrderTerm term) =>
+        PredicateCanonicalizer.Column(term.Column) + ":" + term.Direction + ":" + term.NullOrder;
 
     private static QueryConstant DecodeValue(string encoded, ColumnRef column)
     {

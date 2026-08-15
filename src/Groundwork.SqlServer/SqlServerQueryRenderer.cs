@@ -20,6 +20,134 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     protected override string RenderIndexHint(string indexName) =>
         "WITH (INDEX(" + Dialect.QuoteIdentifier(indexName) + "))";
 
+    protected override string RenderColumn(ColumnRef column) => column.Type == QueryType.String
+        ? base.RenderColumn(column) + " COLLATE Latin1_General_100_BIN2"
+        : base.RenderColumn(column);
+
+    protected override string RenderOrderTerm(OrderTerm term)
+    {
+        var rendered = base.RenderOrderTerm(term);
+        if (term.Column.Type != QueryType.String)
+            return rendered;
+        var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+        return rendered + ", DATALENGTH(" + RenderColumn(term.Column) + ") " + direction;
+    }
+
+    protected override string RenderEquality(
+        ColumnRef column,
+        QueryConstant value,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (column.Type != QueryType.String)
+            return base.RenderEquality(column, value, parameters, ref parameterIndex);
+        var expression = RenderColumn(column);
+        if (value.Kind == QueryConstantKind.Null)
+            return expression + " IS NULL";
+        var parameter = AddParameter(column, value, parameters, ref parameterIndex);
+        return "(" + expression + " IS NOT NULL AND DATALENGTH(" + expression + ") = DATALENGTH(@" + parameter + ") AND " + expression + " = @" + parameter + ")";
+    }
+
+    protected override string RenderMembership(
+        Predicate.In membership,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (membership.Column.Type != QueryType.String)
+            return base.RenderMembership(membership, parameters, ref parameterIndex);
+        if (membership.Values.Length == 0)
+            return "1 = 0";
+        var expression = RenderColumn(membership.Column);
+        var parts = new List<string>();
+        foreach (var value in membership.Values)
+        {
+            if (value.Kind == QueryConstantKind.Null)
+            {
+                parts.Add(expression + " IS NULL");
+                continue;
+            }
+            var parameter = AddParameter(membership.Column, value, parameters, ref parameterIndex);
+            parts.Add("(" + expression + " IS NOT NULL AND DATALENGTH(" + expression + ") = DATALENGTH(@" + parameter + ") AND " + expression + " = @" + parameter + ")");
+        }
+        return parts.Count == 1 ? parts[0] : "(" + string.Join(" OR ", parts) + ")";
+    }
+
+    protected override string RenderRange(
+        Predicate.Range range,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (range.Column.Type != QueryType.String)
+            return base.RenderRange(range, parameters, ref parameterIndex);
+
+        var expression = RenderColumn(range.Column);
+        var parts = new List<string> { expression + " IS NOT NULL" };
+        if (range.Lower is { } lower)
+            parts.Add(RenderStringBound(expression, range.Column, lower, isLower: true, parameters, ref parameterIndex));
+        if (range.Upper is { } upper)
+            parts.Add(RenderStringBound(expression, range.Column, upper, isLower: false, parameters, ref parameterIndex));
+        return "(" + string.Join(" AND ", parts) + ")";
+    }
+
+    protected override string RenderCursorEquality(
+        ColumnRef column,
+        QueryConstant value,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex) => column.Type == QueryType.String
+            ? RenderEquality(column, value, parameters, ref parameterIndex)
+            : base.RenderCursorEquality(column, value, parameters, ref parameterIndex);
+
+    protected override string RenderAfter(
+        OrderTerm term,
+        QueryConstant value,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (term.Column.Type != QueryType.String)
+            return base.RenderAfter(term, value, parameters, ref parameterIndex);
+        var expression = RenderColumn(term.Column);
+        if (value.Kind == QueryConstantKind.Null)
+            return term.NullOrder == NullOrder.First ? expression + " IS NOT NULL" : "1 = 0";
+
+        var parameter = AddParameter(term.Column, value, parameters, ref parameterIndex);
+        var comparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
+        var lengthComparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
+        var strict = "((" + expression + " IS NOT NULL AND " + expression + " " + comparison + " @" + parameter + ") OR (" +
+            expression + " = @" + parameter + " AND DATALENGTH(" + expression + ") " + lengthComparison + " DATALENGTH(@" + parameter + ")))";
+        return term.NullOrder == NullOrder.First
+            ? strict
+            : "(" + strict + " OR " + expression + " IS NULL)";
+    }
+
+    protected override string RenderContains(string expression, string parameter) =>
+        "(LEN(@" + parameter + ") = 0 OR CHARINDEX(@" + parameter + ", " + expression + ") > 0)";
+
+    protected override string RenderEndsWith(string expression, string parameter) =>
+        "(DATALENGTH(@" + parameter + ") = 0 OR (DATALENGTH(RIGHT(" + expression + ", DATALENGTH(@" + parameter + ") / 2)) = DATALENGTH(@" + parameter + ") AND RIGHT(" + expression + ", DATALENGTH(@" + parameter + ") / 2) = @" + parameter + "))";
+
+    protected override string RenderElementOf(
+        Predicate.ElementOf elementOf,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        if (elementOf.Set.Type is not QueryType type)
+            throw new QueryRenderException("GW-SEM-TYPE-007", "An element set must declare its exact element type before rendering.");
+        var expression = Dialect.QuoteIdentifier(elementOf.Set.Name);
+        if (elementOf.Values.Length == 0)
+            return elementOf.Quantifier == SetQuantifier.Any ? "1 = 0" : "1 = 1";
+        var clauses = new List<string>();
+        foreach (var value in elementOf.Values)
+        {
+            if (value.Kind == QueryConstantKind.Null)
+                clauses.Add("element.[value] IS NULL");
+            else
+                clauses.Add("element.[value] = @" + AddElementParameter(type, value.Value, parameters, ref parameterIndex));
+        }
+        return elementOf.Quantifier == SetQuantifier.Any
+            ? "EXISTS (SELECT 1 FROM OPENJSON(" + expression + ") AS element WHERE " + string.Join(" OR ", clauses) + ")"
+            : string.Join(" AND ", clauses.Select(clause => "EXISTS (SELECT 1 FROM OPENJSON(" + expression + ") AS element WHERE " + clause + ")"));
+    }
+
     protected override string RenderPaging(
         Paging paging,
         ICollection<QueryRenderParameter> parameters,
@@ -31,7 +159,7 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         var offset = paging.Offset is int suppliedOffset
             ? AddPagingParameter(parameters, ref parameterIndex, suppliedOffset)
             : "0";
-        var text = " OFFSET @" + offset + " ROWS";
+        var text = " OFFSET " + (paging.Offset is int ? "@" + offset : offset) + " ROWS";
         if (paging.Limit is int limit)
             text += " FETCH NEXT @" + AddPagingParameter(parameters, ref parameterIndex, limit) + " ROWS ONLY";
         return text;
@@ -45,5 +173,25 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         var name = "p" + parameterIndex++;
         parameters.Add(new QueryRenderParameter(name, QueryType.Int32, value));
         return name;
+    }
+
+    private string RenderStringBound(
+        string expression,
+        ColumnRef column,
+        Bound bound,
+        bool isLower,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        var parameter = AddParameter(column, bound.Value, parameters, ref parameterIndex);
+        var operatorText = isLower
+            ? bound.IsInclusive ? ">=" : ">"
+            : bound.IsInclusive ? "<=" : "<";
+        var lengthOperator = isLower
+            ? bound.IsInclusive ? ">=" : ">"
+            : bound.IsInclusive ? "<=" : "<";
+        return "((" + expression + " " + operatorText + " @" + parameter + ") OR (" + expression +
+            " = @" + parameter + " AND DATALENGTH(" + expression + ") " + lengthOperator +
+            " DATALENGTH(@" + parameter + ")))";
     }
 }

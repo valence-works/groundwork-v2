@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.Query.Model;
 
 namespace Groundwork.MongoDb;
 
@@ -240,6 +241,8 @@ public interface IMongoStorageSession
     MongoStorageAccess Access { get; }
 
     MongoStoredEntry? Read(MongoStorageKey key);
+
+    QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
 
     MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null);
 

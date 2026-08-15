@@ -3,6 +3,8 @@ using System.Data.Common;
 using System.Globalization;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
+using Groundwork.Substrate.Relational;
 using Groundwork.Testing;
 using Npgsql;
 using NpgsqlTypes;
@@ -34,6 +36,27 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     public StorageUnit Unit { get; }
 
     public StorageAccess Access { get; }
+
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var renderOptions = suppliedOptions with
+        {
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
+        };
+        var executionRequest = QueryRequestExecution.ForPage(request, renderOptions);
+        var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
+        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
+        {
+            if (name == "__groundwork_total_count") return value;
+            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
+        });
+        return QueryResultMaterializer.Materialize(request, suppliedOptions, rows, command.SelectedIndex, command.IndexHintApplied);
+    });
 
     public StoredEntry? Read(StorageKey key) => Execute(() => ReadCore(key));
 
