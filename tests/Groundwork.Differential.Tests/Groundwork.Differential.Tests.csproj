@@ -21,6 +21,7 @@
   <ItemGroup>
     <Compile Include="../Groundwork.Query.Model.Tests/G2Q1Corpus.cs" Link="G2Q1Corpus.cs" />
     <ProjectReference Include="../../src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
     <ProjectReference Include="../../src/Groundwork.Substrate.Mongo/Groundwork.Substrate.Mongo.csproj" />
     <ProjectReference Include="../../src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
     <ProjectReference Include="../../src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />

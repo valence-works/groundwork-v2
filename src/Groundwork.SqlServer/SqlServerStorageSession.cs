@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.SqlTypes;
 using System.Globalization;
 using System.Collections.Immutable;
 using System.Text.Json;
@@ -10,7 +11,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -55,10 +56,54 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
         });
+        AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
     });
+
+    private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
+    {
+        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        var logicalIndex = query.SelectedIndex!;
+        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
+        using (var enable = Command("SET STATISTICS XML ON")) enable.ExecuteNonQuery();
+        string rawPlan;
+        try
+        {
+            using var explain = Command(query.CommandText);
+            RelationalQueryResultReader.AddParameters(explain, query);
+            using var reader = explain.ExecuteReader();
+            var plans = new List<string>();
+            do
+            {
+                while (reader.Read())
+                for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+                {
+                    if (!reader.GetName(ordinal).Contains("XML Showplan", StringComparison.OrdinalIgnoreCase) &&
+                        reader.GetFieldType(ordinal) != typeof(SqlXml))
+                        continue;
+                    var content = reader.GetValue(ordinal) switch
+                    {
+                        SqlXml xml when !xml.IsNull => xml.Value,
+                        SqlString text when !text.IsNull => text.Value,
+                        string text => text,
+                        _ => null
+                    };
+                    if (!string.IsNullOrWhiteSpace(content)) plans.Add(content);
+                }
+            } while (reader.NextResult());
+            rawPlan = string.Join(Environment.NewLine, plans);
+        }
+        finally
+        {
+            using var disable = Command("SET STATISTICS XML OFF");
+            disable.ExecuteNonQuery();
+        }
+        ExplainAssertTestMode.AssertChosenIndex(
+            "SQL Server", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
+            SqlServerExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+    }
 
     private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
         ? request
@@ -75,6 +120,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
         Execute(() => ConditionalUpsertCore(values, options));
+
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
+        ExecuteWrite(() => ApplyBatchCore(writes));
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
@@ -95,6 +143,252 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
 
     internal void Close() => closed = true;
 
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
+    {
+        ArgumentNullException.ThrowIfNull(writes);
+        if (writes.Count == 0)
+            return [];
+        if (writes.Any(write => write.Options.ExpectedVersion is not null))
+            return ApplyBatchFallback(writes);
+        if (HasSecondaryUniqueIndex(writes[0].Unit))
+            return ApplyBatchFallback(writes);
+        if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
+            return ApplyBatchFallback(writes);
+
+        var columns = PhysicalBatchColumns(writes[0]);
+        foreach (var write in writes)
+        {
+            ValidateValues(write.Values!.Values, requireAllNonNullable: write.Mode == RowWriteMode.Insert);
+            if (!PhysicalBatchColumns(write).Select(column => column.Name).SequenceEqual(columns.Select(column => column.Name), StringComparer.Ordinal))
+                return ApplyBatchFallback(writes);
+        }
+
+        return ApplyMergeBatch(writes, columns);
+    }
+
+    private IReadOnlyList<ColumnDefinition> PhysicalBatchColumns(RowWrite write)
+    {
+        var columns = UserColumns.Where(column => write.Values!.Values.ContainsKey(column.Name)).ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            columns.Add(ScopeColumnDefinition);
+        return columns;
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatch(
+        IReadOnlyList<RowWrite> writes,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        try
+        {
+            return ApplyMergeBatchTableValued(writes, columns);
+        }
+        catch (SqlException exception) when (exception.Message.Contains("table type", StringComparison.OrdinalIgnoreCase) ||
+                                              exception.Message.Contains("type name", StringComparison.OrdinalIgnoreCase))
+        {
+            // Existing installations can be upgraded before the provider definition is
+            // materialized. Preserve a VALUES fallback while the durable TVP catches up.
+            return ApplyMergeBatchValues(writes, columns);
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatchTableValued(
+        IReadOnlyList<RowWrite> writes,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        using var command = Command(string.Empty);
+        var table = new DataTable();
+        foreach (var column in Unit.Columns)
+            table.Columns.Add(column.Name, ClrType(column.Type));
+        foreach (var write in writes)
+        {
+            var row = table.NewRow();
+            foreach (var column in Unit.Columns)
+            {
+                row[column.Name] = column.Name == SqlServerSchemaCoordinator.VersionColumn
+                    ? 1L
+                    : column.Name == SqlServerSchemaCoordinator.ScopeColumn
+                        ? Access.Scope?.Value ?? (object)DBNull.Value
+                        : write.Values!.Values.TryGetValue(column.Name, out var value)
+                            ? SqlServerProviderConnection.ToSqlServerValue(value, column) ?? DBNull.Value
+                            : DBNull.Value;
+            }
+            table.Rows.Add(row);
+        }
+        var parameter = command.Parameters.Add("@rows", SqlDbType.Structured);
+        parameter.TypeName = $"dbo.{SqlServerSchemaCoordinator.BatchTypeName(writes[0].Unit)}";
+        parameter.Value = table;
+
+        var match = string.Join(" AND ", Unit.Key.Columns.Select(column =>
+            $"target.{Quote(column)}=source.{Quote(column)}"));
+        var sql = $"MERGE {Quote(Unit.Name)} WITH (HOLDLOCK) AS target USING @rows AS source ON {match} ";
+        if (writes[0].Mode == RowWriteMode.Upsert)
+        {
+            var updates = columns
+                .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                                 column.Name != SqlServerSchemaCoordinator.ScopeColumn &&
+                                 column.Name != "createdAt" &&
+                                 column.Name != SqlServerSchemaCoordinator.VersionColumn)
+                .Select(column => $"target.{Quote(column.Name)}=source.{Quote(column.Name)}")
+                .ToList();
+            if (VersionColumnDefinition is not null)
+                updates.Add($"target.{Quote(VersionColumnDefinition.Name)}=target.{Quote(VersionColumnDefinition.Name)}+1");
+            if (updates.Count == 0)
+                updates.Add($"target.{Quote(Unit.Key.Columns[0])}=target.{Quote(Unit.Key.Columns[0])}");
+            sql += $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", updates)} ";
+        }
+        sql += $"WHEN NOT MATCHED BY TARGET THEN INSERT ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))}) OUTPUT $action, {string.Join(", ", Unit.Key.Columns.Select(column => $"inserted.{Quote(column)}"))}{(VersionColumnDefinition is null ? string.Empty : $", inserted.{Quote(VersionColumnDefinition.Name)}")};";
+        command.CommandText = sql;
+        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlserver.batch-merge-tvp", "SQL Server MERGE table-valued parameter", IsProbe: false));
+        try
+        {
+            var returned = ReadMergeOutcomes(command, writes[0].Unit);
+            return MapMergeOutcomes(writes, returned);
+        }
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatchValues(
+        IReadOnlyList<RowWrite> writes,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        var maxRows = Math.Max(1, 2_000 / columns.Count);
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(chunk => ApplyMergeBatchValues(chunk, columns)).ToArray();
+
+        using var command = Command(string.Empty);
+        var rows = new List<string>(writes.Count);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var values = writes[row].Values!.Values;
+            var parameters = new List<string>(columns.Count);
+            foreach (var column in columns)
+            {
+                var name = $"@r{row}_{column.Name}";
+                parameters.Add(name);
+                SqlServerProviderConnection.AddParameter(command, name,
+                    column.Name == SqlServerSchemaCoordinator.VersionColumn
+                        ? 1L
+                        : column.Name == SqlServerSchemaCoordinator.ScopeColumn
+                            ? Access.Scope!.Value
+                            : values[column.Name], column);
+            }
+            rows.Add($"({string.Join(", ", parameters)})");
+        }
+
+        var sourceColumns = string.Join(", ", columns.Select(column => Quote(column.Name)));
+        var match = string.Join(" AND ", Unit.Key.Columns.Select(column =>
+            $"target.{Quote(column)}=source.{Quote(column)}"));
+        var sql = $"MERGE {Quote(Unit.Name)} WITH (HOLDLOCK) AS target USING (VALUES {string.Join(", ", rows)}) AS source ({sourceColumns}) ON {match} ";
+        if (writes[0].Mode == RowWriteMode.Upsert)
+        {
+            var updates = columns
+                .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                                 column.Name != SqlServerSchemaCoordinator.ScopeColumn &&
+                                 column.Name != "createdAt" &&
+                                 column.Name != SqlServerSchemaCoordinator.VersionColumn)
+                .Select(column => $"target.{Quote(column.Name)}=source.{Quote(column.Name)}")
+                .ToList();
+            if (VersionColumnDefinition is not null)
+                updates.Add($"target.{Quote(VersionColumnDefinition.Name)}=target.{Quote(VersionColumnDefinition.Name)}+1");
+            if (updates.Count == 0)
+                updates.Add($"target.{Quote(Unit.Key.Columns[0])}=target.{Quote(Unit.Key.Columns[0])}");
+            sql += $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", updates)} ";
+        }
+        sql += $"WHEN NOT MATCHED BY TARGET THEN INSERT ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))}) OUTPUT $action, {string.Join(", ", Unit.Key.Columns.Select(column => $"inserted.{Quote(column)}"))}{(VersionColumnDefinition is null ? string.Empty : $", inserted.{Quote(VersionColumnDefinition.Name)}")};";
+        command.CommandText = sql;
+        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlserver.batch-merge", "SQL Server MERGE batch", IsProbe: false));
+        try
+        {
+            var returned = ReadMergeOutcomes(command, writes[0].Unit);
+            return writes.Select(write =>
+            {
+                if (!returned.TryGetValue(write.Identity, out var result))
+                    return new RowWriteOutcome(write, new WriteOutcome(WriteOutcomeStatus.UniqueViolation));
+                var status = string.Equals(result.Action, "INSERT", StringComparison.Ordinal)
+                    ? WriteOutcomeStatus.Inserted
+                    : WriteOutcomeStatus.Updated;
+                return new RowWriteOutcome(write, new WriteOutcome(status, result.Version));
+            }).ToArray();
+        }
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private Dictionary<string, (string Action, long? Version)> ReadMergeOutcomes(
+        SqlCommand command,
+        StorageUnit logicalUnit)
+    {
+        var returned = new Dictionary<string, (string, long?)>(StringComparer.Ordinal);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+            for (var index = 0; index < Unit.Key.Columns.Count; index++)
+            {
+                var column = Unit.Key.Columns[index];
+                if (column != SqlServerSchemaCoordinator.ScopeColumn)
+                    values[column] = FromSqlServer(reader.GetValue(index + 1), Column(column));
+            }
+            var versionOrdinal = Unit.Key.Columns.Count + 1;
+            var version = VersionColumnDefinition is null || reader.IsDBNull(versionOrdinal)
+                ? (long?)null
+                : Convert.ToInt64(reader.GetValue(versionOrdinal), CultureInfo.InvariantCulture);
+            returned[RowWrite.IdentityFor(logicalUnit, values)] = (reader.GetString(0), version);
+        }
+        return returned;
+    }
+
+    private IReadOnlyList<RowWriteOutcome> MapMergeOutcomes(
+        IReadOnlyList<RowWrite> writes,
+        IReadOnlyDictionary<string, (string Action, long? Version)> returned) =>
+        writes.Select(write =>
+        {
+            if (!returned.TryGetValue(write.Identity, out var result))
+                return new RowWriteOutcome(write, new WriteOutcome(WriteOutcomeStatus.UniqueViolation));
+            var status = string.Equals(result.Action, "INSERT", StringComparison.Ordinal)
+                ? WriteOutcomeStatus.Inserted
+                : WriteOutcomeStatus.Updated;
+            return new RowWriteOutcome(write, new WriteOutcome(status, result.Version));
+        }).ToArray();
+
+    private static Type ClrType(PortableType type) => type switch
+    {
+        PortableType.String or PortableType.Json => typeof(string),
+        PortableType.Int32 => typeof(int),
+        PortableType.Int64 => typeof(long),
+        PortableType.Decimal => typeof(decimal),
+        PortableType.Boolean => typeof(bool),
+        PortableType.DateTimeOffset => typeof(DateTimeOffset),
+        PortableType.Guid => typeof(Guid),
+        PortableType.Binary => typeof(byte[]),
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
+        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+        {
+            RowWriteMode.Insert => Insert(write.Values!, write.Options),
+            RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+        })).ToArray();
+
+    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
+        logicalUnit.Indexes.Any(index => index.IsUnique &&
+            !index.Columns.Select(column => column.Column)
+                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
     private ColumnRef? QueryColumn(string name)
     {
         var column = Unit.Columns.Single(item => item.Name == name);

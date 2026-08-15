@@ -124,7 +124,9 @@ public enum WriteOutcomeStatus
     Deleted,
     NotFound,
     UniqueViolation,
-    ConcurrencyConflict
+    ConcurrencyConflict,
+    /// <summary>The staged input was superseded by a later write to the same key.</summary>
+    Superseded
 }
 
 /// <summary>
@@ -329,7 +331,20 @@ public interface IUnitOfWork : IDisposable
 {
     IStorageSession OpenSession(StorageUnit unit);
 
-    void Commit();
+    /// <summary>Stages a row write for the next provider batch.</summary>
+    void Stage(RowWrite write);
+
+    /// <summary>Commits staged writes and returns aggregate success counts.</summary>
+    BatchWriteSummary Commit();
+
+    /// <summary>Commits an exact-mode unit and returns one outcome for every staged write.</summary>
+    BatchWriteReport CommitWithOutcomes();
+
+    /// <summary>Asynchronously commits an exact-mode unit and returns per-row outcomes.</summary>
+    ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Asynchronously commits staged writes and returns aggregate evidence.</summary>
+    ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default);
 
     void Rollback();
 }
@@ -340,9 +355,17 @@ public interface IStorageProviderConnection : IDisposable
 
     ISchemaCoordinator Schema { get; }
 
+    /// <summary>Provider capabilities relevant to staged writes and their outcome contract.</summary>
+    IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
+
     IStorageSession OpenSession(StorageUnit unit, StorageAccess access);
 
     IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units);
+
+    IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        params StorageUnit[] units);
 }
 
 /// <summary>

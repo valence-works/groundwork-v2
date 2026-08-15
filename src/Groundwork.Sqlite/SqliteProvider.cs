@@ -49,6 +49,11 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "SQLite", nativeBatch: true,
+        exactOutcomeCost: "one RETURNING result per native batch",
+        batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback");
+
     internal object Gate => gate;
 
     internal SqliteConnection Connection => connection;
@@ -82,9 +87,16 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
+        => BeginUnitOfWork(access, BatchWriteOptions.Default, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
@@ -100,7 +112,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         try
         {
             var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-            return new SqliteUnitOfWork(this, transactional, transaction, units, access);
+            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options);
         }
         catch
         {

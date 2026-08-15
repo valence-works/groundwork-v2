@@ -10,7 +10,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorageSession
+internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -58,10 +58,28 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
         });
+        AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
     });
+
+    private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
+    {
+        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        var logicalIndex = query.SelectedIndex!;
+        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
+        using var explain = Command("EXPLAIN QUERY PLAN " + query.CommandText.TrimEnd().TrimEnd(';'));
+        RelationalQueryResultReader.AddParameters(explain, query);
+        using var reader = explain.ExecuteReader();
+        var details = new List<string>();
+        while (reader.Read())
+            details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => Convert.ToString(reader.GetValue(index), CultureInfo.InvariantCulture))));
+        var rawPlan = string.Join(Environment.NewLine, details);
+        ExplainAssertTestMode.AssertChosenIndex(
+            "SQLite", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
+            SqliteExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+    }
 
     private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
         ? request
@@ -92,6 +110,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
         Execute(() => ConditionalUpsertCore(values, options));
 
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
+        ExecuteWrite(() => ApplyBatchCore(writes));
+
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
         var existing = ReadCore(key);
@@ -111,6 +132,201 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
 
     internal void Close() => closed = true;
 
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
+    {
+        ArgumentNullException.ThrowIfNull(writes);
+        if (writes.Count == 0)
+            return [];
+
+        // Expected-version writes and deletes need their per-row predicates and
+        // conflict details. Keep those semantics exact; unconditional inserts and
+        // upserts are the provider-native multi-row path.
+        if (writes.Any(write => write.Options.ExpectedVersion is not null))
+            return ApplyBatchFallback(writes);
+        if (HasSecondaryUniqueIndex(writes[0].Unit))
+            return ApplyBatchFallback(writes);
+
+        return writes[0].Mode switch
+        {
+            RowWriteMode.Insert => ApplyInsertBatch(writes),
+            RowWriteMode.Upsert => ApplyUpsertBatch(writes),
+            _ => ApplyBatchFallback(writes)
+        };
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyInsertBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
+        foreach (var write in writes)
+        {
+            ValidateValues(write.Values!.Values, requireAllNonNullable: true);
+            var writeColumns = UserColumns
+                .Where(column => write.Values!.Values.ContainsKey(column.Name))
+                .Select(column => column.Name)
+                .ToArray();
+            if (!writeColumns.SequenceEqual(supplied.Select(column => column.Name), StringComparer.Ordinal))
+                return ApplyBatchFallback(writes);
+        }
+
+        var columns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            columns.Add(ScopeColumnDefinition);
+        var maxRows = Math.Max(1, SqliteVariableLimit() / columns.Count);
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(ApplyInsertBatch).ToArray();
+        var valuesSql = new List<string>();
+        using var command = Command(string.Empty);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var parameters = new List<string>();
+            foreach (var column in columns)
+            {
+                var name = $"@r{row}_{column.Name}";
+                parameters.Add(name);
+                command.Parameters.AddWithValue(name, column.Name == SqliteSchemaCoordinator.VersionColumn
+                    ? 1L
+                    : column.Name == SqliteSchemaCoordinator.ScopeColumn
+                        ? Access.Scope!.Value
+                        : ToSqlite(writes[row].Values!.Values[column.Name], column) ?? DBNull.Value);
+            }
+            valuesSql.Add($"({string.Join(", ", parameters)})");
+        }
+
+        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
+            VersionColumnDefinition is null ? [] : [Quote(VersionColumnDefinition.Name)]));
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)} ON CONFLICT DO NOTHING RETURNING {returning};";
+        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-insert", "SQLite multi-row INSERT", IsProbe: false));
+        try
+        {
+            var inserted = ReadReturnedRows(command, writes[0].Unit);
+            return writes.Select(write => new RowWriteOutcome(write,
+                inserted.TryGetValue(write.Identity, out var version)
+                    ? new WriteOutcome(WriteOutcomeStatus.Inserted, version)
+                    : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
+        }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyUpsertBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
+        foreach (var write in writes)
+        {
+            ValidateValues(write.Values!.Values, requireAllNonNullable: false);
+            var writeColumns = UserColumns
+                .Where(column => write.Values!.Values.ContainsKey(column.Name))
+                .Select(column => column.Name)
+                .ToArray();
+            if (!writeColumns.SequenceEqual(supplied.Select(column => column.Name), StringComparer.Ordinal))
+                return ApplyBatchFallback(writes);
+        }
+
+        var columns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            columns.Add(ScopeColumnDefinition);
+        var maxRows = Math.Max(1, SqliteVariableLimit() / columns.Count);
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(ApplyUpsertBatch).ToArray();
+        var valuesSql = new List<string>();
+        using var command = Command(string.Empty);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var parameters = new List<string>();
+            foreach (var column in columns)
+            {
+                var name = $"@r{row}_{column.Name}";
+                parameters.Add(name);
+                command.Parameters.AddWithValue(name, column.Name == SqliteSchemaCoordinator.VersionColumn
+                    ? 1L
+                    : column.Name == SqliteSchemaCoordinator.ScopeColumn
+                        ? Access.Scope!.Value
+                        : ToSqlite(writes[row].Values!.Values[column.Name], column) ?? DBNull.Value);
+            }
+            valuesSql.Add($"({string.Join(", ", parameters)})");
+        }
+
+        var updateColumns = supplied
+            .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                             column.Name != SqliteSchemaCoordinator.ScopeColumn &&
+                             column.Name != "createdAt")
+            .Select(column => $"{Quote(column.Name)}=excluded.{Quote(column.Name)}")
+            .ToList();
+        if (VersionColumnDefinition is not null)
+            updateColumns.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(Unit.Name)}.{Quote(VersionColumnDefinition.Name)}+1");
+        if (updateColumns.Count == 0)
+            updateColumns.Add($"{Quote(Unit.Key.Columns[0])}={Quote(Unit.Name)}.{Quote(Unit.Key.Columns[0])}");
+
+        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
+            VersionColumnDefinition is null ? [] : [Quote(VersionColumnDefinition.Name)]));
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)} ON CONFLICT ({string.Join(", ", Unit.Key.Columns.Select(Quote))}) DO UPDATE SET {string.Join(", ", updateColumns)} RETURNING {returning};";
+        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-upsert", "SQLite multi-row INSERT ON CONFLICT", IsProbe: false));
+        try
+        {
+            var returned = ReadReturnedRows(command, writes[0].Unit);
+            return writes.Select(write => new RowWriteOutcome(write,
+                returned.TryGetValue(write.Identity, out var version)
+                    ? new WriteOutcome(WriteOutcomeStatus.Upserted, version)
+                    : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
+        }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private Dictionary<string, long?> ReadReturnedRows(SqliteCommand command, StorageUnit logicalUnit)
+    {
+        var returned = new Dictionary<string, long?>(StringComparer.Ordinal);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+            for (var index = 0; index < Unit.Key.Columns.Count; index++)
+            {
+                var column = Unit.Key.Columns[index];
+                if (column != SqliteSchemaCoordinator.ScopeColumn)
+                    values[column] = FromSqlite(reader.GetValue(index), Column(column));
+            }
+            var versionOrdinal = Unit.Key.Columns.Count;
+            var version = VersionColumnDefinition is null || reader.IsDBNull(versionOrdinal)
+                ? (long?)null
+                : Convert.ToInt64(reader.GetValue(versionOrdinal), CultureInfo.InvariantCulture);
+            returned[RowWrite.IdentityFor(logicalUnit, values)] = version;
+        }
+        return returned;
+    }
+
+    private int SqliteVariableLimit() =>
+        SQLitePCL.raw.sqlite3_limit(
+            connection.Handle,
+            SQLitePCL.raw.SQLITE_LIMIT_VARIABLE_NUMBER,
+            -1);
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
+        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+        {
+            RowWriteMode.Insert => Insert(write.Values!, write.Options),
+            RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+        })).ToArray();
+
+    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
+        logicalUnit.Indexes.Any(index => index.IsUnique &&
+            !index.Columns.Select(column => column.Column)
+                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
     private ColumnRef? QueryColumn(string name)
     {
         var column = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition])
@@ -330,7 +546,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var updateColumns = columns.Where(column =>
             !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
             column.Name != SqliteSchemaCoordinator.ScopeColumn &&
-            (!exactOutcome || column.Name != "createdAt")).ToArray();
+            column.Name != "createdAt").ToArray();
         if (VersionColumnDefinition is not null && updateColumns.All(column => column.Name != VersionColumnDefinition.Name))
             updateColumns = updateColumns.Append(VersionColumnDefinition).ToArray();
         var keyNames = Unit.Key.Columns;

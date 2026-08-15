@@ -53,6 +53,11 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "the in-memory provider", nativeBatch: false,
+        exactOutcomeCost: "one provider operation per coalesced row",
+        batchCost: "uses provider-neutral per-row operations inside the transaction");
+
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
     {
         ThrowIfDisposed();
@@ -63,9 +68,16 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
+        => BeginUnitOfWork(access, BatchWriteOptions.Default, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
@@ -74,7 +86,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         if (states.Select(state => state.Unit.Id).Distinct().Count() != states.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
 
-        return new InMemoryUnitOfWork(database, states, access);
+        return new InMemoryUnitOfWork(database, states, access, options);
     }
 
     public void Dispose() => disposed = true;
@@ -690,12 +702,12 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         Mutate(values, options, MutationKind.Update);
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Upsert);
+        Mutate(values, options, MutationKind.Upsert, preserveCreatedAt: true);
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
         options?.Observer?.Observe(new WritePathEvent("in-memory.conditional-upsert", null, IsProbe: false));
-        return Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+        return Mutate(values, options, MutationKind.Upsert, exactOutcome: true, preserveCreatedAt: true);
     }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
@@ -714,13 +726,14 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         StorageValues values,
         WriteOptions? options,
         MutationKind kind,
-        bool exactOutcome = false)
+        bool exactOutcome = false,
+        bool preserveCreatedAt = false)
     {
         ArgumentNullException.ThrowIfNull(values);
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome);
+            return Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
         }
     }
 
@@ -741,15 +754,18 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
     private readonly Dictionary<StorageUnitId, InMemoryUnitState> staged;
     private readonly Dictionary<StorageUnitId, long> baseRevisions;
     private readonly List<InMemoryStorageSession> sessions = [];
+    private readonly BatchContext batch;
     private bool terminal;
 
     internal InMemoryUnitOfWork(
         InMemoryDatabase database,
         IReadOnlyList<InMemoryUnitState> states,
-        StorageAccess access)
+        StorageAccess access,
+        BatchWriteOptions options)
     {
         this.database = database;
         this.access = access;
+        batch = new BatchContext(options);
         lock (database.Gate)
         {
             baseRevisions = states.ToDictionary(state => state.Unit.Id, state => state.Revision);
@@ -767,12 +783,38 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
         var session = new InMemoryStorageSession(database, state, access);
         sessions.Add(session);
-        return session;
+        var batched = new BatchStorageSession(session, batch);
+        batch.Register(batched);
+        return batched;
     }
 
-    public void Commit()
+    public void Stage(RowWrite write)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        ThrowIfTerminal();
+        if (!staged.ContainsKey(write.Unit.Id))
+            throw new InvalidOperationException(
+                $"Storage unit '{write.Unit.Id.Value}' was not declared for this unit of work.");
+        if (!sessions.Any(session => session.Unit.Id == write.Unit.Id))
+            _ = OpenSession(write.Unit);
+        batch.Stage(write);
+        if (batch.ReachedCap)
+            batch.FlushAll();
+    }
+
+    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
+
+    public BatchWriteReport CommitWithOutcomes()
     {
         ThrowIfTerminal();
+        batch.RequireExactOutcomes();
+        return new BatchWriteReport(CompleteCommit());
+    }
+
+    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
+    {
+        ThrowIfTerminal();
+        batch.FlushAll();
         lock (database.Gate)
         {
             foreach (var pair in staged)
@@ -791,6 +833,19 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
         terminal = true;
         CloseSessions();
+        return batch.DrainCompleted();
+    }
+
+    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(CommitWithOutcomes());
+    }
+
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(Commit());
     }
 
     public void Rollback()
@@ -843,7 +898,8 @@ internal static class Mutation
         StorageValues values,
         WriteOptions? options,
         MutationKind kind,
-        bool exactOutcome = false)
+        bool exactOutcome = false,
+        bool preserveCreatedAt = false)
     {
         ValidateValues(state.Unit, values.Values);
         var identity = Key(state.Unit, values.Values);
@@ -884,7 +940,7 @@ internal static class Mutation
             _ => WriteOutcomeStatus.Upserted
         };
         var storedValues = values.Values;
-        if (exactOutcome && existing is not null &&
+        if ((exactOutcome || preserveCreatedAt) && existing is not null &&
             existing.Values.TryGetValue("createdAt", out var existingCreatedAt))
         {
             var preserved = values.Values.ToDictionary(
