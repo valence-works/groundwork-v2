@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
     <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <PackageId>Groundwork.SchemaTool.MSBuild</PackageId>
     <Description>MSBuild portability and query-coverage verification for Groundwork schemas.</Description>
   </PropertyGroup>
