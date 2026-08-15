@@ -14,6 +14,7 @@ using Xunit;
 
 namespace Groundwork.Records.Tests;
 
+[Collection("Records provider integration")]
 public sealed class RecordsProviderProofTests
 {
     [Fact]
