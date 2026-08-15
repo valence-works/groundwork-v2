@@ -60,6 +60,12 @@ public sealed class QueryRendererTests
             Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 1L)), [], Paging.None, ResultShape.TotalCount.Instance));
         Assert.Contains("COUNT_BIG(*)", sqlServerCount.CommandText, StringComparison.Ordinal);
         Assert.DoesNotContain("OFFSET 0 ROWS", sqlServerCount.CommandText, StringComparison.Ordinal);
+        var orderedSqlServerCount = new SqlServerQueryRenderer().Render(Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Id, OrderDirection.Ascending, NullOrder.First)],
+            Paging.None, ResultShape.TotalCount.Instance));
+        Assert.Contains("ORDER BY", orderedSqlServerCount.CommandText, StringComparison.Ordinal);
+        Assert.Contains("OFFSET 0 ROWS", orderedSqlServerCount.CommandText, StringComparison.Ordinal);
     }
 
     [Fact]

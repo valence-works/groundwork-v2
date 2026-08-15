@@ -357,7 +357,7 @@ public sealed class CorpusDifferentialTests
                 Paging.Continuation(first.NextContinuationToken!, 1), ResultShape.TotalCount.Instance, latest), QueryRenderOptions.Default);
             Assert.Equal(2, second.TotalCount);
             Assert.Equal(new[] { 5L }, second.Rows.Select(row => (long)row["id"]!).ToArray());
-            Assert.Null(second.NextContinuationToken);
+            Assert.Null(second.NextContinuationToken, provider.Name);
 
             var beyondEnd = provider.Query(new QueryRequest(table, Predicate.AlwaysTrue.Instance, order, projection,
                 Paging.OffsetLimit(100, 1), ResultShape.TotalCount.Instance, latest), QueryRenderOptions.Default);

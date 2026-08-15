@@ -765,6 +765,8 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             }
             if (document.TryGetValue("__groundwork_total_count", out var count))
                 row["__groundwork_total_count"] = count.ToInt64();
+            if (document.TryGetValue("__groundwork_count_only", out var marker))
+                row["__groundwork_count_only"] = marker.ToInt64();
             return (IReadOnlyDictionary<string, object?>)row;
         }).ToArray();
         if (facetTotalCount is long count)

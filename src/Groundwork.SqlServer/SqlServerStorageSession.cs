@@ -39,7 +39,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var executionSource = WithScopePredicate(request);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null && column.Name != SqlServerSchemaCoordinator.ScopeColumn)!.Select(column => column!)) with
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != SqlServerSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
             Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(

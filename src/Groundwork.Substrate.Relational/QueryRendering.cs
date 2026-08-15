@@ -184,7 +184,11 @@ public abstract class RelationalQueryRenderer
                 pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
             var page = "SELECT * FROM __groundwork_base WHERE " + pageWhere;
             if (effectiveOrder.Count != 0)
+            {
                 page += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                if (RequiresOrderForOffset && request.Paging.Offset is null && request.Paging.Limit is null)
+                    page += " OFFSET 0 ROWS";
+            }
             else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
                 page += " ORDER BY (SELECT 1)";
             page += RenderPaging(request.Paging, parameters, ref parameterIndex);
