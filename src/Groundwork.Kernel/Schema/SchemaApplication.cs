@@ -49,7 +49,14 @@ public interface IPhysicalSchemaApplicationLock : IDisposable
 
 public sealed record PhysicalSchemaInspectionResult(
     PhysicalSchemaHistoryState History,
-    bool IsAppliedSchemaValid);
+    bool IsAppliedSchemaValid,
+    ImmutableArray<SchemaRefusal> ColumnDrift = default,
+    ImmutableArray<SchemaRefusal> IndexDrift = default)
+{
+    public bool HasColumnDrift => !ColumnDrift.IsDefaultOrEmpty;
+
+    public bool HasIndexDrift => !IndexDrift.IsDefaultOrEmpty;
+}
 
 public enum PhysicalSchemaApplicationOutcome
 {
@@ -168,13 +175,18 @@ public sealed record GroundworkRuntimeSchemaAdmissionResult(
 {
     public bool IsReady =>
         Inspection.IsAppliedSchemaValid &&
+        !Inspection.HasColumnDrift &&
         ((Plan.IsApplicable && Plan.Operations.Length == 0) ||
          Application?.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
 
     public ImmutableArray<PhysicalSchemaOperation> PendingOperations => IsReady ? [] : Plan.Operations;
 
     public ImmutableArray<SchemaRefusal> Refusals =>
-        Plan.Refusals.Concat(Application?.AuthorizationRefusals ?? []).ToImmutableArray();
+        (Inspection.ColumnDrift.IsDefault ? [] : Inspection.ColumnDrift)
+            .Concat(Inspection.IndexDrift.IsDefault ? [] : Inspection.IndexDrift)
+            .Concat(Plan.Refusals)
+            .Concat(Application?.AuthorizationRefusals ?? [])
+            .ToImmutableArray();
 
     public int AppliedOperationCount =>
         Application?.Outcome == PhysicalSchemaApplicationOutcome.Applied
@@ -198,8 +210,8 @@ public sealed class GroundworkRuntimeSchemaAdmissionException : InvalidOperation
 
     private static string CreateMessage(GroundworkRuntimeSchemaAdmissionResult result)
     {
-        var reason = !result.Inspection.IsAppliedSchemaValid
-            ? "found drift in the applied schema"
+        var reason = result.Inspection.HasColumnDrift || !result.Inspection.IsAppliedSchemaValid
+            ? "found column drift in the applied schema"
             : result.Application?.Outcome == PhysicalSchemaApplicationOutcome.AuthorizationRequired
                 ? "found pending operations that require explicit authorization"
                 : "requires the exact target to be applied before startup can continue";
