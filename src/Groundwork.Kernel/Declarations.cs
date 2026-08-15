@@ -111,6 +111,14 @@ public sealed record ConcurrencyDeclaration
             throw new ArgumentException(
                 $"Optimistic token column '{tokenName}' is system-owned and cannot be part of the storage key.", nameof(unit));
         }
+        if (declaration.IsOptimistic && declaration.TokenColumn is { } indexedToken &&
+            (unit.Indexes ?? []).FirstOrDefault(index =>
+                index?.Columns?.Any(column => string.Equals(column?.Column, indexedToken, StringComparison.Ordinal)) == true) is { } tokenIndex)
+        {
+            throw new ArgumentException(
+                $"Optimistic token column '{indexedToken}' is system-owned and cannot be part of index '{tokenIndex.Name}'.",
+                nameof(unit));
+        }
         if (declaration.IsOptimistic && columns.FirstOrDefault(column => column.Name == declaration.TokenColumn) is { } token &&
             (token.Type != PortableType.Int64 || token.IsNullable ||
              token.Default?.Value is not long defaultValue || defaultValue != 0))

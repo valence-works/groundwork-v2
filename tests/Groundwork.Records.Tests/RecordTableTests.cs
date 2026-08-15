@@ -107,6 +107,30 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Build_refuses_an_index_over_the_system_owned_optimistic_token_in_either_builder_order()
+    {
+        var indexThenOptimistic = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<VersionedCustomer>("bad_version_index_first")
+                .Key(row => row.Id)
+                .Index("by-version", row => row.Version)
+                .OptimisticConcurrency()
+                .Build());
+        var optimisticThenIndex = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<VersionedCustomer>("bad_optimistic_first")
+                .Key(row => row.Id)
+                .OptimisticConcurrency()
+                .Index("by-version", row => row.Version)
+                .Build());
+
+        Assert.All(
+            new[] { indexThenOptimistic, optimisticThenIndex },
+            error => Assert.Contains(error.Diagnostics, diagnostic =>
+                diagnostic.Code == "GW-DECL-CONCURRENCY-001" &&
+                diagnostic.Path == "concurrency" &&
+                diagnostic.Message.Contains("index 'by-version'", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public void Typed_partial_projections_materialize_anonymous_and_same_type_shapes_without_omitted_columns()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://projections-" + Guid.NewGuid().ToString("N"));
