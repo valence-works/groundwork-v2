@@ -564,7 +564,12 @@ public sealed class WritePathTests
 
     private static void AssertNoneProviderWrites(IStorageProviderConnection connection, string provider)
     {
-        var unit = Unit(provider + "-none-native-writes", ConcurrencyDeclaration.None);
+        var unit = Unit(provider switch
+        {
+            "postgresql" => "pg-none",
+            "sqlserver" => "ss-none",
+            _ => "sqlite-none"
+        }, ConcurrencyDeclaration.None);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var createdAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
