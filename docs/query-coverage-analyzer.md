@@ -21,3 +21,9 @@ The code fix rewrites supported conditional reassignment into `WhereIf`.
 The analyzer has no provider, ADO.NET, or runtime storage dependency. Its package places the
 analyzer and provider-neutral model/planning/schema dependencies under `analyzers/dotnet/cs` so an
 external project can consume the analyzer without referencing this repository's source.
+
+The editor-budget regression test analyzes 500 covered call sites in one compilation and enforces a
+15-second ceiling on the shared CI runner. A Release test run during delivery completed the full
+analyzer test assembly, including that workload, in two seconds; the deliberately generous ceiling
+detects accidental combinatorial regressions
+without turning ordinary runner variance into a flaky build.

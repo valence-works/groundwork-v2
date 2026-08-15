@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Text;
 using Groundwork.Analyzers;
 using Groundwork.Schema;
@@ -136,6 +137,23 @@ public sealed class CoverageAnalyzerTests
         var changed = apply.ChangedSolution.GetDocument(document.Id)!;
         var rewritten = (await changed.GetTextAsync()).ToString();
         Assert.Contains("q = q.WhereIf(enabled, t => t.Status == status);", rewritten, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Large_compilation_analysis_stays_within_the_bounded_editor_budget()
+    {
+        var queries = string.Join(Environment.NewLine, Enumerable.Range(0, 500).Select(index =>
+            $"public static void Query{index}() {{ var result = db.Table<Ticket>().Where(t => t.Status == status).QueryAsync(); }}"));
+        var source = WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QueryInfrastructure +
+                     " public static class LargeQuerySurface { " + queries + " }";
+        var stopwatch = Stopwatch.StartNew();
+
+        var diagnostics = await Analyze(source);
+
+        stopwatch.Stop();
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(15),
+            $"500 query sites took {stopwatch.Elapsed.TotalMilliseconds:F0} ms to analyze.");
     }
 
     private static async Task<ImmutableArray<Diagnostic>> Analyze(
