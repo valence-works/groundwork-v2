@@ -15,6 +15,15 @@
   <Folder Name="/src/Groundwork.SchemaTool.MSBuild/">
     <Project Path="src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Substrate.Mongo/">
+    <Project Path="src/Groundwork.Substrate.Mongo/Groundwork.Substrate.Mongo.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.MongoDb/">
+    <Project Path="src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.MongoDb.TestingAdapter/">
+    <Project Path="src/Groundwork.MongoDb.TestingAdapter/Groundwork.MongoDb.TestingAdapter.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
@@ -36,6 +45,9 @@
   <Folder Name="/tests/" />
   <Folder Name="/tests/Groundwork.Testing.SelfTests/">
     <Project Path="tests/Groundwork.Testing.SelfTests/Groundwork.Testing.SelfTests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.MongoDb.Tests/">
+    <Project Path="tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Kernel.Schema.Tests/">
     <Project Path="tests/Groundwork.Kernel.Schema.Tests/Groundwork.Kernel.Schema.Tests.csproj" />
