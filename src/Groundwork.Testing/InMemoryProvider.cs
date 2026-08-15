@@ -926,39 +926,52 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        WriteOutcome outcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            var now = DateTimeOffset.UtcNow;
-            var ledger = liveState
-                ? database.IdempotencyLedger
-                : stagedLedger ?? throw new InvalidOperationException("The staged append ledger is unavailable.");
-            ReclaimLedger(ledger, Unit.Id, now, declaration.Window);
-            var ledgerKey = new IdempotencyLedgerKey(Unit.Id, partition, operationId.Nonce);
-            if (ledger.TryGetValue(ledgerKey, out var committedAt))
-            {
-                if (IdempotencyRules.IsWithinWindow(committedAt, now, declaration.Window))
-                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
-                ledger.Remove(ledgerKey);
-            }
-
-            var candidate = CurrentState().Clone();
-            foreach (var value in values)
-            {
-                WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
-                var outcome = Mutation.Apply(candidate, partition, value, WriteOptions.Unconditional, MutationKind.Insert);
-                if (!outcome.Succeeded)
-                    throw new InvalidOperationException($"Append row failed with outcome '{outcome.Status}'.");
-            }
-
-            state = candidate;
-            if (liveState)
-                database.Units[Unit.Id] = candidate;
-            else
-                stagedUnits![Unit.Id] = candidate;
-            ledger[ledgerKey] = now;
-            return new WriteOutcome(WriteOutcomeStatus.Inserted);
+            outcome = AppendCore(operationId, values, declaration);
         }
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return outcome;
+    }
+
+    private WriteOutcome AppendCore(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        AppendIdempotencyDeclaration declaration)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var ledger = liveState
+            ? database.IdempotencyLedger
+            : stagedLedger ?? throw new InvalidOperationException("The staged append ledger is unavailable.");
+        ReclaimLedger(ledger, Unit.Id, now, declaration.Window);
+        var ledgerKey = new IdempotencyLedgerKey(Unit.Id, partition, operationId.Nonce);
+        if (ledger.TryGetValue(ledgerKey, out var committedAt))
+        {
+            if (IdempotencyRules.IsWithinWindow(committedAt, now, declaration.Window))
+                return new WriteOutcome(WriteOutcomeStatus.Replayed);
+            ledger.Remove(ledgerKey);
+        }
+
+        var candidate = CurrentState().Clone();
+        foreach (var value in values)
+        {
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            var outcome = Mutation.Apply(candidate, partition, value, WriteOptions.Unconditional, MutationKind.Insert);
+            if (!outcome.Succeeded)
+                throw new InvalidOperationException($"Append row failed with outcome '{outcome.Status}'.");
+        }
+
+        state = candidate;
+        if (liveState)
+            database.Units[Unit.Id] = candidate;
+        else
+            stagedUnits![Unit.Id] = candidate;
+        ledger[ledgerKey] = now;
+        return new WriteOutcome(WriteOutcomeStatus.Inserted);
     }
 
     private static void ReclaimLedger(
@@ -994,22 +1007,25 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
             outcome = Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
         }
 
-        // Retention runs after the write lock is released. Providers with native post-commit
-        // retention follow the same shape, so concurrent appends do not queue behind a scan.
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             kind is MutationKind.Insert or MutationKind.Upsert)
-        {
-            void Cleanup() => ApplyRetention(new RetentionExecutionOptions
-            {
-                MaxRowsPerBatch = 512,
-                Observer = options?.Observer
-            });
-            if (liveState)
-                OnAppendRetentionCoordinator.Run(database, Unit, Access.Scope?.Value, Cleanup);
-            else
-                Cleanup();
-        }
+            ApplyOnAppendRetention(options?.Observer);
         return outcome;
+    }
+
+    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    {
+        // Retention runs after the write lock is released. Providers with native post-commit
+        // retention follow the same shape, so concurrent appends do not queue behind a scan.
+        void Cleanup() => ApplyRetention(new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 512,
+            Observer = observer
+        });
+        if (liveState)
+            OnAppendRetentionCoordinator.Run(database, Unit, Access.Scope?.Value, Cleanup);
+        else
+            Cleanup();
     }
 
     private static string InMemoryKey(StorageUnit unit, IReadOnlyDictionary<string, object?> values) =>

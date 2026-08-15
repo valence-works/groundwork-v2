@@ -241,7 +241,11 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
-        return ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        var outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return outcome;
     }
 
     private WriteOutcome AppendCore(

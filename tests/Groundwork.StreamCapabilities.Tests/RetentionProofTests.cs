@@ -329,7 +329,77 @@ public sealed class RetentionProofTests
         AssertTiedOrderRetention(connection, provider);
         AssertNativeBatchOnAppend(connection, provider);
         AssertConditionalCreateOnlyOnAppend(connection, provider);
+        AssertIdempotentAppendOnAppendRetention(connection, provider);
         AssertInterruptedNativeRetentionResumes(connection, provider);
+    }
+
+    private static void AssertIdempotentAppendOnAppendRetention(
+        IStorageProviderConnection connection,
+        string provider)
+    {
+        var name = "s3-idem-" + provider[..Math.Min(provider.Length, 8)] + "-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 3,
+                OrderColumn = "ordering",
+                Trigger = RetentionTrigger.OnAppend
+            }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        for (var index = 0; index < 10; index++)
+        {
+            var outcome = session.Append(
+                new OperationId(DateTimeOffset.UnixEpoch, "operation-" + index),
+                [IdempotentValues(index)]);
+            Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Status);
+        }
+
+        Assert.Equal(new[] { "0007", "0008", "0009" }, SurvivorIds());
+        var replay = session.Append(
+            new OperationId(DateTimeOffset.UnixEpoch, "operation-9"),
+            [new StorageValues(new Dictionary<string, object?> { ["id"] = "replayed", ["ordering"] = 100L })]);
+        Assert.Equal(WriteOutcomeStatus.Replayed, replay.Status);
+        Assert.Equal(new[] { "0007", "0008", "0009" }, SurvivorIds());
+
+        var retryableOperation = new OperationId(DateTimeOffset.UnixEpoch, "operation-retry-after-failure");
+        var rejected = Record.Exception(() => session.Append(
+            retryableOperation,
+            [new StorageValues(new Dictionary<string, object?> { ["id"] = "invalid" })]));
+        Assert.NotNull(rejected);
+        Assert.Equal(new[] { "0007", "0008", "0009" }, SurvivorIds());
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            session.Append(retryableOperation, [IdempotentValues(10)]).Status);
+        Assert.Equal(new[] { "0008", "0009", "0010" }, SurvivorIds());
+
+        using var interrupted = new CancellationTokenSource();
+        interrupted.Cancel();
+        Assert.Throws<OperationCanceledException>(() => session.ApplyRetention(
+            new RetentionExecutionOptions { CancellationToken = interrupted.Token, MaxRowsPerBatch = 1 }));
+        session.ApplyRetention(new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        Assert.Equal(new[] { "0008", "0009", "0010" }, SurvivorIds());
+
+        string[] SurvivorIds() => session.Query(All(unit)).Rows
+            .Select(row => (string)row["id"]!)
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToArray();
+
+        static StorageValues IdempotentValues(int index) => new(new Dictionary<string, object?>
+        {
+            ["id"] = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
+            ["ordering"] = (long)index
+        });
     }
 
     private static void AssertTiedOrderRetention(IStorageProviderConnection connection, string provider)

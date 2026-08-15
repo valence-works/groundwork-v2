@@ -291,7 +291,23 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
-        return ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        WriteOutcome outcome;
+        try
+        {
+            outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            throw;
+        }
+        CompleteOnAppend(
+            registration,
+            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            observer: null);
+        return outcome;
     }
 
     private WriteOutcome AppendCore(

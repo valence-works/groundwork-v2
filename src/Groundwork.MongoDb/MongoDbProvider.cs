@@ -1392,11 +1392,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
             values.Select(value => new StorageValues(value.Values)).ToArray());
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        MongoWriteOutcome outcome;
         for (var attempt = 0; ; attempt++)
         {
             try
             {
-                return ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration));
+                outcome = ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration));
+                break;
             }
             catch (MongoLedgerConflictException) when (attempt == 0)
             {
@@ -1415,6 +1417,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
                 }
             }
         }
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcome.Status is MongoWriteOutcomeStatus.Inserted or MongoWriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return outcome;
     }
 
     private MongoWriteOutcome AppendCore(
