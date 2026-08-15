@@ -104,31 +104,68 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         return new StoredEntry(new StorageValues(values), version);
     });
 
-    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Insert);
-    public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);
-    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
-    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        Execute(() => ConditionalUpsertCore(values, options));
+    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
+        return Mutate(values, options, Mutation.Insert);
+    }
+
+    public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
+        return Mutate(values, options, Mutation.Update);
+    }
+
+    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
+        return Mutate(values, options, Mutation.Upsert);
+    }
+
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
+        return Execute(() => ConditionalUpsertCore(values, options));
+    }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
         ExecuteWrite(() => ApplyBatchCore(writes));
 
-    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
+    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
-        var existing = ReadCore(key);
-        ValidateExpected(options, existing, Mutation.Delete);
-        if (existing is null) return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        var (where, parameters) = KeyPredicate(key.Values);
-        if (VersionColumnDefinition is not null)
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
+        return ExecuteWrite(() =>
         {
-            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
-            parameters["@expected"] = options!.ExpectedVersion!.Value;
-        }
-        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
-        AddParameters(command, parameters);
-        command.ExecuteNonQuery();
-        return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-    });
+            if (Unit.Concurrency.IsNone)
+            {
+                var (noneWhere, noneParameters) = KeyPredicate(key.Values);
+                using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+                AddParameters(noneCommand, noneParameters);
+                return noneCommand.ExecuteNonQuery() == 0
+                    ? new WriteOutcome(WriteOutcomeStatus.NotFound)
+                    : new WriteOutcome(WriteOutcomeStatus.Deleted);
+            }
+
+            var existing = ReadCore(key);
+            ValidateExpected(options, existing, Mutation.Delete);
+            if (existing is null)
+                return new WriteOutcome(WriteOutcomeStatus.NotFound);
+            var (where, parameters) = KeyPredicate(key.Values);
+            if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+                parameters["@expected"] = options.Precondition.Version!.Value;
+            }
+            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            AddParameters(command, parameters);
+            command.ExecuteNonQuery();
+            return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
+        });
+    }
 
     internal void Close() => closed = true;
 
@@ -138,10 +175,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         if (writes.Count == 0)
             return [];
 
-        // Expected-version writes and deletes need their per-row predicates and
+        // Non-unconditional writes and deletes need their per-row predicates and
         // conflict details. Keep those semantics exact; unconditional inserts and
         // upserts are the provider-native multi-row path.
-        if (writes.Any(write => write.Options.ExpectedVersion is not null))
+        if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
@@ -316,7 +353,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
@@ -371,10 +408,12 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
             column => column, column => values.Values.TryGetValue(column, out var value) ? value : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
             StringComparer.Ordinal));
-        var existing = ReadCore(key);
+        // None mode has no token to inspect. Keep direct writes single-statement and let the
+        // database report uniqueness/not-found from the write itself.
+        var existing = Unit.Concurrency.IsNone ? null : ReadCore(key);
         if (mutation == Mutation.Insert && existing is not null)
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
-        if (mutation == Mutation.Update && existing is null)
+        if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
         ValidateExpected(options, existing, mutation);
 
@@ -386,9 +425,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             columns.Add(ScopeColumnDefinition!);
 
         if (mutation == Mutation.Upsert)
-            return Upsert(values, existing, columns, exactOutcome);
+            return Upsert(values, existing, columns, exactOutcome, options);
         var sets = supplied.Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
-            .Select(column => $"{Quote(column.Name)}=@{column.Name}").ToArray();
+            .Select(column => $"{Quote(column.Name)}=@{column.Name}").ToList();
         var parameters = BuildParameters(values.Values, supplied);
         if (mutation == Mutation.Insert)
         {
@@ -404,15 +443,28 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         foreach (var pair in keyParameters) parameters[pair.Key] = pair.Value;
         if (VersionColumnDefinition is not null)
         {
-            sets = sets.Append($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1").ToArray();
-            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
-            parameters["@expected"] = options!.ExpectedVersion!.Value;
+            sets.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1");
+            if (options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+                parameters["@expected"] = options.Precondition.Version!.Value;
+            }
         }
-        if (sets.Length == 0) return new WriteOutcome(WriteOutcomeStatus.Updated, existing!.Version);
-        using var update = Command($"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};");
+        if (sets.Count == 0)
+        {
+            var noOpColumn = LogicalKeyColumns[0];
+            sets.Add($"{Quote(noOpColumn)}={Quote(noOpColumn)}");
+        }
+        var sql = $"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};";
+        using var update = Command(sql);
         AddParameters(update, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("sqlite.update", sql, IsProbe: false));
         var affected = update.ExecuteNonQuery();
-        if (affected == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+        if (affected == 0)
+            return new WriteOutcome(Unit.Concurrency.IsNone
+                ? WriteOutcomeStatus.NotFound
+                : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
         return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
     });
 
@@ -427,7 +479,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
                 ? value
                 : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
             StringComparer.Ordinal));
-        if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
+        if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumnDefinition is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
 
         var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
@@ -460,7 +512,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         if (VersionColumnDefinition is not null)
         {
             parameters["@__groundwork_version"] = 1L;
-            parameters["@__expected"] = options?.ExpectedVersion;
+            parameters["@__expected"] = options?.Precondition.Version;
         }
         if (ScopeColumnDefinition is not null)
             parameters["@__groundwork_scope"] = Access.Scope!.Value;
@@ -468,13 +520,15 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var insertValues = string.Join(", ", insertColumns.Select(column =>
             column.Name == SqliteSchemaCoordinator.VersionColumn ? "@__groundwork_version" :
             column.Name == SqliteSchemaCoordinator.ScopeColumn ? "@__groundwork_scope" : "@" + column.Name));
-        var insertSource = VersionColumnDefinition is null || options?.ExpectedVersion is null
+        var insertSource = VersionColumnDefinition is null || options?.Precondition.Version is null
             ? $"VALUES ({insertValues})"
             : $"SELECT {insertValues} WHERE EXISTS (SELECT 1 FROM {Quote(Unit.Name)} WHERE {keyPredicate} AND {Quote(VersionColumnDefinition.Name)}=@__expected)";
         var conflict = string.Join(", ", Unit.Key.Columns.Select(Quote));
-        var expected = VersionColumnDefinition is null
-            ? string.Empty
-            : $" WHERE @__expected IS NOT NULL AND {Quote(Unit.Name)}.{Quote(VersionColumnDefinition.Name)}=@__expected";
+        var expected = VersionColumnDefinition is null || options?.Precondition.Kind != WritePreconditionKind.IfVersion
+            ? options?.Precondition.Kind == WritePreconditionKind.CreateOnly && VersionColumnDefinition is not null
+                ? " WHERE 0=1"
+                : string.Empty
+            : $" WHERE {Quote(Unit.Name)}.{Quote(VersionColumnDefinition.Name)}=@__expected";
         var returning = VersionColumnDefinition is null
             ? Quote(ActionColumnDefinition!.Name)
             : Quote(VersionColumnDefinition.Name);
@@ -492,7 +546,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
 
             var inserted = ActionColumnDefinition is not null
                 ? string.Equals(reader.GetString(0), "I", StringComparison.Ordinal)
-                : options?.ExpectedVersion is null;
+                : options?.Precondition.Kind != WritePreconditionKind.IfVersion;
             var version = VersionColumnDefinition is null
                 ? (long?)null
                 : Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
@@ -541,7 +595,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         StorageValues values,
         StoredEntry? existing,
         IReadOnlyList<ColumnDefinition> columns,
-        bool exactOutcome)
+        bool exactOutcome,
+        WriteOptions? options)
     {
         var updateColumns = columns.Where(column =>
             !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
@@ -550,14 +605,25 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         if (VersionColumnDefinition is not null && updateColumns.All(column => column.Name != VersionColumnDefinition.Name))
             updateColumns = updateColumns.Append(VersionColumnDefinition).ToArray();
         var keyNames = Unit.Key.Columns;
+        var preconditionSql = options?.Precondition.Kind switch
+        {
+            WritePreconditionKind.CreateOnly => " WHERE 0=1",
+            WritePreconditionKind.IfVersion when VersionColumnDefinition is not null =>
+                $" WHERE {Quote(VersionColumnDefinition.Name)}=@expected",
+            _ => string.Empty
+        };
         var sql = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}) ON CONFLICT ({string.Join(", ", keyNames.Select(Quote))}) DO UPDATE SET " +
             string.Join(", ", updateColumns.Select(column => column.Name == SqliteSchemaCoordinator.VersionColumn
-                ? $"{Quote(column.Name)}={Quote(column.Name)}+1" : $"{Quote(column.Name)}=excluded.{Quote(column.Name)}")) + ";";
+                ? $"{Quote(column.Name)}={Quote(column.Name)}+1" : $"{Quote(column.Name)}=excluded.{Quote(column.Name)}")) + preconditionSql + ";";
         var parameters = BuildParameters(values.Values, columns.Where(column => values.Values.ContainsKey(column.Name)).ToArray());
         if (VersionColumnDefinition is not null && !parameters.ContainsKey("@__groundwork_version")) parameters["@__groundwork_version"] = 1L;
         if (ScopeColumnDefinition is not null && !parameters.ContainsKey("@__groundwork_scope")) parameters["@__groundwork_scope"] = Access.Scope!.Value;
+        if (options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            parameters["@expected"] = options.Precondition.Version!.Value;
         using var command = Command(sql);
         AddParameters(command, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("sqlite.upsert", sql, IsProbe: false));
         try
         {
             command.ExecuteNonQuery();
@@ -598,22 +664,23 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
     {
-        if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
-            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
         if (VersionColumnDefinition is null) return;
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
         if (mutation == Mutation.Insert)
         {
-            if (existing is null && options?.ExpectedVersion is not null)
-                throw new ConcurrencyConflictException();
             return;
         }
         if (mutation == Mutation.Upsert)
         {
-            if (existing is null ? options?.ExpectedVersion is not null : options?.ExpectedVersion != existing.Version)
+            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
+                throw new ConcurrencyConflictException(existing.Version);
+            if (precondition.Kind == WritePreconditionKind.IfVersion &&
+                (existing is null || precondition.Version != existing.Version))
                 throw new ConcurrencyConflictException(existing?.Version);
             return;
         }
-        if (existing is null || options?.ExpectedVersion != existing.Version)
+        if (precondition.Kind == WritePreconditionKind.IfVersion &&
+            (existing is null || precondition.Version != existing.Version))
             throw new ConcurrencyConflictException(existing?.Version);
     }
 

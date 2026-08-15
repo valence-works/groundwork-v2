@@ -4,6 +4,7 @@ using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
+using Microsoft.Data.Sqlite;
 using Xunit;
 
 namespace Groundwork.WritePath.Tests;
@@ -59,7 +60,7 @@ public sealed class WritePathTests
         var observer = new WritePathObserver();
         var outcome = session.Conditional().ConditionalUpsert(
             Values("one", "stale", DateTimeOffset.Parse("2026-01-02T00:00:00Z")),
-            new WriteOptions { ExpectedVersion = 99, Observer = observer });
+            new WriteOptions { Precondition = WritePrecondition.IfVersion(99), Observer = observer });
 
         Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, outcome.Status);
         Assert.Equal(1, observer.RoundTrips);
@@ -101,13 +102,211 @@ public sealed class WritePathTests
         Assert.DoesNotContain("__groundwork_action", stored!.Values.Values.Keys);
     }
 
+    [Fact]
+    public void SQLite_none_key_only_update_uses_one_native_statement_and_reports_affected_rows()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-none-key-only-update", ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Values("existing", "first", DateTimeOffset.UnixEpoch));
+
+        var existingObserver = new WritePathObserver();
+        var existing = session.Update(KeyOnlyValues("existing"), new WriteOptions { Observer = existingObserver });
+        var missingObserver = new WritePathObserver();
+        var missing = session.Update(KeyOnlyValues("missing"), new WriteOptions { Observer = missingObserver });
+
+        Assert.Equal(WriteOutcomeStatus.Updated, existing.Status);
+        Assert.Equal(WriteOutcomeStatus.NotFound, missing.Status);
+        AssertSingleUpdateWithoutProbe(existingObserver);
+        AssertSingleUpdateWithoutProbe(missingObserver);
+    }
+
+    [Fact]
+    public void SQLite_none_update_of_missing_row_reports_not_found()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-none-missing-update", ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+        var observer = new WritePathObserver();
+
+        var outcome = connection.OpenSession(unit, StorageAccess.Global).Update(
+            Values("missing", "value", DateTimeOffset.UnixEpoch),
+            new WriteOptions { Observer = observer });
+
+        Assert.Equal(WriteOutcomeStatus.NotFound, outcome.Status);
+        AssertSingleUpdateWithoutProbe(observer);
+    }
+
+    [Fact]
+    public void SQLite_none_provider_writes_use_one_native_statement_and_upsert_overwrites()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        AssertNoneProviderWrites(connection, "sqlite");
+    }
+
+    [SkippableFact]
+    public void PostgreSQL_none_provider_writes_use_one_native_statement_and_report_not_found()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL write-path tests.");
+        using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
+        AssertNoneProviderWrites(connection, "postgresql");
+    }
+
+    [SkippableFact]
+    public void SQLServer_none_provider_writes_use_one_native_statement_and_upsert_overwrites()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server write-path tests.");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        AssertNoneProviderWrites(connection, "sqlserver");
+    }
+
+    [Fact]
+    public void Concurrency_declaration_and_preconditions_are_explicit_and_system_owned()
+    {
+        var optimistic = ConcurrencyDeclaration.Optimistic("revision");
+
+        Assert.Equal(ConcurrencyKind.Optimistic, optimistic.Kind);
+        Assert.Equal("revision", optimistic.TokenColumn);
+        Assert.Equal(WritePreconditionKind.Unconditional, WriteOptions.Unconditional.Precondition.Kind);
+        Assert.Equal(WritePreconditionKind.CreateOnly, WriteOptions.CreateOnly.Precondition.Kind);
+        Assert.Equal(42, WriteOptions.IfVersion(42).Precondition.Version);
+    }
+
+    [Fact]
+    public void Explicit_token_column_is_provider_owned_and_not_required_from_application_values()
+    {
+        var baseDeclaration = Unit("explicit-token", ConcurrencyDeclaration.Optimistic("revision"));
+        var declaration = baseDeclaration with
+        {
+            Columns =
+            [
+                ..baseDeclaration.Columns,
+                new ColumnDefinition
+                {
+                    Name = "revision",
+                    Type = PortableType.Int64,
+                    IsNullable = false,
+                    Default = new PortableDefault(0L)
+                }
+            ]
+        };
+
+        using var connection = new InMemoryProviderFactory().Create("memory://explicit-token");
+        connection.Schema.Apply(declaration);
+        var session = connection.OpenSession(declaration, StorageAccess.Global);
+
+        var inserted = session.Insert(Values("one", "value", DateTimeOffset.UnixEpoch));
+        Assert.Equal(WriteOutcomeStatus.Inserted, inserted.Status);
+        Assert.Equal(1, inserted.Version);
+        Assert.DoesNotContain("revision", session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" }))!.Values.Values.Keys);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => session.Insert(
+            new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["id"] = "two",
+                ["value"] = "value",
+                ["createdAt"] = DateTimeOffset.UnixEpoch,
+                ["revision"] = 1L
+            })));
+        Assert.Contains("GW-WRITE-CONCURRENCY-003", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SQLite_none_schema_has_no_version_column_and_protected_writes_are_refused_before_io()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-explicit-none", ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+
+        using (var catalog = new SqliteConnection(store.ConnectionString))
+        {
+            catalog.Open();
+            using var command = catalog.CreateCommand();
+            command.CommandText = $"PRAGMA table_info([{unit.Name}]);";
+            using var reader = command.ExecuteReader();
+            var columns = new List<string>();
+            while (reader.Read()) columns.Add(reader.GetString(1));
+            Assert.DoesNotContain("__groundwork_version", columns);
+        }
+
+        var observer = new WritePathObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var exception = Assert.Throws<InvalidOperationException>(() => session.Insert(
+            Values("one", "value", DateTimeOffset.UnixEpoch),
+            new WriteOptions { Precondition = WritePrecondition.CreateOnly, Observer = observer }));
+
+        Assert.Contains("GW-WRITE-CONCURRENCY-001", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(observer.Commands);
+        Assert.Throws<InvalidOperationException>(() => RowWrite.Update(
+            unit,
+            Values("one", "value", DateTimeOffset.UnixEpoch),
+            WriteOptions.CreateOnly));
+
+        var invalid = unit with
+        {
+            Id = new StorageUnitId("invalid-" + Guid.NewGuid().ToString("N")),
+            Name = "invalid_" + Guid.NewGuid().ToString("N"),
+            Concurrency = new ConcurrencyDeclaration
+            {
+                Kind = ConcurrencyKind.None,
+                TokenColumn = "revision"
+            }
+        };
+        Assert.Throws<ArgumentException>(() => connection.Schema.Apply(invalid));
+        using var checkInvalid = new SqliteConnection(store.ConnectionString);
+        checkInvalid.Open();
+        using var checkCommand = checkInvalid.CreateCommand();
+        checkCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$name;";
+        checkCommand.Parameters.AddWithValue("$name", invalid.Name);
+        Assert.Equal(0L, checkCommand.ExecuteScalar());
+    }
+
+    [Fact]
+    public void SQLite_optimistic_schema_synthesizes_zero_default_and_returns_first_version_one()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-synthesized-optimistic");
+        connection.Schema.Apply(unit);
+
+        using (var catalog = new SqliteConnection(store.ConnectionString))
+        {
+            catalog.Open();
+            using var command = catalog.CreateCommand();
+            command.CommandText = $"PRAGMA table_info([{unit.Name}]);";
+            using var reader = command.ExecuteReader();
+            var version = false;
+            while (reader.Read())
+            {
+                if (reader.GetString(1) != "__groundwork_version") continue;
+                version = true;
+                Assert.Equal("0", reader.IsDBNull(4) ? null : reader.GetString(4));
+            }
+            Assert.True(version);
+        }
+
+        var result = connection.OpenSession(unit, StorageAccess.Global)
+            .Conditional()
+            .ConditionalUpsert(Values("one", "value", DateTimeOffset.UnixEpoch));
+        Assert.Equal(WriteOutcomeStatus.Inserted, result.Status);
+        Assert.Equal(1, result.Version);
+    }
+
     [SkippableFact]
     public void PostgreSQL_partial_unique_violation_names_the_index_without_a_probe()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL write-path tests.");
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
-        var unit = Unit("postgresql-partial", ConcurrencyDeclaration.Optimistic, includePartialUniqueIndex: true);
+        var unit = Unit("postgresql-partial", ConcurrencyDeclaration.Optimistic(), includePartialUniqueIndex: true);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
@@ -129,7 +328,7 @@ public sealed class WritePathTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL write-path tests.");
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
-        var unit = Unit("postgresql-partial-key", ConcurrencyDeclaration.Optimistic, includePartialKeyIndex: true);
+        var unit = Unit("postgresql-partial-key", ConcurrencyDeclaration.Optimistic(), includePartialKeyIndex: true);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "first", DateTimeOffset.UnixEpoch));
@@ -137,7 +336,7 @@ public sealed class WritePathTests
         var observer = new WritePathObserver();
         var result = session.ConditionalUpsert(
             Values("one", "second", DateTimeOffset.UnixEpoch.AddDays(1)),
-            new WriteOptions { ExpectedVersion = 1, Observer = observer });
+            new WriteOptions { Precondition = WritePrecondition.IfVersion(1), Observer = observer });
 
         Assert.Equal(WriteOutcomeStatus.Updated, result.Status);
         Assert.Equal(2, result.Version);
@@ -153,7 +352,7 @@ public sealed class WritePathTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL write-path tests.");
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
-        var unit = Unit("postgresql-scoped", ConcurrencyDeclaration.Optimistic, scope: ScopePolicy.Scoped);
+        var unit = Unit("postgresql-scoped", ConcurrencyDeclaration.Optimistic(), scope: ScopePolicy.Scoped);
         connection.Schema.Apply(unit);
         var rawSession = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
         var session = rawSession.Conditional();
@@ -178,7 +377,7 @@ public sealed class WritePathTests
         var observer = new WritePathObserver();
         var outcome = connection.OpenSession(unit, StorageAccess.Global).Conditional().ConditionalUpsert(
             Values("missing", "value", DateTimeOffset.UnixEpoch),
-            new WriteOptions { ExpectedVersion = 99, Observer = observer });
+            new WriteOptions { Precondition = WritePrecondition.IfVersion(99), Observer = observer });
 
         Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, outcome.Status);
         Assert.Equal(1, observer.RoundTrips);
@@ -193,7 +392,7 @@ public sealed class WritePathTests
     {
         using var store = TemporarySqliteStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var unit = Unit("sqlite-unique", ConcurrencyDeclaration.Optimistic, includePartialUniqueIndex: true);
+        var unit = Unit("sqlite-unique", ConcurrencyDeclaration.Optimistic(), includePartialUniqueIndex: true);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
@@ -215,7 +414,7 @@ public sealed class WritePathTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB write-path tests.");
         using var connection = new MongoDbTestingFactory().Create(connectionString!);
-        var unit = Unit("mongodb-unique", ConcurrencyDeclaration.Optimistic, includePartialUniqueIndex: true);
+        var unit = Unit("mongodb-unique", ConcurrencyDeclaration.Optimistic(), includePartialUniqueIndex: true);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
@@ -237,7 +436,7 @@ public sealed class WritePathTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server write-path tests.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
-        var unit = Unit("sqlserver-unique", ConcurrencyDeclaration.Optimistic, includePartialUniqueIndex: true);
+        var unit = Unit("sqlserver-unique", ConcurrencyDeclaration.Optimistic(), includePartialUniqueIndex: true);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
@@ -294,7 +493,7 @@ public sealed class WritePathTests
         var secondObserver = new WritePathObserver();
         var updated = session.ConditionalUpsert(
             Values("one", "second", firstTimestamp.AddDays(1)),
-            new WriteOptions { ExpectedVersion = 1, Observer = secondObserver });
+            new WriteOptions { Precondition = WritePrecondition.IfVersion(1), Observer = secondObserver });
         Assert.Equal(WriteOutcomeStatus.Updated, updated.Status);
         Assert.Equal(2, updated.Version);
         Assert.Equal(1, secondObserver.RoundTrips);
@@ -307,7 +506,7 @@ public sealed class WritePathTests
 
     private static StorageUnit Unit(
         string id,
-        ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.Optimistic,
+        ConcurrencyDeclaration? concurrency = null,
         bool includePartialUniqueIndex = false,
         bool includePartialKeyIndex = false,
         ScopePolicy scope = ScopePolicy.Global) => new()
@@ -321,7 +520,7 @@ public sealed class WritePathTests
             new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
         ],
         Key = new KeyDefinition { Columns = ["id"] },
-        Concurrency = concurrency,
+        Concurrency = concurrency ?? ConcurrencyDeclaration.Optimistic(),
         Scope = scope,
         Indexes =
         [
@@ -359,6 +558,56 @@ public sealed class WritePathTests
             ["value"] = value,
             ["createdAt"] = createdAt
         });
+
+    private static StorageValues KeyOnlyValues(string id) =>
+        new(new Dictionary<string, object?> { ["id"] = id });
+
+    private static void AssertNoneProviderWrites(IStorageProviderConnection connection, string provider)
+    {
+        var unit = Unit(provider switch
+        {
+            "postgresql" => "pg-none",
+            "sqlserver" => "ss-none",
+            _ => "sqlite-none"
+        }, ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var createdAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        session.Insert(Values("existing", "first", createdAt));
+
+        var upsertObserver = new WritePathObserver();
+        var upsert = session.Upsert(
+            Values("existing", "second", createdAt.AddDays(1)),
+            new WriteOptions { Observer = upsertObserver });
+        var updateObserver = new WritePathObserver();
+        var update = session.Update(KeyOnlyValues("existing"), new WriteOptions { Observer = updateObserver });
+        var missingObserver = new WritePathObserver();
+        var missing = session.Update(KeyOnlyValues("missing"), new WriteOptions { Observer = missingObserver });
+
+        Assert.Equal(WriteOutcomeStatus.Upserted, upsert.Status);
+        var upsertCommand = Assert.Single(upsertObserver.Commands);
+        Assert.False(upsertCommand.IsProbe);
+        Assert.DoesNotContain("SELECT", upsertCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        if (provider == "sqlserver")
+            Assert.StartsWith("MERGE", upsertCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(WriteOutcomeStatus.Updated, update.Status);
+        Assert.Equal(WriteOutcomeStatus.NotFound, missing.Status);
+        AssertSingleUpdateWithoutProbe(updateObserver);
+        AssertSingleUpdateWithoutProbe(missingObserver);
+
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "existing" }));
+        Assert.NotNull(stored);
+        Assert.Equal("second", stored!.Values.Values["value"]);
+        Assert.Equal(createdAt, stored.Values.Values["createdAt"]);
+    }
+
+    private static void AssertSingleUpdateWithoutProbe(WritePathObserver observer)
+    {
+        var command = Assert.Single(observer.Commands);
+        Assert.False(command.IsProbe);
+        Assert.Contains("UPDATE", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SELECT", command.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
 
     [SkippableFact]
     public void MongoDB_provider_sequence_conditional_upsert_refuses_before_any_command()

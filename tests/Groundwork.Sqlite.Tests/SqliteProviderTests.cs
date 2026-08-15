@@ -195,7 +195,7 @@ public sealed class SqliteProviderTests
         {
             Id = new StorageUnitId("batched-versions"),
             Name = "batched_versions",
-            Concurrency = ConcurrencyDeclaration.Optimistic
+            Concurrency = ConcurrencyDeclaration.Optimistic()
         };
         connection.Schema.Apply(unit);
 

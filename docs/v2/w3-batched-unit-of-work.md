@@ -53,7 +53,7 @@ staged input. They reject an aggregate-mode unit rather than claiming exact
 evidence after an earlier aggregate flush. `BatchWriteException.Outcomes`
 contains only attributed applied failures, never aggregate synthetic successes
 or superseded declarations. `RowWrite.Upsert` with an
-expected version, or the explicit `RowWrite.ConditionalUpsert`, always uses
+explicit `IfVersion` precondition, or the explicit `RowWrite.ConditionalUpsert`, always uses
 the provider's atomic conditional upsert primitive. A failed applied outcome
 raises `BatchWriteException`, poisons the unit of work against further
 staging/commit, and requires rollback.
