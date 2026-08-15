@@ -181,7 +181,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(operationId, values);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
         return ExecuteWrite(() => AppendCore(operationId, values, declaration));
@@ -193,11 +193,12 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         AppendIdempotencyDeclaration declaration)
     {
         EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = DateTimeOffset.UtcNow;
+        var providerNow = ProviderNow();
         var scope = Access.Scope?.Value ?? string.Empty;
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-        using (var reclaim = Command($"WITH expired AS (SELECT TOP (128) * FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerCommittedAt)} <= @cutoff) DELETE FROM expired;"))
+        using (var reclaim = Command($"WITH expired AS (SELECT TOP (128) * FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff) DELETE FROM expired;"))
         {
+            AddLedgerParameter(reclaim, "reclaim_unit", Unit.Id.Value);
             AddLedgerParameter(reclaim, "cutoff", FormatLedgerTime(cutoff));
             reclaim.ExecuteNonQuery();
         }
@@ -230,7 +231,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 return new WriteOutcome(WriteOutcomeStatus.Replayed);
         }
 
-        var writes = values.Select(value => RowWrite.Insert(Unit, value)).ToArray();
+        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, SqlServerSchemaCoordinator.ScopeColumn);
+        var writes = values
+            .Select(value => RowWrite.Insert(logicalUnit, value))
+            .ToArray();
         var outcomes = ApplyBatchCore(writes);
         if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
             throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
@@ -262,6 +266,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
 
     private static string FormatLedgerTime(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private DateTimeOffset ProviderNow()
+    {
+        using var command = Command("SELECT SYSUTCDATETIME();");
+        var value = (DateTime)command.ExecuteScalar()!;
+        return new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc));
+    }
 
     internal void Close() => closed = true;
 
@@ -457,7 +468,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             for (var index = 0; index < Unit.Key.Columns.Count; index++)
             {
                 var column = Unit.Key.Columns[index];
-                if (column != SqlServerSchemaCoordinator.ScopeColumn)
+                if (column == SqlServerSchemaCoordinator.ScopeColumn)
+                    values[column] = Access.Scope!.Value;
+                else
                     values[column] = FromSqlServer(reader.GetValue(index + 1), Column(column));
             }
             var versionOrdinal = Unit.Key.Columns.Count + 1;

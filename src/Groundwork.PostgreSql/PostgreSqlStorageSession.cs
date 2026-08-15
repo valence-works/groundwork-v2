@@ -158,7 +158,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(operationId, values);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
         return ExecuteWrite(() => AppendCore(operationId, values, declaration));
@@ -170,11 +170,12 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         AppendIdempotencyDeclaration declaration)
     {
         EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = DateTimeOffset.UtcNow;
+        var providerNow = ProviderNow();
         var scope = Access.Scope?.Value ?? string.Empty;
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE ctid IN (SELECT ctid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
+        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE ctid IN (SELECT ctid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
         {
+            Add(reclaim, "reclaim_unit", Unit.Id.Value);
             Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
             reclaim.ExecuteNonQuery();
         }
@@ -207,7 +208,10 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 return new WriteOutcome(WriteOutcomeStatus.Replayed);
         }
 
-        var writes = values.Select(value => RowWrite.Insert(Unit, value)).ToArray();
+        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, PostgreSqlSchemaCoordinator.ScopeColumn);
+        var writes = values
+            .Select(value => RowWrite.Insert(logicalUnit, value))
+            .ToArray();
         var outcomes = ApplyBatchCore(writes);
         if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
             throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
@@ -230,6 +234,18 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         Add(command, "unit", unit);
         Add(command, "scope", scope);
         Add(command, "nonce", nonce);
+    }
+
+    private DateTimeOffset ProviderNow()
+    {
+        using var command = Command("SELECT clock_timestamp();");
+        var value = command.ExecuteScalar();
+        return value switch
+        {
+            DateTimeOffset timestamp => timestamp.ToUniversalTime(),
+            DateTime timestamp => new DateTimeOffset(DateTime.SpecifyKind(timestamp, DateTimeKind.Utc)),
+            _ => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal)
+        };
     }
 
     private static string FormatLedgerTime(DateTimeOffset value) =>
@@ -362,7 +378,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             for (var index = 0; index < Unit.Key.Columns.Count; index++)
             {
                 var column = Unit.Key.Columns[index];
-                if (column != PostgreSqlSchemaCoordinator.ScopeColumn)
+                if (column == PostgreSqlSchemaCoordinator.ScopeColumn)
+                    values[column] = Access.Scope!.Value;
+                else
                     values[column] = FromDatabase(reader.GetValue(index), Column(column));
             }
             var versionOrdinal = Unit.Key.Columns.Count;

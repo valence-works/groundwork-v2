@@ -27,6 +27,44 @@ public static class IdempotencyRules
             throw new ArgumentException("An append batch cannot contain null rows.", nameof(values));
     }
 
+    public static void ValidateOperation(
+        StorageUnit unit,
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ValidateOperation(operationId, values);
+        ValidateDistinctKeys(unit, values);
+    }
+
+    public static void ValidateDistinctKeys(StorageUnit unit, IReadOnlyList<StorageValues> values)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(values);
+        var identities = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var value in values)
+        {
+            var identity = RowWrite.IdentityForAvailableKeys(unit, value.Values);
+            if (!identities.Add(identity))
+                throw new ArgumentException("An append batch cannot contain duplicate storage keys.", nameof(values));
+        }
+    }
+
+    public static StorageUnit LogicalUnit(
+        StorageUnit unit,
+        string scopeColumn)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        if (unit.Scope != ScopePolicy.Scoped)
+            return unit;
+
+        return unit with
+        {
+            Columns = unit.Columns.Where(column => column.Name != scopeColumn).ToArray(),
+            Key = new KeyDefinition { Columns = unit.Key.Columns.Where(column => column != scopeColumn).ToArray() }
+        };
+    }
+
     public static bool IsWithinWindow(DateTimeOffset committedAt, DateTimeOffset providerNow, TimeSpan window) =>
         committedAt > ReclamationCutoff(providerNow, window);
 

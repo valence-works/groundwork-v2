@@ -125,7 +125,7 @@ internal sealed class MongoTestingSession(
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(operationId, values);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
         var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
         return ToTesting(inner.Append(operationId, native));
     }

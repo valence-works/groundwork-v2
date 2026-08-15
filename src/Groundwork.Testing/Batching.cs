@@ -178,6 +178,17 @@ public sealed class RowWrite
             return $"{value.Length}:{value}";
         }));
 
+    internal static string IdentityForAvailableKeys(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> values) => string.Concat(
+        unit.Key.Columns
+            .Where(values.ContainsKey)
+            .Select(column =>
+            {
+                var value = Canonical(values[column]);
+                return $"{column.Length}:{column}{value.Length}:{value}";
+            }));
+
     internal bool Matches(StorageKey key)
     {
         ArgumentNullException.ThrowIfNull(key);

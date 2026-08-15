@@ -1058,6 +1058,10 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         ArgumentNullException.ThrowIfNull(values);
         if (values.Count == 0 || values.Any(value => value is null))
             throw new ArgumentException("An append batch must contain at least one non-null row.", nameof(values));
+        IdempotencyRules.ValidateOperation(
+            Unit,
+            operationId,
+            values.Select(value => new StorageValues(value.Values)).ToArray());
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
         for (var attempt = 0; ; attempt++)
@@ -1081,13 +1085,21 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         IReadOnlyList<MongoStorageValues> values,
         AppendIdempotencyDeclaration declaration)
     {
-        var providerNow = DateTimeOffset.UtcNow;
         var scope = Access.Scope?.Value ?? string.Empty;
         var ledger = state.Operations(declaration.LedgerName);
-        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
+        var cutoffExpression = new BsonDocument("$dateSubtract", new BsonDocument
+        {
+            ["startDate"] = "$$NOW",
+            ["unit"] = "millisecond",
+            ["amount"] = Math.Max(1L, checked((long)Math.Ceiling(declaration.Window.TotalMilliseconds)))
+        });
         var expired = ledger.Find(
                 transactionSession,
-                Builders<BsonDocument>.Filter.Lte("committed_at", new BsonDateTime(cutoff.UtcDateTime)))
+                new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
+                {
+                    new BsonDocument("$eq", new BsonArray { "$unit", Unit.Id.Value }),
+                    new BsonDocument("$lte", new BsonArray { "$committed_at", cutoffExpression })
+                })))
             .Limit(128)
             .Project(new BsonDocument("_id", 1))
             .ToList();
@@ -1107,25 +1119,58 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             ["scope"] = scope,
             ["nonce"] = operationId.Nonce
         };
+        var validIdentity = new BsonDocument
+        {
+            ["_id"] = identity,
+            ["$expr"] = new BsonDocument("$gt", new BsonArray { "$committed_at", cutoffExpression })
+        };
         var existing = transactionSession is null
+            ? ledger.Find(validIdentity).FirstOrDefault()
+            : ledger.Find(transactionSession, validIdentity).FirstOrDefault();
+        if (existing is not null)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.Replayed);
+
+        var expiredExisting = transactionSession is null
             ? ledger.Find(new BsonDocument("_id", identity)).FirstOrDefault()
             : ledger.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();
-        if (existing is not null)
+        if (expiredExisting is not null)
         {
-            var committedAt = existing.GetValue("committed_at").ToUniversalTime();
-            if (IdempotencyRules.IsWithinWindow(new DateTimeOffset(committedAt), providerNow, declaration.Window))
-                return new MongoWriteOutcome(MongoWriteOutcomeStatus.Replayed);
             if (transactionSession is null)
                 ledger.DeleteOne(new BsonDocument("_id", identity));
             else
                 ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
         }
 
-        var ledgerUpdate = Builders<BsonDocument>.Update.Combine(
-            Builders<BsonDocument>.Update.SetOnInsert("unit", Unit.Id.Value),
-            Builders<BsonDocument>.Update.SetOnInsert("scope", scope),
-            Builders<BsonDocument>.Update.SetOnInsert("nonce", operationId.Nonce),
-            Builders<BsonDocument>.Update.SetOnInsert("committed_at", new BsonDateTime(providerNow.UtcDateTime)));
+        var ledgerSet = new BsonDocument
+        {
+            ["unit"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$unit"), "missing" }),
+                Unit.Id.Value,
+                "$unit"
+            }),
+            ["scope"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$scope"), "missing" }),
+                scope,
+                "$scope"
+            }),
+            ["nonce"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$nonce"), "missing" }),
+                operationId.Nonce,
+                "$nonce"
+            }),
+            ["committed_at"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$committed_at"), "missing" }),
+                "$$NOW",
+                "$committed_at"
+            })
+        };
+        var ledgerUpdate = Builders<BsonDocument>.Update.Pipeline(
+            new EmptyPipelineDefinition<BsonDocument>()
+                .AppendStage<BsonDocument, BsonDocument, BsonDocument>(new BsonDocument("$set", ledgerSet)));
         var ledgerOptions = new FindOneAndUpdateOptions<BsonDocument>
         {
             IsUpsert = true,

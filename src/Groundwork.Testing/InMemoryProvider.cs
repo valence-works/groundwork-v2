@@ -753,7 +753,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(operationId, values);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
         lock (database.Gate)
         {
             ThrowIfDisposed();
@@ -761,7 +761,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
             var ledger = liveState
                 ? database.IdempotencyLedger
                 : stagedLedger ?? throw new InvalidOperationException("The staged append ledger is unavailable.");
-            ReclaimLedger(ledger, now, declaration.Window);
+            ReclaimLedger(ledger, Unit.Id, now, declaration.Window);
             var ledgerKey = new IdempotencyLedgerKey(Unit.Id, partition, operationId.Nonce);
             if (ledger.TryGetValue(ledgerKey, out var committedAt))
             {
@@ -791,12 +791,13 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
 
     private static void ReclaimLedger(
         Dictionary<IdempotencyLedgerKey, DateTimeOffset> ledger,
+        StorageUnitId unit,
         DateTimeOffset providerNow,
         TimeSpan window)
     {
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, window);
         foreach (var key in ledger
-                     .Where(pair => pair.Value <= cutoff)
+                     .Where(pair => pair.Key.Unit == unit && pair.Value <= cutoff)
                      .Take(128)
                      .Select(pair => pair.Key)
                      .ToArray())
@@ -916,8 +917,12 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
             foreach (var pair in staged)
                 database.Units[pair.Key] = pair.Value;
-            database.IdempotencyLedger.Clear();
-            foreach (var pair in stagedLedger)
+            var stagedUnits = this.staged.Keys.ToHashSet();
+            foreach (var key in database.IdempotencyLedger.Keys
+                         .Where(key => stagedUnits.Contains(key.Unit))
+                         .ToArray())
+                database.IdempotencyLedger.Remove(key);
+            foreach (var pair in stagedLedger.Where(pair => stagedUnits.Contains(pair.Key.Unit)))
                 database.IdempotencyLedger[pair.Key] = pair.Value;
         }
 

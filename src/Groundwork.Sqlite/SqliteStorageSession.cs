@@ -170,7 +170,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(operationId, values);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
         return ExecuteWrite(() => AppendCore(operationId, values, declaration));
@@ -182,12 +182,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         AppendIdempotencyDeclaration declaration)
     {
         EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = DateTimeOffset.UtcNow;
+        var providerNow = ProviderNow();
         var scope = Access.Scope?.Value ?? string.Empty;
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
 
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE rowid IN (SELECT rowid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
+        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE rowid IN (SELECT rowid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
         {
+            reclaim.Parameters.AddWithValue("@reclaim_unit", Unit.Id.Value);
             reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
             reclaim.ExecuteNonQuery();
         }
@@ -221,7 +222,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
                 return new WriteOutcome(WriteOutcomeStatus.Replayed);
         }
 
-        var writes = values.Select(value => RowWrite.Insert(Unit, value)).ToArray();
+        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, SqliteSchemaCoordinator.ScopeColumn);
+        var writes = values
+            .Select(value => RowWrite.Insert(logicalUnit, value))
+            .ToArray();
         var outcomes = ApplyBatchCore(writes);
         if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
             throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
@@ -248,6 +252,15 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
 
     private static string FormatLedgerTime(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private DateTimeOffset ProviderNow()
+    {
+        using var command = Command("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now');");
+        return DateTimeOffset.Parse(
+            Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture)!,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+    }
 
     internal void Close() => closed = true;
 
@@ -412,7 +425,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             for (var index = 0; index < Unit.Key.Columns.Count; index++)
             {
                 var column = Unit.Key.Columns[index];
-                if (column != SqliteSchemaCoordinator.ScopeColumn)
+                if (column == SqliteSchemaCoordinator.ScopeColumn)
+                    values[column] = Access.Scope!.Value;
+                else
                     values[column] = FromSqlite(reader.GetValue(index), Column(column));
             }
             var versionOrdinal = Unit.Key.Columns.Count;
