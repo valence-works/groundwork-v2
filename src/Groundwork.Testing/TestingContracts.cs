@@ -338,10 +338,10 @@ public interface IUnitOfWork : IDisposable
     BatchWriteSummary Commit();
 
     /// <summary>Commits an exact-mode unit and returns one outcome for every staged write.</summary>
-    BatchWriteSummary CommitWithOutcomes();
+    BatchWriteReport CommitWithOutcomes();
 
     /// <summary>Asynchronously commits an exact-mode unit and returns per-row outcomes.</summary>
-    ValueTask<BatchWriteSummary> CommitWithOutcomesAsync(CancellationToken cancellationToken = default);
+    ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Asynchronously commits staged writes and returns aggregate evidence.</summary>
     ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default);

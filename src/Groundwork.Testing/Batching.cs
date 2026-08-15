@@ -21,7 +21,7 @@ public static class BatchWriteCapabilities
     public static CapabilityDescriptor PerRowOutcomesDescriptor { get; } = new(
         PerRowOutcomes,
         "Batched per-row outcomes",
-        "Returns one outcome for each staged row through an exact-mode CommitWithOutcomes call; aggregate-mode units reject that API rather than fabricating evidence.");
+        "Returns a BatchWriteReport with one outcome for each staged row through an exact-mode CommitWithOutcomes call; aggregate commits return counts only.");
 
     public static CapabilityDescriptor NativeBatchDescriptor { get; } = new(
         NativeBatch,
@@ -223,37 +223,99 @@ public sealed record RowWriteOutcome(
     public bool IsSuperseded => Disposition == RowWriteDisposition.Superseded;
 }
 
-/// <summary>Aggregate and per-row evidence returned by a batched commit.</summary>
+/// <summary>Counts returned by an aggregate batched commit; no per-row evidence is exposed.</summary>
 public sealed class BatchWriteSummary
 {
-    public BatchWriteSummary(IReadOnlyList<RowWriteOutcome> outcomes)
+    public BatchWriteSummary(int submitted, int applied, int succeeded, int failed, int superseded)
+    {
+        if (submitted < 0) throw new ArgumentOutOfRangeException(nameof(submitted));
+        if (applied < 0) throw new ArgumentOutOfRangeException(nameof(applied));
+        if (succeeded < 0) throw new ArgumentOutOfRangeException(nameof(succeeded));
+        if (failed < 0) throw new ArgumentOutOfRangeException(nameof(failed));
+        if (superseded < 0) throw new ArgumentOutOfRangeException(nameof(superseded));
+        if (submitted != applied + superseded)
+            throw new ArgumentException("Submitted must equal applied plus superseded.", nameof(submitted));
+        if (applied != succeeded + failed)
+            throw new ArgumentException("Applied must equal succeeded plus failed.", nameof(applied));
+
+        Submitted = submitted;
+        Applied = applied;
+        Succeeded = succeeded;
+        Failed = failed;
+        Superseded = superseded;
+    }
+
+    public int Submitted { get; }
+
+    public int Succeeded { get; }
+
+    public int Applied { get; }
+
+    public int Superseded { get; }
+
+    public int Failed { get; }
+
+    public bool IsSuccessful => Failed == 0;
+
+    internal static BatchWriteSummary FromOutcomes(IReadOnlyList<RowWriteOutcome> outcomes)
+    {
+        ArgumentNullException.ThrowIfNull(outcomes);
+        var applied = outcomes.Count(item => item.Disposition == RowWriteDisposition.Applied);
+        var succeeded = outcomes.Count(item =>
+            item.Disposition == RowWriteDisposition.Applied && item.Outcome.Succeeded);
+        return new BatchWriteSummary(
+            outcomes.Count,
+            applied,
+            succeeded,
+            applied - succeeded,
+            outcomes.Count - applied);
+    }
+}
+
+/// <summary>Exact per-row evidence returned by an exact-mode batched commit.</summary>
+public sealed class BatchWriteReport
+{
+    public BatchWriteReport(IReadOnlyList<RowWriteOutcome> outcomes)
     {
         Outcomes = Array.AsReadOnly((outcomes ?? throw new ArgumentNullException(nameof(outcomes))).ToArray());
+        Summary = BatchWriteSummary.FromOutcomes(Outcomes);
     }
 
     public IReadOnlyList<RowWriteOutcome> Outcomes { get; }
 
-    public int Submitted => Outcomes.Count;
+    public BatchWriteSummary Summary { get; }
 
-    /// <summary>Number of provider-applied writes that succeeded; superseded inputs are not counted.</summary>
-    public int Succeeded => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Applied && item.Outcome.Succeeded);
+    public int Submitted => Summary.Submitted;
 
-    public int Applied => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Applied);
+    public int Succeeded => Summary.Succeeded;
 
-    public int Superseded => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Superseded);
+    public int Applied => Summary.Applied;
 
-    public int Failed => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Applied && !item.Outcome.Succeeded);
+    public int Superseded => Summary.Superseded;
 
-    public bool IsSuccessful => Failed == 0;
+    public int Failed => Summary.Failed;
+
+    public bool IsSuccessful => Summary.IsSuccessful;
 }
 
-/// <summary>Raised when a staged batch cannot be committed atomically.</summary>
+/// <summary>
+/// Raised when modeled row failures prevent an atomic commit. Outcomes contains only
+/// attributed applied failures; aggregate synthetic successes are never included.
+/// </summary>
 public sealed class BatchWriteException : InvalidOperationException
 {
     public BatchWriteException(string message, IReadOnlyList<RowWriteOutcome> outcomes)
         : base(message)
     {
-        Outcomes = Array.AsReadOnly((outcomes ?? throw new ArgumentNullException(nameof(outcomes))).ToArray());
+        var attributedFailures = (outcomes ?? throw new ArgumentNullException(nameof(outcomes))).ToArray();
+        if (attributedFailures.Any(outcome =>
+                outcome.Disposition != RowWriteDisposition.Applied || outcome.Outcome.Succeeded))
+        {
+            throw new ArgumentException(
+                "Batch write exceptions may contain only attributed applied failures.",
+                nameof(outcomes));
+        }
+        Outcomes = Array.AsReadOnly(attributedFailures);
     }
 
     public IReadOnlyList<RowWriteOutcome> Outcomes { get; }
@@ -280,6 +342,7 @@ internal sealed class BatchContext
     private readonly bool exactOutcomes;
     private readonly List<RowWrite> staged = [];
     private readonly List<RowWriteOutcome> completed = [];
+    private readonly HashSet<RowWrite> declarations = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<RowWrite, int> ordinals = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StorageUnitId, IBatchedStorageSession> sessions = [];
     private Exception? failure;
@@ -306,6 +369,10 @@ internal sealed class BatchContext
     {
         EnsureHealthy();
         ArgumentNullException.ThrowIfNull(write);
+        if (!declarations.Add(write))
+            throw new ArgumentException(
+                "The same RowWrite instance cannot be staged more than once; create a new RowWrite declaration for each position.",
+                nameof(write));
         staged.Add(write);
         ordinals.Add(write, nextOrdinal++);
     }
@@ -388,12 +455,15 @@ internal sealed class BatchContext
             foreach (var write in writes)
                 ordinals.Remove(write);
             completed.AddRange(ordered);
-            if (ordered.Any(item => item.Disposition == RowWriteDisposition.Applied && !item.Outcome.Succeeded))
+            var failedOutcomes = ordered
+                .Where(item => item.Disposition == RowWriteDisposition.Applied && !item.Outcome.Succeeded)
+                .ToArray();
+            if (failedOutcomes.Length != 0)
             {
-                var failures = ordered.Where(item => item.Disposition == RowWriteDisposition.Applied && !item.Outcome.Succeeded)
+                var failures = failedOutcomes
                     .Select(item => $"{item.Write.Unit.Id.Value}/{KeyDescription(item.Write)}: {item.Outcome.Status}");
                 throw new BatchWriteException(
-                    $"A staged row write failed ({string.Join(", ", failures)}); the unit of work must be rolled back.", ordered);
+                    $"A staged row write failed ({string.Join(", ", failures)}); the unit of work must be rolled back.", failedOutcomes);
             }
             return ordered;
         }

@@ -15,7 +15,7 @@ using var work = connection.BeginUnitOfWork(
     unit);
 
 work.Stage(RowWrite.Upsert(unit, values));
-var summary = await work.CommitWithOutcomesAsync();
+var report = await work.CommitWithOutcomesAsync();
 ```
 
 ## Flush semantics
@@ -30,6 +30,10 @@ staged-key read is a synchronization point: all matching staged writes are
 flushed before the read is delegated, while a query flushes the whole staged
 set.
 
+Each call to `Stage` is a declaration position. Reusing the same `RowWrite`
+object instance is rejected with guidance to create a new declaration, avoiding
+ambiguous occurrence identity in coalescing evidence.
+
 The row cap is a memory and parameter safety boundary, not a transaction
 boundary. A cap-triggered flush remains part of the enclosing unit-of-work
 transaction and is rolled back with it.
@@ -40,12 +44,15 @@ transaction and is rolled back with it.
 applies to automatic cap/read/query flushes as well as commit. `Aggregate` is
 the default low-cost path; use `BatchWriteOptions.Exact` (or set
 `OutcomeMode = BatchOutcomeMode.Exact`) when provider evidence is required.
-`Commit` and `CommitAsync` return the submitted/applied/succeeded/failed/
-superseded `BatchWriteSummary`; with `Aggregate`, they use the lowest-cost
-provider path. `CommitWithOutcomes` and
-`CommitWithOutcomesAsync` require `Exact` and expose one `RowWriteOutcome` for
-every staged input. They reject an aggregate-mode unit rather than claiming
-exact evidence after an earlier aggregate flush. `RowWrite.Upsert` with an
+`Commit` and `CommitAsync` return a counts-only `BatchWriteSummary` containing
+submitted/applied/succeeded/failed/superseded totals; they never expose
+provider row statuses. With `Aggregate`, they use the lowest-cost provider
+path. `CommitWithOutcomes` and `CommitWithOutcomesAsync` require `Exact` and
+return a distinct `BatchWriteReport` exposing one `RowWriteOutcome` for every
+staged input. They reject an aggregate-mode unit rather than claiming exact
+evidence after an earlier aggregate flush. `BatchWriteException.Outcomes`
+contains only attributed applied failures, never aggregate synthetic successes
+or superseded declarations. `RowWrite.Upsert` with an
 expected version, or the explicit `RowWrite.ConditionalUpsert`, always uses
 the provider's atomic conditional upsert primitive. A failed applied outcome
 raises `BatchWriteException`, poisons the unit of work against further
@@ -64,13 +71,15 @@ row values or keys.
 
 - SQLite uses one multi-row `INSERT ... RETURNING` or
   `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING` command for unconditional
-  insert/upsert groups. Version-conditional writes and operations whose exact
-  outcome requires row-specific predicates retain the single-row path.
+  insert/upsert groups and returns generated optimistic versions in exact mode.
+  It chunks groups at the active SQLite variable limit. Version-conditional
+  writes and declarations with secondary unique indexes retain the single-row
+  path so modeled failures remain attributable to their exact key.
 - PostgreSQL uses one multi-row `INSERT ... ON CONFLICT ... RETURNING` command
   per unconditional insert/upsert group, including its partial-index conflict
-  predicate when one is declared. A declared secondary unique index selects the
-  row-attributed fallback so one constraint error cannot be reported for every
-  row in the native statement.
+  predicate and generated optimistic version when declared. A declared
+  secondary unique index selects the row-attributed fallback so one constraint
+  error cannot be reported for every row in the native statement.
 - SQL Server uses a durable schema-owned table-valued parameter as the
   `MERGE ... WITH (HOLDLOCK)` source, so a 1,000-row homogeneous group remains
   one provider command. Existing installations without the type use the

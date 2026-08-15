@@ -61,7 +61,7 @@ public sealed class SqliteProviderTests
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var unit = Model(includePriority: false);
+        var unit = Model(includePriority: false, includeUniqueIndex: false);
         connection.Schema.Apply(unit);
         var observer = new WritePathObserver();
         using var work = connection.BeginUnitOfWork(
@@ -97,16 +97,19 @@ public sealed class SqliteProviderTests
         var unit = Model(includePriority: false);
         connection.Schema.Apply(unit);
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
-        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        var first = RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
         {
             ["id"] = "one", ["value"] = "one", ["uniqueValue"] = "duplicate"
-        })));
-        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        }));
+        var second = RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
         {
             ["id"] = "two", ["value"] = "two", ["uniqueValue"] = "duplicate"
-        })));
+        }));
+        work.Stage(first);
+        work.Stage(second);
 
         var error = Assert.Throws<BatchWriteException>(() => work.CommitWithOutcomes());
+        Assert.Same(second, Assert.Single(error.Outcomes).Write);
         Assert.Contains("id=two", error.Message, StringComparison.Ordinal);
         Assert.Contains(nameof(WriteOutcomeStatus.UniqueViolation), error.Message, StringComparison.Ordinal);
         Assert.Null(connection.OpenSession(unit, StorageAccess.Global)
@@ -118,7 +121,7 @@ public sealed class SqliteProviderTests
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var unit = Model(includePriority: true);
+        var unit = Model(includePriority: true, includeUniqueIndex: false);
         connection.Schema.Apply(unit);
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
         work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
@@ -144,18 +147,87 @@ public sealed class SqliteProviderTests
         }))!.Values.Values["priority"]);
     }
 
-    private static StorageUnit Model(bool includePriority) => new()
+    [Fact]
+    public void Exact_batched_upserts_return_optimistic_versions()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Model(includePriority: false, includeUniqueIndex: false) with
+        {
+            Id = new StorageUnitId("batched-versions"),
+            Name = "batched_versions",
+            Concurrency = ConcurrencyDeclaration.Optimistic
+        };
+        connection.Schema.Apply(unit);
+
+        using (var first = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
+        {
+            first.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = "same", ["value"] = "first", ["uniqueValue"] = "first"
+            })));
+            Assert.Equal(1, first.CommitWithOutcomes().Outcomes.Single().Outcome.Version);
+        }
+
+        using var second = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        second.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "same", ["value"] = "second", ["uniqueValue"] = "second"
+        })));
+        Assert.Equal(2, second.CommitWithOutcomes().Outcomes.Single().Outcome.Version);
+    }
+
+    [Fact]
+    public void Batched_upserts_chunk_at_the_sqlite_variable_limit()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var columns = Enumerable.Range(0, 39)
+            .Select(index => new ColumnDefinition { Name = $"value{index}", Type = PortableType.String })
+            .Prepend(new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false })
+            .ToArray();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("batched-wide"),
+            Name = "batched_wide",
+            Columns = columns,
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(unit);
+        var observer = new WritePathObserver();
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },
+            unit);
+        for (var row = 0; row < 1_000; row++)
+        {
+            var values = columns.ToDictionary(
+                column => column.Name,
+                column => (object?)$"{column.Name}-{row}",
+                StringComparer.Ordinal);
+            work.Stage(RowWrite.Upsert(unit, new StorageValues(values), new WriteOptions { Observer = observer }));
+        }
+
+        var report = work.CommitWithOutcomes();
+
+        Assert.Equal(1_000, report.Succeeded);
+        Assert.Equal(2, observer.RoundTrips);
+    }
+
+    private static StorageUnit Model(bool includePriority, bool includeUniqueIndex = true) => new()
     {
         Id = new StorageUnitId("rebuild"), Name = "rebuild",
         Columns = includePriority
             ? [new() { Name = "id", Type = PortableType.String, IsNullable = false }, new() { Name = "value", Type = PortableType.String }, new() { Name = "uniqueValue", Type = PortableType.String }, new() { Name = "priority", Type = PortableType.Int32, IsNullable = false, Default = new PortableDefault(0) }]
             : [new() { Name = "id", Type = PortableType.String, IsNullable = false }, new() { Name = "value", Type = PortableType.String }, new() { Name = "uniqueValue", Type = PortableType.String }],
         Key = new KeyDefinition { Columns = ["id"] },
-        Indexes =
-        [
-            new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] },
-            new IndexDefinition { Name = "unique-value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }
-        ]
+        Indexes = includeUniqueIndex
+            ?
+            [
+                new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] },
+                new IndexDefinition { Name = "unique-value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }
+            ]
+            : [new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] }]
     };
 
     private sealed class TemporaryStore : IDisposable

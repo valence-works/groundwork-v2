@@ -273,17 +273,20 @@ public sealed class ConcurrencyHarnessTests
         var secondCreatedAt = DateTimeOffset.UnixEpoch.AddDays(2);
         var thirdCreatedAt = DateTimeOffset.UnixEpoch.AddDays(3);
 
-        using (var first = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        using (var first = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
         {
             first.Stage(RowWrite.Upsert(unit, Values("same", "first", firstCreatedAt)));
-            Assert.True(first.Commit().IsSuccessful);
+            var report = first.CommitWithOutcomes();
+            Assert.True(report.IsSuccessful);
+            Assert.Equal(1, report.Outcomes.Single().Outcome.Version);
         }
 
-        using (var second = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        using (var second = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
         {
             second.Stage(RowWrite.Upsert(unit, Values("same", "second", secondCreatedAt), WriteOptions.ForVersion(1)));
-            var summary = second.Commit();
-            Assert.True(summary.IsSuccessful);
+            var report = second.CommitWithOutcomes();
+            Assert.True(report.IsSuccessful);
+            Assert.Equal(2, report.Outcomes.Single().Outcome.Version);
         }
 
         var read = connection.OpenSession(unit, StorageAccess.Global)

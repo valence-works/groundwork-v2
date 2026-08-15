@@ -802,16 +802,16 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public BatchWriteSummary Commit() => CompleteCommit();
+    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
 
-    public BatchWriteSummary CommitWithOutcomes()
+    public BatchWriteReport CommitWithOutcomes()
     {
         ThrowIfTerminal();
         batch.RequireExactOutcomes();
-        return CompleteCommit();
+        return new BatchWriteReport(CompleteCommit());
     }
 
-    private BatchWriteSummary CompleteCommit()
+    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
     {
         ThrowIfTerminal();
         batch.FlushAll();
@@ -833,10 +833,10 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
         terminal = true;
         CloseSessions();
-        return new BatchWriteSummary(batch.DrainCompleted());
+        return batch.DrainCompleted();
     }
 
-    public ValueTask<BatchWriteSummary> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult(CommitWithOutcomes());

@@ -125,6 +125,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         // upserts are the provider-native multi-row path.
         if (writes.Any(write => write.Options.ExpectedVersion is not null))
             return ApplyBatchFallback(writes);
+        if (HasSecondaryUniqueIndex(writes[0].Unit))
+            return ApplyBatchFallback(writes);
 
         return writes[0].Mode switch
         {
@@ -153,6 +155,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             columns.Add(VersionColumnDefinition);
         if (ScopeColumnDefinition is not null)
             columns.Add(ScopeColumnDefinition);
+        var maxRows = Math.Max(1, SqliteVariableLimit() / columns.Count);
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(ApplyInsertBatch).ToArray();
         var valuesSql = new List<string>();
         using var command = Command(string.Empty);
         for (var row = 0; row < writes.Count; row++)
@@ -171,15 +176,15 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             valuesSql.Add($"({string.Join(", ", parameters)})");
         }
 
-        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote));
+        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
+            VersionColumnDefinition is null ? [] : [Quote(VersionColumnDefinition.Name)]));
         command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)} ON CONFLICT DO NOTHING RETURNING {returning};";
         writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-insert", "SQLite multi-row INSERT", IsProbe: false));
         try
         {
-            var inserted = ReadReturnedKeys(command, writes[0].Unit);
-            var version = VersionColumnDefinition is null ? (long?)null : 1;
+            var inserted = ReadReturnedRows(command, writes[0].Unit);
             return writes.Select(write => new RowWriteOutcome(write,
-                inserted.Contains(write.Identity)
+                inserted.TryGetValue(write.Identity, out var version)
                     ? new WriteOutcome(WriteOutcomeStatus.Inserted, version)
                     : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
         }
@@ -196,7 +201,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         foreach (var write in writes)
         {
             ValidateValues(write.Values!.Values, requireAllNonNullable: false);
-            if (write.Values!.Values.Keys.Except(supplied.Select(column => column.Name), StringComparer.Ordinal).Any())
+            var writeColumns = UserColumns
+                .Where(column => write.Values!.Values.ContainsKey(column.Name))
+                .Select(column => column.Name)
+                .ToArray();
+            if (!writeColumns.SequenceEqual(supplied.Select(column => column.Name), StringComparer.Ordinal))
                 return ApplyBatchFallback(writes);
         }
 
@@ -205,6 +214,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             columns.Add(VersionColumnDefinition);
         if (ScopeColumnDefinition is not null)
             columns.Add(ScopeColumnDefinition);
+        var maxRows = Math.Max(1, SqliteVariableLimit() / columns.Count);
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(ApplyUpsertBatch).ToArray();
         var valuesSql = new List<string>();
         using var command = Command(string.Empty);
         for (var row = 0; row < writes.Count; row++)
@@ -240,10 +252,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-upsert", "SQLite multi-row INSERT ON CONFLICT", IsProbe: false));
         try
         {
-            var returned = ReadReturnedKeys(command, writes[0].Unit);
+            var returned = ReadReturnedRows(command, writes[0].Unit);
             return writes.Select(write => new RowWriteOutcome(write,
-                returned.Contains(write.Identity)
-                    ? new WriteOutcome(WriteOutcomeStatus.Upserted)
+                returned.TryGetValue(write.Identity, out var version)
+                    ? new WriteOutcome(WriteOutcomeStatus.Upserted, version)
                     : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
         }
         catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
@@ -253,9 +265,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         }
     }
 
-    private HashSet<string> ReadReturnedKeys(SqliteCommand command, StorageUnit logicalUnit)
+    private Dictionary<string, long?> ReadReturnedRows(SqliteCommand command, StorageUnit logicalUnit)
     {
-        var identities = new HashSet<string>(StringComparer.Ordinal);
+        var returned = new Dictionary<string, long?>(StringComparer.Ordinal);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -266,10 +278,20 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
                 if (column != SqliteSchemaCoordinator.ScopeColumn)
                     values[column] = FromSqlite(reader.GetValue(index), Column(column));
             }
-            identities.Add(RowWrite.IdentityFor(logicalUnit, values));
+            var versionOrdinal = Unit.Key.Columns.Count;
+            var version = VersionColumnDefinition is null || reader.IsDBNull(versionOrdinal)
+                ? (long?)null
+                : Convert.ToInt64(reader.GetValue(versionOrdinal), CultureInfo.InvariantCulture);
+            returned[RowWrite.IdentityFor(logicalUnit, values)] = version;
         }
-        return identities;
+        return returned;
     }
+
+    private int SqliteVariableLimit() =>
+        SQLitePCL.raw.sqlite3_limit(
+            connection.Handle,
+            SQLitePCL.raw.SQLITE_LIMIT_VARIABLE_NUMBER,
+            -1);
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
         writes.Select(write => new RowWriteOutcome(write, write.Mode switch
@@ -282,6 +304,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
+
+    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
+        logicalUnit.Indexes.Any(index => index.IsUnique &&
+            !index.Columns.Select(column => column.Column)
+                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
     private ColumnRef? QueryColumn(string name)
     {
         var column = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition])

@@ -141,14 +141,15 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             return writes.Chunk(maxRows).SelectMany(ApplyInsertBatch).ToArray();
         using var command = Command(string.Empty);
         var rows = AddBatchValues(command, writes, columns);
-        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT DO NOTHING RETURNING {string.Join(", ", Unit.Key.Columns.Select(Quote))};";
+        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
+            VersionColumn is null ? [] : [Quote(VersionColumn.Name)]));
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT DO NOTHING RETURNING {returning};";
         writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-insert", "PostgreSQL multi-row INSERT", IsProbe: false));
         try
         {
-            var returned = ReadReturnedKeys(command, writes[0].Unit);
-            var version = VersionColumn is null ? (long?)null : 1;
+            var returned = ReadReturnedRows(command, writes[0].Unit);
             return writes.Select(write => new RowWriteOutcome(write,
-                returned.Contains(write.Identity)
+                returned.TryGetValue(write.Identity, out var version)
                     ? new WriteOutcome(WriteOutcomeStatus.Inserted, version)
                     : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
         }
@@ -187,14 +188,16 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             updates.Add($"{Quote(VersionColumn.Name)}={Quote(Unit.Name)}.{Quote(VersionColumn.Name)}+1");
         if (updates.Count == 0)
             updates.Add($"{Quote(Unit.Key.Columns[0])}={Quote(Unit.Name)}.{Quote(Unit.Key.Columns[0])}");
-        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT {conflict} DO UPDATE SET {string.Join(", ", updates)} RETURNING {string.Join(", ", Unit.Key.Columns.Select(Quote))};";
+        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
+            VersionColumn is null ? [] : [Quote(VersionColumn.Name)]));
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT {conflict} DO UPDATE SET {string.Join(", ", updates)} RETURNING {returning};";
         writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-upsert", "PostgreSQL multi-row INSERT ON CONFLICT", IsProbe: false));
         try
         {
-            var returned = ReadReturnedKeys(command, writes[0].Unit);
+            var returned = ReadReturnedRows(command, writes[0].Unit);
             return writes.Select(write => new RowWriteOutcome(write,
-                returned.Contains(write.Identity)
-                    ? new WriteOutcome(WriteOutcomeStatus.Upserted)
+                returned.TryGetValue(write.Identity, out var version)
+                    ? new WriteOutcome(WriteOutcomeStatus.Upserted, version)
                     : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
         }
         catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out var indexName))
@@ -222,9 +225,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         return rows;
     }
 
-    private HashSet<string> ReadReturnedKeys(NpgsqlCommand command, StorageUnit logicalUnit)
+    private Dictionary<string, long?> ReadReturnedRows(NpgsqlCommand command, StorageUnit logicalUnit)
     {
-        var identities = new HashSet<string>(StringComparer.Ordinal);
+        var returned = new Dictionary<string, long?>(StringComparer.Ordinal);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -235,9 +238,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 if (column != PostgreSqlSchemaCoordinator.ScopeColumn)
                     values[column] = FromDatabase(reader.GetValue(index), Column(column));
             }
-            identities.Add(RowWrite.IdentityFor(logicalUnit, values));
+            var versionOrdinal = Unit.Key.Columns.Count;
+            var version = VersionColumn is null || reader.IsDBNull(versionOrdinal)
+                ? (long?)null
+                : Convert.ToInt64(reader.GetValue(versionOrdinal), CultureInfo.InvariantCulture);
+            returned[RowWrite.IdentityFor(logicalUnit, values)] = version;
         }
-        return identities;
+        return returned;
     }
 
 

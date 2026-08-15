@@ -53,23 +53,23 @@ internal sealed class SqlServerUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public BatchWriteSummary Commit() => CompleteCommit();
+    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
 
-    public BatchWriteSummary CommitWithOutcomes()
+    public BatchWriteReport CommitWithOutcomes()
     {
         ThrowIfTerminal();
         batch.RequireExactOutcomes();
-        return CompleteCommit();
+        return new BatchWriteReport(CompleteCommit());
     }
 
-    private BatchWriteSummary CompleteCommit()
+    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
     {
         ThrowIfTerminal();
         try
         {
             batch.FlushAll();
             transaction.Commit();
-            return new BatchWriteSummary(batch.DrainCompleted());
+            return batch.DrainCompleted();
         }
         catch
         {
@@ -84,7 +84,7 @@ internal sealed class SqlServerUnitOfWork : IUnitOfWork
         }
     }
 
-    public ValueTask<BatchWriteSummary> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult(CommitWithOutcomes());

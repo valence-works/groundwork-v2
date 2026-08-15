@@ -211,11 +211,11 @@ public sealed class InMemoryProviderTests
         var staged = work.OpenSession(unit).Read(TestingFixture.Key("same"));
         Assert.Equal("last", staged!.Values.Values["value"]);
 
-        var summary = work.CommitWithOutcomes();
-        Assert.Equal(2, summary.Submitted);
-        Assert.Equal(1, summary.Applied);
-        Assert.Equal(1, summary.Superseded);
-        var superseded = Assert.Single(summary.Outcomes.Where(item => item.IsSuperseded));
+        var report = work.CommitWithOutcomes();
+        Assert.Equal(2, report.Submitted);
+        Assert.Equal(1, report.Applied);
+        Assert.Equal(1, report.Superseded);
+        var superseded = Assert.Single(report.Outcomes.Where(item => item.IsSuperseded));
         Assert.Equal(1, superseded.WinnerOrdinal);
         Assert.Equal(WriteOutcomeStatus.Upserted, superseded.WinnerEvidence!.Status);
         Assert.Equal(WriteOutcomeStatus.Superseded, superseded.Outcome.Status);
@@ -299,6 +299,22 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Batched_unit_of_work_rejects_reusing_the_same_write_declaration()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://batched-duplicate-declaration");
+        var unit = TestingFixture.GlobalUnit("batched-duplicate-declaration");
+        connection.Schema.Apply(unit);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        var write = RowWrite.Upsert(unit, TestingFixture.Values("same", "same"));
+        work.Stage(write);
+
+        var error = Assert.Throws<ArgumentException>(() => work.Stage(write));
+
+        Assert.Contains("new RowWrite declaration", error.Message, StringComparison.Ordinal);
+        Assert.True(work.Commit().IsSuccessful);
+    }
+
+    [Fact]
     public async Task Batched_unit_of_work_honors_flush_cap_and_async_commit()
     {
         var factory = new InMemoryProviderFactory();
@@ -314,9 +330,10 @@ public sealed class InMemoryProviderTests
         work.Stage(RowWrite.Insert(unit, TestingFixture.Values("two", "two")));
         work.Stage(RowWrite.Insert(unit, TestingFixture.Values("three", "three")));
 
-        var summary = await work.CommitWithOutcomesAsync();
-        Assert.Equal(3, summary.Submitted);
-        Assert.True(summary.IsSuccessful);
+        var report = await work.CommitWithOutcomesAsync();
+        Assert.Equal(3, report.Submitted);
+        Assert.Equal(3, report.Outcomes.Count);
+        Assert.True(report.IsSuccessful);
     }
 
     [Fact]
@@ -393,7 +410,8 @@ public sealed class InMemoryProviderTests
 
         Assert.NotNull(work.OpenSession(unit).Read(TestingFixture.Key("one")));
         Assert.Throws<InvalidOperationException>(() => work.CommitWithOutcomes());
-        Assert.True(work.Commit().IsSuccessful);
+        var summary = work.Commit();
+        Assert.True(summary.IsSuccessful);
     }
 
     [Fact]
@@ -416,7 +434,7 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
-    public void Default_unit_of_work_uses_aggregate_mode()
+    public async Task Default_unit_of_work_uses_aggregate_mode()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://batched-default-mode");
         var unit = TestingFixture.GlobalUnit("batched-default-mode");
@@ -425,7 +443,9 @@ public sealed class InMemoryProviderTests
         work.Stage(RowWrite.Insert(unit, TestingFixture.Values("one", "one")));
 
         Assert.Throws<InvalidOperationException>(() => work.CommitWithOutcomes());
-        Assert.True(work.Commit().IsSuccessful);
+        var summary = await work.CommitAsync();
+        Assert.True(summary.IsSuccessful);
+        Assert.Null(typeof(BatchWriteSummary).GetProperty("Outcomes"));
     }
 
     [Fact]
@@ -471,9 +491,9 @@ public sealed class InMemoryProviderTests
 
         var error = Assert.Throws<BatchWriteException>(() => work.CommitWithOutcomes());
         Assert.Equal(1, error.Message.Split("id=target", StringSplitOptions.None).Length - 1);
-        Assert.Equal(RowWriteDisposition.Superseded, error.Outcomes[0].Disposition);
-        Assert.Equal(RowWriteDisposition.Applied, error.Outcomes[1].Disposition);
-        Assert.Equal(WriteOutcomeStatus.UniqueViolation, error.Outcomes[1].Outcome.Status);
+        var failure = Assert.Single(error.Outcomes);
+        Assert.Equal(RowWriteDisposition.Applied, failure.Disposition);
+        Assert.Equal(WriteOutcomeStatus.UniqueViolation, failure.Outcome.Status);
     }
 
     [Fact]
