@@ -215,7 +215,8 @@ public enum MongoSchemaChangeKind
     AddColumn,
     CreateIndex,
     AddDerivedColumn,
-    RebuildIndex
+    RebuildIndex,
+    UpdateAggregationProfile
 }
 
 public sealed record MongoSchemaChange(MongoSchemaChangeKind Kind, string Identity);
@@ -288,6 +289,9 @@ public interface IMongoStorageSession
     MongoStoredEntry? Read(MongoStorageKey key);
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
+
+    /// <summary>Executes one named, declared aggregation profile through the native provider.</summary>
+    AggregationResult Aggregate(AggregationQuery query);
 
     /// <summary>
     /// Inserts a row. A ProviderSequence key must be omitted and is returned through

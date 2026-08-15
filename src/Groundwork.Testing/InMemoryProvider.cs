@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 
 namespace Groundwork.Testing;
@@ -107,6 +108,7 @@ internal sealed class InMemoryDatabase
     {
         ArgumentNullException.ThrowIfNull(requested);
         ArgumentNullException.ThrowIfNull(access);
+        AggregationProfileValidator.ValidateUnit(requested);
         lock (Gate)
         {
             if (!Units.TryGetValue(requested.Id, out var state))
@@ -217,6 +219,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
+        AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
         {
             return new SchemaDiff(BuildChanges(desired, database.Units.TryGetValue(desired.Id, out var current)
@@ -230,6 +233,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
+        AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
         {
             database.Units.TryGetValue(desired.Id, out var current);
@@ -368,6 +372,20 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
                 throw new SchemaConflictException($"Index '{previous.Name}' was removed non-additively.");
         }
 
+        var previousProfiles = current.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        foreach (var profile in desiredProfiles.Values)
+        {
+            if (!previousProfiles.TryGetValue(profile.Name, out var previous) ||
+                !SchemaIdentity.AggregationProfileEquals(previous, profile))
+                changes.Add(new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, profile.Name));
+        }
+        foreach (var previous in previousProfiles.Values)
+        {
+            if (!desiredProfiles.ContainsKey(previous.Name))
+                changes.Add(new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, previous.Name));
+        }
+
         return changes;
     }
 
@@ -417,6 +435,9 @@ internal static class SchemaIdentity
     internal static bool KeyEquals(KeyDefinition left, KeyDefinition right) =>
         left.Columns.SequenceEqual(right.Columns, StringComparer.Ordinal);
 
+    internal static bool AggregationProfileEquals(AggregationProfile left, AggregationProfile right) =>
+        string.Equals(AggregationProfile(left), AggregationProfile(right), StringComparison.Ordinal);
+
     private static string Column(ColumnDefinition column) => Encode(
         column.Name,
         column.Type,
@@ -436,6 +457,9 @@ internal static class SchemaIdentity
         index.MissingValues,
         index.SchemaVersion,
         string.Join("", index.Columns.Select(column => Encode(column.Column, column.Direction))));
+
+    private static string AggregationProfile(AggregationProfile profile) =>
+        AggregationProfileCanonicalization.Canonicalize(profile);
 
     private static string Encode(params object?[] parts) => string.Join(";", parts.Select(part =>
     {
@@ -475,7 +499,8 @@ internal static class StorageDeclaration
         Indexes = unit.Indexes.Select(index => index with
         {
             Columns = index.Columns.ToArray()
-        }).ToArray()
+        }).ToArray(),
+        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
     };
 }
 
@@ -586,6 +611,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
                 sourceIncludesContinuation: !deferContinuation);
         }
     }
+
+    public AggregationResult Aggregate(AggregationQuery query) =>
+        AggregationSessionExecutor.Execute(this, query);
 
     private ColumnRef? QueryColumn(string name)
     {

@@ -6,6 +6,71 @@ namespace Groundwork.Testing.SelfTests;
 
 public sealed class InMemoryProviderTests
 {
+    [Fact]
+    public void Aggregation_profile_only_drift_is_reported_and_retained()
+    {
+        var initial = AggregationUnit(1_000);
+        using var connection = new InMemoryProviderFactory().Create("memory://aggregation-profile-drift");
+
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        Assert.False(connection.Schema.Apply(initial).Applied);
+
+        var changed = AggregationUnit(2_000);
+        var diff = connection.Schema.Diff(changed);
+
+        Assert.Contains(diff.Changes, change =>
+            change.Kind == SchemaChangeKind.UpdateAggregationProfile && change.Identity == "summary");
+        Assert.True(connection.Schema.Apply(changed).Applied);
+        Assert.False(connection.Schema.Apply(changed).Applied);
+    }
+
+    [Fact]
+    public void InMemory_schema_admission_validates_aggregation_profiles_before_persistence()
+    {
+        var invalid = AggregationUnit(1_000) with
+        {
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "invalid",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Sum("total", "flag")]
+                }
+            ]
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://aggregation-invalid-admission");
+
+        var exception = Assert.Throws<AggregationValidationException>(() => connection.Schema.Apply(invalid));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-TYPE-001");
+        Assert.Empty(connection.Catalog.ReadIndexes(invalid.Id));
+    }
+
+    private static StorageUnit AggregationUnit(int maxGroups) => new()
+    {
+        Id = new StorageUnitId("aggregation-profile-drift"),
+        Name = "aggregation_profile_drift",
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 },
+            new ColumnDefinition { Name = "flag", Type = PortableType.Boolean }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        AggregationProfiles =
+        [
+            new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Sum("total", "amount")],
+                MaxGroups = maxGroups
+            }
+        ]
+    };
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

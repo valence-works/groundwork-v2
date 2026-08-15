@@ -403,6 +403,52 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Aggregation_profile_fingerprint_is_injective_for_delimited_identifiers()
+    {
+        var baseUnit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-canonical-collision"),
+            Name = "AggregationCanonicalCollision",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "a:b", Type = PortableType.String },
+                new() { Name = "c", Type = PortableType.String },
+                new() { Name = "a", Type = PortableType.String },
+                new() { Name = "b:c", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var first = new SchemaSubject(baseUnit with
+        {
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Min("a:b", "c")]
+                }
+            ]
+        });
+        var second = new SchemaSubject(baseUnit with
+        {
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Min("a", "b:c")]
+                }
+            ]
+        });
+
+        Assert.NotEqual(first.Fingerprint, second.Fingerprint);
+    }
+
+    [Fact]
     public void Applied_state_serialization_preserves_typed_defaults()
     {
         var target = CreateTarget(CreateDefaultsUnit(

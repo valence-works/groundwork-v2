@@ -66,6 +66,25 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             sourceIncludesContinuation: true);
     });
 
+    public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (Unit.Scope != ScopePolicy.Global)
+            return AggregationSessionExecutor.Execute(this, query);
+        return RelationalAggregationExecutor.Execute(
+            connection,
+            activeTransaction ?? transaction,
+            new SqliteDialect(),
+            Unit,
+            AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+            query,
+            (name, value) =>
+            {
+                var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+                return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
+            });
+    });
+
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
         if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
