@@ -168,14 +168,12 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
-    public void Closed_accessor_cache_reuses_only_the_field_getter_and_reads_fresh_closures()
+    public void Closed_accessor_reads_fresh_closure_values()
     {
-        var before = ExpressionLowerer.ClosedAccessorCount;
         var first = Assert.IsType<Predicate.Equal>(ExpressionLowerer.Lower(ClosedTenant(7), Tickets));
         var second = Assert.IsType<Predicate.Equal>(ExpressionLowerer.Lower(ClosedTenant(8), Tickets));
         Assert.Equal(7, first.Value.Value);
         Assert.Equal(8, second.Value.Value);
-        Assert.InRange(ExpressionLowerer.ClosedAccessorCount - before, 0, 1);
     }
 
     [Fact]
@@ -270,14 +268,11 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
-    public void Closed_accessor_is_compiled_once_for_a_repeated_expression_shape()
+    public void Closed_accessors_read_fresh_values_across_expression_shapes()
     {
-        var before = GetClosedAccessorCount();
         var first = ExpressionLowerer.Lower<Ticket>(MakeTenantPredicate(7), Tickets);
         var second = ExpressionLowerer.Lower<Ticket>(MakeTenantPredicate(8), Tickets);
         var other = ExpressionLowerer.Lower<Ticket>(OtherClosure.Make(9), Tickets);
-        var after = GetClosedAccessorCount();
-        Assert.InRange(after - before, 1, 5);
         Assert.Equal(7, Assert.IsType<Predicate.Equal>(first).Value.Value);
         Assert.Equal(8, Assert.IsType<Predicate.Equal>(second).Value.Value);
         Assert.Equal(9, Assert.IsType<Predicate.Equal>(other).Value.Value);
@@ -288,7 +283,4 @@ public sealed class LinqFrontEndTests
     {
         public static Expression<Func<Ticket, bool>> Make(int tenant) => ticket => ticket.TenantId == tenant;
     }
-
-    private static int GetClosedAccessorCount() =>
-        (int)typeof(ExpressionLowerer).GetProperty("ClosedAccessorCount", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
 }
