@@ -183,6 +183,14 @@ internal static class PortableSearchKeyEncoding
                     return new string(chars, 0, index + 1);
                 }
 
+                if (highIndex >= 0 && chars[highIndex] == '\uDBFF')
+                {
+                    // In UTF-16 ordinal order the supplementary block is followed by
+                    // the BMP range U+E000..U+FFFF. U+E000 is therefore the exact
+                    // well-formed upper bound for a prefix ending in U+10FFFF.
+                    return new string(chars, 0, highIndex) + "\uE000";
+                }
+
                 index = highIndex;
                 continue;
             }

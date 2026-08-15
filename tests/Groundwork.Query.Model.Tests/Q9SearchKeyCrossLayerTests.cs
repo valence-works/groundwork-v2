@@ -45,8 +45,8 @@ public sealed class Q9SearchKeyCrossLayerTests
     }
 
     [Fact]
-    public void Ordinal_successor_has_no_upper_bound_after_the_maximum_scalar()
+    public void Ordinal_successor_moves_from_the_maximum_scalar_to_the_post_surrogate_bmp_range()
     {
-        Assert.Null(QuerySearchKeys.Successor("\uDBFF\uDFFF", QuerySearchKeyPolicy.Ordinal));
+        Assert.Equal("\uE000", QuerySearchKeys.Successor("\uDBFF\uDFFF", QuerySearchKeyPolicy.Ordinal));
     }
 }

@@ -56,7 +56,7 @@ public sealed class Q9SearchKeyQueryTests
     [Theory]
     [InlineData("\uD7FF", "\uD800\uDC00")]
     [InlineData("\uD83D\uDFFF", "\uD83E\uDC00")]
-    [InlineData("\uDBFF\uDFFF", null)]
+    [InlineData("\uDBFF\uDFFF", "\uE000")]
     public void Ordinal_prefix_uses_a_well_formed_upper_bound_at_surrogate_boundaries(
         string prefix,
         string? expectedUpper)

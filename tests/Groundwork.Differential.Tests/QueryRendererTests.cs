@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Groundwork.Kernel;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -155,6 +156,33 @@ public sealed class QueryRendererTests
 
         Assert.Null(command.Hint);
         Assert.Equal("ix_customers_id", command.ExpectedIndex);
+    }
+
+    [Fact]
+    public void SqlServer_search_key_ranges_bind_as_the_physical_ansi_type()
+    {
+        var folded = new ColumnRef(
+            Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new(
+                    "name",
+                    SearchKeyProjection.ColumnName("name"),
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    700)
+            }
+        };
+
+        var command = new SqlServerQueryRenderer().Render(
+            Request(new Predicate.StartsWith(folded, "I"), [], Paging.None, ResultShape.Rows.Instance),
+            options);
+
+        Assert.Contains("CAST(@p0 AS varchar(700))", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("CAST(@p1 AS varchar(700))", command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("DATALENGTH([__groundwork_search_name]", command.CommandText, StringComparison.Ordinal);
     }
 
     [Fact]
