@@ -46,7 +46,8 @@ public sealed record CapabilityDescriptor(
     string DisplayName,
     string Description,
     bool EvidenceGatedByDefault = false,
-    string OwningModule = "groundwork")
+    string OwningModule = "groundwork",
+    int AdditionalProviderCommandsPerWrite = 0)
 {
     public bool Equals(CapabilityDescriptor? other) => other is not null && Id.Equals(other.Id);
 

@@ -15,7 +15,7 @@ public static class SchemaCompilation
     public static StorageUnit Compile(SchemaTable table)
     {
         ArgumentNullException.ThrowIfNull(table);
-        return new StorageUnit
+        var unit = new StorageUnit
         {
             Id = new StorageUnitId(table.Name),
             Name = table.Name,
@@ -51,6 +51,7 @@ public static class SchemaCompilation
                     : MissingValueBehavior.Excluded
             }).ToArray()
         };
+        return SearchKeyProjection.Expand(unit);
     }
 
     public static IReadOnlyList<PhysicalSchemaTarget> CompileTargets(

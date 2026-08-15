@@ -615,27 +615,23 @@ public sealed class WritePathTests
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB write-path tests.");
         using var connection = new MongoDbTestingFactory().Create(connectionString!);
-        var baseUnit = Unit("mongodb-provider-sequence");
-        var unit = baseUnit with
+        var unit = new StorageUnit
         {
+            Id = new StorageUnitId("mongodb-provider-sequence-" + Guid.NewGuid().ToString("N")),
+            Name = "mongodb-provider-sequence-" + Guid.NewGuid().ToString("N"),
             Columns =
             [
-                ..baseUnit.Columns,
-                new ColumnDefinition
-                {
-                    Name = "sequence",
-                    Type = PortableType.Int64,
-                    IsNullable = false,
-                    Generation = ColumnGeneration.ProviderSequence
-                }
-            ]
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "payload", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
         };
         connection.Schema.Apply(unit);
         var observer = new WritePathObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
 
         var exception = Assert.Throws<NotSupportedException>(() => session.ConditionalUpsert(
-            Values("one", "first", DateTimeOffset.UnixEpoch),
+            new StorageValues(new Dictionary<string, object?> { ["payload"] = "first" }),
             new WriteOptions { Observer = observer }));
 
         Assert.Contains("ProviderSequence", exception.Message, StringComparison.Ordinal);

@@ -141,6 +141,8 @@ public sealed record ColumnDefinition
     public int? Precision { get; init; }
     public int? Scale { get; init; }
     public PortableCollation? Collation { get; init; }
+    /// <summary>The logical collation retained when physical expansion uses ordinal storage.</summary>
+    public PortableCollation? LogicalCollation { get; init; }
     public PortableDefault? Default { get; init; }
     public ColumnGeneration Generation { get; init; } = ColumnGeneration.Supplied;
 }
@@ -166,6 +168,13 @@ public sealed record DerivedColumnDefinition
     public required string Name { get; init; }
     public required string SourceColumn { get; init; }
     public required PortableProjection Projection { get; init; }
+
+    /// <summary>
+    /// The complete algorithm identity used to produce the derived value. This is intentionally
+    /// persisted with the declaration: a change to either folding or prefix-boundary encoding is
+    /// a rebuild, not an additive metadata edit.
+    /// </summary>
+    public string? AlgorithmId { get; init; }
 }
 
 public sealed record StorageUnit

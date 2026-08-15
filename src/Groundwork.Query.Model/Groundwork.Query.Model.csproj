@@ -8,5 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Collections.Immutable" />
+    <Compile Include="../Groundwork.Kernel/PortableSearchKeyEncoding.cs" Link="PortableSearchKeyEncoding.cs" />
+    <Compile Include="../Groundwork.Kernel/UnicodeOrdinalCasingData.Generated.cs" Link="UnicodeOrdinalCasingData.Generated.cs" />
   </ItemGroup>
 </Project>

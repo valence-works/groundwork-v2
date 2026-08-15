@@ -39,6 +39,33 @@ internal sealed class SqliteDialect : RelationalDialect
         ? null
         : Literal(definition.Default.Value, definition.Type);
 
+    public override string CreateTableSql(
+        string table,
+        IReadOnlyList<string> columns,
+        IReadOnlyList<string> primaryKey,
+        string? providerSequenceColumn)
+    {
+        if (providerSequenceColumn is null)
+            return base.CreateTableSql(table, columns, primaryKey, providerSequenceColumn);
+
+        if (primaryKey.Count != 1 || !string.Equals(primaryKey[0], providerSequenceColumn, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "SQLite ProviderSequence requires the generated column to be the sole primary-key column.");
+
+        var quoted = QuoteIdentifier(providerSequenceColumn);
+        var sequenceColumn = columns.SingleOrDefault(column =>
+            column.StartsWith(quoted + " ", StringComparison.Ordinal));
+        if (sequenceColumn is null || !sequenceColumn.Contains("INTEGER", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "SQLite ProviderSequence requires an INTEGER primary-key declaration.");
+
+        var replacement = sequenceColumn.Replace(" NOT NULL", "", StringComparison.Ordinal) +
+            " PRIMARY KEY AUTOINCREMENT";
+        var body = string.Join(", ", columns.Select(column =>
+            string.Equals(column, sequenceColumn, StringComparison.Ordinal) ? replacement : column));
+        return $"CREATE TABLE IF NOT EXISTS {QuoteIdentifier(table)} ({body});";
+    }
+
     public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey) =>
         $"CREATE TABLE IF NOT EXISTS {QuoteIdentifier(table)} ({string.Join(", ", columns)}" +
         (primaryKey.Count == 0 ? ")" : $", PRIMARY KEY ({string.Join(", ", primaryKey.Select(QuoteIdentifier))}))" ) + ";";
@@ -119,9 +146,39 @@ internal sealed class SqliteDialect : RelationalDialect
                 "state_json" TEXT NOT NULL,
                 PRIMARY KEY ("subject_id", "provider_name")
             );
+            CREATE TABLE IF NOT EXISTS "__groundwork_search_key_algorithms" (
+                "table_name" TEXT NOT NULL,
+                "column_name" TEXT NOT NULL,
+                "algorithm_id" TEXT NOT NULL,
+                PRIMARY KEY ("table_name", "column_name")
+            );
             """;
         command.ExecuteNonQuery();
     }
+
+    public override void ApplyProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported SQLite provider definition '{definition.Kind}'.");
+        RelationalSearchKeyCatalog.Apply(
+            connection,
+            transaction,
+            definition,
+            "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=excluded.\"algorithm_id\";");
+    }
+
+    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table)
+        => RelationalSearchKeyCatalog.Read(
+            connection,
+            transaction,
+            table,
+            "SELECT \"column_name\",\"algorithm_id\" FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table;");
 
     public override PhysicalSchemaHistoryState ReadHistory(DbConnection connection, PhysicalSchemaTargetIdentity target)
     {
@@ -175,6 +232,7 @@ internal sealed class SqliteDialect : RelationalDialect
 
     public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction transaction, string table)
     {
+        var createSql = ReadCreateSql((SqliteConnection)connection, transaction, table);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"PRAGMA table_info({QuoteIdentifier(table)});";
@@ -183,8 +241,11 @@ internal sealed class SqliteDialect : RelationalDialect
         while (reader.Read())
         {
             var name = reader.GetString(1);
-            result[name] = new(name, reader.GetString(2), reader.GetInt32(3) == 0,
-                reader.IsDBNull(4) ? null : reader.GetString(4), "BINARY", reader.GetInt32(5));
+            var declaration = createSql is null ? null : SqliteCreateTableSql.ExtractColumnDeclaration(createSql, name);
+            var providerSequence = declaration?.Contains("AUTOINCREMENT", StringComparison.OrdinalIgnoreCase) == true;
+            result[name] = new(name, reader.GetString(2), !providerSequence && reader.GetInt32(3) == 0,
+                reader.IsDBNull(4) ? null : reader.GetString(4), "BINARY", reader.GetInt32(5),
+                Generation: providerSequence ? ColumnGeneration.ProviderSequence : ColumnGeneration.Supplied);
         }
         return result;
     }

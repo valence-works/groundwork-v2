@@ -19,13 +19,15 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
     private readonly object gate = new();
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
+    private readonly SqlServerSchemaCoordinator schemaCoordinator;
     private bool disposed;
 
     public SqlServerProviderConnection(string connectionString)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         this.connectionString = connectionString;
-        Schema = new SqlServerSchemaCoordinator(this);
+        schemaCoordinator = new SqlServerSchemaCoordinator(this);
+        Schema = schemaCoordinator;
         Catalog = new SqlServerProviderCatalog(this);
     }
 
@@ -62,6 +64,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = CreateIndependentConnection();
         lock (gate)
             sessionConnections.Add(connection);
@@ -88,6 +91,8 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
         foreach (var unit in units)
             SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+        foreach (var unit in units)
+            schemaCoordinator.EnsureRuntimeAdmission(unit);
 
         var connection = CreateIndependentConnection();
         try

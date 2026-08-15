@@ -42,11 +42,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         var executionSource = WithScopePredicate(request);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != SqlServerSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(
                 index => index.Name,
                 index => SqlServerDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal)
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
@@ -132,7 +134,11 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqlServerSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key) => Execute(() => ReadCore(key));
+    public StoredEntry? Read(StorageKey key) => Execute(() => PublicEntry(ReadCore(key)));
+
+    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
+        ? null
+        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
@@ -204,6 +210,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         ArgumentNullException.ThrowIfNull(writes);
         if (writes.Count == 0)
             return [];
+        if (SequenceColumnDefinition is not null)
+            return ApplyBatchFallback(writes);
         if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
@@ -211,15 +219,17 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
             return ApplyBatchFallback(writes);
 
-        var columns = PhysicalBatchColumns(writes[0]);
-        foreach (var write in writes)
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+
+        var columns = PhysicalBatchColumns(physicalWrites[0]);
+        foreach (var write in physicalWrites)
         {
             ValidateValues(write.Values!.Values, requireAllNonNullable: write.Mode == RowWriteMode.Insert);
             if (!PhysicalBatchColumns(write).Select(column => column.Name).SequenceEqual(columns.Select(column => column.Name), StringComparer.Ordinal))
                 return ApplyBatchFallback(writes);
         }
 
-        return ApplyMergeBatch(writes, columns);
+        return ApplyMergeBatch(physicalWrites, columns);
     }
 
     private IReadOnlyList<ColumnDefinition> PhysicalBatchColumns(RowWrite write)
@@ -480,7 +490,16 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
-        ValidateValues(values.Values, mutation == Mutation.Insert);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
+        ValidateValues(values.Values, mutation == Mutation.Insert,
+            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
+        if (SequenceColumnDefinition is not null &&
+            (mutation is Mutation.Insert or Mutation.Upsert) &&
+            !values.Values.ContainsKey(SequenceColumnDefinition.Name))
+        {
+            ValidateExpected(options, null, mutation);
+            return InsertCore(values.Values, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted);
+        }
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
             column => column,
             column => values.Values.TryGetValue(column, out var value)
@@ -492,9 +511,14 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         var existing = Unit.Concurrency.IsNone ? null : ReadCore(key);
         if (mutation == Mutation.Insert && existing is not null) return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic) return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        if (mutation == Mutation.Upsert && SequenceColumnDefinition is not null &&
+            values.Values.ContainsKey(SequenceColumnDefinition.Name) && existing is null && Unit.Concurrency.IsOptimistic)
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
         ValidateExpected(options, existing, mutation);
         if (mutation == Mutation.Upsert)
         {
+            if (SequenceColumnDefinition is not null && values.Values.ContainsKey(SequenceColumnDefinition.Name))
+                return UpdateCore(values.Values, existing, options);
             if (Unit.Concurrency.IsNone) return UpsertNoneCore(values.Values, options);
             if (existing is null) return InsertCore(values.Values);
             return UpdateCore(values.Values, existing, options);
@@ -509,12 +533,25 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             var parameters = BuildParameters(values.Values, supplied);
             if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = (1L, VersionColumnDefinition);
             if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
-            using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
+            var output = SequenceColumnDefinition is null ? string.Empty : $" OUTPUT INSERTED.{Quote(SequenceColumnDefinition.Name)}";
+            using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
             AddParameters(insert, parameters);
             try
             {
-                insert.ExecuteNonQuery();
-                return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? null : 1);
+                if (SequenceColumnDefinition is null)
+                {
+                    insert.ExecuteNonQuery();
+                    return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? null : 1);
+                }
+
+                var generated = insert.ExecuteScalar();
+                return new WriteOutcome(
+                    WriteOutcomeStatus.Inserted,
+                    VersionColumnDefinition is null ? null : 1,
+                    generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        [SequenceColumnDefinition.Name] = FromSqlServer(generated!, SequenceColumnDefinition)
+                    });
             }
             catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
             {
@@ -524,7 +561,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         return UpdateCore(values.Values, existing, options);
     });
 
-    private WriteOutcome InsertCore(IReadOnlyDictionary<string, object?> values)
+    private WriteOutcome InsertCore(
+        IReadOnlyDictionary<string, object?> values,
+        WriteOutcomeStatus status = WriteOutcomeStatus.Upserted)
     {
         var supplied = UserColumns.Where(column => values.ContainsKey(column.Name)).ToArray();
         var columns = supplied.ToList();
@@ -533,12 +572,28 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         var parameters = BuildParameters(values, supplied);
         if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = (1L, VersionColumnDefinition);
         if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
-        using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
+        var output = SequenceColumnDefinition is null ? string.Empty : $" OUTPUT INSERTED.{Quote(SequenceColumnDefinition.Name)}";
+        var sql = columns.Count == 0
+            ? $"INSERT INTO {Quote(Unit.Name)}{output} DEFAULT VALUES;"
+            : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});";
+        using var command = Command(sql);
         AddParameters(command, parameters);
         try
         {
-            command.ExecuteNonQuery();
-            return new WriteOutcome(WriteOutcomeStatus.Upserted, VersionColumnDefinition is null ? null : 1);
+            if (SequenceColumnDefinition is null)
+            {
+                command.ExecuteNonQuery();
+                return new WriteOutcome(status, VersionColumnDefinition is null ? null : 1);
+            }
+
+            var generated = command.ExecuteScalar();
+            return new WriteOutcome(
+                status,
+                VersionColumnDefinition is null ? null : 1,
+                generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    [SequenceColumnDefinition.Name] = FromSqlServer(generated!, SequenceColumnDefinition)
+                });
         }
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
     }
@@ -635,6 +690,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, requireAllNonNullable: false);
         if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumnDefinition is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
@@ -788,15 +844,25 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         return new StoredEntry(new StorageValues(values), version);
     }
 
-    private void ValidateValues(IReadOnlyDictionary<string, object?> values, bool requireAllNonNullable)
+    private void ValidateValues(
+        IReadOnlyDictionary<string, object?> values,
+        bool requireAllNonNullable,
+        bool allowGeneratedLocator = false)
     {
         var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
         if (unknown is not null) throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
+        foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
+            if (values.ContainsKey(generated.Name) && !allowGeneratedLocator)
+                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by SQL Server; it may only be supplied as the locator for Update or Upsert.", nameof(values));
         if (requireAllNonNullable)
             foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
+            {
+                if (column.Generation == ColumnGeneration.ProviderSequence)
+                    continue;
                 if (!values.TryGetValue(column.Name, out var value) || value is null)
                     throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
+            }
     }
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
@@ -896,6 +962,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private IReadOnlyList<string> LogicalKeyColumns => Unit.Key.Columns.Where(column => column != SqlServerSchemaCoordinator.ScopeColumn).ToArray();
     private ColumnDefinition? ScopeColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn);
     private ColumnDefinition? VersionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqlServerSchemaCoordinator.VersionColumn);
+    private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
     private static string Quote(string value) => SqlServerProviderConnection.QuoteIdentifier(value);
 
     private static object? FromSqlServer(object value, ColumnDefinition definition)

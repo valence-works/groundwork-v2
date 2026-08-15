@@ -96,11 +96,11 @@ public static class PhysicalSchemaInspection
         foreach (var expected in target.Subject.DerivedColumns)
         {
             if (!columns.TryGetValue(expected.Name, out var actual) ||
-                !string.Equals(actual.SearchKeyAlgorithmId, ProjectionAlgorithmId(expected.Projection), StringComparison.Ordinal))
+                !string.Equals(actual.SearchKeyAlgorithmId, ProjectionAlgorithmId(expected), StringComparison.Ordinal))
             {
                 columnDrift.Add(new SchemaRefusal(
                     "GW-RUNTIME-001",
-                    $"Persisted search-key algorithm for folded column '{expected.Name}' differs from '{ProjectionAlgorithmId(expected.Projection)}'.",
+                    $"Persisted search-key algorithm for folded column '{expected.Name}' differs from '{ProjectionAlgorithmId(expected)}'.",
                     $"columns.{expected.Name}.searchKeyAlgorithm"));
             }
         }
@@ -143,12 +143,12 @@ public static class PhysicalSchemaInspection
             ? string.Join(" AND ", index.Columns.Select(column => column.Column + " IS NOT NULL"))
             : null;
 
-    private static string ProjectionAlgorithmId(PortableProjection projection) => projection switch
+    private static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
     {
         PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
         PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
-        _ => throw new ArgumentOutOfRangeException(nameof(projection), projection, null)
+        _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Projection, null)
     };
 
     private static string? NormalizeFilter(string? filter) =>

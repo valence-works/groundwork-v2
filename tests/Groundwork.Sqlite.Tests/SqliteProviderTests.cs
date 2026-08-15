@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Testing;
 using Groundwork.Sqlite;
 using Groundwork.Query.Linq;
@@ -99,6 +100,7 @@ public sealed class SqliteProviderTests
                     integerAmount INTEGER NOT NULL,
                     decimalAmount TEXT NOT NULL,
                     label TEXT COLLATE NOCASE NULL,
+                    __groundwork_search_label TEXT COLLATE BINARY NULL,
                     ascendingOrder INTEGER NOT NULL,
                     descendingOrder INTEGER NOT NULL,
                     __groundwork_action TEXT NOT NULL DEFAULT 'I');
@@ -262,6 +264,97 @@ public sealed class SqliteProviderTests
             ["descendingOrder"] = descendingOrder
         })).Status);
 
+    [Fact]
+    public void Provider_sequence_uses_sqlite_autoincrement_and_returns_generated_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = SequenceUnit("sqlite-sequence-" + Guid.NewGuid().ToString("N"));
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var first = session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "first" }));
+        var second = session.Upsert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "second" }));
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, first.Status);
+        Assert.Equal(1L, first.GeneratedValue<long>("sequence"));
+        Assert.Equal(WriteOutcomeStatus.Upserted, second.Status);
+        Assert.Equal(2L, second.GeneratedValue<long>("sequence"));
+        Assert.Equal("first", session.Read(new StorageKey(new Dictionary<string, object?> { ["sequence"] = 1L }))!
+            .Values.Values["payload"]);
+        Assert.Throws<ArgumentException>(() => session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["sequence"] = 99L,
+            ["payload"] = "caller-supplied"
+        })));
+    }
+
+    [Fact]
+    public void Provider_sequence_batch_returns_one_generated_value_per_exact_row()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = SequenceUnit("sqlite-sequence-batch-" + Guid.NewGuid().ToString("N"));
+        connection.Schema.Apply(unit);
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["payload"] = "one" })));
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["payload"] = "two" })));
+
+        var report = work.CommitWithOutcomes();
+
+        Assert.True(report.IsSuccessful);
+        Assert.Equal([1L, 2L], report.Outcomes.Select(outcome => outcome.Outcome.GeneratedValue<long>("sequence")));
+    }
+
+    [Fact]
+    public void Scoped_provider_sequence_is_unit_wide_and_scope_isolates_reads()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = SequenceUnit("sqlite-scoped-sequence-" + Guid.NewGuid().ToString("N")) with
+        {
+            Scope = ScopePolicy.Scoped
+        };
+        connection.Schema.Apply(unit);
+
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("first")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("second")));
+        var firstSequence = first.Insert(Values("first")).GeneratedValue<long>("sequence");
+        var secondSequence = second.Insert(Values("second")).GeneratedValue<long>("sequence");
+
+        Assert.Equal(1L, firstSequence);
+        Assert.Equal(2L, secondSequence);
+        Assert.NotNull(first.Read(Key(firstSequence)));
+        Assert.Null(first.Read(Key(secondSequence)));
+        Assert.NotNull(second.Read(Key(secondSequence)));
+        Assert.Null(second.Read(Key(firstSequence)));
+    }
+
+    [Fact]
+    public void Provider_sequence_only_insert_uses_default_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var name = "sqlite-sequence-only-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        connection.Schema.Apply(unit);
+
+        var inserted = connection.OpenSession(unit, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?>()));
+
+        Assert.Equal(1L, inserted.GeneratedValue<long>("sequence"));
+    }
+
     private sealed class LinqTicket
     {
         public string Id { get; set; } = string.Empty;
@@ -333,6 +426,103 @@ public sealed class SqliteProviderTests
             {
                 ["id"] = "two", ["value"] = "other", ["uniqueValue"] = "unique", ["priority"] = 1
             })).Status);
+    }
+
+    [Fact]
+    public void Folded_schema_migration_backfills_and_partial_updates_preserve_the_key()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var original = new StorageUnit
+        {
+            Id = new StorageUnitId("folded-migration"),
+            Name = "folded_migration",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(original).Applied);
+        Assert.Equal(WriteOutcomeStatus.Inserted, connection.OpenSession(original, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+
+        var folded = original with
+        {
+            Columns = [.. original.Columns.Select(column => column.Name == "status"
+                ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                : column)],
+            Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+        };
+        Assert.Contains(SearchKeyProjection.Expand(folded).Columns, column => column.Name == "__groundwork_search_status");
+        var foldedDiff = connection.Schema.Diff(folded);
+        using (var historyConnection = new SqliteConnection(store.ConnectionString))
+        {
+            historyConnection.Open();
+            using var historyCommand = historyConnection.CreateCommand();
+            historyCommand.CommandText = "SELECT state_json FROM __groundwork_schema_history WHERE subject_id='folded-migration'";
+            var state = PhysicalSchemaAppliedStateSerializer.Deserialize((string)historyCommand.ExecuteScalar()!);
+            var target = SqliteSchemaCoordinator.Target(SqliteSchemaCoordinator.Physicalize(folded));
+            var plan = PhysicalSchemaDiffPlanner.Plan(
+                target,
+                PhysicalSchemaHistoryState.FromApplied(state),
+                DateTimeOffset.UnixEpoch);
+            Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Code + ":" + refusal.Message)));
+            Assert.Contains(plan.Operations, operation => operation is BackfillColumnOperation backfill &&
+                backfill.Derived is not null && backfill.RequiresAuthorization);
+            Assert.Contains(plan.Operations, operation => operation is FinalizeColumnOperation finalize &&
+                finalize.Column.Name == SearchKeyProjection.ColumnName("status"));
+        }
+        var foldedApply = connection.Schema.Apply(folded);
+        Assert.True(foldedApply.Applied, string.Join("; ", foldedDiff.Changes.Select(change => change.Kind + ":" + change.Identity)) + " / " + string.Join("; ", foldedApply.Diff.Changes.Select(change => change.Kind + ":" + change.Identity)));
+
+        var status = new ColumnRef(
+            new TableId(folded.Name), "status", Groundwork.Query.Model.QueryType.String, false, 32,
+            stringComparison: Groundwork.Query.Model.QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var session = connection.OpenSession(folded, StorageAccess.Global);
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.NotNull(stored);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored!.Values.Values.Keys);
+        var result = session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None));
+        Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+
+        var indexed = session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None),
+            new QueryRenderOptions(
+                [new QueryIndexDeclaration("by-status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.Pinned)],
+                selectedIndex: "by-status"));
+        Assert.Equal("by-status", indexed.SelectedIndex);
+        Assert.Equal([1], indexed.Rows.Select(row => Assert.IsType<int>(row["id"])));
+
+        Assert.Equal(WriteOutcomeStatus.Updated, session.Update(new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })).Status);
+        Assert.Single(session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None)).Rows);
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, folded);
+        work.Stage(RowWrite.Update(folded, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })));
+        Assert.True(work.CommitWithOutcomes().IsSuccessful);
+        Assert.Single(session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None)).Rows);
+
+        using (var tamper = new SqliteConnection(store.ConnectionString))
+        {
+            tamper.Open();
+            using var command = tamper.CreateCommand();
+            command.CommandText = "UPDATE __groundwork_search_key_algorithms SET algorithm_id='stale-search-key-v0' WHERE table_name='folded_migration' AND column_name='__groundwork_search_status';";
+            command.ExecuteNonQuery();
+        }
+        var admission = Assert.Throws<InvalidOperationException>(() => connection.OpenSession(folded, StorageAccess.Global));
+        Assert.Contains("rebuild", admission.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -519,6 +709,24 @@ public sealed class SqliteProviderTests
             ]
             : [new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] }]
     };
+
+    private static StorageUnit SequenceUnit(string name) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "payload", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["sequence"] }
+    };
+
+    private static StorageValues Values(string payload) => new(
+        new Dictionary<string, object?> { ["payload"] = payload });
+
+    private static StorageKey Key(long sequence) => new(
+        new Dictionary<string, object?> { ["sequence"] = sequence });
 
     private sealed class TemporaryStore : IDisposable
     {

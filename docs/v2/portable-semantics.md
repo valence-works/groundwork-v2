@@ -25,14 +25,15 @@ which `Validate` returns no refusals.
   true for an empty owner. Element sets declare an exact element type; legacy
   untyped set references are refused rather than allowing provider-specific
   JSON/BSON element coercion.
-- Text accepted for provider planning is explicitly `Ordinal`. The
-  `UnicodeOrdinalIgnoreCase` and `AsciiIgnoreCase` policies require an AST
-  node naming the versioned persisted search key defined by #256; until that
-  projection exists in this model, both policies are refused. Culture, ICU,
-  accent, and implicit Unicode-normalization semantics are refused; malformed
-  UTF-16 is rejected at binding. Evaluating a refused folded policy remains a
-  deterministic two-valued operation and never invokes runtime
-  `OrdinalIgnoreCase` behavior.
+- Text accepted for provider planning is explicitly `Ordinal`. Ordinal
+  `StartsWith` is lowered to an exact `[prefix, successor)` range on the base
+  column and does not create a derived column. `UnicodeOrdinalIgnoreCase` and
+  `AsciiIgnoreCase` prefix matching require the schema's versioned persisted
+  search-key mapping; the `ColumnRef` policy must match that mapping exactly or
+  rendering fails with `GW-QUERY-031`. Culture, ICU, accent, and implicit
+  Unicode-normalization semantics are refused; malformed UTF-16 is rejected at
+  binding. Evaluating a refused folded policy remains deterministic and never
+  invokes runtime `OrdinalIgnoreCase` behavior.
 - Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` values are portable.
   No numeric coercion or rounding is performed. Binary floating point is
   refused for predicates, ordering, and indexes.

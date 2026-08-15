@@ -47,11 +47,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var executionSource = WithScopePredicate(request);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(
                 index => index.Name,
                 index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal)
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
@@ -107,7 +109,11 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key) => Execute(() => ReadCore(key));
+    public StoredEntry? Read(StorageKey key) => Execute(() => PublicEntry(ReadCore(key)));
+
+    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
+        ? null
+        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
@@ -181,14 +187,20 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         ArgumentNullException.ThrowIfNull(writes);
         if (writes.Count == 0)
             return [];
+        if (SequenceColumn is not null)
+            return ApplyBatchFallback(writes);
         if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
-        return writes[0].Mode switch
+        if (writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() != 1)
+            return ApplyBatchFallback(writes);
+
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+        return physicalWrites[0].Mode switch
         {
-            RowWriteMode.Insert => ApplyInsertBatch(writes),
-            RowWriteMode.Upsert => ApplyUpsertBatch(writes),
+            RowWriteMode.Insert => ApplyInsertBatch(physicalWrites),
+            RowWriteMode.Upsert => ApplyUpsertBatch(physicalWrites),
             _ => ApplyBatchFallback(writes)
         };
     }
@@ -365,7 +377,21 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
-        ValidateValues(values.Values, mutation == Mutation.Insert);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
+        ValidateValues(values.Values, mutation == Mutation.Insert,
+            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
+
+        // A provider sequence has no caller-visible key until the insert commits. Treat an
+        // upsert without a generated key as an insert; accepting a synthetic read here would
+        // both defeat the native identity and make the returned generated value ambiguous.
+        if (SequenceColumn is not null &&
+            (mutation is Mutation.Insert or Mutation.Upsert) &&
+            !values.Values.ContainsKey(SequenceColumn.Name))
+        {
+            ValidateExpected(options, null, mutation);
+            return InsertCore(values, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted);
+        }
+
         var key = KeyFromValues(values.Values);
         // None mode has no token to inspect. Keep direct writes single-statement and let the
         // database report uniqueness/not-found from the write itself.
@@ -374,11 +400,16 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        if (mutation == Mutation.Upsert && SequenceColumn is not null &&
+            values.Values.ContainsKey(SequenceColumn.Name) && existing is null && Unit.Concurrency.IsOptimistic)
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
         ValidateExpected(options, existing, mutation);
         return mutation switch
         {
             Mutation.Insert => InsertCore(values),
             Mutation.Update => UpdateCore(values, key, existing!, options),
+            Mutation.Upsert when SequenceColumn is not null && values.Values.ContainsKey(SequenceColumn.Name) =>
+                UpdateCore(values, key, existing!, options),
             Mutation.Upsert => UpsertCore(values, key, existing, options, exactOutcome: false),
             Mutation.ConditionalUpsert => UpsertCore(values, key, existing, options, exactOutcome: true),
             _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null)
@@ -388,6 +419,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, requireAllNonNullable: false);
         if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumn is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
@@ -477,16 +509,34 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 StringComparison.Ordinal))?.Name ?? physicalName;
     }
 
-    private WriteOutcome InsertCore(StorageValues values)
+    private WriteOutcome InsertCore(StorageValues values, WriteOutcomeStatus status = WriteOutcomeStatus.Inserted)
     {
         var physical = PhysicalValues(values.Values, includeVersion: VersionColumn is not null);
         var columns = physical.Keys.ToArray();
-        using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column))});");
+        var returning = SequenceColumn is null ? string.Empty : $" RETURNING {Quote(SequenceColumn.Name)};";
+        var sql = columns.Length == 0
+            ? $"INSERT INTO {Quote(Unit.Name)} DEFAULT VALUES{returning}"
+            : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column))}){returning}";
+        using var command = Command(sql);
         AddParameters(command, physical);
         try
         {
-            command.ExecuteNonQuery();
-            return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumn is null ? null : 1);
+            if (SequenceColumn is null)
+            {
+                command.ExecuteNonQuery();
+                return new WriteOutcome(status, VersionColumn is null ? null : 1);
+            }
+
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+                return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
+            return new WriteOutcome(
+                status,
+                VersionColumn is null ? null : 1,
+                generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    [SequenceColumn.Name] = FromDatabase(reader.GetValue(0), SequenceColumn)
+                });
         }
         catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out _))
         {
@@ -667,17 +717,27 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         return index is null ? null : new PostgreSqlDialect().IndexFilter(index);
     }
 
-    private void ValidateValues(IReadOnlyDictionary<string, object?> values, bool requireAllNonNullable)
+    private void ValidateValues(
+        IReadOnlyDictionary<string, object?> values,
+        bool requireAllNonNullable,
+        bool allowGeneratedLocator = false)
     {
         var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
         if (unknown is not null)
             throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
+        foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
+            if (values.ContainsKey(generated.Name) && !allowGeneratedLocator)
+                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by PostgreSQL; it may only be supplied as the locator for Update or Upsert.", nameof(values));
         if (!requireAllNonNullable)
             return;
         foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
+        {
+            if (column.Generation == ColumnGeneration.ProviderSequence)
+                continue;
             if (!values.TryGetValue(column.Name, out var value) || value is null)
                 throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
+        }
     }
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
@@ -794,6 +854,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
 
     private IReadOnlyList<ColumnDefinition> UserColumns =>
         Unit.Columns.Where(column => column.Name is not PostgreSqlSchemaCoordinator.ScopeColumn and not PostgreSqlSchemaCoordinator.VersionColumn).ToArray();
+
+    private ColumnDefinition? SequenceColumn => UserColumns.FirstOrDefault(column =>
+        column.Generation == ColumnGeneration.ProviderSequence);
 
     private ColumnDefinition? VersionColumn => Unit.Columns.FirstOrDefault(column => column.Name == PostgreSqlSchemaCoordinator.VersionColumn);
 

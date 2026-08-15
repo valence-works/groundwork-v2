@@ -144,7 +144,8 @@ public sealed class SchemaSubject
         {
             Name = derived.Name,
             SourceColumn = derived.SourceColumn,
-            Projection = derived.Projection
+            Projection = derived.Projection,
+            AlgorithmId = derived.AlgorithmId
         }).ToImmutableArray(),
         Indexes = (source.Indexes ?? []).Select(index => new IndexDefinition
         {
@@ -170,6 +171,7 @@ public sealed class SchemaSubject
         Precision = source.Precision,
         Scale = source.Scale,
         Collation = source.Collation,
+        LogicalCollation = source.LogicalCollation,
         Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
         Generation = source.Generation
     };
@@ -184,22 +186,15 @@ public sealed class SchemaSubject
             column.Precision?.ToString(CultureInfo.InvariantCulture),
             column.Scale?.ToString(CultureInfo.InvariantCulture),
             column.Collation?.ToString(),
+            column.LogicalCollation?.ToString(),
             column.Generation.ToString(),
             column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
         ]);
 
     private static string CanonicalDerivedColumn(DerivedColumnDefinition column) =>
-        SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString()]);
+        SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString(), column.AlgorithmId]);
 
-    private static string CanonicalIndex(IndexDefinition index) =>
-        SchemaFingerprint.Canonicalize(
-        [
-            index.Name,
-            index.IsUnique.ToString(CultureInfo.InvariantCulture),
-            index.MissingValues.ToString(),
-            index.SchemaVersion.ToString(CultureInfo.InvariantCulture),
-            .. index.Columns.Select(column => $"{column.Column}:{column.Direction}")
-        ]);
+    private static string CanonicalIndex(IndexDefinition index) => CanonicalIndexPayload.From(index).Canonical;
 
     private static AggregationProfile Snapshot(AggregationProfile profile) =>
         AggregationProfileSnapshot.Capture(profile);

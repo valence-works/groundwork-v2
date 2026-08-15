@@ -160,6 +160,28 @@ public sealed class PortabilityTests
     }
 
     [Fact]
+    public void Provider_sequence_must_be_the_sole_primary_key_column()
+    {
+        var result = Validate(Unit([
+            Column("sequence", PortableType.Int64, nullable: false, generation: ColumnGeneration.ProviderSequence),
+            Column("payload", PortableType.String)
+        ], key: ["payload"]));
+
+        AssertCode(result, "GW-PORT-005", "sequence");
+    }
+
+    [Fact]
+    public void Provider_sequence_is_valid_when_it_is_the_non_nullable_int64_primary_key()
+    {
+        var result = Validate(Unit([
+            Column("sequence", PortableType.Int64, nullable: false, generation: ColumnGeneration.ProviderSequence),
+            Column("payload", PortableType.String)
+        ], key: ["sequence"]));
+
+        Assert.DoesNotContain(result.Refusals, refusal => refusal.Code == "GW-PORT-005");
+    }
+
+    [Fact]
     public void Collation_must_be_in_the_portable_set()
     {
         var result = Validate(Unit([Column("name", PortableType.String, collation: (PortableCollation)99)]));
