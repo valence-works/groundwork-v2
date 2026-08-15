@@ -5,6 +5,12 @@ namespace Groundwork.Kernel;
 /// <summary>Declares the durable replay window for append operations on a storage unit.</summary>
 public sealed record AppendIdempotencyDeclaration
 {
+    private static readonly string[] ProviderReservedLedgerNames =
+    [
+        "__groundwork_metadata", "__groundwork_sequences", "__groundwork_schema_history",
+        "__groundwork_schema_locks", "__groundwork_schema_fences", "__groundwork_search_key_algorithms"
+    ];
+
     /// <summary>
     /// The amount of provider-recorded time for which an operation nonce is retained. A replay
     /// inside this window is acknowledged without writing the payload again.
@@ -37,16 +43,14 @@ public sealed record AppendIdempotencyDeclaration
     {
         ArgumentNullException.ThrowIfNull(owner);
         Validate();
-        if (string.Equals(LedgerName, owner.Name, StringComparison.Ordinal))
+        if (string.Equals(LedgerName, owner.Name, StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException(
                 $"The append idempotency ledger '{LedgerName}' cannot share a provider storage name with unit '{owner.Name}'.",
                 nameof(LedgerName));
         }
 
-        if (LedgerName is "__groundwork_metadata" or "__groundwork_sequences" or
-            "__groundwork_schema_history" or "__groundwork_schema_locks" or
-            "__groundwork_schema_fences" or "__groundwork_search_key_algorithms")
+        if (ProviderReservedLedgerNames.Contains(LedgerName, StringComparer.OrdinalIgnoreCase))
         {
             throw new ArgumentException(
                 $"The append idempotency ledger '{LedgerName}' is reserved by a provider-owned catalog.",

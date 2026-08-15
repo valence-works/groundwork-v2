@@ -85,6 +85,54 @@ public sealed class SchemaSubject
     /// <summary>Returns a fresh immutable snapshot suitable for provider mapping.</summary>
     public StorageUnit Definition => Snapshot(definition);
 
+    /// <summary>
+    /// Validates a complete schema manifest before provider I/O. Provider identifiers are
+    /// compared case-insensitively so a ledger cannot alias any declared unit on a provider
+    /// with folded identifiers; the shared default ledger remains valid when spelled identically.
+    /// </summary>
+    public static void ValidateManifest(IEnumerable<StorageUnit> declarations)
+    {
+        ArgumentNullException.ThrowIfNull(declarations);
+        var units = declarations.ToArray();
+        if (units.Any(unit => unit is null))
+            throw new ArgumentException("A schema manifest cannot contain null storage units.", nameof(declarations));
+
+        foreach (var unit in units)
+            Validate(unit);
+
+        var names = new Dictionary<string, StorageUnit>(StringComparer.OrdinalIgnoreCase);
+        foreach (var unit in units)
+        {
+            if (!names.TryAdd(unit.Name, unit))
+            {
+                throw new ArgumentException(
+                    $"Schema manifest storage unit names must be unique under provider identifier comparison: '{unit.Name}'.",
+                    nameof(declarations));
+            }
+        }
+
+        var ledgers = new Dictionary<string, (string Name, StorageUnit Unit)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var unit in units)
+        {
+            if (unit.AppendIdempotency is not { } declaration)
+                continue;
+            if (ledgers.TryGetValue(declaration.LedgerName, out var prior) &&
+                !string.Equals(prior.Name, declaration.LedgerName, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"Schema manifest ledger names cannot differ only by provider identifier casing: '{prior.Name}' and '{declaration.LedgerName}'.",
+                    nameof(declarations));
+            }
+            ledgers.TryAdd(declaration.LedgerName, (declaration.LedgerName, unit));
+            if (names.TryGetValue(declaration.LedgerName, out var owner))
+            {
+                throw new ArgumentException(
+                    $"Schema manifest ledger '{declaration.LedgerName}' collides with storage unit '{owner.Name}' under provider identifier comparison.",
+                    nameof(declarations));
+            }
+        }
+    }
+
     public override string ToString() => Id.Value;
 
     private static void Validate(StorageUnit unit)

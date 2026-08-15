@@ -220,6 +220,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        desired.AppendIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         lock (database.Gate)
         {
@@ -233,6 +234,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        desired.AppendIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         lock (database.Gate)
         {
@@ -309,6 +311,9 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         if (current is not null && current.SchemaVersion != desired.SchemaVersion)
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change schema version non-additively.");
+        if (current is not null && !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change append idempotency window or ledger non-additively.");
 
         if (current is null)
         {
@@ -420,6 +425,12 @@ internal static class SchemaIdentity
 
     internal static bool KeyEquals(KeyDefinition left, KeyDefinition right) =>
         left.Columns.SequenceEqual(right.Columns, StringComparer.Ordinal);
+
+    internal static bool IdempotencyEquals(
+        AppendIdempotencyDeclaration? left,
+        AppendIdempotencyDeclaration? right) =>
+        left?.Window == right?.Window &&
+        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
 
     private static string Column(ColumnDefinition column) => Encode(
         column.Name,

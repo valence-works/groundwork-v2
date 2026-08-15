@@ -361,3 +361,14 @@ public sealed class MongoSchemaConflictException : InvalidOperationException
     {
     }
 }
+
+/// <summary>
+/// Indicates that a concurrent idempotency nonce conflict aborted the whole explicit unit of
+/// work. The caller must retry the complete unit of work; no partial work can be committed.
+/// </summary>
+public sealed class MongoUnitOfWorkConflictException : InvalidOperationException
+{
+    public MongoUnitOfWorkConflictException(string message) : base(message)
+    {
+    }
+}

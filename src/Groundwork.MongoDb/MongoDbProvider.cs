@@ -1236,14 +1236,15 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             {
                 // A concurrent upsert can surface as a duplicate-key error after the other
                 // transaction commits. A standalone append is retried by its outer transaction
-                // wrapper. An explicit unit of work owns the session, so restart that aborted
-                // transaction before retrying; this preserves the public Replayed outcome for
-                // the losing duplicate instead of leaking Mongo's duplicate-key exception.
+                // wrapper. An explicit unit of work may already contain other writes, so its
+                // transaction is aborted as a whole and the caller must retry the whole unit of
+                // work; restarting only the append would silently lose those earlier writes.
                 if (transactionSession is not null)
                 {
                     try { transactionSession.AbortTransaction(); }
                     catch (MongoException) { }
-                    transactionSession.StartTransaction();
+                    throw new MongoUnitOfWorkConflictException(
+                        "A concurrent idempotency nonce conflict aborted the whole MongoDB unit of work; retry the complete unit of work.");
                 }
             }
         }
@@ -2125,7 +2126,8 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
         ThrowIfTerminal();
         try
         {
-            session.AbortTransaction();
+            if (session.IsInTransaction)
+                session.AbortTransaction();
             terminal = true;
             CloseSessions();
         }

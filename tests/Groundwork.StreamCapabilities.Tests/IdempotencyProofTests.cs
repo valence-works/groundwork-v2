@@ -46,6 +46,19 @@ public sealed class IdempotencyProofTests
     }
 
     [Fact]
+    public void InMemory_schema_diff_surfaces_append_idempotency_profile_drift()
+    {
+        using var connection = new InMemoryProviderFactory().Create("idempotency-profile-drift-" + Guid.NewGuid().ToString("N"));
+        var name = "idempotency-profile-drift-unit-" + Guid.NewGuid().ToString("N");
+        var applied = Unit(name, TimeSpan.FromMinutes(1), ledgerName: "profile_ledger_a");
+        Assert.True(connection.Schema.Apply(applied).Applied);
+
+        var changed = Unit(name, TimeSpan.FromMinutes(2), ledgerName: "profile_ledger_b");
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Apply(changed));
+    }
+
+    [Fact]
     public void InMemory_replay_within_window_returns_replayed_and_writes_nothing()
     {
         using var connection = new InMemoryProviderFactory().Create("idempotency-inmemory-" + Guid.NewGuid().ToString("N"));
@@ -353,6 +366,9 @@ public sealed class IdempotencyProofTests
     {
         var collidingName = "idempotency-ledger-collision-" + Guid.NewGuid().ToString("N");
         Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(collidingName, ledgerName: collidingName)));
+        var foldedCollision = "idempotency-ledger-folded-" + Guid.NewGuid().ToString("N");
+        Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
+            foldedCollision.ToUpperInvariant(), ledgerName: foldedCollision.ToLowerInvariant())));
         Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
             "idempotency-ledger-provider-collision-" + Guid.NewGuid().ToString("N"),
             ledgerName: "__groundwork_metadata")));
@@ -361,8 +377,28 @@ public sealed class IdempotencyProofTests
             ledgerName: "__groundwork_sequences")));
     }
 
+    [Fact]
+    public void SQLite_manifest_rejects_cross_unit_case_folded_ledger_collision_before_schema_io()
+    {
+        using var connection = new SqliteProviderFactory().Create("Data Source=:memory:");
+        var ledger = Unit("manifest-ledger-owner-" + Guid.NewGuid().ToString("N"), ledgerName: "CrossUnitLedger");
+        var unit = Unit("crossunitledger", ledgerName: "another_ledger");
+        Assert.Throws<ArgumentException>(() => SchemaSubject.ValidateManifest([ledger, unit]));
+    }
+
     [SkippableFact]
-    public void MongoDB_concurrent_duplicate_nonce_inside_transactions_returns_one_replay()
+    public void MongoDB_manifest_rejects_cross_unit_case_folded_ledger_collision_before_schema_io()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB manifest collision proof.");
+        using var connection = new MongoDbProviderFactory().Create(connectionString!);
+        var ledger = Unit("manifest-mongo-ledger-owner-" + Guid.NewGuid().ToString("N"), ledgerName: "CrossUnitLedger");
+        var unit = Unit("crossunitledger", ledgerName: "another_ledger");
+        Assert.Throws<ArgumentException>(() => SchemaSubject.ValidateManifest([ledger, unit]));
+    }
+
+    [SkippableFact]
+    public void MongoDB_concurrent_duplicate_nonce_aborts_only_the_losing_whole_unit_of_work()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB duplicate race proof.");
@@ -370,25 +406,46 @@ public sealed class IdempotencyProofTests
         using var secondConnection = new MongoDbTestingFactory().Create(connectionString!);
         var unit = Unit("idempotency-mongo-race-" + Guid.NewGuid().ToString("N"));
         Assert.True(firstConnection.Schema.Apply(unit).Applied);
-        var outcomes = Task.WhenAll(
-                Task.Run(() => AppendInUnitOfWork(firstConnection, unit, "race-first")),
-                Task.Run(() => AppendInUnitOfWork(secondConnection, unit, "race-second")))
+        using var barrier = new Barrier(2);
+        var results = Task.WhenAll(
+                Task.Run(() => AppendWithPriorWrite(firstConnection, unit, "prior-first", barrier)),
+                Task.Run(() => AppendWithPriorWrite(secondConnection, unit, "prior-second", barrier)))
             .GetAwaiter().GetResult();
 
-        Assert.Equal(1, outcomes.Count(outcome => outcome.Status == WriteOutcomeStatus.Inserted));
-        Assert.Equal(1, outcomes.Count(outcome => outcome.Status == WriteOutcomeStatus.Replayed));
+        Assert.Equal(1, results.Count(result => result.Outcome?.Status == WriteOutcomeStatus.Inserted));
+        Assert.Single(results.Where(result => result.Error is MongoUnitOfWorkConflictException));
+
+        var firstSession = firstConnection.OpenSession(unit, StorageAccess.Global);
+        var secondSession = secondConnection.OpenSession(unit, StorageAccess.Global);
+        var priorRows = new[] { "prior-first", "prior-second" }
+            .Count(id => firstSession.Read(Key(id)) is not null || secondSession.Read(Key(id)) is not null);
+        Assert.Equal(1, priorRows);
+        Assert.Equal(1, new[] { "race-first", "race-second" }
+            .Count(id => firstSession.Read(Key(id)) is not null || secondSession.Read(Key(id)) is not null));
     }
 
-    private static WriteOutcome AppendInUnitOfWork(
+    private static (WriteOutcome? Outcome, Exception? Error) AppendWithPriorWrite(
         IStorageProviderConnection connection,
         StorageUnit unit,
-        string payload)
+        string priorKey,
+        Barrier barrier)
     {
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
-        var outcome = work.OpenSession(unit).Append(
-            new OperationId(DateTimeOffset.UnixEpoch, "race-operation"), [Values(payload)]);
-        work.Commit();
-        return outcome;
+        var session = work.OpenSession(unit);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(Values(priorKey)).Status);
+        barrier.SignalAndWait();
+        try
+        {
+            var outcome = session.Append(
+                new OperationId(DateTimeOffset.UnixEpoch, "race-operation"), [Values(priorKey == "prior-first" ? "race-first" : "race-second")]);
+            work.Commit();
+            return (outcome, null);
+        }
+        catch (Exception exception)
+        {
+            work.Rollback();
+            return (null, exception);
+        }
     }
 
     [SkippableFact]
