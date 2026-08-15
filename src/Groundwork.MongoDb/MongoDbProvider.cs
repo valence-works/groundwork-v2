@@ -11,6 +11,7 @@ using Groundwork.Query.Model;
 using Groundwork.Substrate.Mongo;
 using Groundwork.Testing;
 using MongoDB.Bson;
+using MongoDB.Bson.IO;
 using MongoDB.Driver;
 using KernelSortDirection = Groundwork.Kernel.SortDirection;
 
@@ -796,6 +797,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 rows[0] = first;
             }
         }
+        AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(
             executionSource,
             renderOptions,
@@ -804,6 +806,45 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             command.Hint is not null,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
+    }
+
+    private void AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options)
+    {
+        var logicalIndex = options.FindPinnedIndex()?.Name;
+        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(logicalIndex)) return;
+        if (transactionSession is not null)
+            throw new InvalidOperationException(
+                "MongoDB explain-assert cannot run inside a transaction; execute the differential query outside a unit of work.");
+
+        var native = query.Pipeline.Length == 0
+            ? new BsonDocument
+            {
+                { "find", collection.CollectionNamespace.CollectionName },
+                { "filter", query.Filter },
+                { "sort", query.Sort, query.Sort.ElementCount != 0 },
+                { "projection", query.Projection, query.Projection.ElementCount != 0 },
+                { "skip", query.Skip.GetValueOrDefault(), query.Skip.HasValue },
+                { "limit", query.Limit.GetValueOrDefault(), query.Limit.HasValue },
+                { "hint", query.Hint ?? string.Empty, query.Hint is not null }
+            }
+            : new BsonDocument
+            {
+                { "aggregate", collection.CollectionNamespace.CollectionName },
+                { "pipeline", new BsonArray(query.Pipeline) },
+                { "cursor", new BsonDocument() },
+                { "hint", query.Hint ?? string.Empty, query.Hint is not null }
+            };
+        var explainCommand = new BsonDocument
+        {
+            { "explain", native },
+            { "verbosity", "executionStats" }
+        };
+        var explain = state.Context.Database.RunCommand(new BsonDocumentCommand<BsonDocument>(explainCommand));
+        var rawPlan = explain.ToJson(new JsonWriterSettings { Indent = true });
+        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex!);
+        ExplainAssertTestMode.AssertChosenIndex(
+            "MongoDB", logicalIndex!, physicalIndex, query.Hint is not null, rawPlan,
+            MongoExplainPlanInspector.ChoseIndex(explain, physicalIndex));
     }
 
     private ColumnRef? QueryColumn(string name)

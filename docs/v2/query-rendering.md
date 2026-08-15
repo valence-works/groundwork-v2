@@ -28,3 +28,37 @@ before materialization. `In` values are capped at 1,000 by default (`GW-QUERY-01
 rendered parameter, including cursor and page parameters, is checked against the provider budget
 (SQLite 999, SQL Server 2,100, PostgreSQL 65,535). No renderer emits database-side case folding;
 non-ordinal text policies are refused by the normalized semantic contract.
+
+## Explain-assert test mode
+
+Set `GW_EXPLAIN_ASSERT=1` (or `true`) when running the differential suite to verify that every
+query carrying a coverage-proven selected index actually uses its deployed physical index:
+
+```bash
+GW_EXPLAIN_ASSERT=1 \
+GW_EXPLAIN_ARTIFACT_DIR="$PWD/TestResults/groundwork-explain" \
+dotnet test tests/Groundwork.Differential.Tests
+```
+
+The mode is off by default and adds no plan command to normal query execution. When enabled, the
+provider executes the query normally and then obtains its native plan: PostgreSQL uses
+`EXPLAIN (FORMAT JSON)`, SQL Server uses showplan XML, SQLite uses `EXPLAIN QUERY PLAN`, and
+MongoDB uses `explain` with `executionStats`. The assertion requires the exact resolved physical
+index name on an `Index Scan`/`Index Only Scan`, `Index Seek`, `USING INDEX` (including SQLite's
+equivalent `USING COVERING INDEX`), or winning-plan `IXSCAN`, respectively. Match-none queries do
+not perform a provider read and therefore have no chosen index to assert.
+
+Each assertion writes the unmodified JSON, XML, or text plan to `GW_EXPLAIN_ARTIFACT_DIR`; when the
+variable is omitted, artifacts go to `TestResults/groundwork-explain`. Test output labels the proof
+as `optimizer-selected` for unhinted PostgreSQL/SQLite plans and `hinted` for SQL Server/MongoDB.
+The latter proves that the deployed index exists and is usable, not that the optimizer selected it
+freely. A failure includes the artifact path. Plans can contain identifiers and query values, so CI
+should handle the artifact directory as potentially sensitive test output.
+
+The differential harness computes its plan claim from the effective provider request, after the
+automatic identity tie-break has been appended. It does not claim `ix_number` for the nullable,
+order-only page shape: the rendered null-rank expressions and identity suffix are not served by
+that single-column index on every provider. Its positive plan proof instead uses a selective
+`(numberValue, id)` compound index, 2,000 rows, and current PostgreSQL statistics. Predicate shapes
+that the effective coverage checker proves against the compound index remain asserted; unrelated
+shapes are left at provider-default selection rather than carrying a false pinned-index claim.

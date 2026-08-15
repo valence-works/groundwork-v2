@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.SqlTypes;
 using System.Globalization;
 using System.Collections.Immutable;
 using System.Text.Json;
@@ -55,10 +56,54 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
         });
+        AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
     });
+
+    private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
+    {
+        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        var logicalIndex = query.SelectedIndex!;
+        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
+        using (var enable = Command("SET STATISTICS XML ON")) enable.ExecuteNonQuery();
+        string rawPlan;
+        try
+        {
+            using var explain = Command(query.CommandText);
+            RelationalQueryResultReader.AddParameters(explain, query);
+            using var reader = explain.ExecuteReader();
+            var plans = new List<string>();
+            do
+            {
+                while (reader.Read())
+                for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+                {
+                    if (!reader.GetName(ordinal).Contains("XML Showplan", StringComparison.OrdinalIgnoreCase) &&
+                        reader.GetFieldType(ordinal) != typeof(SqlXml))
+                        continue;
+                    var content = reader.GetValue(ordinal) switch
+                    {
+                        SqlXml xml when !xml.IsNull => xml.Value,
+                        SqlString text when !text.IsNull => text.Value,
+                        string text => text,
+                        _ => null
+                    };
+                    if (!string.IsNullOrWhiteSpace(content)) plans.Add(content);
+                }
+            } while (reader.NextResult());
+            rawPlan = string.Join(Environment.NewLine, plans);
+        }
+        finally
+        {
+            using var disable = Command("SET STATISTICS XML OFF");
+            disable.ExecuteNonQuery();
+        }
+        ExplainAssertTestMode.AssertChosenIndex(
+            "SQL Server", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
+            SqlServerExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+    }
 
     private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
         ? request

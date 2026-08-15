@@ -48,7 +48,10 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
             Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(
+                index => index.Name,
+                index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
+                StringComparer.Ordinal)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
@@ -58,10 +61,24 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
         });
+        AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
     });
+
+    private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
+    {
+        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        var logicalIndex = query.SelectedIndex!;
+        var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
+        using var explain = Command("EXPLAIN (FORMAT JSON) " + query.CommandText.TrimEnd().TrimEnd(';'));
+        RelationalQueryResultReader.AddParameters(explain, query);
+        var rawPlan = Convert.ToString(explain.ExecuteScalar(), CultureInfo.InvariantCulture) ?? string.Empty;
+        ExplainAssertTestMode.AssertChosenIndex(
+            "PostgreSQL", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
+            PostgreSqlExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
+    }
 
     private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
         ? request

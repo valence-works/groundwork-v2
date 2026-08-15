@@ -49,13 +49,7 @@ public static class RelationalQueryResultReader
         ArgumentNullException.ThrowIfNull(decode);
         using var command = connection.CreateCommand();
         command.CommandText = query.CommandText;
-        foreach (var value in query.Parameters)
-        {
-            var parameter = command.CreateParameter();
-            parameter.ParameterName = "@" + value.Name;
-            parameter.Value = value.Value ?? DBNull.Value;
-            command.Parameters.Add(parameter);
-        }
+        AddParameters(command, query);
         using var reader = command.ExecuteReader();
         var rows = new List<IReadOnlyDictionary<string, object?>>();
         while (reader.Read())
@@ -70,6 +64,20 @@ public static class RelationalQueryResultReader
             rows.Add(row);
         }
         return rows;
+    }
+
+    /// <summary>Adds the rendered values to a native command, including explain commands.</summary>
+    public static void AddParameters(DbCommand command, RelationalQueryCommand query)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(query);
+        foreach (var value in query.Parameters)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "@" + value.Name;
+            parameter.Value = value.Value ?? DBNull.Value;
+            command.Parameters.Add(parameter);
+        }
     }
 }
 
