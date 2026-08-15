@@ -16,12 +16,12 @@ public static class BatchWriteCapabilities
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
-        "Stages row writes, coalesces same-key writes, and flushes grouped writes at commit, staged reads, or the configured row cap.");
+        "Stages row writes, coalesces same-key writes, and flushes grouped writes at commit, staged reads, or the configured row cap; the aggregate or exact outcome path is selected when the unit of work begins.");
 
     public static CapabilityDescriptor PerRowOutcomesDescriptor { get; } = new(
         PerRowOutcomes,
         "Batched per-row outcomes",
-        "Returns one outcome for each staged row through CommitWithOutcomesAsync; providers may use a native returning/output path or a documented fallback.");
+        "Returns one outcome for each staged row through an exact-mode CommitWithOutcomes call; aggregate-mode units reject that API rather than fabricating evidence.");
 
     public static CapabilityDescriptor NativeBatchDescriptor { get; } = new(
         NativeBatch,
@@ -48,6 +48,15 @@ public static class BatchWriteCapabilities
             },
             ..(nativeBatch ? [NativeBatchDescriptor] : Array.Empty<CapabilityDescriptor>())
         ]);
+}
+
+/// <summary>Determines the provider path selected for a unit of work at begin time.</summary>
+public enum BatchOutcomeMode
+{
+    /// <summary>Prefer the lowest-cost aggregate provider path; exact commit APIs are unavailable.</summary>
+    Aggregate,
+    /// <summary>Retain exact provider evidence through automatic flushes and commit.</summary>
+    Exact
 }
 
 /// <summary>The operation applied to one staged row.</summary>
@@ -177,17 +186,42 @@ public sealed record BatchWriteOptions
 {
     public int MaxRowsPerFlush { get; init; } = 1_000;
 
+    /// <summary>
+    /// Selects the outcome contract before any writes can flush. Aggregate is the low-cost
+    /// default; choose Exact explicitly when per-row provider evidence is required.
+    /// </summary>
+    public BatchOutcomeMode OutcomeMode { get; init; } = BatchOutcomeMode.Aggregate;
+
     internal void Validate()
     {
         if (MaxRowsPerFlush <= 0)
             throw new ArgumentOutOfRangeException(nameof(MaxRowsPerFlush));
+        if (!Enum.IsDefined(OutcomeMode))
+            throw new ArgumentOutOfRangeException(nameof(OutcomeMode));
     }
 
     public static BatchWriteOptions Default { get; } = new();
+
+    public static BatchWriteOptions Exact { get; } = new() { OutcomeMode = BatchOutcomeMode.Exact };
 }
 
 /// <summary>One staged write and its provider outcome.</summary>
-public sealed record RowWriteOutcome(RowWrite Write, WriteOutcome Outcome);
+public enum RowWriteDisposition
+{
+    Applied,
+    Superseded
+}
+
+/// <summary>Provider evidence for one staged input, including explicit coalescing disposition.</summary>
+public sealed record RowWriteOutcome(
+    RowWrite Write,
+    WriteOutcome Outcome,
+    RowWriteDisposition Disposition = RowWriteDisposition.Applied,
+    int? WinnerOrdinal = null,
+    WriteOutcome? WinnerEvidence = null)
+{
+    public bool IsSuperseded => Disposition == RowWriteDisposition.Superseded;
+}
 
 /// <summary>Aggregate and per-row evidence returned by a batched commit.</summary>
 public sealed class BatchWriteSummary
@@ -201,9 +235,14 @@ public sealed class BatchWriteSummary
 
     public int Submitted => Outcomes.Count;
 
-    public int Succeeded => Outcomes.Count(item => item.Outcome.Succeeded);
+    /// <summary>Number of provider-applied writes that succeeded; superseded inputs are not counted.</summary>
+    public int Succeeded => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Applied && item.Outcome.Succeeded);
 
-    public int Failed => Submitted - Succeeded;
+    public int Applied => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Applied);
+
+    public int Superseded => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Superseded);
+
+    public int Failed => Outcomes.Count(item => item.Disposition == RowWriteDisposition.Applied && !item.Outcome.Succeeded);
 
     public bool IsSuccessful => Failed == 0;
 }
@@ -238,15 +277,19 @@ public interface IBatchedStorageSession
 internal sealed class BatchContext
 {
     private readonly BatchWriteOptions options;
+    private readonly bool exactOutcomes;
     private readonly List<RowWrite> staged = [];
     private readonly List<RowWriteOutcome> completed = [];
+    private readonly Dictionary<RowWrite, int> ordinals = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StorageUnitId, IBatchedStorageSession> sessions = [];
     private Exception? failure;
+    private int nextOrdinal;
 
     internal BatchContext(BatchWriteOptions? options)
     {
         this.options = options ?? BatchWriteOptions.Default;
         this.options.Validate();
+        exactOutcomes = this.options.OutcomeMode == BatchOutcomeMode.Exact;
     }
 
     internal int Count => staged.Count;
@@ -264,6 +307,7 @@ internal sealed class BatchContext
         EnsureHealthy();
         ArgumentNullException.ThrowIfNull(write);
         staged.Add(write);
+        ordinals.Add(write, nextOrdinal++);
     }
 
     internal IReadOnlyList<RowWriteOutcome> FlushFor(StorageUnit unit, StorageKey key)
@@ -273,12 +317,12 @@ internal sealed class BatchContext
         return writes.Length == 0 ? [] : Flush(writes);
     }
 
-    internal IReadOnlyList<RowWriteOutcome> FlushAll(bool exactOutcomes = false)
+    internal IReadOnlyList<RowWriteOutcome> FlushAll()
     {
         EnsureHealthy();
         if (staged.Count == 0)
             return [];
-        return Flush(staged.ToArray(), exactOutcomes);
+        return Flush(staged.ToArray());
     }
 
     internal IReadOnlyList<RowWriteOutcome> DrainCompleted()
@@ -290,7 +334,7 @@ internal sealed class BatchContext
 
     internal bool ReachedCap => staged.Count >= options.MaxRowsPerFlush;
 
-    private IReadOnlyList<RowWriteOutcome> Flush(IReadOnlyList<RowWrite> writes, bool exactOutcomes = false)
+    private IReadOnlyList<RowWriteOutcome> Flush(IReadOnlyList<RowWrite> writes)
     {
         EnsureHealthy();
         try
@@ -324,12 +368,29 @@ internal sealed class BatchContext
                 }
             }
 
-            var ordered = writes.Select(write => new RowWriteOutcome(write, outcomes[write])).ToArray();
-            staged.RemoveAll(write => writes.Contains(write, ReferenceEqualityComparer.Instance));
-            completed.AddRange(ordered);
-            if (ordered.Any(item => !item.Outcome.Succeeded))
+            var finalByOriginal = coalesced
+                .SelectMany(item => item.Originals.Select(original => (original, item.Final)))
+                .ToDictionary(item => item.original, item => item.Final, ReferenceEqualityComparer.Instance);
+            var ordered = writes.Select(write =>
             {
-                var failures = ordered.Where(item => !item.Outcome.Succeeded)
+                var providerOutcome = outcomes[write];
+                var winner = finalByOriginal[write];
+                return ReferenceEquals(write, winner)
+                    ? new RowWriteOutcome(write, providerOutcome)
+                    : new RowWriteOutcome(
+                        write,
+                        new WriteOutcome(WriteOutcomeStatus.Superseded),
+                        RowWriteDisposition.Superseded,
+                        ordinals[winner],
+                        providerOutcome);
+            }).ToArray();
+            staged.RemoveAll(write => writes.Contains(write, ReferenceEqualityComparer.Instance));
+            foreach (var write in writes)
+                ordinals.Remove(write);
+            completed.AddRange(ordered);
+            if (ordered.Any(item => item.Disposition == RowWriteDisposition.Applied && !item.Outcome.Succeeded))
+            {
+                var failures = ordered.Where(item => item.Disposition == RowWriteDisposition.Applied && !item.Outcome.Succeeded)
                     .Select(item => $"{item.Write.Unit.Id.Value}/{KeyDescription(item.Write)}: {item.Outcome.Status}");
                 throw new BatchWriteException(
                     $"A staged row write failed ({string.Join(", ", failures)}); the unit of work must be rolled back.", ordered);
@@ -348,6 +409,14 @@ internal sealed class BatchContext
         if (failure is not null)
             throw new InvalidOperationException(
                 "The unit of work contains a failed batch and must be rolled back.", failure);
+    }
+
+    internal void RequireExactOutcomes()
+    {
+        EnsureHealthy();
+        if (!exactOutcomes)
+            throw new InvalidOperationException(
+                "This unit of work selected aggregate outcomes at begin time; start a new unit of work with BatchOutcomeMode.Exact for per-row evidence.");
     }
 
     private sealed class CoalescedWrite(IReadOnlyList<RowWrite> originals)

@@ -293,7 +293,7 @@ public sealed class ConcurrencyHarnessTests
         Assert.Equal(firstCreatedAt, read.Values.Values["createdAt"]);
         Assert.Equal(2, read.Version);
 
-        using var stale = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        using var stale = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
         stale.Stage(RowWrite.Upsert(unit, Values("same", "stale", thirdCreatedAt), WriteOptions.ForVersion(1)));
         var error = Assert.Throws<BatchWriteException>(() => stale.CommitWithOutcomes());
         Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, error.Outcomes.Single().Outcome.Status);

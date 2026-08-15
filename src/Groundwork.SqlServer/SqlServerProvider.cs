@@ -36,7 +36,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
     public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
         "SQL Server", nativeBatch: true,
         exactOutcomeCost: "one OUTPUT result per MERGE batch",
-        batchCost: "uses parameter-limited MERGE VALUES batches; TVP is not yet available");
+        batchCost: "uses one durable table-valued-parameter MERGE batch; VALUES is a compatibility fallback");
 
     internal object Gate => gate;
 

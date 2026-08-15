@@ -68,7 +68,8 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
             Type = (int)column.Type,
             column.MaxLength,
             column.Precision,
-            column.Scale
+            column.Scale,
+            Collation = column.Collation?.ToString()
         }));
 
     internal static void ValidateAccess(StorageUnit unit, StorageAccess access)

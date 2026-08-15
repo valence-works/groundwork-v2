@@ -58,16 +58,21 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public BatchWriteSummary Commit() => CompleteCommit(exactOutcomes: false);
+    public BatchWriteSummary Commit() => CompleteCommit();
 
-    public BatchWriteSummary CommitWithOutcomes() => CompleteCommit(exactOutcomes: true);
+    public BatchWriteSummary CommitWithOutcomes()
+    {
+        ThrowIfTerminal();
+        batch.RequireExactOutcomes();
+        return CompleteCommit();
+    }
 
-    private BatchWriteSummary CompleteCommit(bool exactOutcomes)
+    private BatchWriteSummary CompleteCommit()
     {
         ThrowIfTerminal();
         try
         {
-            batch.FlushAll(exactOutcomes);
+            batch.FlushAll();
             transaction.Commit();
             return new BatchWriteSummary(batch.DrainCompleted());
         }

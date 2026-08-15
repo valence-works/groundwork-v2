@@ -802,14 +802,19 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public BatchWriteSummary Commit() => CompleteCommit(exactOutcomes: false);
+    public BatchWriteSummary Commit() => CompleteCommit();
 
-    public BatchWriteSummary CommitWithOutcomes() => CompleteCommit(exactOutcomes: true);
-
-    private BatchWriteSummary CompleteCommit(bool exactOutcomes)
+    public BatchWriteSummary CommitWithOutcomes()
     {
         ThrowIfTerminal();
-        batch.FlushAll(exactOutcomes);
+        batch.RequireExactOutcomes();
+        return CompleteCommit();
+    }
+
+    private BatchWriteSummary CompleteCommit()
+    {
+        ThrowIfTerminal();
+        batch.FlushAll();
         lock (database.Gate)
         {
             foreach (var pair in staged)

@@ -66,7 +66,7 @@ public sealed class SqliteProviderTests
         var observer = new WritePathObserver();
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
-            new BatchWriteOptions { MaxRowsPerFlush = 1_000 },
+            new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },
             unit);
 
         for (var index = 0; index < 1_000; index++)
@@ -96,7 +96,7 @@ public sealed class SqliteProviderTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Model(includePriority: false);
         connection.Schema.Apply(unit);
-        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
         work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
         {
             ["id"] = "one", ["value"] = "one", ["uniqueValue"] = "duplicate"
@@ -120,7 +120,7 @@ public sealed class SqliteProviderTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Model(includePriority: true);
         connection.Schema.Apply(unit);
-        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
         work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
         {
             ["id"] = "full", ["value"] = "full", ["uniqueValue"] = "full", ["priority"] = 7

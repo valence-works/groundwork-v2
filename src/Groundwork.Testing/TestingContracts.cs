@@ -124,7 +124,9 @@ public enum WriteOutcomeStatus
     Deleted,
     NotFound,
     UniqueViolation,
-    ConcurrencyConflict
+    ConcurrencyConflict,
+    /// <summary>The staged input was superseded by a later write to the same key.</summary>
+    Superseded
 }
 
 /// <summary>
@@ -335,10 +337,10 @@ public interface IUnitOfWork : IDisposable
     /// <summary>Commits staged writes and returns aggregate success counts.</summary>
     BatchWriteSummary Commit();
 
-    /// <summary>Commits staged writes and returns one outcome for every staged write.</summary>
+    /// <summary>Commits an exact-mode unit and returns one outcome for every staged write.</summary>
     BatchWriteSummary CommitWithOutcomes();
 
-    /// <summary>Asynchronously commits staged writes and returns per-row outcomes.</summary>
+    /// <summary>Asynchronously commits an exact-mode unit and returns per-row outcomes.</summary>
     ValueTask<BatchWriteSummary> CommitWithOutcomesAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Asynchronously commits staged writes and returns aggregate evidence.</summary>

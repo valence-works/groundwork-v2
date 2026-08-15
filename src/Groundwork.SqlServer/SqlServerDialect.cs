@@ -57,14 +57,17 @@ internal sealed class SqlServerDialect : RelationalDialect
             Type = (PortableType)element.GetProperty("Type").GetInt32(),
             MaxLength = ReadNullableInt(element, "MaxLength"),
             Precision = ReadNullableInt(element, "Precision"),
-            Scale = ReadNullableInt(element, "Scale")
+            Scale = ReadNullableInt(element, "Scale"),
+            Collation = ReadNullableCollation(element, "Collation")
         }).ToArray();
         if (columns.Length == 0)
             throw new InvalidOperationException("A SQL Server batch table type must declare at least one column.");
 
         var typeName = $"[dbo].{SqlServerProviderConnection.QuoteIdentifier(definition.SubjectIdentity)}";
         var body = string.Join(", ", columns.Select(column =>
-            $"{SqlServerProviderConnection.QuoteIdentifier(column.Name)} {MapType(column)} NULL"));
+            $"{SqlServerProviderConnection.QuoteIdentifier(column.Name)} {MapType(column)}" +
+            (MapCollation(column) is { } collation ? $" COLLATE {collation}" : string.Empty) +
+            " NULL"));
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"IF TYPE_ID(N'dbo.{definition.SubjectIdentity.Replace("'", "''", StringComparison.Ordinal)}') IS NOT NULL DROP TYPE {typeName}; CREATE TYPE {typeName} AS TABLE ({body});";
@@ -74,6 +77,11 @@ internal sealed class SqlServerDialect : RelationalDialect
     private static int? ReadNullableInt(JsonElement element, string name) =>
         element.TryGetProperty(name, out var property) && property.ValueKind != JsonValueKind.Null
             ? property.GetInt32()
+            : null;
+
+    private static PortableCollation? ReadNullableCollation(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var property) && property.ValueKind != JsonValueKind.Null
+            ? Enum.Parse<PortableCollation>(property.GetString()!, ignoreCase: false)
             : null;
 
     public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey)

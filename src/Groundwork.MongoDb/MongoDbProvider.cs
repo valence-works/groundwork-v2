@@ -903,7 +903,13 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             foreach (var column in Unit.Columns)
             {
                 if (Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
+                {
+                    // Mongo's _id is the lookup identity, not a substitute for the
+                    // declared key fields. Persist the key fields on insert so schema
+                    // admission and subsequent reads see the complete declaration.
+                    setOnInsert[column.Name] = document[column.Name];
                     continue;
+                }
                 if (column.Name != "createdAt" && write.Values.Values.ContainsKey(column.Name))
                     set[column.Name] = document[column.Name];
                 else

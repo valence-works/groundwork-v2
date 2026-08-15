@@ -7,7 +7,11 @@ writes, or when `BatchWriteOptions.MaxRowsPerFlush` is reached.
 ```csharp
 using var work = connection.BeginUnitOfWork(
     StorageAccess.Global,
-    new BatchWriteOptions { MaxRowsPerFlush = 1_000 },
+    new BatchWriteOptions
+    {
+        MaxRowsPerFlush = 1_000,
+        OutcomeMode = BatchOutcomeMode.Exact
+    },
     unit);
 
 work.Stage(RowWrite.Upsert(unit, values));
@@ -18,11 +22,13 @@ var summary = await work.CommitWithOutcomesAsync();
 
 Writes are first coalesced by storage unit and key in declaration order. The
 last write wins even when earlier inputs used another mode or supplied column
-set; only then are final writes grouped for a provider batch. The final result
-is associated with every coalesced input row. Writes to different keys are not
-ordered and providers may execute them in any order. A staged-key read is a
-synchronization point: all matching staged writes are flushed before the read
-is delegated, while a query flushes the whole staged set.
+set; only then are final writes grouped for a provider batch. Earlier inputs
+are returned as `Superseded` with the zero-based ordinal and provider evidence
+of their winning input; they are not reported as provider successes. Writes to
+different keys are not ordered and providers may execute them in any order. A
+staged-key read is a synchronization point: all matching staged writes are
+flushed before the read is delegated, while a query flushes the whole staged
+set.
 
 The row cap is a memory and parameter safety boundary, not a transaction
 boundary. A cap-triggered flush remains part of the enclosing unit-of-work
@@ -30,14 +36,20 @@ transaction and is rolled back with it.
 
 ## Outcomes and capabilities
 
-`Commit` and `CommitAsync` select the aggregate-cost provider path and return
-the submitted/succeeded/failed `BatchWriteSummary`. `CommitWithOutcomes` and
-`CommitWithOutcomesAsync` select exact evidence and expose one
-`RowWriteOutcome` for every staged input, including inputs coalesced into a
-final write. `RowWrite.Upsert` with an expected version, or the explicit
-`RowWrite.ConditionalUpsert`, always uses the provider's atomic conditional
-upsert primitive. A failed outcome raises `BatchWriteException`, poisons the
-unit of work against further staging/commit, and requires rollback.
+`BatchWriteOptions.OutcomeMode` is selected when the unit of work begins and
+applies to automatic cap/read/query flushes as well as commit. `Aggregate` is
+the default low-cost path; use `BatchWriteOptions.Exact` (or set
+`OutcomeMode = BatchOutcomeMode.Exact`) when provider evidence is required.
+`Commit` and `CommitAsync` return the submitted/applied/succeeded/failed/
+superseded `BatchWriteSummary`; with `Aggregate`, they use the lowest-cost
+provider path. `CommitWithOutcomes` and
+`CommitWithOutcomesAsync` require `Exact` and expose one `RowWriteOutcome` for
+every staged input. They reject an aggregate-mode unit rather than claiming
+exact evidence after an earlier aggregate flush. `RowWrite.Upsert` with an
+expected version, or the explicit `RowWrite.ConditionalUpsert`, always uses
+the provider's atomic conditional upsert primitive. A failed applied outcome
+raises `BatchWriteException`, poisons the unit of work against further
+staging/commit, and requires rollback.
 
 Providers advertise `BatchWriteCapabilities.StagedUnitOfWork` and
 `BatchWriteCapabilities.PerRowOutcomes` through `IStorageProviderConnection.Capabilities`.
@@ -83,5 +95,6 @@ dotnet run --project benchmarks/Groundwork.Benchmarks -- \
 
 The target is one batch command for a 1,000-row homogeneous upsert group on
 SQLite, PostgreSQL, SQL Server, and MongoDB aggregate commits; exact MongoDB
-outcomes intentionally cost one command per coalesced row. The transaction
-boundary is owned by the unit of work.
+outcomes intentionally cost one command per coalesced row. Select
+`OutcomeMode.Aggregate` for this benchmark target. The transaction boundary is
+owned by the unit of work.

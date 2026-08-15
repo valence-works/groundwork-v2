@@ -119,7 +119,7 @@ static void RunCommitWorkload(
     var observer = new WritePathObserver();
     using var work = provider.BeginUnitOfWork(
         StorageAccess.Global,
-        new BatchWriteOptions { MaxRowsPerFlush = 1_000 },
+        new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Aggregate },
         unit);
     for (var index = 0; index < count; index++)
     {
