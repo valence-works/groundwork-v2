@@ -37,6 +37,7 @@ public sealed class SqliteProviderTests
         Assert.NotNull(read);
         Assert.Equal("keep", read!.Values.Values["value"]);
         Assert.Equal(0, read.Values.Values["priority"]);
+        Assert.Equal(["by-value", "unique-value"], connection.Catalog.ReadIndexes(evolved.Id).Select(index => index.Name).OrderBy(name => name, StringComparer.Ordinal));
         Assert.Equal(WriteOutcomeStatus.UniqueViolation, connection.OpenSession(evolved, StorageAccess.Global).Insert(
             new StorageValues(new Dictionary<string, object?>
             {
@@ -62,7 +63,11 @@ public sealed class SqliteProviderTests
             ? [new() { Name = "id", Type = PortableType.String, IsNullable = false }, new() { Name = "value", Type = PortableType.String }, new() { Name = "uniqueValue", Type = PortableType.String }, new() { Name = "priority", Type = PortableType.Int32, IsNullable = false, Default = new PortableDefault(0) }]
             : [new() { Name = "id", Type = PortableType.String, IsNullable = false }, new() { Name = "value", Type = PortableType.String }, new() { Name = "uniqueValue", Type = PortableType.String }],
         Key = new KeyDefinition { Columns = ["id"] },
-        Indexes = [new IndexDefinition { Name = "unique-value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }]
+        Indexes =
+        [
+            new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] },
+            new IndexDefinition { Name = "unique-value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }
+        ]
     };
 
     private sealed class TemporaryStore : IDisposable
