@@ -47,7 +47,13 @@ try
                     ["value"] = "value-" + index,
                     ["createdAt"] = DateTimeOffset.UnixEpoch
                 }),
-                new WriteOptions { ExpectedVersion = version, Observer = observer });
+                new WriteOptions
+                {
+                    Precondition = version is { } expected
+                        ? WritePrecondition.IfVersion(expected)
+                        : WritePrecondition.Unconditional,
+                    Observer = observer
+                });
             if (!outcome.Succeeded)
                 throw new InvalidOperationException($"Write {index} returned {outcome.Status}.");
             version = outcome.Version;
@@ -107,7 +113,7 @@ static StorageUnit Unit(string provider) => new()
         new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
     ],
     Key = new KeyDefinition { Columns = ["id"] },
-    Concurrency = ConcurrencyDeclaration.Optimistic
+    Concurrency = ConcurrencyDeclaration.Optimistic()
 };
 
 static void RunCommitWorkload(

@@ -76,10 +76,10 @@ public static class ConformanceSuite
                 var inserted = session.Insert(ProbeModel.Values("versioned", "first"));
                 Require(inserted.Version == 1, "optimistic insert must start at version one");
                 Require(session.Update(ProbeModel.Values("versioned", "second"),
-                        WriteOptions.ForVersion(1)).Status == WriteOutcomeStatus.Updated,
+                        WriteOptions.IfVersion(1)).Status == WriteOutcomeStatus.Updated,
                     "matching optimistic update failed");
                 Require(session.Update(ProbeModel.Values("versioned", "stale"),
-                        WriteOptions.ForVersion(1)).Status == WriteOutcomeStatus.ConcurrencyConflict,
+                        WriteOptions.IfVersion(1)).Status == WriteOutcomeStatus.ConcurrencyConflict,
                     "stale optimistic update did not report a conflict");
 
                 var globalSession = connection.OpenSession(global, StorageAccess.Global);
@@ -88,7 +88,7 @@ public static class ConformanceSuite
                 Require(globalSession.Read(ProbeModel.Key("no-version"))?.Version is null,
                     "a unit without concurrency must not store versions");
                 RequireThrows<InvalidOperationException>(() => globalSession.Update(
-                    ProbeModel.Values("no-version", "changed"), WriteOptions.ForVersion(1)));
+                    ProbeModel.Values("no-version", "changed"), WriteOptions.IfVersion(1)));
             });
 
             RunCheck(checks, "unit-of-work commit and rollback", () =>
@@ -189,7 +189,7 @@ public static class ConformanceSuite
         internal static readonly StorageUnit Global = Create("conformance-global", ScopePolicy.Global,
             ConcurrencyDeclaration.None);
         internal static readonly StorageUnit Scoped = Create("conformance-scoped", ScopePolicy.Scoped,
-            ConcurrencyDeclaration.Optimistic);
+            ConcurrencyDeclaration.Optimistic());
 
         internal static StorageValues Values(string id, string value, string? unique = null) =>
             new(new Dictionary<string, object?>(StringComparer.Ordinal)

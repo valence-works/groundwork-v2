@@ -86,6 +86,19 @@ public sealed class RowWrite
         Key = key;
         Options = options ?? WriteOptions.Unconditional;
 
+        WritePreconditionValidator.Validate(
+            unit,
+            mode switch
+            {
+                RowWriteMode.Insert => WriteOperation.Insert,
+                RowWriteMode.Update => WriteOperation.Update,
+                RowWriteMode.Upsert => WriteOperation.Upsert,
+                RowWriteMode.ConditionalUpsert => WriteOperation.ConditionalUpsert,
+                RowWriteMode.Delete => WriteOperation.Delete,
+                _ => throw new ArgumentOutOfRangeException(nameof(mode))
+            },
+            Options);
+
         if (mode == RowWriteMode.Delete)
         {
             if (key is null)
@@ -101,6 +114,9 @@ public sealed class RowWrite
         {
             throw new ArgumentException("Only a delete may provide a separate key.", nameof(key));
         }
+
+        if (values is not null)
+            WritePreconditionValidator.ValidateSystemOwnedValues(unit, values.Values);
     }
 
     public StorageUnit Unit { get; }
@@ -561,7 +577,7 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
         {
             RowWriteMode.Insert => inner.Insert(write.Values!, write.Options),
             RowWriteMode.Update => inner.Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => inner is IConcurrencyStorageSession expectedConcurrency
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => inner is IConcurrencyStorageSession expectedConcurrency
                 ? expectedConcurrency.ConditionalUpsert(write.Values!, write.Options)
                 : throw new NotSupportedException("The provider session does not support conditional upsert."),
             RowWriteMode.Upsert => inner.Upsert(write.Values!, write.Options),

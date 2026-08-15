@@ -223,7 +223,7 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
             requiredCapabilities,
             ConcurrencyDeclaration.None);
         var replacementQueryOperations = new HashSet<PortableQueryOperation> { PortableQueryOperation.Contains };
-        var replacementConcurrencyModes = new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.Optimistic };
+        var replacementConcurrencyModes = new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.Optimistic() };
         var report = new ProviderCapabilityReport(
             new("test", "1"),
             new HashSet<CapabilityId>(),
@@ -251,7 +251,7 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         Assert.Contains(PortableQueryOperation.Equal, report.SupportedQueryOperations);
         Assert.Contains(ConcurrencyDeclaration.None, report.SupportedConcurrencyModes);
         Assert.Contains(PortableQueryOperation.Contains, reboundReport.SupportedQueryOperations);
-        Assert.Contains(ConcurrencyDeclaration.Optimistic, reboundReport.SupportedConcurrencyModes);
+        Assert.Contains(ConcurrencyDeclaration.Optimistic(), reboundReport.SupportedConcurrencyModes);
         Assert.False(report.Indexes.SupportsUniqueIndexes);
         Assert.Contains(WellKnownCapabilities.AtomicCommit, unitRequirements.RequiredCapabilities);
 
@@ -265,7 +265,7 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         Assert.Throws<NotSupportedException>(() => queryOperationView.Add(PortableQueryOperation.Contains));
         var concurrencyView = Assert.IsAssignableFrom<ISet<ConcurrencyDeclaration>>(
             report.SupportedConcurrencyModes);
-        Assert.Throws<NotSupportedException>(() => concurrencyView.Add(ConcurrencyDeclaration.Optimistic));
+        Assert.Throws<NotSupportedException>(() => concurrencyView.Add(ConcurrencyDeclaration.Optimistic()));
         var requiredCapabilityView = Assert.IsAssignableFrom<IList<CapabilityId>>(
             unitRequirements.RequiredCapabilities);
         Assert.Throws<NotSupportedException>(() => requiredCapabilityView.Add(
@@ -288,7 +288,7 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         var unit = new StorageUnitCapabilityRequirements(
             new StorageUnitId("orders"),
             [gated, missing, unknown],
-            ConcurrencyDeclaration.Optimistic);
+            ConcurrencyDeclaration.Optimistic());
         var provider = new ProviderCapabilityReport(
             new("test", "1"),
             new HashSet<CapabilityId> { gated },
@@ -311,12 +311,12 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         var compatibleUnit = new StorageUnitCapabilityRequirements(
             new StorageUnitId("orders"),
             [gated, missing],
-            ConcurrencyDeclaration.Optimistic);
+            ConcurrencyDeclaration.Optimistic());
         var compatibleProvider = provider with
         {
             SupportedCapabilities = new HashSet<CapabilityId> { gated, missing },
             EvidencedCapabilities = new HashSet<CapabilityId> { gated, missing },
-            SupportedConcurrencyModes = new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.Optimistic }
+            SupportedConcurrencyModes = new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.Optimistic() }
         };
 
         Assert.True(validator.Validate([compatibleUnit], compatibleProvider).IsCompatible);

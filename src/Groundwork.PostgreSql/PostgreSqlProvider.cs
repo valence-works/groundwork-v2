@@ -217,8 +217,11 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
                 SchemaVersion = index.SchemaVersion
             }).ToList();
         }
-        if (source.Concurrency == ConcurrencyDeclaration.Optimistic)
-            columns.Add(new ColumnDefinition { Name = VersionColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(1L) });
+        if (source.Concurrency.IsOptimistic)
+        {
+            RemoveDeclaredToken(source, columns);
+            columns.Add(new ColumnDefinition { Name = VersionColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) });
+        }
         return new StorageUnit
         {
             Id = source.Id,
@@ -232,6 +235,20 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
             Timestamps = source.Timestamps,
             SchemaVersion = source.SchemaVersion
         };
+    }
+
+    private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)
+    {
+        var token = source.Concurrency.TokenColumn!;
+        var declared = columns.FirstOrDefault(column => column.Name == token);
+        if (declared is null) return;
+        if (declared.Type != PortableType.Int64 || declared.IsNullable ||
+            declared.Default?.Value is not long defaultValue || defaultValue != 0)
+        {
+            throw new ArgumentException(
+                $"Optimistic token column '{token}' must be a non-null Int64 with default 0.", nameof(source));
+        }
+        columns.Remove(declared);
     }
 
     private void Remember(StorageUnit original, StorageUnit physical) => units[original.Id] = physical;
