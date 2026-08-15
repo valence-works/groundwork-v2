@@ -373,7 +373,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             var expectedColumns = expectedIndex.Columns
                 .Select(column => new RelationalIndexColumnMetadata(column.Column, column.Direction))
                 .ToArray();
-            if (!actual.Columns.SequenceEqual(expectedColumns) ||
+            if (!IndexColumnsMatch(actual.Columns, expectedColumns) ||
                 !string.Equals(
                     NormalizeIndexFilter(actual.Filter),
                     NormalizeIndexFilter(dialect.IndexFilter(expectedIndex)),
@@ -414,6 +414,29 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         }
 
         return inspection;
+    }
+
+    private static bool IndexColumnsMatch(
+        IReadOnlyList<RelationalIndexColumnMetadata> actual,
+        IReadOnlyList<RelationalIndexColumnMetadata> expected)
+    {
+        if (actual.Count != expected.Count)
+            return false;
+        for (var index = 0; index < expected.Count; index++)
+        {
+            var actualColumn = actual[index];
+            var expectedColumn = expected[index];
+            if (!string.Equals(actualColumn.Name, expectedColumn.Name, StringComparison.Ordinal) ||
+                actualColumn.Direction != expectedColumn.Direction)
+                return false;
+
+            // Dialects that expose provider null ordering report it. A null value preserves
+            // the historical direction-only contract for catalogs that cannot expose this bit.
+            var expectedNullsFirst = expectedColumn.Direction == SortDirection.Ascending;
+            if (actualColumn.NullsFirst is { } nullsFirst && nullsFirst != expectedNullsFirst)
+                return false;
+        }
+        return true;
     }
 
     private static string ProjectionAlgorithmId(PortableProjection projection) => projection switch

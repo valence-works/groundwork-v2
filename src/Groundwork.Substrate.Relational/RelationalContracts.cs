@@ -271,7 +271,10 @@ public sealed record RelationalColumnMetadata(
     string? ComputedDefinition = null,
     ColumnGeneration Generation = ColumnGeneration.Supplied);
 
-public sealed record RelationalIndexColumnMetadata(string Name, SortDirection Direction);
+public sealed record RelationalIndexColumnMetadata(
+    string Name,
+    SortDirection Direction,
+    bool? NullsFirst = null);
 
 public sealed record RelationalIndexMetadata
 {
