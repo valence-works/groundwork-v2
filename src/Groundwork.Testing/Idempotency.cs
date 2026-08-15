@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Groundwork.Kernel;
 
 namespace Groundwork.Testing;
@@ -10,7 +12,7 @@ public static class IdempotencyRules
         ArgumentNullException.ThrowIfNull(unit);
         var declaration = unit.AppendIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{unit.Name}' does not declare append idempotency.");
-        declaration.ValidateForProvider();
+        declaration.Validate(unit);
         return declaration;
     }
 
@@ -86,6 +88,12 @@ public static class IdempotencyRules
         }
     }
 
-    private static void ValidateForProvider(this AppendIdempotencyDeclaration declaration) =>
-        declaration.Validate();
+    /// <summary>Returns a portable, bounded index name for a ledger's cleanup path.</summary>
+    public static string CleanupIndexName(string ledgerName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ledgerName);
+        return "__groundwork_ledger_cleanup_" +
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ledgerName)))[..16].ToLowerInvariant();
+    }
+
 }

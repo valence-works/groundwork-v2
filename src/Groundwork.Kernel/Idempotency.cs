@@ -32,6 +32,28 @@ public sealed record AppendIdempotencyDeclaration
         }
     }
 
+    /// <summary>Validates the ledger name against the storage unit that owns it.</summary>
+    public void Validate(StorageUnit owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        Validate();
+        if (string.Equals(LedgerName, owner.Name, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"The append idempotency ledger '{LedgerName}' cannot share a provider storage name with unit '{owner.Name}'.",
+                nameof(LedgerName));
+        }
+
+        if (LedgerName is "__groundwork_metadata" or "__groundwork_sequences" or
+            "__groundwork_schema_history" or "__groundwork_schema_locks" or
+            "__groundwork_schema_fences" or "__groundwork_search_key_algorithms")
+        {
+            throw new ArgumentException(
+                $"The append idempotency ledger '{LedgerName}' is reserved by a provider-owned catalog.",
+                nameof(LedgerName));
+        }
+    }
+
 }
 
 /// <summary>Caller-supplied identity for one append operation.</summary>

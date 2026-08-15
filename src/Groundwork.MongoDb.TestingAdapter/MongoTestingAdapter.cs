@@ -27,6 +27,8 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
                 exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
                 batchCost: "uses unordered BulkWrite for aggregate commits");
             return descriptors
+                .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
+                                     inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ProviderSequence ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Select(descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence

@@ -1,10 +1,14 @@
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.MongoDb.TestingAdapter;
+using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Microsoft.Data.Sqlite;
+using MongoDB.Bson;
+using MongoDB.Driver;
 using System.Text.Json;
 using Xunit;
 
@@ -83,6 +87,63 @@ public sealed class IdempotencyProofTests
         {
             try { File.Delete(path); } catch { }
         }
+    }
+
+    [Fact]
+    public void SQLite_idempotency_cleanup_index_covers_unit_and_provider_time()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-idempotency-index-" + Guid.NewGuid().ToString("N") + ".db");
+        var ledger = "ledger_index_" + Guid.NewGuid().ToString("N");
+        try
+        {
+            using (var connection = new SqliteProviderFactory().Create($"Data Source={path}"))
+            {
+                var unit = Unit("idempotency-index-sqlite-" + Guid.NewGuid().ToString("N"), ledgerName: ledger);
+                Assert.True(connection.Schema.Apply(unit).Applied);
+                Assert.Equal(WriteOutcomeStatus.Inserted,
+                    connection.OpenSession(unit, StorageAccess.Global)
+                        .Append(new OperationId(DateTimeOffset.UnixEpoch, "index-operation"), [Values("indexed")]).Status);
+            }
+
+            using var native = new SqliteConnection($"Data Source={path}");
+            native.Open();
+            using var command = native.CreateCommand();
+            command.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'index' AND name LIKE '__groundwork_ledger_cleanup_%';";
+            var definition = Convert.ToString(command.ExecuteScalar());
+            Assert.Contains("\"unit\", \"committed_at\"", definition, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [SkippableFact]
+    public void MongoDB_idempotency_cleanup_index_covers_unit_and_provider_time()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB ledger index proof.");
+        using var connection = new MongoDbProviderFactory().Create(connectionString!);
+        var nativeConnection = Assert.IsType<MongoDbProviderConnection>(connection);
+        var ledger = "ledger_index_" + Guid.NewGuid().ToString("N");
+        var unit = Unit("idempotency-index-mongo-" + Guid.NewGuid().ToString("N"), ledgerName: ledger);
+        try
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            Assert.Equal(MongoWriteOutcomeStatus.Inserted,
+                connection.OpenSession(unit, MongoStorageAccess.Global)
+                    .Append(new OperationId(DateTimeOffset.UnixEpoch, "index-operation"), [new MongoStorageValues(new Dictionary<string, object?> { ["id"] = "indexed", ["payload"] = "indexed" })]).Status);
+        }
+        catch (InvalidOperationException exception) when (IsStandaloneMongoCapabilityRefusal(exception))
+        {
+            Skip.If(true, "MongoDB idempotency requires a transaction-capable deployment.");
+            return;
+        }
+
+        var index = nativeConnection.Database.GetCollection<BsonDocument>(ledger).Indexes.List()
+            .ToList().Single(item => item["name"] == "__groundwork_ledger_cleanup");
+        Assert.Equal("unit", index["key"].AsBsonDocument.GetElement(0).Name);
+        Assert.Equal("committed_at", index["key"].AsBsonDocument.GetElement(1).Name);
     }
 
     [SkippableFact]
@@ -285,6 +346,64 @@ public sealed class IdempotencyProofTests
         Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
             "idempotency-ledger-name-" + Guid.NewGuid().ToString("N"),
             ledgerName: tooLongUtf8Name)));
+    }
+
+    [Fact]
+    public void Ledger_names_cannot_collide_with_units_or_provider_catalogs()
+    {
+        var collidingName = "idempotency-ledger-collision-" + Guid.NewGuid().ToString("N");
+        Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(collidingName, ledgerName: collidingName)));
+        Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
+            "idempotency-ledger-provider-collision-" + Guid.NewGuid().ToString("N"),
+            ledgerName: "__groundwork_metadata")));
+        Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
+            "idempotency-ledger-provider-collision-" + Guid.NewGuid().ToString("N"),
+            ledgerName: "__groundwork_sequences")));
+    }
+
+    [SkippableFact]
+    public void MongoDB_concurrent_duplicate_nonce_inside_transactions_returns_one_replay()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB duplicate race proof.");
+        using var firstConnection = new MongoDbTestingFactory().Create(connectionString!);
+        using var secondConnection = new MongoDbTestingFactory().Create(connectionString!);
+        var unit = Unit("idempotency-mongo-race-" + Guid.NewGuid().ToString("N"));
+        Assert.True(firstConnection.Schema.Apply(unit).Applied);
+        var outcomes = Task.WhenAll(
+                Task.Run(() => AppendInUnitOfWork(firstConnection, unit, "race-first")),
+                Task.Run(() => AppendInUnitOfWork(secondConnection, unit, "race-second")))
+            .GetAwaiter().GetResult();
+
+        Assert.Equal(1, outcomes.Count(outcome => outcome.Status == WriteOutcomeStatus.Inserted));
+        Assert.Equal(1, outcomes.Count(outcome => outcome.Status == WriteOutcomeStatus.Replayed));
+    }
+
+    private static WriteOutcome AppendInUnitOfWork(
+        IStorageProviderConnection connection,
+        StorageUnit unit,
+        string payload)
+    {
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        var outcome = work.OpenSession(unit).Append(
+            new OperationId(DateTimeOffset.UnixEpoch, "race-operation"), [Values(payload)]);
+        work.Commit();
+        return outcome;
+    }
+
+    [SkippableFact]
+    public void MongoDB_schema_drift_surfaces_idempotency_window_and_ledger_changes()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB idempotency schema drift proof.");
+        using var connection = new MongoDbProviderFactory().Create(connectionString!);
+        var name = "idempotency-mongo-drift-" + Guid.NewGuid().ToString("N");
+        var applied = Unit(name, TimeSpan.FromMinutes(1), ledgerName: "drift_ledger_a");
+        Assert.True(connection.Schema.Apply(applied).Applied);
+        var changedWindow = Unit(name, TimeSpan.FromMinutes(2), ledgerName: "drift_ledger_a");
+        Assert.Throws<MongoSchemaConflictException>(() => connection.OpenSession(changedWindow, MongoStorageAccess.Global));
+        var changedLedger = Unit(name, TimeSpan.FromMinutes(1), ledgerName: "drift_ledger_b");
+        Assert.Throws<MongoSchemaConflictException>(() => connection.OpenSession(changedLedger, MongoStorageAccess.Global));
     }
 
     [SkippableFact]

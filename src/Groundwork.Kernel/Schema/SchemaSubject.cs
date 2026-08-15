@@ -90,7 +90,7 @@ public sealed class SchemaSubject
     private static void Validate(StorageUnit unit)
     {
         ConcurrencyDeclaration.ValidateDeclaration(unit);
-        unit.AppendIdempotency?.Validate();
+        unit.AppendIdempotency?.Validate(unit);
         if (string.IsNullOrWhiteSpace(unit.Id.Value))
             throw new ArgumentException("A schema subject requires a non-empty storage-unit id.", nameof(unit));
         if (string.IsNullOrWhiteSpace(unit.Name))

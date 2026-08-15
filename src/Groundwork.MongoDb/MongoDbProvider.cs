@@ -408,7 +408,9 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 $"[{string.Join("; ", report.ColumnDrift.Select(refusal => refusal.Code + " at " + refusal.Path + ": " + refusal.Message))}]");
         }
 
-        return state.Context.Database.GetCollection<BsonDocument>(CollectionName(applied, access));
+        var collection = state.Context.Database.GetCollection<BsonDocument>(CollectionName(applied, access));
+        EnsureLedgerIndexes(state, applied.Declaration.AppendIdempotency?.LedgerName);
+        return collection;
     }
 
     /// <summary>
@@ -544,6 +546,17 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         }
     }
 
+    private static void EnsureLedgerIndexes(MongoProviderState state, string? ledgerName)
+    {
+        if (ledgerName is null)
+            return;
+
+        var ledger = state.Operations(ledgerName);
+        ledger.Indexes.CreateOne(new CreateIndexModel<BsonDocument>(
+            Builders<BsonDocument>.IndexKeys.Ascending("unit").Ascending("committed_at"),
+            new CreateIndexOptions { Name = "__groundwork_ledger_cleanup" }));
+    }
+
     private static void CreateIndexes(
         IMongoCollection<BsonDocument> collection,
         StorageUnit unit,
@@ -597,7 +610,8 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             if (!current.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
                 throw new MongoSchemaConflictException($"Storage unit '{desired.Name}' cannot change its key non-additively.");
             if (current.Scope != desired.Scope || current.Concurrency != desired.Concurrency ||
-                current.Timestamps != desired.Timestamps || current.SchemaVersion != desired.SchemaVersion)
+                current.Timestamps != desired.Timestamps || current.SchemaVersion != desired.SchemaVersion ||
+                !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
             {
                 throw new MongoSchemaConflictException($"Storage unit '{desired.Name}' changed non-additive storage metadata.");
             }
@@ -750,6 +764,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         ArgumentNullException.ThrowIfNull(unit.Key.Columns);
         ArgumentNullException.ThrowIfNull(unit.DerivedColumns);
         ArgumentNullException.ThrowIfNull(unit.Indexes);
+        unit.AppendIdempotency?.Validate(unit);
         if (unit.Columns.Count == 0)
             throw new ArgumentException("A MongoDB storage unit must declare at least one column.", nameof(unit));
         if (unit.Key.Columns.Count == 0)
@@ -1197,7 +1212,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     {
         var declaration = Unit.AppendIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{Unit.Name}' does not declare append idempotency.");
-        declaration.Validate();
+        declaration.Validate(Unit);
         if (string.IsNullOrWhiteSpace(operationId.Nonce))
             throw new ArgumentException("An operation id requires a non-empty nonce.", nameof(operationId));
         if (operationId.Nonce.Length > 256)
@@ -1217,12 +1232,19 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             {
                 return ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration));
             }
-            catch (MongoLedgerConflictException) when (attempt == 0 && transactionSession is null)
+            catch (MongoLedgerConflictException) when (attempt == 0)
             {
                 // A concurrent upsert can surface as a duplicate-key error after the other
-                // transaction commits. That transaction is aborted above; retrying the whole
-                // append now observes its durable ledger row and returns Replayed. If its
-                // transaction rolled back, this attempt becomes the admitted writer.
+                // transaction commits. A standalone append is retried by its outer transaction
+                // wrapper. An explicit unit of work owns the session, so restart that aborted
+                // transaction before retrying; this preserves the public Replayed outcome for
+                // the losing duplicate instead of leaking Mongo's duplicate-key exception.
+                if (transactionSession is not null)
+                {
+                    try { transactionSession.AbortTransaction(); }
+                    catch (MongoException) { }
+                    transactionSession.StartTransaction();
+                }
             }
         }
     }
@@ -1332,6 +1354,14 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         }
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
+            throw new MongoLedgerConflictException();
+        }
+        catch (MongoCommandException exception) when (
+            exception.Code == 112 || exception.HasErrorLabel("TransientTransactionError"))
+        {
+            // WiredTiger reports a concurrent insert into the same ledger identity as a
+            // transaction write conflict on some server versions rather than duplicate key.
+            // Both outcomes mean this transaction lost the nonce race and can retry safely.
             throw new MongoLedgerConflictException();
         }
         if (previous is not null)
@@ -2228,6 +2258,9 @@ internal static class SchemaIdentity
         unit.Concurrency,
         unit.Timestamps,
         unit.SchemaVersion,
+        unit.AppendIdempotency is null
+            ? "idempotency:none"
+            : string.Join("|", "idempotency", unit.AppendIdempotency.Window.Ticks, unit.AppendIdempotency.LedgerName),
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
@@ -2238,6 +2271,12 @@ internal static class SchemaIdentity
 
     internal static bool IndexEquals(IndexDefinition left, IndexDefinition right) =>
         string.Equals(Index(left), Index(right), StringComparison.Ordinal);
+
+    internal static bool IdempotencyEquals(
+        AppendIdempotencyDeclaration? left,
+        AppendIdempotencyDeclaration? right) =>
+        left?.Window == right?.Window &&
+        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
 
     private static string Column(ColumnDefinition column) => string.Join("|",
         column.Name, column.Type, column.IsNullable, column.MaxLength, column.Precision,

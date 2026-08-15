@@ -243,6 +243,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             $"{Quote(LedgerCommittedAt)} TEXT NOT NULL, " +
             $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}));");
         command.ExecuteNonQuery();
+
+        using var cleanupIndex = Command($"CREATE INDEX IF NOT EXISTS {Quote(IdempotencyRules.CleanupIndexName(table))} " +
+            $"ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
+        cleanupIndex.ExecuteNonQuery();
     }
 
     private static void AddLedgerParameters(SqliteCommand command, string unit, string scope, string nonce)

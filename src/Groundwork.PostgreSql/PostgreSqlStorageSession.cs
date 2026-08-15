@@ -242,6 +242,10 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             $"{Quote(LedgerCommittedAt)} text NOT NULL, " +
             $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}));");
         command.ExecuteNonQuery();
+
+        using var cleanupIndex = Command($"CREATE INDEX IF NOT EXISTS {Quote(IdempotencyRules.CleanupIndexName(table))} " +
+            $"ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
+        cleanupIndex.ExecuteNonQuery();
     }
 
     private void AddLedgerParameters(NpgsqlCommand command, string unit, string scope, string nonce)

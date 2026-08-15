@@ -267,6 +267,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             // 900 bytes, while SQL Server's nonclustered key budget is 1,700 bytes.
             $"PRIMARY KEY NONCLUSTERED ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)})); END; END TRY BEGIN CATCH IF ERROR_NUMBER() <> 2714 THROW; END CATCH;");
         command.ExecuteNonQuery();
+
+        using var cleanupIndex = Command($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{IdempotencyRules.CleanupIndexName(table)}' AND object_id = OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}')) " +
+            $"CREATE INDEX {Quote(IdempotencyRules.CleanupIndexName(table))} ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
+        cleanupIndex.ExecuteNonQuery();
     }
 
     private static void AddLedgerParameters(SqlCommand command, string unit, string scope, string nonce)
