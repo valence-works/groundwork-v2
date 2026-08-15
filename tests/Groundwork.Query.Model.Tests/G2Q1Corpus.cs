@@ -49,6 +49,9 @@ internal static class G2Q1Corpus
     private static readonly ColumnRef Text = new(Table, "textSearch", QueryType.String);
     private static readonly ColumnRef Number = new(Table, "numberValue", QueryType.Decimal, decimalPrecision: 18, decimalScale: 4);
     private static readonly ColumnRef Boolean = new(Table, "boolValue", QueryType.Boolean);
+    // Boolean ordering is represented by an explicit three-state Int32 projection,
+    // not by native Boolean ordering.
+    private static readonly ColumnRef BooleanOrderKey = new(Table, "boolValueKey", QueryType.Int32, isNullable: false);
     private static readonly ColumnRef Instant = new(Table, "dateTicks", QueryType.DateTimeOffset);
     private static readonly ColumnRef Guid = new(Table, "guidKey", QueryType.Guid);
     private static readonly ColumnRef Binary = new(Table, "binaryValue", QueryType.Binary);
@@ -98,7 +101,7 @@ internal static class G2Q1Corpus
         {
             ("textOrderKey", Text, false),
             ("numberValue", Number, false),
-            ("boolValue", Boolean, false),
+            ("boolValueKey", BooleanOrderKey, false),
             ("dateTicks", Instant, false),
             ("guidKey", Guid, false),
             ("binaryValue", Binary, true)
@@ -113,11 +116,11 @@ internal static class G2Q1Corpus
             Func<Q1CorpusExercise> exercise = refused
                 ? () => new Q1CorpusExercise(Request(
                     Predicate.AlwaysTrue.Instance,
-                    ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
+                    ImmutableArray.Create(new OrderTerm(column, capturedDirection, NullOrderFor(capturedDirection))),
                     Paging.OffsetLimit(capturedPage * 2, 2)), "binary-order-refused")
                 : () => new Q1CorpusExercise(Request(
                     Predicate.AlwaysTrue.Instance,
-                    ImmutableArray.Create(new OrderTerm(column, capturedDirection)),
+                    ImmutableArray.Create(new OrderTerm(column, capturedDirection, NullOrderFor(capturedDirection))),
                     Paging.OffsetLimit(capturedPage * 2, 2)), null);
             shapes.Add(new Q1CorpusShape(
                 number++,
@@ -159,6 +162,9 @@ internal static class G2Q1Corpus
             throw new InvalidOperationException($"Q1 G2 corpus generated {shapes.Count} shapes, expected {ExpectedShapeCount}.");
         return shapes;
     }
+
+    private static NullOrder NullOrderFor(OrderDirection direction) =>
+        direction == OrderDirection.Ascending ? NullOrder.First : NullOrder.Last;
 
     private static void AddPredicateShapes(
         ICollection<Q1CorpusShape> shapes,
