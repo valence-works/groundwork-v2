@@ -52,8 +52,11 @@ public static class PhysicalSchemaDiffPlanner
         var appliedIdentities = applied?.Snapshot.SemanticOperations
             .Select(operation => operation.Identity)
             .ToHashSet(StringComparer.Ordinal) ?? [];
+        var appliedBySlot = applied?.Snapshot.SemanticOperations
+            .ToDictionary(operation => operation.SlotIdentity, StringComparer.Ordinal) ?? [];
         var pending = desired
             .Where(operation => !appliedIdentities.Contains(operation.Identity))
+            .Select(operation => Realize(operation, appliedBySlot))
             .ToList();
 
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
@@ -113,6 +116,8 @@ public static class PhysicalSchemaDiffPlanner
 
             if (desiredBySlot.TryGetValue(current.SlotIdentity, out var replacement))
             {
+                if (IsIndexWidening(current, replacement))
+                    continue;
                 if (!reportedSubjects.Add($"{current.SubjectId?.Value}:{current.SubjectIdentity}"))
                     continue;
                 refusals.Add(new SchemaRefusal(
@@ -131,6 +136,55 @@ public static class PhysicalSchemaDiffPlanner
         }
 
         return refusals.ToImmutableArray();
+    }
+
+    private static PhysicalSchemaOperation Realize(
+        PhysicalSchemaOperation operation,
+        IReadOnlyDictionary<string, PhysicalSchemaAppliedOperation> appliedBySlot)
+    {
+        if (operation is not CreatePhysicalIndexOperation create ||
+            !appliedBySlot.TryGetValue(create.SlotIdentity, out var applied) ||
+            !IsIndexWidening(applied, operation) ||
+            !create.Index.Columns.Any(indexColumn =>
+                create.Subject.Columns.Any(column =>
+                    column.Name == indexColumn.Column && column.IsNullable)))
+        {
+            return operation;
+        }
+
+        return new RebuildPhysicalIndexOperation(
+            create.Subject,
+            create.Index,
+            applied.Fingerprint);
+    }
+
+    private static bool IsIndexWidening(
+        PhysicalSchemaAppliedOperation applied,
+        PhysicalSchemaOperation desired)
+    {
+        if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
+            desired is not CreatePhysicalIndexOperation create ||
+            !SchemaFingerprint.TryParseCanonical(applied.CanonicalPayload, out var operationParts) ||
+            operationParts.Length < 5 ||
+            !SchemaFingerprint.TryParseCanonical(operationParts[4]!, out var currentIndexParts) ||
+            !SchemaFingerprint.TryParseCanonical(CreatePhysicalIndexOperation.CanonicalIndex(create.Index), out var desiredIndexParts) ||
+            currentIndexParts.Length != desiredIndexParts.Length ||
+            currentIndexParts.Length < 4 ||
+            currentIndexParts[2] != MissingValueBehavior.Excluded.ToString() ||
+            desiredIndexParts[2] != MissingValueBehavior.Included.ToString())
+        {
+            return false;
+        }
+
+        for (var index = 0; index < currentIndexParts.Length; index++)
+        {
+            if (index == 2)
+                continue;
+            if (!string.Equals(currentIndexParts[index], desiredIndexParts[index], StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
     }
 
     private static PhysicalSchemaAppliedSnapshot CreateSnapshot(

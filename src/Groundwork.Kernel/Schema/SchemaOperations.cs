@@ -232,7 +232,7 @@ public sealed class RebuildPhysicalIndexOperation : PhysicalSchemaOperation
         Subject = subject;
         Index = CreatePhysicalIndexOperation.Snapshot(index);
         SupersededFingerprint = supersededFingerprint;
-        RequiresAuthorization = subject.Evolution.IsDestructive;
+        RequiresAuthorization = true;
         SemanticMigrationId = subject.Evolution.SemanticMigrationId;
     }
 

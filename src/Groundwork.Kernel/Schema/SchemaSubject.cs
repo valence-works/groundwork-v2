@@ -300,4 +300,46 @@ public static class SchemaFingerprint
     public static string CreateCanonical(string canonical) =>
         Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(canonical)));
+
+    internal static bool TryParseCanonical(string canonical, out ImmutableArray<string?> parts)
+    {
+        ArgumentNullException.ThrowIfNull(canonical);
+        var parsed = new List<string?>();
+        var position = 0;
+        while (position < canonical.Length)
+        {
+            var separator = canonical.IndexOf(':', position);
+            if (separator < position ||
+                !int.TryParse(canonical.AsSpan(position, separator - position), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var length) ||
+                length < -1)
+            {
+                parts = [];
+                return false;
+            }
+
+            position = separator + 1;
+            if (length == -1)
+            {
+                if (position >= canonical.Length || canonical[position] != ';')
+                {
+                    parts = [];
+                    return false;
+                }
+                parsed.Add(null);
+                position++;
+                continue;
+            }
+
+            if (canonical.Length - position <= length || canonical[position + length] != ';')
+            {
+                parts = [];
+                return false;
+            }
+            parsed.Add(canonical.Substring(position, length));
+            position += length + 1;
+        }
+
+        parts = parsed.ToImmutableArray();
+        return true;
+    }
 }

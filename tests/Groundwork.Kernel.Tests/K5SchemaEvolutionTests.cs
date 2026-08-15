@@ -113,6 +113,43 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Widening_nullable_index_missing_values_is_a_protected_rebuild()
+    {
+        var initial = CreateTarget(CreateNullableIndexUnit(MissingValueBehavior.Excluded));
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(initial, executor, PlannedAt.AddMinutes(1));
+
+        var widened = CreateTarget(CreateNullableIndexUnit(MissingValueBehavior.Included));
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            widened,
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.Equal("by-category", rebuild.SubjectIdentity);
+        Assert.Contains(rebuild.Identity, PhysicalSchemaPlanProtection.Inspect(plan.Operations).DestructiveOperationIdentities);
+    }
+
+    [Fact]
+    public void Widening_index_without_nullable_keys_revalidates_with_create()
+    {
+        var initial = CreateTarget(CreateNonNullableIndexUnit(MissingValueBehavior.Excluded));
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(initial, executor, PlannedAt.AddMinutes(1));
+
+        var widened = CreateTarget(CreateNonNullableIndexUnit(MissingValueBehavior.Included));
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            widened,
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable);
+        Assert.Single(plan.Operations.OfType<CreatePhysicalIndexOperation>());
+        Assert.Empty(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+    }
+
+    [Fact]
     public void Destructive_metadata_requires_authorization_for_startup_auto_apply()
     {
         var subject = new SchemaSubject(
@@ -262,6 +299,47 @@ public sealed class K5SchemaEvolutionTests
         Indexes = includePriority
             ? [new IndexDefinition { Name = "by-priority", Columns = [new IndexColumn("priority")] }]
             : []
+    };
+
+    private static StorageUnit CreateNullableIndexUnit(MissingValueBehavior missingValues) => new()
+    {
+        Id = new StorageUnitId("catalog"),
+        Name = "Catalog",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+            new() { Name = "category", Type = PortableType.String, IsNullable = true, MaxLength = 50 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes =
+        [
+            new IndexDefinition
+            {
+                Name = "by-category",
+                Columns = [new IndexColumn("category")],
+                MissingValues = missingValues
+            }
+        ]
+    };
+
+    private static StorageUnit CreateNonNullableIndexUnit(MissingValueBehavior missingValues) => new()
+    {
+        Id = new StorageUnitId("catalog"),
+        Name = "Catalog",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Guid, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes =
+        [
+            new IndexDefinition
+            {
+                Name = "by-id",
+                Columns = [new IndexColumn("id")],
+                MissingValues = missingValues
+            }
+        ]
     };
 
     private sealed class FakeExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector
