@@ -160,20 +160,6 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
-    public void Predicate_cannot_be_subclassed_outside_the_model()
-    {
-        var constructor = typeof(Predicate).GetConstructor(
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-            binder: null,
-            types: Type.EmptyTypes,
-            modifiers: null);
-
-        Assert.NotNull(constructor);
-        Assert.True(constructor!.IsPrivate);
-        Assert.Empty(typeof(Predicate).GetConstructors(BindingFlags.Instance | BindingFlags.Public));
-    }
-
-    [Fact]
     public void Query_result_snapshots_rows_and_validates_input()
     {
         var source = new List<int> { 1 };

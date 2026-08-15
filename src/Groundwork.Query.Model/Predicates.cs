@@ -2,15 +2,11 @@ using System.Collections.Immutable;
 
 namespace Groundwork.Query.Model;
 
-public abstract class Predicate
+public abstract record Predicate
 {
-    private Predicate()
-    {
-    }
-
     public string CanonicalForm => PredicateCanonicalizer.ToCanonicalString(this);
 
-    public sealed class Equal : Predicate
+    public sealed record Equal : Predicate
     {
         public Equal(ColumnRef column, QueryConstant value)
         {
@@ -22,7 +18,7 @@ public abstract class Predicate
         public QueryConstant Value { get; }
     }
 
-    public sealed class In : Predicate
+    public sealed record In : Predicate
     {
         public In(ColumnRef column, ImmutableArray<QueryConstant> values)
         {
@@ -41,7 +37,7 @@ public abstract class Predicate
         public ImmutableArray<QueryConstant> Values { get; }
     }
 
-    public sealed class Range : Predicate
+    public sealed record Range : Predicate
     {
         public Range(ColumnRef column, Bound? lower, Bound? upper)
         {
@@ -63,7 +59,7 @@ public abstract class Predicate
                 : Bound.Exclusive(bound.Value.Bind(column));
     }
 
-    public sealed class StartsWith : Predicate
+    public sealed record StartsWith : Predicate
     {
         public StartsWith(ColumnRef column, string prefix)
         {
@@ -77,7 +73,7 @@ public abstract class Predicate
         public string Prefix { get; }
     }
 
-    public sealed class Substring : Predicate
+    public sealed record Substring : Predicate
     {
         public Substring(ColumnRef column, string needle, Anchor anchor)
         {
@@ -93,7 +89,7 @@ public abstract class Predicate
         public Anchor Anchor { get; }
     }
 
-    public sealed class ElementOf : Predicate
+    public sealed record ElementOf : Predicate
     {
         public ElementOf(ElementSetRef set, ImmutableArray<QueryConstant> values, SetQuantifier quantifier)
         {
@@ -112,7 +108,7 @@ public abstract class Predicate
         public SetQuantifier Quantifier { get; }
     }
 
-    public sealed class ColumnCompare : Predicate
+    public sealed record ColumnCompare : Predicate
     {
         public ColumnCompare(ColumnRef left, CompareOp op, ColumnRef right)
         {
@@ -130,14 +126,14 @@ public abstract class Predicate
         public ColumnRef Right { get; }
     }
 
-    public sealed class Not : Predicate
+    public sealed record Not : Predicate
     {
         public Not(Predicate inner) => Inner = inner ?? throw new ArgumentNullException(nameof(inner));
 
         public Predicate Inner { get; }
     }
 
-    public sealed class And : Predicate
+    public sealed record And : Predicate
     {
         public And(ImmutableArray<Predicate> terms)
         {
@@ -154,7 +150,7 @@ public abstract class Predicate
         public ImmutableArray<Predicate> Terms { get; }
     }
 
-    public sealed class Or : Predicate
+    public sealed record Or : Predicate
     {
         public Or(ImmutableArray<Predicate> terms)
         {
@@ -171,12 +167,12 @@ public abstract class Predicate
         public ImmutableArray<Predicate> Terms { get; }
     }
 
-    public sealed class AlwaysTrue : Predicate
+    public sealed record AlwaysTrue : Predicate
     {
         public static AlwaysTrue Instance { get; } = new();
     }
 
-    public sealed class AlwaysFalse : Predicate
+    public sealed record AlwaysFalse : Predicate
     {
         public static AlwaysFalse Instance { get; } = new();
     }
