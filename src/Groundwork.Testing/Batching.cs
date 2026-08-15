@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Testing;
 
@@ -306,6 +307,14 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
     {
         context.FlushFor(Unit, key);
         return inner.Read(key);
+    }
+
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+    {
+        // A query can observe any key in the unit, so its read barrier is the whole
+        // staged set rather than the exact-key barrier used by Read.
+        context.FlushAll();
+        return inner.Query(request, options);
     }
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);

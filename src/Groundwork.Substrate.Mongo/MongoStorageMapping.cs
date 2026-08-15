@@ -83,7 +83,10 @@ public static class MongoValueCodec
             PortableType.Int64 => new BsonInt64(ExactInt64(value, column)),
             PortableType.Decimal => EncodeDecimal(value, column),
             PortableType.Boolean => new BsonBoolean(ExactBoolean(value, column)),
-            PortableType.DateTimeOffset => new BsonDateTime(ExactDateTimeOffset(value, column).UtcDateTime),
+            // BSON DateTime is millisecond precision; the portable contract is UTC ticks.
+            // Store the canonical tick count as an Int64 so Mongo ordering and equality do
+            // not silently collapse values that differ inside one millisecond.
+            PortableType.DateTimeOffset => new BsonInt64(ExactDateTimeOffset(value, column).UtcTicks),
             PortableType.Guid => new BsonBinaryData(ExactGuid(value, column), GuidRepresentation.Standard),
             PortableType.Binary => EncodeBinary(value, column),
             PortableType.Json => EncodeJson(value, column),
@@ -105,7 +108,7 @@ public static class MongoValueCodec
             PortableType.Int64 => value.ToInt64(),
             PortableType.Decimal => DecodeDecimal(value),
             PortableType.Boolean => value.AsBoolean,
-            PortableType.DateTimeOffset => new DateTimeOffset(value.ToUniversalTime(), TimeSpan.Zero),
+            PortableType.DateTimeOffset => new DateTimeOffset(value.AsInt64, TimeSpan.Zero),
             PortableType.Guid => value.AsBsonBinaryData.ToGuid(GuidRepresentation.Standard),
             PortableType.Binary => value.AsBsonBinaryData.Bytes.ToArray(),
             PortableType.Json => DecodeJson(value),
@@ -120,7 +123,7 @@ public static class MongoValueCodec
         PortableType.Int64 => "long",
         PortableType.Decimal => "decimal",
         PortableType.Boolean => "bool",
-        PortableType.DateTimeOffset => "date",
+        PortableType.DateTimeOffset => "long",
         PortableType.Guid or PortableType.Binary => "binData",
         PortableType.Json => "object",
         _ => throw new ArgumentOutOfRangeException(nameof(column), column.Type, null)

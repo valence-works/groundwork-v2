@@ -3,6 +3,7 @@ using System.Collections;
 using System.Text.Json.Nodes;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Testing;
 
@@ -312,6 +313,8 @@ public interface IStorageSession
     StorageAccess Access { get; }
 
     StoredEntry? Read(StorageKey key);
+
+    QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
 
     WriteOutcome Insert(StorageValues values, WriteOptions? options = null);
 

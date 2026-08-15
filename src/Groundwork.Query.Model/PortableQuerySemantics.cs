@@ -322,13 +322,12 @@ public static class PortableQuerySemantics
         if (set.Type is not QueryType type)
             return false;
         if (!row.TryGetValue(set.Name, out var value) || value is null)
-            return true;
+            return false;
 
-        var candidate = value is string or byte[]
-            ? new[] { (object?)value }
-            : value is IEnumerable enumerable
-                ? enumerable.Cast<object?>().ToArray()
-                : new[] { value };
+        if (value is string or byte[] || value is not IEnumerable enumerable)
+            return false;
+
+        var candidate = enumerable.Cast<object?>().ToArray();
         if (candidate.Any(element => element is not null && !IsExactRuntimeType(type, element)))
             return false;
 

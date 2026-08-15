@@ -13,6 +13,7 @@
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../Groundwork.Testing/Groundwork.Testing.csproj" />
     <ProjectReference Include="../Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Include="../../docs/sqlserver-provider.md" Pack="true" PackagePath="\" />

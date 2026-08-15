@@ -1,11 +1,13 @@
 using System.Collections;
 using System.Collections.ObjectModel;
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.Query.Model;
 using Groundwork.Substrate.Mongo;
 using Groundwork.Testing;
 using MongoDB.Bson;
@@ -690,6 +692,151 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     public StorageUnit Unit { get; }
 
     public MongoStorageAccess Access { get; }
+
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var executionSource = Access.Policy == ScopePolicy.Scoped
+            ? QueryRequestExecution.WithProviderPredicate(request, request.Where,
+                QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value))
+            : request;
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
+        {
+            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
+        };
+        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
+        var command = new MongoQueryRenderer().Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName);
+        List<BsonDocument> documents;
+        long? facetTotalCount = null;
+        if (command.Pipeline.Length != 0)
+        {
+            var unionIndex = command.Pipeline
+                .Select((stage, index) => (stage, index))
+                .FirstOrDefault(item => item.stage.Contains("$unionWith")).index;
+            if (transactionSession is not null && unionIndex != 0)
+            {
+                // MongoDB forbids $unionWith inside a transaction. Execute the data and
+                // count branches separately on the same session, preserving the transaction
+                // snapshot while retaining streaming results outside transactions.
+                var dataPipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline.Take(unionIndex).ToArray());
+                var union = command.Pipeline[unionIndex]["$unionWith"].AsBsonDocument;
+                var countPipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(
+                    union["pipeline"].AsBsonArray.Select(value => value.AsBsonDocument).ToArray());
+                documents = collection.Aggregate(transactionSession, dataPipeline, new AggregateOptions { Hint = command.Hint }).ToList();
+                documents.AddRange(collection.Aggregate(transactionSession, countPipeline, new AggregateOptions { Hint = command.Hint }).ToList());
+            }
+            else
+            {
+                var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
+                documents = (transactionSession is null
+                    ? collection.Aggregate(pipeline, new AggregateOptions { Hint = command.Hint })
+                    : collection.Aggregate(transactionSession, pipeline, new AggregateOptions { Hint = command.Hint })).ToList();
+            }
+            if (command.IncludesTotalCount && documents.Count == 1 && documents[0].Contains("metadata") && documents[0].Contains("data"))
+            {
+                var envelope = documents[0];
+                var metadata = envelope["metadata"].AsBsonArray;
+                facetTotalCount = metadata.Count == 0 ? 0L : metadata[0].AsBsonDocument.GetValue("__groundwork_total_count", 0).ToInt64();
+                documents = envelope["data"].AsBsonArray.Select(value => value.AsBsonDocument).ToList();
+            }
+        }
+        else
+        {
+            var findOptions = new FindOptions<BsonDocument>
+            {
+                Sort = command.Sort.ElementCount == 0 ? null : command.Sort,
+                Projection = command.Projection.ElementCount == 0 ? null : command.Projection,
+                Skip = command.Skip,
+                Limit = command.Limit,
+                Hint = command.Hint
+            };
+            documents = (transactionSession is null
+                ? collection.FindSync(command.Filter, findOptions)
+                : collection.FindSync(transactionSession, command.Filter, findOptions)).ToList();
+        }
+
+        var rows = documents.Select(document =>
+        {
+            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var column in Unit.Columns)
+            {
+                if (document.TryGetValue(column.Name, out var value))
+                    row[column.Name] = MongoValueCodec.Decode(value, column);
+            }
+            if (document.TryGetValue("__groundwork_total_count", out var count))
+                row["__groundwork_total_count"] = count.ToInt64();
+            if (document.TryGetValue("__groundwork_count_only", out var marker))
+                row["__groundwork_count_only"] = marker.ToInt64();
+            return (IReadOnlyDictionary<string, object?>)row;
+        }).ToArray();
+        if (facetTotalCount is long count)
+        {
+            if (rows.Length == 0)
+            {
+                rows =
+                [
+                    new Dictionary<string, object?>
+                    {
+                        ["__groundwork_total_count"] = count,
+                        ["__groundwork_count_only"] = 1L
+                    }
+                ];
+            }
+            else
+            {
+                var first = new Dictionary<string, object?>(rows[0], StringComparer.Ordinal)
+                {
+                    ["__groundwork_total_count"] = count
+                };
+                rows[0] = first;
+            }
+        }
+        return QueryResultMaterializer.Materialize(
+            executionSource,
+            renderOptions,
+            rows,
+            renderOptions.FindPinnedIndex()?.Name,
+            command.Hint is not null,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+    }
+
+    private ColumnRef? QueryColumn(string name)
+    {
+        var column = Unit.Columns.Single(item => item.Name == name);
+        return column.Type switch
+        {
+            PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
+            PortableType.Int32 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int32, column.IsNullable),
+            PortableType.Int64 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int64, column.IsNullable),
+            PortableType.Decimal => new ColumnRef(new TableId(Unit.Name), name, QueryType.Decimal, column.IsNullable, null,
+                column.Precision is int precision ? checked((byte)precision) : null,
+                column.Scale is int scale ? checked((byte)scale) : null),
+            PortableType.String => new ColumnRef(new TableId(Unit.Name), name, QueryType.String, column.IsNullable, column.MaxLength),
+            PortableType.DateTimeOffset => new ColumnRef(new TableId(Unit.Name), name, QueryType.DateTimeOffset, column.IsNullable),
+            PortableType.Guid => new ColumnRef(new TableId(Unit.Name), name, QueryType.Guid, column.IsNullable),
+            PortableType.Binary => new ColumnRef(new TableId(Unit.Name), name, QueryType.Binary, column.IsNullable, column.MaxLength),
+            _ => null
+        };
+    }
+
+    private static QueryType? QueryTypeOf(PortableType type) => type switch
+    {
+        PortableType.Boolean => QueryType.Boolean,
+        PortableType.Int32 => QueryType.Int32,
+        PortableType.Int64 => QueryType.Int64,
+        PortableType.Decimal => QueryType.Decimal,
+        PortableType.String => QueryType.String,
+        PortableType.DateTimeOffset => QueryType.DateTimeOffset,
+        PortableType.Guid => QueryType.Guid,
+        PortableType.Binary => QueryType.Binary,
+        _ => null
+    };
 
     public MongoStoredEntry? Read(MongoStorageKey key)
     {
