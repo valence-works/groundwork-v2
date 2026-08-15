@@ -52,6 +52,8 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.All;
+
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
     {
         ThrowIfDisposed();
@@ -62,9 +64,16 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
+        => BeginUnitOfWork(access, BatchWriteOptions.Default, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
@@ -73,7 +82,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         if (states.Select(state => state.Unit.Id).Distinct().Count() != states.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
 
-        return new InMemoryUnitOfWork(database, states, access);
+        return new InMemoryUnitOfWork(database, states, access, options);
     }
 
     public void Dispose() => disposed = true;
@@ -510,15 +519,18 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
     private readonly Dictionary<StorageUnitId, InMemoryUnitState> staged;
     private readonly Dictionary<StorageUnitId, long> baseRevisions;
     private readonly List<InMemoryStorageSession> sessions = [];
+    private readonly BatchContext batch;
     private bool terminal;
 
     internal InMemoryUnitOfWork(
         InMemoryDatabase database,
         IReadOnlyList<InMemoryUnitState> states,
-        StorageAccess access)
+        StorageAccess access,
+        BatchWriteOptions options)
     {
         this.database = database;
         this.access = access;
+        batch = new BatchContext(options);
         lock (database.Gate)
         {
             baseRevisions = states.ToDictionary(state => state.Unit.Id, state => state.Revision);
@@ -536,12 +548,34 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
         var session = new InMemoryStorageSession(database, state, access);
         sessions.Add(session);
-        return session;
+        var batched = new BatchStorageSession(session, batch);
+        batch.Register(batched);
+        return batched;
+    }
+
+    public void Stage(RowWrite write)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        ThrowIfTerminal();
+        if (!staged.ContainsKey(write.Unit.Id))
+            throw new InvalidOperationException(
+                $"Storage unit '{write.Unit.Id.Value}' was not declared for this unit of work.");
+        if (!sessions.Any(session => session.Unit.Id == write.Unit.Id))
+            _ = OpenSession(write.Unit);
+        batch.Stage(write);
+        if (batch.ReachedCap)
+            batch.FlushAll();
     }
 
     public void Commit()
     {
+        _ = CommitWithOutcomes();
+    }
+
+    public BatchWriteSummary CommitWithOutcomes()
+    {
         ThrowIfTerminal();
+        batch.FlushAll();
         lock (database.Gate)
         {
             foreach (var pair in staged)
@@ -560,7 +594,17 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
         terminal = true;
         CloseSessions();
+        return new BatchWriteSummary(batch.DrainCompleted());
     }
+
+    public ValueTask<BatchWriteSummary> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(CommitWithOutcomes());
+    }
+
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
+        CommitWithOutcomesAsync(cancellationToken);
 
     public void Rollback()
     {

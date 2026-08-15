@@ -9,7 +9,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencyStorageSession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -49,6 +49,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
         Execute(() => ConditionalUpsertCore(values, options));
 
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
+        ExecuteWrite(() => ApplyBatchCore(writes));
+
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
         var existing = ReadCore(key);
@@ -70,6 +73,146 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     });
 
     internal void Close() => closed = true;
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
+    {
+        ArgumentNullException.ThrowIfNull(writes);
+        if (writes.Count == 0)
+            return [];
+        if (writes.Any(write => write.Options.ExpectedVersion is not null))
+            return ApplyBatchFallback(writes);
+        return writes[0].Mode switch
+        {
+            RowWriteMode.Insert => ApplyInsertBatch(writes),
+            RowWriteMode.Upsert => ApplyUpsertBatch(writes),
+            _ => ApplyBatchFallback(writes)
+        };
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyInsertBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
+        foreach (var write in writes)
+        {
+            ValidateValues(write.Values!.Values, requireAllNonNullable: true);
+            if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
+                return ApplyBatchFallback(writes);
+        }
+        using var command = Command(string.Empty);
+        var rows = AddBatchValues(command, writes, columns);
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT DO NOTHING RETURNING {string.Join(", ", Unit.Key.Columns.Select(Quote))};";
+        writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-insert", "PostgreSQL multi-row INSERT", IsProbe: false));
+        try
+        {
+            var returned = ReadReturnedKeys(command);
+            var version = VersionColumn is null ? (long?)null : 1;
+            return writes.Select(write => new RowWriteOutcome(write,
+                returned.Contains(write.Identity)
+                    ? new WriteOutcome(WriteOutcomeStatus.Inserted, version)
+                    : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
+        }
+        catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyUpsertBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
+        foreach (var write in writes)
+        {
+            ValidateValues(write.Values!.Values, requireAllNonNullable: false);
+            if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
+                return ApplyBatchFallback(writes);
+        }
+        using var command = Command(string.Empty);
+        var rows = AddBatchValues(command, writes, columns);
+        var conflictPredicate = PartialKeyPredicate();
+        var conflict = $"({string.Join(", ", Unit.Key.Columns.Select(Quote))})" +
+            (conflictPredicate is null ? string.Empty : $" WHERE {conflictPredicate}");
+        var updates = columns
+            .Where(column => !Unit.Key.Columns.Contains(column, StringComparer.Ordinal) &&
+                             column != PostgreSqlSchemaCoordinator.ScopeColumn)
+            .Select(column => $"{Quote(column)}=EXCLUDED.{Quote(column)}")
+            .ToList();
+        if (VersionColumn is not null)
+            updates.Add($"{Quote(VersionColumn.Name)}={Quote(Unit.Name)}.{Quote(VersionColumn.Name)}+1");
+        if (updates.Count == 0)
+            updates.Add($"{Quote(Unit.Key.Columns[0])}={Quote(Unit.Name)}.{Quote(Unit.Key.Columns[0])}");
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT {conflict} DO UPDATE SET {string.Join(", ", updates)} RETURNING {string.Join(", ", Unit.Key.Columns.Select(Quote))};";
+        writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-upsert", "PostgreSQL multi-row INSERT ON CONFLICT", IsProbe: false));
+        try
+        {
+            var returned = ReadReturnedKeys(command);
+            return writes.Select(write => new RowWriteOutcome(write,
+                returned.Contains(write.Identity)
+                    ? new WriteOutcome(WriteOutcomeStatus.Upserted)
+                    : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
+        }
+        catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private List<string> AddBatchValues(NpgsqlCommand command, IReadOnlyList<RowWrite> writes, IReadOnlyList<string> columns)
+    {
+        var rows = new List<string>(writes.Count);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var physical = PhysicalValues(writes[row].Values!.Values, includeVersion: VersionColumn is not null);
+            var parameters = new List<string>(columns.Count);
+            foreach (var column in columns)
+            {
+                var name = $"r{row}_{column}";
+                parameters.Add("@" + name);
+                Add(command, name, physical[column]);
+            }
+            rows.Add($"({string.Join(", ", parameters)})");
+        }
+        return rows;
+    }
+
+    private HashSet<string> ReadReturnedKeys(NpgsqlCommand command)
+    {
+        var identities = new HashSet<string>(StringComparer.Ordinal);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+            for (var index = 0; index < Unit.Key.Columns.Count; index++)
+            {
+                var column = Unit.Key.Columns[index];
+                if (column != PostgreSqlSchemaCoordinator.ScopeColumn)
+                    values[column] = FromDatabase(reader.GetValue(index), Column(column));
+            }
+            identities.Add(BatchIdentity(values));
+        }
+        return identities;
+    }
+
+    private string BatchIdentity(IReadOnlyDictionary<string, object?> values) => string.Join("\u001e",
+        Unit.Key.Columns.Where(column => column != PostgreSqlSchemaCoordinator.ScopeColumn).Select(column => values[column] switch
+        {
+            null => "<null>",
+            byte[] bytes => Convert.ToBase64String(bytes),
+            DateTimeOffset timestamp => timestamp.UtcTicks.ToString(CultureInfo.InvariantCulture),
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "",
+            _ => values[column]?.ToString() ?? ""
+        }));
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
+        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+        {
+            RowWriteMode.Insert => Insert(write.Values!, write.Options),
+            RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+        })).ToArray();
 
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {

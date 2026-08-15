@@ -7,7 +7,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorageSession
+internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -53,6 +53,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
         Execute(() => ConditionalUpsertCore(values, options));
 
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
+        ExecuteWrite(() => ApplyBatchCore(writes));
+
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
         var existing = ReadCore(key);
@@ -71,6 +74,178 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     });
 
     internal void Close() => closed = true;
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
+    {
+        ArgumentNullException.ThrowIfNull(writes);
+        if (writes.Count == 0)
+            return [];
+
+        // Expected-version writes and deletes need their per-row predicates and
+        // conflict details. Keep those semantics exact; unconditional inserts and
+        // upserts are the provider-native multi-row path.
+        if (writes.Any(write => write.Options.ExpectedVersion is not null))
+            return ApplyBatchFallback(writes);
+
+        return writes[0].Mode switch
+        {
+            RowWriteMode.Insert => ApplyInsertBatch(writes),
+            RowWriteMode.Upsert => ApplyUpsertBatch(writes),
+            _ => ApplyBatchFallback(writes)
+        };
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyInsertBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
+        foreach (var write in writes)
+        {
+            ValidateValues(write.Values!.Values, requireAllNonNullable: true);
+            if (write.Values!.Values.Keys.Except(supplied.Select(column => column.Name), StringComparer.Ordinal).Any())
+                return ApplyBatchFallback(writes);
+        }
+
+        var columns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            columns.Add(ScopeColumnDefinition);
+        var valuesSql = new List<string>();
+        using var command = Command(string.Empty);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var parameters = new List<string>();
+            foreach (var column in columns)
+            {
+                var name = $"@r{row}_{column.Name}";
+                parameters.Add(name);
+                command.Parameters.AddWithValue(name, column.Name == SqliteSchemaCoordinator.VersionColumn
+                    ? 1L
+                    : column.Name == SqliteSchemaCoordinator.ScopeColumn
+                        ? Access.Scope!.Value
+                        : ToSqlite(writes[row].Values!.Values[column.Name], column) ?? DBNull.Value);
+            }
+            valuesSql.Add($"({string.Join(", ", parameters)})");
+        }
+
+        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote));
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)} ON CONFLICT DO NOTHING RETURNING {returning};";
+        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-insert", "SQLite multi-row INSERT", IsProbe: false));
+        try
+        {
+            var inserted = ReadReturnedKeys(command);
+            var version = VersionColumnDefinition is null ? (long?)null : 1;
+            return writes.Select(write => new RowWriteOutcome(write,
+                inserted.Contains(write.Identity)
+                    ? new WriteOutcome(WriteOutcomeStatus.Inserted, version)
+                    : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
+        }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyUpsertBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
+        foreach (var write in writes)
+        {
+            ValidateValues(write.Values!.Values, requireAllNonNullable: false);
+            if (write.Values!.Values.Keys.Except(supplied.Select(column => column.Name), StringComparer.Ordinal).Any())
+                return ApplyBatchFallback(writes);
+        }
+
+        var columns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (ScopeColumnDefinition is not null)
+            columns.Add(ScopeColumnDefinition);
+        var valuesSql = new List<string>();
+        using var command = Command(string.Empty);
+        for (var row = 0; row < writes.Count; row++)
+        {
+            var parameters = new List<string>();
+            foreach (var column in columns)
+            {
+                var name = $"@r{row}_{column.Name}";
+                parameters.Add(name);
+                command.Parameters.AddWithValue(name, column.Name == SqliteSchemaCoordinator.VersionColumn
+                    ? 1L
+                    : column.Name == SqliteSchemaCoordinator.ScopeColumn
+                        ? Access.Scope!.Value
+                        : ToSqlite(writes[row].Values!.Values[column.Name], column) ?? DBNull.Value);
+            }
+            valuesSql.Add($"({string.Join(", ", parameters)})");
+        }
+
+        var updateColumns = supplied
+            .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                             column.Name != SqliteSchemaCoordinator.ScopeColumn)
+            .Select(column => $"{Quote(column.Name)}=excluded.{Quote(column.Name)}")
+            .ToList();
+        if (VersionColumnDefinition is not null)
+            updateColumns.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(Unit.Name)}.{Quote(VersionColumnDefinition.Name)}+1");
+        if (updateColumns.Count == 0)
+            updateColumns.Add($"{Quote(Unit.Key.Columns[0])}={Quote(Unit.Name)}.{Quote(Unit.Key.Columns[0])}");
+
+        var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
+            VersionColumnDefinition is null ? [] : [Quote(VersionColumnDefinition.Name)]));
+        command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)} ON CONFLICT ({string.Join(", ", Unit.Key.Columns.Select(Quote))}) DO UPDATE SET {string.Join(", ", updateColumns)} RETURNING {returning};";
+        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-upsert", "SQLite multi-row INSERT ON CONFLICT", IsProbe: false));
+        try
+        {
+            var returned = ReadReturnedKeys(command);
+            return writes.Select(write => new RowWriteOutcome(write,
+                returned.Contains(write.Identity)
+                    ? new WriteOutcome(WriteOutcomeStatus.Upserted)
+                    : new WriteOutcome(WriteOutcomeStatus.UniqueViolation))).ToArray();
+        }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private HashSet<string> ReadReturnedKeys(SqliteCommand command)
+    {
+        var identities = new HashSet<string>(StringComparer.Ordinal);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+            for (var index = 0; index < Unit.Key.Columns.Count; index++)
+            {
+                var column = Unit.Key.Columns[index];
+                if (column != SqliteSchemaCoordinator.ScopeColumn)
+                    values[column] = FromSqlite(reader.GetValue(index), Column(column));
+            }
+            identities.Add(BatchIdentity(values));
+        }
+        return identities;
+    }
+
+    private string BatchIdentity(IReadOnlyDictionary<string, object?> values) => string.Join("\u001e",
+        LogicalKeyColumns.Select(column => values[column] switch
+        {
+            null => "<null>",
+            byte[] bytes => Convert.ToBase64String(bytes),
+            DateTimeOffset timestamp => timestamp.UtcTicks.ToString(CultureInfo.InvariantCulture),
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "",
+            _ => values[column]?.ToString() ?? ""
+        }));
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
+        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+        {
+            RowWriteMode.Insert => Insert(write.Values!, write.Options),
+            RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+        })).ToArray();
 
     private WriteOutcome Mutate(
         StorageValues values,

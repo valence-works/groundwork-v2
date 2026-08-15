@@ -56,6 +56,63 @@ public sealed class SqliteProviderTests
         using var second = new SqliteProviderFactory().Create(store.ConnectionString);
     }
 
+    [Fact]
+    public void Batched_upserts_use_one_native_command_and_return_all_outcomes()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Model(includePriority: false);
+        connection.Schema.Apply(unit);
+        var observer = new WritePathObserver();
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            new BatchWriteOptions { MaxRowsPerFlush = 1_000 },
+            unit);
+
+        for (var index = 0; index < 1_000; index++)
+        {
+            work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = $"id-{index}",
+                ["value"] = $"value-{index}",
+                ["uniqueValue"] = $"unique-{index}"
+            }), new WriteOptions { Observer = observer }));
+        }
+
+        var summary = work.CommitWithOutcomes();
+
+        Assert.True(summary.IsSuccessful);
+        Assert.Equal(1_000, summary.Submitted);
+        Assert.Equal(1, observer.RoundTrips);
+        Assert.Equal("value-999", connection.OpenSession(unit, StorageAccess.Global)
+            .Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "id-999" }))!
+            .Values.Values["value"]);
+    }
+
+    [Fact]
+    public void Batched_insert_failure_reports_the_key_and_rolls_back_the_batch()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Model(includePriority: false);
+        connection.Schema.Apply(unit);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one", ["value"] = "one", ["uniqueValue"] = "duplicate"
+        })));
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "two", ["value"] = "two", ["uniqueValue"] = "duplicate"
+        })));
+
+        var error = Assert.Throws<BatchWriteException>(() => work.CommitWithOutcomes());
+        Assert.Contains("id=two", error.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(WriteOutcomeStatus.UniqueViolation), error.Message, StringComparison.Ordinal);
+        Assert.Null(connection.OpenSession(unit, StorageAccess.Global)
+            .Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "one" })));
+    }
+
     private static StorageUnit Model(bool includePriority) => new()
     {
         Id = new StorageUnitId("rebuild"), Name = "rebuild",

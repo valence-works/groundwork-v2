@@ -326,7 +326,19 @@ public interface IUnitOfWork : IDisposable
 {
     IStorageSession OpenSession(StorageUnit unit);
 
+    /// <summary>Stages a row write for the next provider batch.</summary>
+    void Stage(RowWrite write);
+
     void Commit();
+
+    /// <summary>Commits staged writes and returns one outcome for every staged write.</summary>
+    BatchWriteSummary CommitWithOutcomes();
+
+    /// <summary>Asynchronously commits staged writes and returns per-row outcomes.</summary>
+    ValueTask<BatchWriteSummary> CommitWithOutcomesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Asynchronously commits staged writes and returns aggregate evidence.</summary>
+    ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default);
 
     void Rollback();
 }
@@ -337,9 +349,17 @@ public interface IStorageProviderConnection : IDisposable
 
     ISchemaCoordinator Schema { get; }
 
+    /// <summary>Provider capabilities relevant to staged writes and their outcome contract.</summary>
+    IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
+
     IStorageSession OpenSession(StorageUnit unit, StorageAccess access);
 
     IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units);
+
+    IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        params StorageUnit[] units);
 }
 
 /// <summary>

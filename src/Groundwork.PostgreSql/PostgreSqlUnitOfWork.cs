@@ -12,6 +12,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
     private readonly IReadOnlyDictionary<StorageUnitId, StorageUnit> units;
     private readonly StorageAccess access;
     private readonly List<PostgreSqlStorageSession> sessions = [];
+    private readonly BatchContext batch;
     private bool terminal;
 
     internal PostgreSqlUnitOfWork(
@@ -19,12 +20,14 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         IReadOnlyList<StorageUnit> declarations,
-        StorageAccess access)
+        StorageAccess access,
+        BatchWriteOptions options)
     {
         this.owner = owner;
         this.connection = connection;
         this.transaction = transaction;
         this.access = access;
+        batch = new BatchContext(options);
         units = declarations.ToDictionary(unit => unit.Id, owner.Resolve);
     }
 
@@ -36,23 +39,59 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
         var session = new PostgreSqlStorageSession(owner, physical, access, connection, transaction);
         sessions.Add(session);
-        return session;
+        var batched = new BatchStorageSession(session, batch);
+        batch.Register(batched);
+        return batched;
+    }
+
+    public void Stage(RowWrite write)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        ThrowIfTerminal();
+        if (!units.ContainsKey(write.Unit.Id))
+            throw new InvalidOperationException($"Storage unit '{write.Unit.Id.Value}' was not declared for this unit of work.");
+        if (!sessions.Any(session => session.Unit.Id == write.Unit.Id))
+            _ = OpenSession(write.Unit);
+        batch.Stage(write);
+        if (batch.ReachedCap)
+            batch.FlushAll();
     }
 
     public void Commit()
     {
+        _ = CommitWithOutcomes();
+    }
+
+    public BatchWriteSummary CommitWithOutcomes()
+    {
         ThrowIfTerminal();
         try
         {
+            batch.FlushAll();
             transaction.Commit();
-            terminal = true;
-            CloseSessions();
+            return new BatchWriteSummary(batch.DrainCompleted());
+        }
+        catch
+        {
+            try { transaction.Rollback(); }
+            finally { Complete(); }
+            throw;
         }
         finally
         {
-            connection.Dispose();
+            if (!terminal)
+                Complete();
         }
     }
+
+    public ValueTask<BatchWriteSummary> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(CommitWithOutcomes());
+    }
+
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
+        CommitWithOutcomesAsync(cancellationToken);
 
     public void Rollback()
     {
@@ -79,6 +118,13 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
     {
         foreach (var session in sessions)
             session.Close();
+    }
+
+    private void Complete()
+    {
+        terminal = true;
+        CloseSessions();
+        connection.Dispose();
     }
 
     private void ThrowIfTerminal()

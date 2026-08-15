@@ -34,6 +34,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.All;
+
     internal string ConnectionString => connectionString;
 
     internal void Remember(StorageUnit source) =>
@@ -59,9 +61,16 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
+        => BeginUnitOfWork(access, BatchWriteOptions.Default, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
@@ -78,7 +87,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         {
             var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
             OwnConnection(connection);
-            return new PostgreSqlUnitOfWork(this, connection, transaction, units, access);
+            return new PostgreSqlUnitOfWork(this, connection, transaction, units, access, options);
         }
         catch
         {
