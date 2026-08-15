@@ -10,7 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Records/Groundwork.Records.csproj" />
-    <ProjectReference Include="../Groundwork.Testing/Groundwork.Testing.csproj" />
+    <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
     <ProjectReference Include="../Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
   </ItemGroup>
 

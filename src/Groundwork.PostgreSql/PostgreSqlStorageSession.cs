@@ -6,7 +6,8 @@ using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 using Npgsql;
 using NpgsqlTypes;
 

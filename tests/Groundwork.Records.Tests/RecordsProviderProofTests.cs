@@ -7,6 +7,7 @@ using Groundwork.Records.TestingAdapter;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Groundwork.Store;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using Npgsql;

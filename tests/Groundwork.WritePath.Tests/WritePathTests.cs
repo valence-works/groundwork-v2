@@ -4,6 +4,7 @@ using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Microsoft.Data.Sqlite;
 using Xunit;
 

@@ -3,6 +3,7 @@ using Groundwork.MongoDb;
 using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
+using Groundwork.Store;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using Xunit;

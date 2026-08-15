@@ -7,6 +7,8 @@ using Groundwork.Query.Planning;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 using System.Collections.Immutable;
 using Xunit;
 

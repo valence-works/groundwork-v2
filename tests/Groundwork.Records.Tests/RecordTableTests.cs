@@ -3,6 +3,7 @@ using Groundwork.Records;
 using Groundwork.Records.TestingAdapter;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.Records.Tests;

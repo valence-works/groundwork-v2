@@ -5,6 +5,7 @@ using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.StreamCapabilities.Tests;

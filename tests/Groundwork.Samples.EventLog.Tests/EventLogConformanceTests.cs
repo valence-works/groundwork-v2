@@ -5,6 +5,7 @@ using Groundwork.Samples.EventLog;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Groundwork.Query.Model;
 using Xunit;
 

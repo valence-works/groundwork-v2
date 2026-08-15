@@ -9,6 +9,8 @@ using Groundwork.Query.Model;
 
 namespace Groundwork.Testing;
 
+using Groundwork.Store;
+
 /// <summary>A deterministic provider-neutral reference implementation for the testing package.</summary>
 public sealed class InMemoryProviderFactory : IStorageProviderFactory
 {

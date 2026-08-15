@@ -3,6 +3,7 @@ using Testcontainers.MsSql;
 using Groundwork.Kernel;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.SqlServer.Tests;

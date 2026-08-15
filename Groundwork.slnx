@@ -1,5 +1,9 @@
 <Solution>
-  <Folder Name="/src/" />
+  <Folder Name="/src/">
+    <Project Path="src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
+    <Project Path="src/Groundwork.Records.Store/Groundwork.Records.Store.csproj" />
+    <Project Path="src/Groundwork.Store/Groundwork.Store.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Kernel/">
     <Project Path="src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
   </Folder>
@@ -60,9 +64,11 @@
   <Folder Name="/src/Groundwork.Analyzers/">
     <Project Path="src/Groundwork.Analyzers/Groundwork.Analyzers.csproj" />
   </Folder>
+  <Folder Name="/samples/" />
   <Folder Name="/samples/Groundwork.Samples.EventLog/">
     <Project Path="samples/Groundwork.Samples.EventLog/Groundwork.Samples.EventLog.csproj" />
   </Folder>
+  <Folder Name="/benchmarks/" />
   <Folder Name="/benchmarks/Groundwork.Benchmarks/">
     <Project Path="benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj" />
   </Folder>

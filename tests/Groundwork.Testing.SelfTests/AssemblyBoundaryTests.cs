@@ -1,5 +1,6 @@
 using System.Reflection;
 using Groundwork.Testing;
+using Groundwork.Store;
 
 namespace Groundwork.Testing.SelfTests;
 

@@ -1,7 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Store;
 
 /// <summary>Capability descriptors exposed by providers that implement staged writes.</summary>
 public static class BatchWriteCapabilities

@@ -6,7 +6,8 @@ using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 

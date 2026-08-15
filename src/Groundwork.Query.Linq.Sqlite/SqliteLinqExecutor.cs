@@ -1,6 +1,6 @@
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
-using Groundwork.Testing;
+using Groundwork.Store;
 
 namespace Groundwork.Query.Linq.Sqlite;
 

@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Diagnostics;
+
+
 
 /// <summary>Failure raised by the opt-in native explain-plan assertion mode.</summary>
 public sealed class ExplainAssertionException : InvalidOperationException

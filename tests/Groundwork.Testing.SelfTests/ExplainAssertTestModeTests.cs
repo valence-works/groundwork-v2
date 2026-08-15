@@ -1,4 +1,6 @@
 using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 
 namespace Groundwork.Testing.SelfTests;
 

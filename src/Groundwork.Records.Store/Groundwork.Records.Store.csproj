@@ -5,12 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
-    <PackageId>Groundwork.MongoDb.TestingAdapter</PackageId>
-    <Description>Groundwork.Testing adapter for the native MongoDB provider.</Description>
+    <PackageId>Groundwork.Records.Store</PackageId>
+    <Description>Production provider bridge and typed unit-of-work helpers for Groundwork Records.</Description>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
+    <ProjectReference Include="../Groundwork.Records/Groundwork.Records.csproj" />
     <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
   </ItemGroup>
 
