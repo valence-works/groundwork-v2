@@ -66,26 +66,99 @@ internal sealed class DeclarationState
 
     public KernelStorageUnit Build(PortabilityValidationContext? context)
     {
-        if (key is null)
-            throw new InvalidOperationException("A storage declaration requires a key before Build().");
-
         var unit = new KernelStorageUnit
         {
             Id = new StorageUnitId(id),
             Name = name,
             Columns = Array.AsReadOnly(columns.ToArray()),
-            Key = new KeyDefinition { Columns = Array.AsReadOnly(key.Columns.ToArray()) },
+            Key = new KeyDefinition
+            {
+                Columns = Array.AsReadOnly((key?.Columns ?? Array.Empty<string>()).ToArray())
+            },
             Indexes = Array.AsReadOnly(indexes.ToArray())
         };
 
+        var declarationDiagnostics = ValidateReferences(unit, key is null);
         var result = BuilderPortabilityValidation.Validate(unit, context);
-        if (!result.IsPortable)
+        var diagnostics = declarationDiagnostics
+            .Concat(result.Refusals.Select(refusal =>
+                new GroundworkDiagnostic(refusal.Code, refusal.Message, refusal.Path)))
+            .ToArray();
+        if (diagnostics.Length != 0)
         {
-            throw new StorageDeclarationException(result.Refusals.Select(refusal =>
-                new GroundworkDiagnostic(refusal.Code, refusal.Message, refusal.Path)));
+            throw new StorageDeclarationException(diagnostics);
         }
 
         return unit;
+    }
+
+    private static IReadOnlyList<GroundworkDiagnostic> ValidateReferences(
+        KernelStorageUnit unit,
+        bool missingKey)
+    {
+        var diagnostics = new List<GroundworkDiagnostic>();
+        if (missingKey)
+        {
+            diagnostics.Add(new(
+                "GW-DECL-KEY-001",
+                "A storage declaration requires a key before Build().",
+                "key"));
+        }
+
+        var declaredColumns = new HashSet<string>(
+            unit.Columns
+                .Where(column => column is not null && column.Name is not null)
+                .Select(column => column.Name),
+            StringComparer.Ordinal);
+        var keyColumns = unit.Key.Columns ?? Array.Empty<string>();
+        var seenKeyColumns = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < keyColumns.Count; index++)
+        {
+            var column = keyColumns[index];
+            if (string.IsNullOrWhiteSpace(column) || !declaredColumns.Contains(column))
+            {
+                diagnostics.Add(new(
+                    "GW-DECL-KEY-002",
+                    $"Key column '{column}' is not declared on the storage unit.",
+                    $"key.columns[{index}]"));
+            }
+
+            if (!string.IsNullOrWhiteSpace(column) && !seenKeyColumns.Add(column))
+            {
+                diagnostics.Add(new(
+                    "GW-DECL-KEY-003",
+                    $"Key column '{column}' is listed more than once.",
+                    "key.columns"));
+            }
+        }
+
+        foreach (var index in unit.Indexes ?? Array.Empty<IndexDefinition>())
+        {
+            var seenIndexColumns = new HashSet<string>(StringComparer.Ordinal);
+            var indexColumns = index.Columns ?? Array.Empty<IndexColumn>();
+            for (var columnIndex = 0; columnIndex < indexColumns.Count; columnIndex++)
+            {
+                var indexColumn = indexColumns[columnIndex];
+                var column = indexColumn?.Column;
+                if (string.IsNullOrWhiteSpace(column) || !declaredColumns.Contains(column))
+                {
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-001",
+                        $"Index '{index.Name}' column '{column}' is not declared on the storage unit.",
+                        $"indexes.{index.Name}.columns[{columnIndex}]"));
+                }
+
+                if (!string.IsNullOrWhiteSpace(column) && !seenIndexColumns.Add(column))
+                {
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-002",
+                        $"Index '{index.Name}' column '{column}' is listed more than once.",
+                        $"indexes.{index.Name}.columns"));
+                }
+            }
+        }
+
+        return diagnostics;
     }
 
     private static IReadOnlyList<string> SnapshotNames(IEnumerable<string> names, string parameterName)

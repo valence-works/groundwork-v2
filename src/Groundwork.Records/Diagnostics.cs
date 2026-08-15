@@ -21,18 +21,29 @@ public sealed class GroundworkDiagnostic
 public sealed class StorageDeclarationException : Exception
 {
     public StorageDeclarationException(IEnumerable<GroundworkDiagnostic> diagnostics)
-        : base(CreateMessage(diagnostics))
+        : this(Snapshot(diagnostics))
     {
-        Diagnostics = Array.AsReadOnly((diagnostics ?? throw new ArgumentNullException(nameof(diagnostics))).ToArray());
     }
+
+    private StorageDeclarationException(GroundworkDiagnostic[] diagnostics)
+        : base(CreateMessage(diagnostics)) => Diagnostics = Array.AsReadOnly(diagnostics);
 
     public IReadOnlyList<GroundworkDiagnostic> Diagnostics { get; }
 
-    private static string CreateMessage(IEnumerable<GroundworkDiagnostic> diagnostics)
+    private static GroundworkDiagnostic[] Snapshot(IEnumerable<GroundworkDiagnostic> diagnostics)
     {
         if (diagnostics is null)
             throw new ArgumentNullException(nameof(diagnostics));
 
+        var snapshot = diagnostics.ToArray();
+        if (snapshot.Any(diagnostic => diagnostic is null))
+            throw new ArgumentException("Diagnostics cannot contain null references.", nameof(diagnostics));
+
+        return snapshot;
+    }
+
+    private static string CreateMessage(IEnumerable<GroundworkDiagnostic> diagnostics)
+    {
         return "The storage declaration is not portable: " +
             string.Join("; ", diagnostics.Select(diagnostic => diagnostic.Code + ": " + diagnostic.Message));
     }

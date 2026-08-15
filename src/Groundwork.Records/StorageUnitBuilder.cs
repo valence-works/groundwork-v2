@@ -189,7 +189,7 @@ public sealed class ColumnBuilder
         Precision = precision,
         Scale = scale,
         Collation = collation,
-        Default = hasDefault ? new PortableDefault(defaultValue) : null,
+        Default = hasDefault ? new PortableDefault(DefaultValueSnapshot.Create(defaultValue, type)) : null,
         Generation = generation
     };
 

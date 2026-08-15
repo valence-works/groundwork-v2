@@ -1,3 +1,4 @@
+using System.Collections;
 using Groundwork.Kernel;
 using Groundwork.Records;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
@@ -123,6 +124,97 @@ public sealed class BuilderTests
     }
 
     [Fact]
+    public void Built_definition_snapshots_mutable_binary_and_json_defaults()
+    {
+        var bytes = new byte[] { 1, 2 };
+        var nested = new Dictionary<string, object?>
+        {
+            ["items"] = new List<object?>
+            {
+                new Dictionary<string, object?> { ["value"] = 1 }
+            }
+        };
+
+        var definition = Groundwork.Records.StorageUnit
+            .Declare("defaults", "defaults")
+            .Int32("id", column => column.Required())
+            .Binary("payload", 2, column => column.Default(bytes))
+            .Json("metadata", column => column.Default(nested))
+            .Key("id")
+            .Build();
+
+        bytes[0] = 9;
+        ((List<object?>)nested["items"]!)[0] = new Dictionary<string, object?> { ["value"] = 9 };
+
+        Assert.Equal(new byte[] { 1, 2 }, definition.Columns[1].Default!.Value);
+        var storedMetadata = Assert.IsType<Dictionary<string, object?>>(definition.Columns[2].Default!.Value);
+        var storedItems = Assert.IsType<List<object?>>(storedMetadata["items"]);
+        var storedItem = Assert.IsType<Dictionary<string, object?>>(storedItems[0]);
+        Assert.Equal(1, storedItem["value"]);
+    }
+
+    [Fact]
+    public void Unsupported_or_cyclic_json_defaults_are_rejected_explicitly()
+    {
+        var cyclic = new Dictionary<string, object?>();
+        cyclic["self"] = cyclic;
+
+        Assert.Throws<ArgumentException>(() => Groundwork.Records.StorageUnit
+            .Declare("cyclic", "cyclic")
+            .Int32("id", column => column.Required())
+            .Json("metadata", column => column.Default(cyclic))
+            .Key("id")
+            .Build());
+    }
+
+    [Fact]
+    public void Exception_snapshots_one_shot_diagnostics_once()
+    {
+        var source = new List<GroundworkDiagnostic>
+        {
+            new("GW-DECL-001", "first failure", "columns.first"),
+            new("GW-DECL-002", "second failure", "columns.second")
+        };
+        var exception = new StorageDeclarationException(new OneShotDiagnostics(source));
+
+        source[0] = new GroundworkDiagnostic("GW-DECL-999", "changed", "changed");
+
+        Assert.Equal(2, exception.Diagnostics.Count);
+        Assert.Equal("GW-DECL-001", exception.Diagnostics[0].Code);
+        Assert.Contains("GW-DECL-001", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("GW-DECL-002", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Build_aggregates_declaration_and_portability_failures()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
+            .Declare("invalid", "invalid")
+            .Decimal("amount")
+            .Build());
+
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-KEY-001");
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-PORT-002");
+    }
+
+    [Fact]
+    public void Build_reports_missing_and_duplicate_key_and_index_columns()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
+            .Declare("invalid", "invalid")
+            .Int32("id")
+            .Int32("value")
+            .Key("id", "id", "missing")
+            .Index("by-value", "missing", "value", "value")
+            .Build());
+
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-KEY-002");
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-KEY-003");
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-INDEX-001");
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-INDEX-002");
+    }
+
+    [Fact]
     public void Committed_customer_sample_stays_within_the_issue_line_targets()
     {
         Assert.Equal("customers", BuilderCustomerSample.Customer.Name);
@@ -140,4 +232,23 @@ public sealed class BuilderTests
         decimal Balance);
 
     public sealed record InvalidCustomer(Guid Id, string? Name);
+
+    private sealed class OneShotDiagnostics : IEnumerable<GroundworkDiagnostic>
+    {
+        private readonly IReadOnlyList<GroundworkDiagnostic> diagnostics;
+        private bool consumed;
+
+        public OneShotDiagnostics(IReadOnlyList<GroundworkDiagnostic> diagnostics) => this.diagnostics = diagnostics;
+
+        public IEnumerator<GroundworkDiagnostic> GetEnumerator()
+        {
+            if (consumed)
+                throw new InvalidOperationException("This diagnostic sequence can only be enumerated once.");
+
+            consumed = true;
+            return diagnostics.GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
 }

@@ -156,7 +156,8 @@ public sealed class RecordTableBuilder<T>
         if (nullable.HasValue)
             return nullable.Value == 2;
 
-        var context = ReadNullableContext(member.DeclaringType!);
+        var context = ReadNullableContext(member.GetCustomAttributesData()) ??
+            ReadNullableContext(member.DeclaringType!);
         return context != 1;
     }
 
@@ -172,12 +173,24 @@ public sealed class RecordTableBuilder<T>
             })
             .FirstOrDefault();
 
-    private static byte? ReadNullableContext(Type type) =>
-        type.GetCustomAttributesData()
+    private static byte? ReadNullableContext(IEnumerable<CustomAttributeData> attributes) =>
+        attributes
             .Where(attribute => attribute.AttributeType.FullName == "System.Runtime.CompilerServices.NullableContextAttribute")
             .Select(attribute => attribute.ConstructorArguments.FirstOrDefault().Value)
-            .OfType<byte>()
-            .FirstOrDefault();
+            .Select(value => value is byte flag ? (byte?)flag : null)
+            .FirstOrDefault(value => value.HasValue);
+
+    private static byte? ReadNullableContext(Type type)
+    {
+        for (var current = type; current is not null; current = current.DeclaringType)
+        {
+            var context = ReadNullableContext(current.GetCustomAttributesData());
+            if (context.HasValue)
+                return context;
+        }
+
+        return ReadNullableContext(type.Assembly.GetCustomAttributesData());
+    }
 
     private static string GetColumnName(MemberInfo member)
     {
