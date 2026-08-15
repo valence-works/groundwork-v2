@@ -115,10 +115,11 @@ public static class PortabilityValidator
         IReadOnlyList<IndexDefinition> indexes,
         IReadOnlyDictionary<string, ColumnDefinition> byName)
     {
-        var indexedColumns = (index.Columns ?? [])
-            .Where(column => column is not null && column.Column is not null)
-            .Select(column => column.Column)
-            .ToHashSet(StringComparer.Ordinal);
+        var indexedColumns = new HashSet<string>(
+            (index.Columns ?? [])
+                .Where(column => column is not null && column.Column is not null)
+                .Select(column => column.Column),
+            StringComparer.Ordinal);
 
         return indexes.Any(other =>
             other is not null &&
@@ -317,7 +318,7 @@ public static class PortabilityValidator
     {
         foreach (var column in columns.Where(column => column is not null && column.Collation is not null))
         {
-            if (Enum.IsDefined(column.Collation!.Value))
+            if (Enum.IsDefined(typeof(PortableCollation), column.Collation!.Value))
                 continue;
 
             diagnostics.Add(new(
@@ -374,10 +375,10 @@ public static class PortabilityValidator
     }
 
     private static bool IsMongoTarget(string identity) =>
-        identity?.Contains("mongo", StringComparison.OrdinalIgnoreCase) == true;
+        identity?.IndexOf("mongo", StringComparison.OrdinalIgnoreCase) >= 0;
 }
 
-/// <summary>Builder validation seam reserved for the later builder slice.</summary>
+/// <summary>Builder validation seam used by the fluent and typed declaration front-ends.</summary>
 public static class BuilderPortabilityValidation
 {
     public static PortabilityValidationResult Validate(StorageUnit? unit, PortabilityValidationContext? context = null) =>
