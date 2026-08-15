@@ -1,3 +1,4 @@
+using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
 
@@ -90,12 +91,38 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         if (range.Column.Type != QueryType.String)
             return base.RenderRange(range, parameters, ref parameterIndex);
 
+        if (range.Column.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal))
+            return RenderSearchKeyRange(range, parameters, ref parameterIndex);
+
         var expression = RenderColumn(range.Column);
         var parts = new List<string> { expression + " IS NOT NULL" };
         if (range.Lower is { } lower)
             parts.Add(RenderStringBound(expression, range.Column, lower, isLower: true, parameters, ref parameterIndex));
         if (range.Upper is { } upper)
             parts.Add(RenderStringBound(expression, range.Column, upper, isLower: false, parameters, ref parameterIndex));
+        return "(" + string.Join(" AND ", parts) + ")";
+    }
+
+    private string RenderSearchKeyRange(
+        Predicate.Range range,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex)
+    {
+        var expression = RenderColumn(range.Column);
+        var ansiType = range.Column.MaxLength is { } length
+            ? $"varchar({length})"
+            : "varchar(max)";
+        var parts = new List<string> { expression + " IS NOT NULL" };
+        if (range.Lower is { } lower)
+        {
+            var parameter = AddParameter(range.Column, lower.Value, parameters, ref parameterIndex);
+            parts.Add(expression + (lower.IsInclusive ? " >= " : " > ") + $"CAST(@{parameter} AS {ansiType})");
+        }
+        if (range.Upper is { } upper)
+        {
+            var parameter = AddParameter(range.Column, upper.Value, parameters, ref parameterIndex);
+            parts.Add(expression + (upper.IsInclusive ? " <= " : " < ") + $"CAST(@{parameter} AS {ansiType})");
+        }
         return "(" + string.Join(" AND ", parts) + ")";
     }
 

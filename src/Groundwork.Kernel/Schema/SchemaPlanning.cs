@@ -97,7 +97,14 @@ public static class PhysicalSchemaDiffPlanner
         foreach (var column in target.Subject.Columns.OrderBy(column => column.Name, StringComparer.Ordinal))
         {
             operations.Add(new AddColumnOperation(target.Subject, column));
-            if (!column.IsNullable)
+            var derived = target.Subject.DerivedColumns.FirstOrDefault(item => item.Name == column.Name);
+            if (derived is not null)
+            {
+                operations.Add(new BackfillColumnOperation(target.Subject, column, derived));
+                if (!column.IsNullable)
+                    operations.Add(new FinalizeColumnOperation(target.Subject, column));
+            }
+            else if (!column.IsNullable)
             {
                 operations.Add(new BackfillColumnOperation(target.Subject, column));
                 operations.Add(new FinalizeColumnOperation(target.Subject, column));
@@ -141,6 +148,9 @@ public static class PhysicalSchemaDiffPlanner
                 !operation.Column.IsNullable &&
                 operation.Column.Default is null &&
                 operation.Column.Generation == ColumnGeneration.Supplied &&
+                !desired.OfType<BackfillColumnOperation>().Any(backfill =>
+                    backfill.Derived is not null &&
+                    string.Equals(backfill.Column.Name, operation.Column.Name, StringComparison.Ordinal)) &&
                 string.IsNullOrWhiteSpace(operation.SemanticMigrationId))
             .Select(operation => new SchemaRefusal(
                 "GW-SCHEMA-005",
@@ -155,7 +165,7 @@ public static class PhysicalSchemaDiffPlanner
 
             if (desiredBySlot.TryGetValue(current.SlotIdentity, out var replacement))
             {
-                if (IsIndexWidening(current, replacement))
+                if (IsIndexWidening(current, replacement) || IsSearchKeyRetarget(current, replacement))
                     continue;
                 if (!reportedSubjects.Add($"{current.SubjectId?.Value}:{current.SubjectIdentity}"))
                     continue;
@@ -185,12 +195,13 @@ public static class PhysicalSchemaDiffPlanner
             !appliedBySlot.TryGetValue(create.SlotIdentity, out var applied) ||
             !create.Index.Columns.Any(indexColumn =>
                 create.Subject.Columns.Any(column =>
-                    column.Name == indexColumn.Column && column.IsNullable)))
+                    column.Name == indexColumn.Column && column.IsNullable)) &&
+            !IsSearchKeyRetarget(applied, operation))
         {
             return operation;
         }
 
-        if (IsIndexWidening(applied, operation))
+        if (IsIndexWidening(applied, operation) || IsSearchKeyRetarget(applied, operation))
         {
             return new RebuildPhysicalIndexOperation(
                 create.Subject,
@@ -269,27 +280,31 @@ public static class PhysicalSchemaDiffPlanner
     {
         if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
             desired is not CreatePhysicalIndexOperation create ||
-            !SchemaFingerprint.TryParseCanonical(applied.CanonicalPayload, out var operationParts) ||
-            operationParts.Length < 5 ||
-            !SchemaFingerprint.TryParseCanonical(operationParts[4]!, out var currentIndexParts) ||
-            !SchemaFingerprint.TryParseCanonical(CreatePhysicalIndexOperation.CanonicalIndex(create.Index), out var desiredIndexParts) ||
-            currentIndexParts.Length != desiredIndexParts.Length ||
-            currentIndexParts.Length < 4 ||
-            currentIndexParts[2] != MissingValueBehavior.Excluded.ToString() ||
-            desiredIndexParts[2] != MissingValueBehavior.Included.ToString())
+            !CanonicalIndexPayload.TryParseOperation(applied.CanonicalPayload, out var current) ||
+            current.MissingValues != MissingValueBehavior.Excluded ||
+            create.Index.MissingValues != MissingValueBehavior.Included)
         {
             return false;
         }
 
-        for (var index = 0; index < currentIndexParts.Length; index++)
-        {
-            if (index == 2)
-                continue;
-            if (!string.Equals(currentIndexParts[index], desiredIndexParts[index], StringComparison.Ordinal))
-                return false;
-        }
+        var desiredPayload = CanonicalIndexPayload.From(create.Index);
+        return string.Equals(
+            (current with { MissingValues = MissingValueBehavior.Included }).Canonical,
+            desiredPayload.Canonical,
+            StringComparison.Ordinal);
+    }
 
-        return true;
+    private static bool IsSearchKeyRetarget(
+        PhysicalSchemaAppliedOperation applied,
+        PhysicalSchemaOperation desired)
+    {
+        if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
+            desired is not CreatePhysicalIndexOperation create ||
+            !CanonicalIndexPayload.TryParseOperation(applied.CanonicalPayload, out var current))
+        {
+            return false;
+        }
+        return SearchKeyProjection.IsIndexRetarget(current.ToDefinition(), create.Index, create.Subject.DerivedColumns);
     }
 
     private static PhysicalSchemaAppliedSnapshot CreateSnapshot(

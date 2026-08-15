@@ -101,20 +101,39 @@ internal sealed class MongoTestingSession(
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
         inner.Query(request, options);
 
-    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
-        ToTesting(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
+    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
+        return ToTesting(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
+    }
 
-    public WriteOutcome Update(StorageValues values, WriteOptions? options = null) =>
-        ToTesting(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
+    public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
+        return ToTesting(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
+    }
 
-    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
-        ToTesting(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
+    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
+        return ToTesting(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
+    }
 
-    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        ToTesting(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
+        return ToTesting(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
+    }
 
-    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) =>
-        ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
+    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
+        return ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
+    }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
         => ApplyBatch(writes, exactOutcomes: false);
@@ -128,7 +147,7 @@ internal sealed class MongoTestingSession(
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
@@ -138,7 +157,7 @@ internal sealed class MongoTestingSession(
 
     private static MongoWriteOptions? ToNative(WriteOptions? options) => options is null
         ? null
-        : new MongoWriteOptions { ExpectedVersion = options.ExpectedVersion, Observer = options.Observer };
+        : new MongoWriteOptions { Precondition = options.Precondition, Observer = options.Observer };
 
     private static WriteOutcome ToTesting(MongoWriteOutcome result) =>
         new((WriteOutcomeStatus)result.Status, result.Version, result.UniqueIndexName,

@@ -137,6 +137,7 @@ internal sealed class MongoProviderState
     internal MongoAppliedUnit Resolve(StorageUnit declaration, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(declaration);
+        declaration = SearchKeyProjection.Expand(declaration);
         ValidateScope(declaration, access);
         lock (gate)
         {
@@ -159,7 +160,7 @@ internal sealed class MongoProviderState
             !string.Equals(fingerprint.AsString, SchemaIdentity.Fingerprint(declaration), StringComparison.Ordinal))
         {
             throw new MongoSchemaConflictException(
-                $"Storage unit '{declaration.Name}' differs from the applied MongoDB schema. Apply the schema before opening it.");
+                $"Storage unit '{declaration.Name}' differs from the applied MongoDB schema, including its folded search-key algorithm identity. Apply the exact schema and rebuild the derived search-key column before opening a session.");
         }
 
         var applied = new MongoAppliedUnit(MongoDeclarationSnapshot.Clone(declaration), declaration.Name);
@@ -180,7 +181,7 @@ internal sealed class MongoProviderState
         if (!string.Equals(SchemaIdentity.Fingerprint(applied), SchemaIdentity.Fingerprint(requested), StringComparison.Ordinal))
         {
             throw new MongoSchemaConflictException(
-                $"Storage unit '{requested.Name}' differs from the applied MongoDB schema. Apply the schema before opening it.");
+                $"Storage unit '{requested.Name}' differs from the applied MongoDB schema, including its folded search-key algorithm identity. Apply the exact schema and rebuild the derived search-key column before opening a session.");
         }
     }
 
@@ -263,6 +264,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 {
     public MongoSchemaDiff Diff(StorageUnit desired)
     {
+        desired = SearchKeyProjection.Expand(desired);
         ValidateDeclaration(desired);
         state.TryGet(desired.Id, out var current);
         var previousKeyOrder = current?.Declaration.Key.Columns ?? ReadSchemaKeyOrder(desired.Id);
@@ -284,6 +286,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
     public MongoSchemaApplyResult Apply(StorageUnit desired)
     {
+        desired = SearchKeyProjection.Expand(desired);
         ValidateDeclaration(desired);
         var portability = PortabilityValidator.Validate(desired, new PortabilityValidationContext(["mongodb"]));
         if (!portability.IsPortable)
@@ -310,12 +313,66 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         var actual = new MongoProviderCatalog(state).ReadIndexes(desired.Name, desired.Indexes);
 
         var collection = state.Context.Database.GetCollection<BsonDocument>(desired.Name);
-        CreateIndexes(collection, desired, actual);
-
         var changes = DiffForApply(desired, current?.Declaration, actual, !exists);
+        BackfillSearchKeys(collection, desired, current?.Declaration);
+        // A new unique folded index must see the fully backfilled key values. Creating it
+        // before projection would treat every legacy document as null and either admit an
+        // invalid index or fail before the actual duplicate-fold collision is observable.
+        CreateIndexes(collection, desired, actual, changes);
         PersistSchemaMetadata(desired);
         state.Remember(desired);
         return new MongoSchemaApplyResult(new MongoSchemaDiff(changes), changes.Count != 0);
+    }
+
+    private static void BackfillSearchKeys(
+        IMongoCollection<BsonDocument> collection,
+        StorageUnit desired,
+        StorageUnit? previous)
+    {
+        var previousDerived = previous?.DerivedColumns.ToDictionary(column => column.Name, StringComparer.Ordinal) ?? [];
+        var pending = desired.DerivedColumns.Where(column =>
+            !previousDerived.TryGetValue(column.Name, out var prior) || prior != column).ToArray();
+        if (pending.Length == 0)
+            return;
+
+        var columns = desired.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        foreach (var document in collection.Find(new BsonDocument()).ToEnumerable())
+        {
+            var updates = new BsonDocument();
+            foreach (var derived in pending)
+            {
+                var source = columns[derived.SourceColumn];
+                var hidden = columns[derived.Name];
+                var value = document.TryGetValue(source.Name, out var stored)
+                    ? MongoValueCodec.Decode(stored, source)
+                    : null;
+                var projected = SearchKeyProjection.Populate(desired,
+                    new Dictionary<string, object?>(StringComparer.Ordinal) { [source.Name] = value });
+                projected.TryGetValue(derived.Name, out var searchKey);
+                updates[hidden.Name] = MongoValueCodec.Encode(searchKey, hidden);
+            }
+
+            if (updates.ElementCount != 0)
+                collection.UpdateOne(
+                    BuildBackfillFilter(document, pending),
+                    new BsonDocument("$set", updates));
+        }
+    }
+
+    internal static BsonDocument BuildBackfillFilter(
+        BsonDocument document,
+        IReadOnlyList<DerivedColumnDefinition> pending)
+    {
+        var filter = new BsonDocument("_id", document.GetValue("_id"));
+        foreach (var source in pending.Select(derived => derived.SourceColumn).Distinct(StringComparer.Ordinal))
+        {
+            filter[source] = !document.TryGetValue(source, out var value)
+                ? new BsonDocument("$exists", false)
+                : value.IsBsonNull
+                    ? new BsonDocument("$type", 10)
+                    : value;
+        }
+        return filter;
     }
 
     internal static IMongoCollection<BsonDocument> EnsureAdmission(
@@ -326,6 +383,17 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         var report = InspectAdmission(state, applied, access);
         if (!report.IsProcessReady)
         {
+            var algorithmDrift = report.ColumnDrift
+                .Where(refusal => refusal.Path.EndsWith(".searchKeyAlgorithm", StringComparison.Ordinal))
+                .ToArray();
+            if (algorithmDrift.Length != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Storage unit '{applied.Declaration.Name}' is not admitted because its persisted folded search-key algorithm differs from the declaration. " +
+                    $"Rebuild the derived search-key column before opening a session. " +
+                    $"[{string.Join("; ", algorithmDrift.Select(refusal => refusal.Code + " at " + refusal.Path + ": " + refusal.Message))}]");
+            }
+
             var name = CollectionName(applied, access);
             var commands = string.Join("; ", applied.Declaration.Columns.Select(column =>
                 $"db.getCollection('{Escape(name)}').updateMany(" +
@@ -355,6 +423,8 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         var columnDrift = new List<SchemaRefusal>();
         foreach (var column in applied.Declaration.Columns)
         {
+            if (MongoDocumentMapper.IsSystemOwnedToken(applied.Declaration, column))
+                continue;
             if (string.Equals(column.Name, "_id", StringComparison.Ordinal))
                 continue;
 
@@ -409,7 +479,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 : new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var expected in applied.Declaration.DerivedColumns)
             {
-                var algorithm = ProjectionAlgorithmId(expected.Projection);
+                var algorithm = ProjectionAlgorithmId(expected);
                 if (!persisted.TryGetValue(expected.Name, out var actual) ||
                     !string.Equals(actual, algorithm, StringComparison.Ordinal))
                 {
@@ -454,12 +524,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         return new MongoSchemaAdmissionReport(applied.Declaration.Id, columnDrift, indexDrift);
     }
 
-    private static string ProjectionAlgorithmId(PortableProjection projection) => projection switch
+    private static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
     {
         PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
         PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
-        _ => throw new ArgumentOutOfRangeException(nameof(projection), projection, null)
+        _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Projection, null)
     };
 
     private static void EnsureCollection(MongoProviderState state, MongoAppliedUnit applied, string name)
@@ -474,11 +544,20 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static void CreateIndexes(
         IMongoCollection<BsonDocument> collection,
         StorageUnit unit,
-        IReadOnlyList<MongoProviderIndex> actual)
+        IReadOnlyList<MongoProviderIndex> actual,
+        IReadOnlyList<MongoSchemaChange>? changes = null)
     {
+        var rebuilds = (changes ?? [])
+            .Where(change => change.Kind == MongoSchemaChangeKind.RebuildIndex)
+            .Select(change => change.Identity)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var index in actual.Where(index => rebuilds.Contains(index.Name)))
+            collection.Indexes.DropOne(index.Name);
+
         foreach (var index in unit.Indexes)
         {
-            if (actual.Any(existing => string.Equals(existing.Name, index.Name, StringComparison.Ordinal)))
+            if (!rebuilds.Contains(index.Name) &&
+                actual.Any(existing => string.Equals(existing.Name, index.Name, StringComparison.Ordinal)))
                 continue;
             var specification = new MongoIndexSpecification(index, unit.Columns);
             var keys = new BsonDocument(specification.Terms.Select(term =>
@@ -558,7 +637,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             if (previous is null && native is null)
                 changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name));
             else if (previous is not null && !SchemaIdentity.IndexEquals(previous, index))
-                throw new MongoSchemaConflictException($"Index '{index.Name}' changed non-additively.");
+            {
+                if (SearchKeyProjection.IsIndexRetarget(previous, index, desired.DerivedColumns))
+                    changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.RebuildIndex, index.Name));
+                else
+                    throw new MongoSchemaConflictException($"Index '{index.Name}' changed non-additively.");
+            }
         }
         foreach (var previous in current.Indexes)
             if (!desired.Indexes.Any(index => index.Name == previous.Name))
@@ -581,11 +665,34 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 .. desired.Indexes.Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
             ];
         return current is null
-            ? desired.Indexes
-                .Where(index => actual.All(native => native.Name != index.Name))
-                .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
-                .ToArray()
+            ? [
+                .. desired.Indexes
+                    .Where(index => actual.Any(native => native.Name == index.Name &&
+                        IsIndexRetarget(native, index, desired.DerivedColumns)))
+                    .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.RebuildIndex, index.Name)),
+                .. desired.Indexes
+                    .Where(index => actual.All(native => native.Name != index.Name))
+                    .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
+            ]
             : BuildChanges(desired, current, actual);
+    }
+
+    private static bool IsIndexRetarget(
+        MongoProviderIndex actual,
+        IndexDefinition desired,
+        IReadOnlyList<DerivedColumnDefinition> derived)
+    {
+        var previous = new IndexDefinition
+        {
+            Name = actual.Name,
+            Columns = actual.Columns
+                .Select(column => new IndexColumn(column.Column, column.Direction))
+                .ToArray(),
+            IsUnique = actual.IsUnique,
+            MissingValues = actual.MissingValues,
+            SchemaVersion = actual.SchemaVersion
+        };
+        return SearchKeyProjection.IsIndexRetarget(previous, desired, derived);
     }
 
     private IReadOnlyList<string>? ReadSchemaKeyOrder(StorageUnitId id)
@@ -609,7 +716,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             ["derived"] = new BsonArray(unit.DerivedColumns.Select(column => new BsonDocument
             {
                 ["name"] = column.Name,
-                ["algorithmId"] = ProjectionAlgorithmId(column.Projection)
+                ["algorithmId"] = ProjectionAlgorithmId(column)
             }))
         };
         state.Metadata.ReplaceOne(
@@ -633,6 +740,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static void ValidateDeclaration(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
+        ConcurrencyDeclaration.ValidateDeclaration(unit);
         ArgumentException.ThrowIfNullOrWhiteSpace(unit.Name);
         ArgumentNullException.ThrowIfNull(unit.Columns);
         ArgumentNullException.ThrowIfNull(unit.Key);
@@ -712,8 +820,10 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             : request;
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new MongoQueryRenderer().Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName);
@@ -771,6 +881,8 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             var row = new Dictionary<string, object?>(StringComparer.Ordinal);
             foreach (var column in Unit.Columns)
             {
+                if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
+                    continue;
                 if (document.TryGetValue(column.Name, out var value))
                     row[column.Name] = MongoValueCodec.Decode(value, column);
             }
@@ -807,7 +919,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             executionSource,
             renderOptions,
             rows,
-            renderOptions.FindPinnedIndex()?.Name,
+            command.ExpectedIndex,
             command.Hint is not null,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
@@ -815,7 +927,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
     private void AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options)
     {
-        var logicalIndex = options.FindPinnedIndex()?.Name;
+        var logicalIndex = query.ExpectedIndex;
         if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(logicalIndex)) return;
         if (transactionSession is not null)
             throw new InvalidOperationException(
@@ -855,6 +967,8 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     private ColumnRef? QueryColumn(string name)
     {
         var column = Unit.Columns.Single(item => item.Name == name);
+        if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
+            return null;
         return column.Type switch
         {
             PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
@@ -893,17 +1007,33 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         return document is null ? null : MongoDocumentMapper.DecodeEntry(Unit, document, Version(identity, document));
     }
 
-    public MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Insert);
+    public MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null)
+    {
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, ToTestingOptions(options));
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        return Mutate(values, options, MutationKind.Insert);
+    }
 
-    public MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Update);
+    public MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null)
+    {
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, ToTestingOptions(options));
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        return Mutate(values, options, MutationKind.Update);
+    }
 
-    public MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Upsert);
+    public MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null)
+    {
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, ToTestingOptions(options));
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        return Mutate(values, options, MutationKind.Upsert);
+    }
 
-    public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
-        ConditionalUpsertCore(values, options);
+    public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null)
+    {
+        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, ToTestingOptions(options));
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        return ConditionalUpsertCore(values, options);
+    }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
         => ApplyBatch(writes, exactOutcomes: false);
@@ -920,76 +1050,94 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         if (writes.Count == 0)
             return [];
         if (writes.Any(write => write.Mode != RowWriteMode.Upsert ||
-                               write.Options.ExpectedVersion is not null ||
+                               write.Options.Precondition.Kind != WritePreconditionKind.Unconditional ||
                                write.Values is null ||
                                Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence)))
             return ApplyBatchFallback(writes);
+
+        // Keep the logical RowWrite for outcome correlation and physicalize exactly once for
+        // the native command. Fallback and exact paths delegate to single-row methods, which
+        // perform their own physicalization.
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
 
         // BulkWrite can acknowledge each model but cannot identify whether each
         // upsert inserted or updated. CommitWithOutcomes requests that exact evidence;
         // use the native single-row conditional primitive in that mode.
         if (exactOutcomes)
         {
-            return writes.Select(write =>
+            return writes.Zip(physicalWrites, (write, physical) =>
                 new RowWriteOutcome(write, ToTesting(
                     ExactOutcomeUpsert(
-                        new MongoStorageValues(write.Values!.Values),
+                        new MongoStorageValues(physical.Values!.Values),
                         ToNative(write.Options))))).ToArray();
         }
 
         var models = new List<WriteModel<BsonDocument>>(writes.Count);
-        foreach (var write in writes)
+        var incompleteWrites = new List<ColumnDefinition?>();
+        foreach (var write in physicalWrites)
         {
             var identity = MongoDocumentMapper.EncodeKey(Unit, write.Values!.Values);
-            var document = MongoDocumentMapper.EncodeDocument(
-                Unit, write.Values.Values, identity, existing: null, _ =>
-                    throw new InvalidOperationException("ProviderSequence must use the fallback batch path."));
+            var missingRequired = MissingRequiredColumn(write.Values.Values);
+            var canInsert = missingRequired is null;
+            incompleteWrites.Add(missingRequired);
+            var document = canInsert
+                ? MongoDocumentMapper.EncodeDocument(
+                    Unit, write.Values.Values, identity, existing: null, _ =>
+                        throw new InvalidOperationException("ProviderSequence must use the fallback batch path."))
+                : null;
             var set = new BsonDocument();
             var setOnInsert = new BsonDocument();
             foreach (var column in Unit.Columns)
             {
+                if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
+                    continue;
                 if (Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
                 {
                     // Mongo's _id is the lookup identity, not a substitute for the
                     // declared key fields. Persist the key fields on insert so schema
                     // admission and subsequent reads see the complete declaration.
-                    setOnInsert[column.Name] = document[column.Name];
+                    if (canInsert)
+                        setOnInsert[column.Name] = document![column.Name];
                     continue;
                 }
                 if (column.Name != "createdAt" && write.Values.Values.ContainsKey(column.Name))
-                    set[column.Name] = document[column.Name];
-                else
-                    setOnInsert[column.Name] = document[column.Name];
+                    set[column.Name] = document?[column.Name] ??
+                        MongoValueCodec.Encode(write.Values.Values[column.Name], column);
+                else if (canInsert)
+                    setOnInsert[column.Name] = document![column.Name];
             }
+            if (!canInsert && set.ElementCount == 0)
+                AddKeyOnlyNoOp(set, write.Values.Values);
             var update = new BsonDocument();
             if (set.ElementCount != 0)
                 update["$set"] = set;
             if (setOnInsert.ElementCount != 0)
                 update["$setOnInsert"] = setOnInsert;
-            if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
+            if (Unit.Concurrency.IsOptimistic)
                 update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
             models.Add(new UpdateOneModel<BsonDocument>(new BsonDocument("_id", identity), update)
             {
-                IsUpsert = true
+                IsUpsert = canInsert
             });
         }
 
         writes[0].Options.Observer?.Observe(new WritePathEvent(
             "mongodb.batch-write",
-            "MongoDB.BulkWrite(UpdateOne upsert:true ordered:false)",
+            "MongoDB.BulkWrite(UpdateOne upsert:eligible-per-row ordered:false)",
             IsProbe: false));
         try
         {
-            if (transactionSession is null)
-                collection.BulkWrite(models, new BulkWriteOptions { IsOrdered = false });
-            else
-                collection.BulkWrite(transactionSession, models, new BulkWriteOptions { IsOrdered = false });
+            var result = transactionSession is null
+                ? collection.BulkWrite(models, new BulkWriteOptions { IsOrdered = false })
+                : collection.BulkWrite(transactionSession, models, new BulkWriteOptions { IsOrdered = false });
+            ThrowIfIncompleteUpsertWasNotApplied(result, incompleteWrites, []);
             return writes.Select(write => new RowWriteOutcome(write,
                 new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
         }
         catch (MongoBulkWriteException<BsonDocument> exception)
         {
             var failures = exception.WriteErrors.ToDictionary(error => error.Index, error => error);
+            ThrowIfIncompleteUpsertWasNotApplied(exception.Result, incompleteWrites, failures.Keys);
             return writes.Select((write, index) =>
                 new RowWriteOutcome(write, failures.TryGetValue(index, out var error)
                     ? new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, ExtractIndexName(error.Message))
@@ -997,12 +1145,31 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         }
     }
 
+    private static void ThrowIfIncompleteUpsertWasNotApplied(
+        BulkWriteResult<BsonDocument> result,
+        IReadOnlyList<ColumnDefinition?> incompleteWrites,
+        IEnumerable<int> failedIndexes)
+    {
+        if (!result.IsAcknowledged)
+            return;
+        var failures = failedIndexes.ToHashSet();
+        var expectedApplied = incompleteWrites.Count - failures.Count;
+        if (result.MatchedCount + result.Upserts.Count == expectedApplied)
+            return;
+        var missing = incompleteWrites
+            .Where((column, index) => column is not null && !failures.Contains(index))
+            .FirstOrDefault();
+        if (missing is not null)
+            throw new InvalidOperationException($"Column '{missing.Name}' is required.");
+        throw new InvalidOperationException("MongoDB did not apply every acknowledged aggregate batch write.");
+    }
+
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
         writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
             RowWriteMode.Insert => ToTesting(Insert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
             RowWriteMode.Update => ToTesting(Update(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ToTesting(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ToTesting(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
             RowWriteMode.Upsert => ToTesting(Upsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
             RowWriteMode.ConditionalUpsert => ToTesting(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
             RowWriteMode.Delete => ToTesting(Delete(new MongoStorageKey(write.Key!.Values), ToNative(write.Options))),
@@ -1010,17 +1177,22 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         })).ToArray();
 
     private static MongoWriteOptions? ToNative(WriteOptions options) =>
-        new() { ExpectedVersion = options.ExpectedVersion, Observer = options.Observer };
+        new() { Precondition = options.Precondition, Observer = options.Observer };
 
     private static WriteOutcome ToTesting(MongoWriteOutcome outcome) =>
         new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName, outcome.GeneratedValues);
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, ToTestingOptions(options));
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
         return ExecuteWithTransactionIfNeeded(transactional => transactional.DeleteCore(key, options));
     }
+
+    private static WriteOptions? ToTestingOptions(MongoWriteOptions? options) => options is null
+        ? null
+        : new WriteOptions { Precondition = options.Precondition, Observer = options.Observer };
 
     internal void Close() => disposed = true;
 
@@ -1042,6 +1214,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MutationKind kind,
         bool exactOutcome = false)
     {
+        values = new MongoStorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         var sequence = Unit.Columns.FirstOrDefault(column =>
             column.Generation == ColumnGeneration.ProviderSequence);
         var generatedValues = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -1056,10 +1229,20 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             var copied = keyValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var generated = NextSequence(sequence, options?.Observer);
             copied[sequence.Name] = generated;
-            keyValues = copied;
+            values = new MongoStorageValues(copied);
+            keyValues = values.Values;
             generatedValues[sequence.Name] = generated;
         }
         var identity = MongoDocumentMapper.EncodeKey(Unit, keyValues);
+        if (!Unit.Concurrency.IsOptimistic)
+            return MutateNoneCore(
+                values,
+                options,
+                kind,
+                identity,
+                hasSequenceLocator,
+                generatedValues);
+
         var existing = FindOne(identity);
         var existingVersion = Version(identity, existing);
 
@@ -1094,12 +1277,12 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             else if (kind == MutationKind.Update)
             {
                 var result = ReplaceOne(filter, document, isUpsert: false);
-                if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic && result.MatchedCount == 0)
+                if (Unit.Concurrency.IsOptimistic && result.MatchedCount == 0)
                     return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
             }
             else
             {
-                if (exactOutcome && Unit.Concurrency == ConcurrencyDeclaration.Optimistic && existing is null)
+                if (exactOutcome && Unit.Concurrency.IsOptimistic && existing is null)
                 {
                     // Use insert rather than an upsert when the caller observed no row. An
                     // upsert can match a row inserted after that observation and would then
@@ -1111,9 +1294,9 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 {
                     var result = ReplaceOne(filter, document,
                         isUpsert: !hasSequenceLocator &&
-                                  (Unit.Concurrency != ConcurrencyDeclaration.Optimistic || existing is null));
+                                  (!Unit.Concurrency.IsOptimistic || existing is null));
                     inserted = result.UpsertedId is not null;
-                    if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic && result.MatchedCount == 0)
+                    if (Unit.Concurrency.IsOptimistic && result.MatchedCount == 0)
                         return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
                 }
             }
@@ -1121,7 +1304,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
             return new MongoWriteOutcome(
-                exactOutcome && Unit.Concurrency == ConcurrencyDeclaration.Optimistic
+                exactOutcome && Unit.Concurrency.IsOptimistic
                     ? MongoWriteOutcomeStatus.ConcurrencyConflict
                     : MongoWriteOutcomeStatus.UniqueViolation,
                 existingVersion);
@@ -1144,11 +1327,107 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         return new MongoWriteOutcome(status, nextVersion, generatedValues: generatedValues);
     }
 
+    private MongoWriteOutcome MutateNoneCore(
+        MongoStorageValues values,
+        MongoWriteOptions? options,
+        MutationKind kind,
+        BsonValue identity,
+        bool hasSequenceLocator,
+        IReadOnlyDictionary<string, object?> generatedValues)
+    {
+        var missingRequired = Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.Supplied &&
+            !SearchKeyProjection.IsProviderOwnedColumn(column.Name) &&
+            !column.IsNullable &&
+            column.Default is null &&
+            !values.Values.ContainsKey(column.Name));
+        var canInsert = missingRequired is null && !hasSequenceLocator;
+        var document = kind == MutationKind.Insert || canInsert
+            ? MongoDocumentMapper.EncodeDocument(
+                Unit,
+                values.Values,
+                identity,
+                existing: null,
+                column => NextSequence(column, options?.Observer),
+                generatedValues: generatedValues)
+            : null;
+        options?.Observer?.Observe(new WritePathEvent(
+            "mongodb.none-write",
+            kind switch
+            {
+                MutationKind.Insert => "MongoDB.InsertOne",
+                MutationKind.Update => "MongoDB.UpdateOne(upsert:false)",
+                _ => $"MongoDB.UpdateOne(upsert:{canInsert.ToString().ToLowerInvariant()})"
+            },
+            IsProbe: false));
+        try
+        {
+            var filter = new BsonDocument("_id", identity);
+            if (kind == MutationKind.Insert)
+            {
+                InsertOne(document!);
+                return new MongoWriteOutcome(
+                    MongoWriteOutcomeStatus.Inserted,
+                    generatedValues: generatedValues);
+            }
+
+            var set = new BsonDocument();
+            var setOnInsert = new BsonDocument();
+            foreach (var column in Unit.Columns)
+            {
+                if (Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) || column.Name == "createdAt")
+                {
+                    if (canInsert && document!.TryGetValue(column.Name, out var insertValue))
+                        setOnInsert[column.Name] = insertValue;
+                    continue;
+                }
+                if (values.Values.ContainsKey(column.Name))
+                    set[column.Name] = document?[column.Name] ?? MongoValueCodec.Encode(values.Values[column.Name], column);
+                else if (canInsert && document!.TryGetValue(column.Name, out var defaultValue))
+                    setOnInsert[column.Name] = defaultValue;
+            }
+            if (set.ElementCount == 0)
+            {
+                var key = Unit.Key.Columns[0];
+                var definition = Unit.Columns.Single(column => column.Name == key);
+                set[key] = MongoValueCodec.Encode(values.Values[key], definition);
+            }
+            var update = new BsonDocument("$set", set);
+            if (setOnInsert.ElementCount != 0)
+                update["$setOnInsert"] = setOnInsert;
+            var isUpsert = kind == MutationKind.Upsert && canInsert && !hasSequenceLocator;
+            var updateOptions = new UpdateOptions { IsUpsert = isUpsert };
+            var result = transactionSession is null
+                ? collection.UpdateOne(filter, update, updateOptions)
+                : collection.UpdateOne(transactionSession, filter, update, updateOptions);
+            if (result.MatchedCount == 0 && result.UpsertedId is null)
+            {
+                if (kind == MutationKind.Update || hasSequenceLocator)
+                    return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
+                throw new InvalidOperationException($"Column '{missingRequired!.Name}' is required.");
+            }
+            var status = kind == MutationKind.Update || hasSequenceLocator
+                ? MongoWriteOutcomeStatus.Updated
+                : kind == MutationKind.Insert
+                    ? MongoWriteOutcomeStatus.Inserted
+                    : MongoWriteOutcomeStatus.Upserted;
+            return new MongoWriteOutcome(status, generatedValues: generatedValues);
+        }
+        catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+        {
+            return new MongoWriteOutcome(
+                MongoWriteOutcomeStatus.UniqueViolation,
+                null,
+                ExtractIndexName(exception.WriteError?.Message));
+        }
+    }
+
     private MongoWriteOutcome ConditionalUpsertCore(
         MongoStorageValues values,
         MongoWriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new MongoStorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ThrowIfDisposed();
 
         // A provider sequence is allocated by a separate FindOneAndUpdate command.
@@ -1173,34 +1452,45 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoWriteOptions? options)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
-        var document = MongoDocumentMapper.EncodeDocument(
-            Unit,
-            values.Values,
-            identity,
-            existing: null,
-            column => NextSequence(column, options?.Observer));
+        var missingRequired = MissingRequiredColumn(values.Values);
+        var canInsert = missingRequired is null;
+        var document = canInsert
+            ? MongoDocumentMapper.EncodeDocument(
+                Unit,
+                values.Values,
+                identity,
+                existing: null,
+                column => NextSequence(column, options?.Observer))
+            : null;
         var filter = new BsonDocument("_id", identity);
-        var optimistic = Unit.Concurrency == ConcurrencyDeclaration.Optimistic;
-        if (optimistic)
+        var optimistic = Unit.Concurrency.IsOptimistic;
+        if (optimistic && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
         {
-            filter[MongoDocumentMapper.VersionField] = options?.ExpectedVersion is { } expected
-                ? new BsonInt64(expected)
-                : new BsonDocument("$exists", false);
+            filter[MongoDocumentMapper.VersionField] = new BsonInt64(options.Precondition.Version!.Value);
+        }
+        else if (optimistic && options?.Precondition.Kind == WritePreconditionKind.CreateOnly)
+        {
+            filter[MongoDocumentMapper.VersionField] = new BsonDocument("$exists", false);
         }
 
         var set = new BsonDocument();
         foreach (var column in Unit.Columns)
         {
+            if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
+                continue;
             if (!values.Values.ContainsKey(column.Name) ||
                 Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) ||
                 column.Name == "createdAt" ||
                 column.Generation == ColumnGeneration.ProviderSequence)
                 continue;
-            set[column.Name] = document[column.Name];
+            set[column.Name] = document?[column.Name] ??
+                MongoValueCodec.Encode(values.Values[column.Name], column);
         }
+        if (!canInsert && set.ElementCount == 0)
+            AddKeyOnlyNoOp(set, values.Values);
 
         var setOnInsert = new BsonDocument();
-        foreach (var element in document)
+        foreach (var element in document ?? [])
         {
             if (element.Name != "_id" && !set.Contains(element.Name))
                 setOnInsert[element.Name] = element.Value;
@@ -1213,23 +1503,31 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         if (setOnInsert.ElementCount != 0)
             update["$setOnInsert"] = setOnInsert;
 
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
+        var isUpsert = canInsert && precondition.Kind != WritePreconditionKind.IfVersion;
         // Observer text is diagnostic metadata, not a command recorder. Never include
         // identity, filter, or document values because they may contain PII/secrets.
         var commandDescription =
-            "MongoDB.UpdateOne(upsert:true; filter=identity+version; update=$set/$inc/$setOnInsert)";
+            $"MongoDB.UpdateOne(upsert:{isUpsert.ToString().ToLowerInvariant()}; filter=identity+version; update=$set/$inc/$setOnInsert)";
         options?.Observer?.Observe(new WritePathEvent("mongodb.conditional-upsert", commandDescription, IsProbe: false));
         try
         {
             var result = transactionSession is null
-                ? collection.UpdateOne(filter, update, new UpdateOptions { IsUpsert = true })
-                : collection.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = true });
-            return result.UpsertedId is not null
-                ? new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, optimistic ? 1 : null)
-                : new MongoWriteOutcome(
+                ? collection.UpdateOne(filter, update, new UpdateOptions { IsUpsert = isUpsert })
+                : collection.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = isUpsert });
+            if (result.UpsertedId is not null)
+                return new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, optimistic ? 1 : null);
+            if (result.MatchedCount != 0)
+            {
+                return new MongoWriteOutcome(
                     MongoWriteOutcomeStatus.Updated,
-                    optimistic && options?.ExpectedVersion is { } expectedVersion
+                    optimistic && precondition.Version is { } expectedVersion
                         ? checked(expectedVersion + 1)
                         : null);
+            }
+            if (precondition.Kind is WritePreconditionKind.IfVersion or WritePreconditionKind.CreateOnly)
+                return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict);
+            throw new InvalidOperationException($"Column '{missingRequired!.Name}' is required.");
         }
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
@@ -1248,25 +1546,38 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoWriteOptions? options)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
-        var document = MongoDocumentMapper.EncodeDocument(
-            Unit,
-            values.Values,
-            identity,
-            existing: null,
-            column => NextSequence(column, options?.Observer));
+        var missingRequired = MissingRequiredColumn(values.Values);
+        var canInsert = missingRequired is null;
+        var document = canInsert
+            ? MongoDocumentMapper.EncodeDocument(
+                Unit,
+                values.Values,
+                identity,
+                existing: null,
+                column => NextSequence(column, options?.Observer))
+            : null;
         var set = new BsonDocument();
         foreach (var column in Unit.Columns)
         {
+            if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
+                continue;
             if (!values.Values.ContainsKey(column.Name) ||
                 Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) ||
                 column.Name == "createdAt" ||
                 column.Generation == ColumnGeneration.ProviderSequence)
                 continue;
-            set[column.Name] = document[column.Name];
+            set[column.Name] = document?[column.Name] ??
+                MongoValueCodec.Encode(values.Values[column.Name], column);
         }
 
+        // A partial upsert that cannot form a valid insert is still a valid update. Keep
+        // it non-upserting and make a key-only update observable without touching source
+        // or provider-owned search-key values.
+        if (!canInsert && set.ElementCount == 0)
+            AddKeyOnlyNoOp(set, values.Values);
+
         var setOnInsert = new BsonDocument();
-        foreach (var element in document)
+        foreach (var element in document ?? [])
         {
             if (element.Name != "_id" && !set.Contains(element.Name))
                 setOnInsert[element.Name] = element.Value;
@@ -1274,27 +1585,29 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         var update = new BsonDocument();
         if (set.ElementCount != 0)
             update["$set"] = set;
-        if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
+        if (Unit.Concurrency.IsOptimistic)
             update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
         if (setOnInsert.ElementCount != 0)
             update["$setOnInsert"] = setOnInsert;
 
         options?.Observer?.Observe(new WritePathEvent(
             "mongodb.exact-batch-upsert",
-            "MongoDB.FindOneAndUpdate(upsert:true; return=before)",
+            $"MongoDB.FindOneAndUpdate(upsert:{canInsert.ToString().ToLowerInvariant()}; return=before)",
             IsProbe: false));
         try
         {
             var filter = new BsonDocument("_id", identity);
             var findOptions = new FindOneAndUpdateOptions<BsonDocument>
             {
-                IsUpsert = true,
+                IsUpsert = canInsert,
                 ReturnDocument = ReturnDocument.Before
             };
             var before = transactionSession is null
                 ? collection.FindOneAndUpdate(filter, update, findOptions)
                 : collection.FindOneAndUpdate(transactionSession, filter, update, findOptions);
-            var version = Unit.Concurrency == ConcurrencyDeclaration.Optimistic
+            if (before is null && missingRequired is not null)
+                throw new InvalidOperationException($"Column '{missingRequired.Name}' is required.");
+            var version = Unit.Concurrency.IsOptimistic
                 ? before is null
                     ? 1L
                     : checked(before.GetValue(MongoDocumentMapper.VersionField, 0L).ToInt64() + 1)
@@ -1308,6 +1621,21 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             var indexName = ExtractIndexName(exception.WriteError?.Message);
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, null, indexName);
         }
+    }
+
+    private ColumnDefinition? MissingRequiredColumn(IReadOnlyDictionary<string, object?> values) =>
+        Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.Supplied &&
+            !SearchKeyProjection.IsProviderOwnedColumn(column.Name) &&
+            !column.IsNullable &&
+            column.Default is null &&
+            !values.ContainsKey(column.Name));
+
+    private void AddKeyOnlyNoOp(BsonDocument set, IReadOnlyDictionary<string, object?> values)
+    {
+        var key = Unit.Key.Columns[0];
+        var definition = Unit.Columns.Single(column => column.Name == key);
+        set[key] = MongoValueCodec.Encode(values[key], definition);
     }
 
     private static bool IsIdentityIndex(string? indexName) =>
@@ -1330,6 +1658,14 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     private MongoWriteOutcome DeleteCore(MongoStorageKey key, MongoWriteOptions? options)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
+        if (!Unit.Concurrency.IsOptimistic)
+        {
+            options?.Observer?.Observe(new WritePathEvent("mongodb.none-delete", "MongoDB.DeleteOne", IsProbe: false));
+            var result = DeleteOne(new BsonDocument("_id", identity));
+            return result.DeletedCount == 0
+                ? new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound)
+                : new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted);
+        }
         var existing = FindOne(identity);
         var existingVersion = Version(identity);
         if (existing is null)
@@ -1339,7 +1675,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
         DeleteOne(new BsonDocument("_id", identity));
         RemoveVersion(identity);
-        return new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted, Unit.Concurrency == ConcurrencyDeclaration.Optimistic ? existingVersion : null);
+        return new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted, Unit.Concurrency.IsOptimistic ? existingVersion : null);
     }
 
     private bool ConcurrencyAllows(
@@ -1348,23 +1684,20 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoWriteOptions? options,
         MutationKind kind)
     {
-        var expected = options?.ExpectedVersion;
-        if (expected is not null && Unit.Concurrency == ConcurrencyDeclaration.None)
-        {
-            throw new InvalidOperationException(
-                $"Storage unit '{Unit.Name}' does not declare version machinery.");
-        }
-        if (Unit.Concurrency != ConcurrencyDeclaration.Optimistic)
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
+        if (!Unit.Concurrency.IsOptimistic)
             return true;
-        if (existing is null)
-            return expected is null && kind is MutationKind.Insert or MutationKind.Upsert;
-        return expected is not null && expected == currentVersion;
+        if (precondition.Kind == WritePreconditionKind.Unconditional)
+            return true;
+        if (precondition.Kind == WritePreconditionKind.CreateOnly)
+            return existing is null && kind is (MutationKind.Insert or MutationKind.Upsert);
+        return existing is not null && precondition.Version == currentVersion;
     }
 
     private BsonDocument ConcurrencyFilter(BsonValue identity, long? currentVersion)
     {
         var filter = new BsonDocument("_id", identity);
-        if (Unit.Concurrency != ConcurrencyDeclaration.Optimistic || currentVersion is null)
+        if (!Unit.Concurrency.IsOptimistic || currentVersion is null)
             return filter;
 
         // Older P1 documents kept the version in metadata only. Accept that shape once,
@@ -1379,7 +1712,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     }
 
     private long? NextVersion(long? current) =>
-        Unit.Concurrency == ConcurrencyDeclaration.Optimistic
+        Unit.Concurrency.IsOptimistic
             ? checked((current ?? 0) + 1)
             : null;
 
@@ -1406,7 +1739,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
     private void PersistVersion(BsonValue identity, long? version)
     {
-        if (Unit.Concurrency != ConcurrencyDeclaration.Optimistic || version is null)
+        if (!Unit.Concurrency.IsOptimistic || version is null)
             return;
         var filter = new BsonDocument("_id", MetadataId(identity));
         var document = new BsonDocument { ["_id"] = MetadataId(identity), ["version"] = version.Value };
@@ -1418,7 +1751,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
     private long? Version(BsonValue identity, BsonDocument? document = null)
     {
-        if (Unit.Concurrency != ConcurrencyDeclaration.Optimistic)
+        if (!Unit.Concurrency.IsOptimistic)
             return null;
         if (document is not null && document.TryGetValue(MongoDocumentMapper.VersionField, out var version))
             return version.ToInt64();
@@ -1431,7 +1764,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
     private void RemoveVersion(BsonValue identity)
     {
-        if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
+        if (Unit.Concurrency.IsOptimistic)
         {
             var filter = new BsonDocument("_id", MetadataId(identity));
             if (transactionSession is null)
@@ -1462,12 +1795,11 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         return collection.ReplaceOne(transactionSession, filter, document, options);
     }
 
-    private void DeleteOne(BsonDocument filter)
+    private DeleteResult DeleteOne(BsonDocument filter)
     {
         if (transactionSession is null)
-            collection.DeleteOne(filter);
-        else
-            collection.DeleteOne(transactionSession, filter);
+            return collection.DeleteOne(filter);
+        return collection.DeleteOne(transactionSession, filter);
     }
 
     private BsonValue MetadataId(BsonValue identity) => new BsonDocument
@@ -1642,6 +1974,10 @@ internal static class MongoDocumentMapper
 {
     internal const string VersionField = "__groundwork_version";
 
+    internal static bool IsSystemOwnedToken(StorageUnit unit, ColumnDefinition column) =>
+        unit.Concurrency.IsOptimistic && string.Equals(
+            unit.Concurrency.TokenColumn, column.Name, StringComparison.Ordinal);
+
     internal static BsonValue EncodeKey(StorageUnit unit, IReadOnlyDictionary<string, object?> values)
     {
         var key = new BsonDocument();
@@ -1672,6 +2008,8 @@ internal static class MongoDocumentMapper
         var document = new BsonDocument("_id", identity);
         foreach (var column in unit.Columns)
         {
+            if (IsSystemOwnedToken(unit, column))
+                continue;
             var isPresent = values.TryGetValue(column.Name, out var value);
             if (column.Generation == ColumnGeneration.ProviderSequence)
             {
@@ -1707,9 +2045,13 @@ internal static class MongoDocumentMapper
     {
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
         foreach (var column in unit.Columns)
+        {
+            if (SearchKeyProjection.IsProviderOwnedColumn(column.Name) || IsSystemOwnedToken(unit, column))
+                continue;
             values[column.Name] = document.TryGetValue(column.Name, out var value)
                 ? MongoValueCodec.Decode(value, column)
                 : null;
+        }
         return new MongoStoredEntry(new MongoStorageValues(values), version);
     }
 }
@@ -1726,7 +2068,7 @@ internal static class SchemaIdentity
         unit.SchemaVersion,
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
-            string.Join("|", column.Name, column.SourceColumn, column.Projection))),
+            string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
         string.Join("|", unit.Indexes.Select(Index)));
 
     internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
@@ -1737,7 +2079,11 @@ internal static class SchemaIdentity
 
     private static string Column(ColumnDefinition column) => string.Join("|",
         column.Name, column.Type, column.IsNullable, column.MaxLength, column.Precision,
-        column.Scale, column.Collation, column.Generation,
+        column.Scale,
+        column.Type == PortableType.String && (column.Collation is null or PortableCollation.Ordinal)
+            ? PortableCollation.Ordinal
+            : column.Collation,
+        column.Generation,
         column.Default is null ? "default:absent" : "default:present:" + column.Default.Value);
 
     private static string Index(IndexDefinition index) => string.Join("|",

@@ -146,9 +146,39 @@ internal sealed class SqliteDialect : RelationalDialect
                 "state_json" TEXT NOT NULL,
                 PRIMARY KEY ("subject_id", "provider_name")
             );
+            CREATE TABLE IF NOT EXISTS "__groundwork_search_key_algorithms" (
+                "table_name" TEXT NOT NULL,
+                "column_name" TEXT NOT NULL,
+                "algorithm_id" TEXT NOT NULL,
+                PRIMARY KEY ("table_name", "column_name")
+            );
             """;
         command.ExecuteNonQuery();
     }
+
+    public override void ApplyProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported SQLite provider definition '{definition.Kind}'.");
+        RelationalSearchKeyCatalog.Apply(
+            connection,
+            transaction,
+            definition,
+            "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=excluded.\"algorithm_id\";");
+    }
+
+    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table)
+        => RelationalSearchKeyCatalog.Read(
+            connection,
+            transaction,
+            table,
+            "SELECT \"column_name\",\"algorithm_id\" FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table;");
 
     public override PhysicalSchemaHistoryState ReadHistory(DbConnection connection, PhysicalSchemaTargetIdentity target)
     {

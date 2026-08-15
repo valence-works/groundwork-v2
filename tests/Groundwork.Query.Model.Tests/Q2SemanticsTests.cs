@@ -112,7 +112,7 @@ public sealed class Q2SemanticsTests
     }
 
     [Fact]
-    public void Search_leaves_are_total_even_when_a_provider_plan_must_refuse_them()
+    public void Search_leaves_are_total_and_ordinal_prefix_is_portable()
     {
         var starts = new Predicate.StartsWith(Text, "pre");
         var contains = new Predicate.Substring(Text, "mid", Anchor.Contains);
@@ -122,7 +122,7 @@ public sealed class Q2SemanticsTests
         Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(starts), row));
         Assert.False(PortableQuerySemantics.Evaluate(contains, row));
         Assert.True(PortableQuerySemantics.Evaluate(new Predicate.Not(contains), row));
-        Assert.False(PortableQuerySemantics.Validate(starts).IsPortable);
+        Assert.True(PortableQuerySemantics.Validate(starts).IsPortable);
         Assert.True(PortableQuerySemantics.Validate(contains).IsPortable);
         Assert.False(PortableQuerySemantics.Validate(new Predicate.Not(contains)).IsPortable);
     }
@@ -165,7 +165,8 @@ public sealed class Q2SemanticsTests
             new Predicate.Range(Binary, Bound.Inclusive(QueryConstant.Of(Binary, new byte[] { 1 })), null),
             new Predicate.Range(Boolean, Bound.Inclusive(QueryConstant.Of(Boolean, true)), null),
             new Predicate.ColumnCompare(Boolean, CompareOp.LessThan, Boolean),
-            new Predicate.StartsWith(Text, "prefix"),
+            new Predicate.StartsWith(new ColumnRef(Table, "text", QueryType.String,
+                stringComparison: QueryStringComparisonPolicy.CurrentCulture), "prefix"),
             new Predicate.Not(new Predicate.In(Number, [QueryConstant.Of(Number, 1)])),
             new Predicate.Equal(UnshapedDecimal, QueryConstant.Of(UnshapedDecimal, 1m))
         };
@@ -362,8 +363,8 @@ public sealed class Q2SemanticsTests
     {
         Assert.Equal(G2Q1Corpus.ExpectedShapeCount, G2Q1Corpus.Shapes.Count);
         Assert.Equal(G2Q1Corpus.Shapes.Count, G2Q1Corpus.Shapes.Select(shape => shape.CanonicalInput).Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(243, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
-        Assert.Equal(57, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
+        Assert.Equal(251, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
+        Assert.Equal(49, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
 
         foreach (var shape in G2Q1Corpus.Shapes)
         {

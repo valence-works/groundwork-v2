@@ -1,6 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
 using Groundwork.MongoDb.TestingAdapter;
+using Groundwork.Query.Model;
 using Groundwork.Testing;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -184,6 +185,276 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Folded_unique_index_migration_backfills_before_index_and_reports_fold_collision()
+    {
+        using var connection = OpenConnection();
+        var original = new StorageUnit
+        {
+            Id = new StorageUnitId("q9-mongo-folded-" + Guid.NewGuid().ToString("N")),
+            Name = "Q9MongoFolded_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(original);
+        var session = connection.OpenSession(original, MongoStorageAccess.Global);
+        Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+        Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 2, ["status"] = "open" })).Status);
+
+        var folded = original with
+        {
+            Columns = [.. original.Columns.Select(column => column.Name == "status"
+                ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                : column)],
+            Indexes = [new IndexDefinition { Name = "unique-status", Columns = [new IndexColumn("status")], IsUnique = true }]
+        };
+
+        var exception = Assert.Throws<MongoCommandException>(() => connection.Schema.Apply(folded));
+        Assert.Contains("duplicate", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [SkippableFact]
+    public void Folded_unique_index_migration_backfills_existing_data_before_successful_index_creation()
+    {
+        using var connection = OpenConnection();
+        var original = new StorageUnit
+        {
+            Id = new StorageUnitId("q9-mongo-folded-success-" + Guid.NewGuid().ToString("N")),
+            Name = "Q9MongoFoldedSuccess_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(original);
+        var session = connection.OpenSession(original, MongoStorageAccess.Global);
+        Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+
+        var folded = original with
+        {
+            Columns = [.. original.Columns.Select(column => column.Name == "status"
+                ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                : column)],
+            Indexes = [new IndexDefinition { Name = "unique-status", Columns = [new IndexColumn("status")], IsUnique = true }]
+        };
+
+        var applied = connection.Schema.Apply(folded);
+        Assert.True(applied.Applied);
+        var status = new ColumnRef(new TableId(folded.Name), "status", QueryType.String, false, 32,
+            stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var result = connection.OpenSession(folded, MongoStorageAccess.Global).Query(new QueryRequest(
+            new TableId(folded.Name), new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None));
+        Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+        Assert.Equal(MongoWriteOutcomeStatus.UniqueViolation, connection.OpenSession(folded, MongoStorageAccess.Global)
+            .Insert(new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 2, ["status"] = "open" })).Status);
+    }
+
+    [SkippableFact]
+    public void Folded_algorithm_id_drift_is_refused_before_mongo_session_open()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("q9-mongo-drift-" + Guid.NewGuid().ToString("N")),
+            Name = "Q9MongoDrift_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false, Collation = PortableCollation.OrdinalIgnoreCase }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(unit);
+        var metadata = Assert.IsType<MongoDbProviderConnection>(connection).Database
+            .GetCollection<BsonDocument>("__groundwork_metadata");
+        metadata.UpdateOne(
+            new BsonDocument("_id", "schema:" + unit.Id.Value),
+            new BsonDocument("$set", new BsonDocument("derived.0.algorithmId", "stale-search-key-v0")));
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            connection.OpenSession(unit, MongoStorageAccess.Global));
+        Assert.Contains("rebuild", exception.Message, StringComparison.OrdinalIgnoreCase);
+        var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
+        Assert.Contains(report.ColumnDrift, refusal => refusal.Path.EndsWith("searchKeyAlgorithm", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public void Folded_partial_updates_preserve_keys_through_aggregate_exact_and_fallback_batches()
+    {
+        using var connection = OpenConnection();
+        var unit = RequiredFoldedUnit("q9-mongo-batch-folded");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+        var stored = session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.NotNull(stored);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored.Values.Values.Keys);
+
+        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+        var aggregateObserver = new WritePathObserver();
+        var aggregate = batch.ApplyBatch(
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+                new WriteOptions { Observer = aggregateObserver })]);
+        Assert.Equal(WriteOutcomeStatus.Upserted, Assert.Single(aggregate).Outcome.Status);
+        Assert.Contains(aggregateObserver.Commands, command => command.Operation == "mongodb.batch-write");
+
+        var exact = batch.ApplyBatch(
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }))],
+            exactOutcomes: true);
+        Assert.Equal(WriteOutcomeStatus.Updated, Assert.Single(exact).Outcome.Status);
+
+        var fallback = batch.ApplyBatch(
+            [RowWrite.Update(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }))]);
+        Assert.Equal(WriteOutcomeStatus.Updated, Assert.Single(fallback).Outcome.Status);
+
+        var missing = Assert.Throws<InvalidOperationException>(() => batch.ApplyBatch(
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 2 }))]));
+        Assert.Contains("status", missing.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
+
+        var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, false, 32,
+            stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var result = session.Query(new QueryRequest(new TableId(unit.Name),
+            new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None));
+        Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+    }
+
+    [SkippableFact]
+    public void Folded_partial_conditional_upserts_preserve_existing_values_and_explicit_preconditions()
+    {
+        using var connection = OpenConnection();
+        var unit = RequiredFoldedUnit(
+            "q9-mongo-conditional-folded",
+            concurrency: ConcurrencyDeclaration.Optimistic());
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.Equal(1, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Version);
+
+        var updated = session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+            MongoWriteOptions.IfVersion(1));
+
+        Assert.Equal(MongoWriteOutcomeStatus.Updated, updated.Status);
+        Assert.Equal(2, updated.Version);
+        Assert.Equal("Open", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = 1 }))!.Values.Values["status"]);
+        var fallback = Assert.IsAssignableFrom<IBatchedStorageSession>(session).ApplyBatch(
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+                WriteOptions.IfVersion(2))]);
+        Assert.Equal(WriteOutcomeStatus.Updated, Assert.Single(fallback).Outcome.Status);
+        Assert.Equal(3, fallback[0].Outcome.Version);
+        Assert.Equal("Open", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = 1 }))!.Values.Values["status"]);
+        Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict, session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+            MongoWriteOptions.IfVersion(1)).Status);
+        Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict, session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 2 }),
+            MongoWriteOptions.IfVersion(1)).Status);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
+
+        var missingRequired = Assert.Throws<InvalidOperationException>(() => session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 3 })));
+        Assert.Contains("status", missingRequired.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 3 })));
+    }
+
+    [SkippableFact]
+    public void Folded_aggregate_batch_does_not_report_an_unmatched_incomplete_upsert_as_success()
+    {
+        using var connection = OpenConnection();
+        var unit = RequiredFoldedUnit("q9-mongo-aggregate-folded", uniqueStatus: true);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+
+        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+        var missingRequired = Assert.Throws<InvalidOperationException>(() => batch.ApplyBatch(
+        [
+            RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 2 })),
+            RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 3, ["status"] = "OPEN" }))
+        ]));
+
+        Assert.Contains("status", missingRequired.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 3 })));
+    }
+
+    [SkippableFact]
+    public void StartsWithUsesIndex_for_the_optimizer_selected_folded_physical_index_without_a_hint()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB explain proofs.");
+        var previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
+        var previousDirectory = Environment.GetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR");
+        var artifactDirectory = Path.Combine(Path.GetTempPath(), "groundwork-q11-mongo-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", "1");
+        Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", artifactDirectory);
+        try
+        {
+            using var connection = new MongoDbProviderFactory().Create(connectionString!);
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId("q9-mongo-explain-" + Guid.NewGuid().ToString("N")),
+                Name = "Q9MongoExplain_" + Guid.NewGuid().ToString("N"),
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                    new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false, Collation = PortableCollation.OrdinalIgnoreCase }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] },
+                Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+            };
+            connection.Schema.Apply(unit);
+            var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+            for (var id = 1; id <= 2_000; id++)
+            {
+                session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = id,
+                    ["status"] = id == 1 ? "Open" : "other-" + id
+                }));
+            }
+
+            var table = new TableId(unit.Name);
+            var status = new ColumnRef(table, "status", QueryType.String, false, 32,
+                stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+            var options = new QueryRenderOptions(
+                [new QueryIndexDeclaration("by-status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.ProviderDefault)],
+                selectedIndex: "by-status");
+            var result = session.Query(new QueryRequest(table,
+                new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None), options);
+
+            Assert.Equal("by-status", result.SelectedIndex);
+            Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+            var artifact = Assert.Single(Directory.GetFiles(artifactDirectory, "*.json"));
+            Assert.Contains("optimizer-selected", Path.GetFileName(artifact), StringComparison.Ordinal);
+            var plan = File.ReadAllText(artifact);
+            Assert.Contains("IXSCAN", plan, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(SearchKeyProjection.ColumnName("status"), plan, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ASSERT", previousFlag);
+            Environment.SetEnvironmentVariable("GW_EXPLAIN_ARTIFACT_DIR", previousDirectory);
+            if (Directory.Exists(artifactDirectory))
+                Directory.Delete(artifactDirectory, recursive: true);
+        }
+    }
+
+    [SkippableFact]
     public void Mongo_bson_type_drift_names_the_column_without_confusing_it_with_index_drift()
     {
         using var connection = OpenConnection();
@@ -223,7 +494,7 @@ public sealed class MongoProviderIntegrationTests
             Id = new StorageUnitId("p1-scope-" + Guid.NewGuid().ToString("N")),
             Name = "P1Scope_" + Guid.NewGuid().ToString("N"),
             Scope = ScopePolicy.Scoped,
-            Concurrency = ConcurrencyDeclaration.Optimistic
+            Concurrency = ConcurrencyDeclaration.Optimistic()
         };
         connection.Schema.Apply(unit);
         var first = connection.OpenSession(unit, MongoStorageAccess.Scoped(new StorageScope("a")));
@@ -234,9 +505,9 @@ public sealed class MongoProviderIntegrationTests
         Assert.Equal("Ada", first.Read(Key("same"))!.Values.Values["name"]);
         Assert.Null(second.Read(Key("same")));
         Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict,
-            first.Update(CustomerValues("same", null), MongoWriteOptions.ForVersion(9)).Status);
+            first.Update(CustomerValues("same", null), MongoWriteOptions.IfVersion(9)).Status);
         Assert.Equal(MongoWriteOutcomeStatus.Updated,
-            first.Update(CustomerValues("same", null), MongoWriteOptions.ForVersion(1)).Status);
+            first.Update(CustomerValues("same", null), MongoWriteOptions.IfVersion(1)).Status);
     }
 
     [SkippableFact]
@@ -285,6 +556,35 @@ public sealed class MongoProviderIntegrationTests
     });
 
     private static MongoStorageKey Key(string id) => new(new Dictionary<string, object?> { ["id"] = id });
+
+    private static StorageUnit RequiredFoldedUnit(
+        string idPrefix,
+        bool uniqueStatus = false,
+        ConcurrencyDeclaration? concurrency = null)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        return new StorageUnit
+        {
+            Id = new StorageUnitId(idPrefix + "-" + suffix),
+            Name = "Q9MongoRequiredFolded_" + suffix,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false, Collation = PortableCollation.OrdinalIgnoreCase }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = uniqueStatus ? "unique-status" : "by-status",
+                    Columns = [new IndexColumn("status")],
+                    IsUnique = uniqueStatus
+                }
+            ],
+            Concurrency = concurrency ?? ConcurrencyDeclaration.None
+        };
+    }
 
     private static IMongoProviderConnection OpenConnection()
     {

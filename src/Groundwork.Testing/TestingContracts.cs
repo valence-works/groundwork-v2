@@ -102,18 +102,110 @@ public sealed class StorageKey
     public IReadOnlyDictionary<string, object?> Values { get; }
 }
 
-/// <summary>Optional optimistic-concurrency precondition for a mutation.</summary>
+/// <summary>The explicit precondition attached to one row mutation.</summary>
+public sealed record WritePrecondition
+{
+    private WritePrecondition(WritePreconditionKind kind, long? version)
+    {
+        Kind = kind;
+        Version = version;
+    }
+
+    public static WritePrecondition Unconditional { get; } = new(WritePreconditionKind.Unconditional, null);
+
+    public static WritePrecondition CreateOnly { get; } = new(WritePreconditionKind.CreateOnly, null);
+
+    public static WritePrecondition IfVersion(long version)
+    {
+        if (version < 0)
+            throw new ArgumentOutOfRangeException(nameof(version), "A version precondition cannot be negative.");
+        return new(WritePreconditionKind.IfVersion, version);
+    }
+
+    public WritePreconditionKind Kind { get; }
+
+    public long? Version { get; }
+
+}
+
+public enum WritePreconditionKind
+{
+    Unconditional,
+    CreateOnly,
+    IfVersion
+}
+
+public enum WriteOperation
+{
+    Insert,
+    Update,
+    Upsert,
+    Delete,
+    ConditionalUpsert
+}
+
+/// <summary>Validates operation/precondition combinations before provider I/O.</summary>
+public static class WritePreconditionValidator
+{
+    public static void ValidateSystemOwnedValues(StorageUnit unit, IReadOnlyDictionary<string, object?> values)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(values);
+        if (unit.Concurrency.IsOptimistic &&
+            unit.Concurrency.TokenColumn is { } token && values.ContainsKey(token))
+        {
+            throw new InvalidOperationException(
+                $"GW-WRITE-CONCURRENCY-003: optimistic token column '{token}' is system-owned and cannot be supplied or mutated by application values.");
+        }
+    }
+
+    public static void Validate(StorageUnit unit, WriteOperation operation, WriteOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
+        var allowed = operation switch
+        {
+            WriteOperation.Insert => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.CreateOnly,
+            WriteOperation.Update => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.IfVersion,
+            WriteOperation.Delete => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.IfVersion,
+            WriteOperation.Upsert or WriteOperation.ConditionalUpsert => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.CreateOnly or WritePreconditionKind.IfVersion,
+            _ => false
+        };
+        if (!allowed)
+        {
+            throw new InvalidOperationException(
+                $"GW-WRITE-CONCURRENCY-002: precondition '{precondition.Kind}' is not valid for {operation}.");
+        }
+
+        if (unit.Concurrency.IsNone && precondition.Kind != WritePreconditionKind.Unconditional)
+        {
+            throw new InvalidOperationException(
+                $"GW-WRITE-CONCURRENCY-001: storage unit '{unit.Name}' declares no concurrency token; " +
+                $"precondition '{precondition.Kind}' is not allowed.");
+        }
+    }
+}
+
+/// <summary>Explicit optimistic-concurrency precondition for a mutation.</summary>
 public sealed record WriteOptions
 {
-    public long? ExpectedVersion { get; init; }
+    private WritePrecondition precondition = WritePrecondition.Unconditional;
+
+    public WritePrecondition Precondition
+    {
+        get => precondition;
+        init => precondition = value ?? throw new ArgumentNullException(nameof(value));
+    }
 
     /// <summary>Optional observer used by write-path proofs to count provider commands.</summary>
     public IWritePathObserver? Observer { get; init; }
 
     public static WriteOptions Unconditional { get; } = new();
 
-    public static WriteOptions ForVersion(long expectedVersion) =>
-        new() { ExpectedVersion = expectedVersion };
+    public static WriteOptions CreateOnly { get; } = new() { Precondition = WritePrecondition.CreateOnly };
+
+    public static WriteOptions IfVersion(long expectedVersion) =>
+        new() { Precondition = WritePrecondition.IfVersion(expectedVersion) };
 }
 
 public enum WriteOutcomeStatus

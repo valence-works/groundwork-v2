@@ -9,6 +9,32 @@ namespace Groundwork.Substrate.Relational.Tests;
 
 public sealed class RelationalSubstrateContractTests
 {
+    [Theory]
+    [InlineData("stale-search-key-v0")]
+    [InlineData("prefix-groundwork-ascii-lower-v1-suffix")]
+    public void Search_key_catalog_refuses_unknown_or_malformed_algorithm_before_sql(string algorithmId)
+    {
+        using var connection = new TrackingConnection();
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        var definition = new ProviderPhysicalSchemaDefinition(
+            "stub",
+            new StorageUnitId("tickets"),
+            RelationalDialect.SearchKeyDefinitionKind,
+            "tickets" + RelationalDialect.SearchKeyDefinitionSeparator + "name_folded",
+            algorithmId);
+
+        var failure = Assert.Throws<InvalidOperationException>(() => RelationalSearchKeyCatalog.Apply(
+            connection,
+            transaction,
+            definition,
+            "UPSERT"));
+
+        Assert.Contains("algorithm", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("rebuild", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, connection.CommandCalls);
+    }
+
     [Fact]
     public void Sql_emission_is_driven_by_kernel_declaration()
     {

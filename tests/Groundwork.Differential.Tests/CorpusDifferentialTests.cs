@@ -20,6 +20,7 @@ public sealed class CorpusDifferentialTests
     private static readonly string LatestTableName = "g2-latest-" + Guid.NewGuid().ToString("N");
     private static readonly string ScopedTableName = "g2-scoped-" + Guid.NewGuid().ToString("N");
     private static readonly string ExplainTableName = "g2-explain-" + Guid.NewGuid().ToString("N");
+    private static readonly string PrefixTableName = "g2-prefix-" + Guid.NewGuid().ToString("N");
 
     [Fact]
     public void Differential_corpus_marks_only_coverage_proven_queries_for_explain_assertion()
@@ -86,6 +87,57 @@ public sealed class CorpusDifferentialTests
 
         Assert.Equal("ix_misdeclared", Path.GetFileNameWithoutExtension(exception.ArtifactPath).Split('-').Last());
         Assert.NotEmpty(File.ReadAllText(exception.ArtifactPath));
+    }
+
+    [SkippableFact]
+    public void Prefix_search_keys_match_the_same_edge_corpus_on_all_four_providers()
+    {
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
+        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        using var sqlite = OpenSqlite(PrefixUnit, PrefixRows);
+        using var pg = OpenPostgreSql(postgres, PrefixUnit, PrefixRows);
+        using var sql = OpenSqlServer(sqlServer, PrefixUnit, PrefixRows);
+        using var mongoSession = OpenMongo(mongo, PrefixUnit, PrefixRows);
+        var providers = new[] { sqlite, pg, sql, mongoSession };
+        var table = new TableId(PrefixTableName);
+        var folded = new ColumnRef(table, "folded", QueryType.String, true, 64,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var ascii = new ColumnRef(table, "ascii", QueryType.String, true, 64,
+            stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var ordinal = new ColumnRef(table, "ordinal", QueryType.String, true, 64);
+        var id = new ColumnRef(table, "id", QueryType.Int64, false);
+        var cases = new[]
+        {
+            ("unicode-I", folded, "i", new long[] { 3, 4 }),
+            ("sharp-S-prefix", folded, "Straß", new long[] { 7 }),
+            ("sharp-SS-prefix", folded, "STRAS", new long[] { 8 }),
+            ("supplementary", folded, "𐐀", new long[] { 9, 10 }),
+            ("unicode-maximum", folded, "\U0010FFFF", new long[] { 11 }),
+            ("unicode-empty", folded, "", Enumerable.Range(2, 10).Select(value => (long)value).ToArray()),
+            ("ascii-Turkish-I", ascii, "I", new long[] { 3, 4 }),
+            ("ordinal-D7FF", ordinal, "\uD7FF", new long[] { 5 }),
+            ("ordinal-maximum", ordinal, "\uDBFF\uDFFF", new long[] { 8, 9 }),
+            ("ordinal-empty", ordinal, "", Enumerable.Range(2, 10).Select(value => (long)value).ToArray())
+        };
+
+        foreach (var (name, column, prefix, expected) in cases)
+        {
+            var request = new QueryRequest(
+                table,
+                new Predicate.StartsWith(column, prefix),
+                [new OrderTerm(id, OrderDirection.Ascending, NullOrder.First)],
+                Projection.ColumnsOnly(id, column),
+                Paging.None);
+            foreach (var provider in providers)
+            {
+                var actual = provider.Query(request, QueryRenderOptions.Default).Rows
+                    .Select(row => (long)row["id"]!)
+                    .ToArray();
+                Assert.True(expected.SequenceEqual(actual),
+                    $"{provider.Name}/{name}: expected [{string.Join(",", expected)}], actual [{string.Join(",", actual)}]");
+            }
+        }
     }
 
     [SkippableFact]
@@ -206,8 +258,8 @@ public sealed class CorpusDifferentialTests
         var providers = new[] { sqlite, pg, sql, mongoSession };
 
         Assert.Equal(G2Q1Corpus.ExpectedShapeCount, G2Q1Corpus.Shapes.Count);
-        Assert.Equal(243, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
-        Assert.Equal(57, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
+        Assert.Equal(251, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
+        Assert.Equal(49, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
 
         foreach (var shape in G2Q1Corpus.Shapes)
         {
@@ -714,6 +766,26 @@ public sealed class CorpusDifferentialTests
         Indexes = [new IndexDefinition { Name = "ix_number_id", Columns = [new IndexColumn("numberValue"), new IndexColumn("id")] }]
     };
 
+    private static StorageUnit PrefixUnit => new()
+    {
+        Id = new StorageUnitId(PrefixTableName),
+        Name = PrefixTableName,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "folded", Type = PortableType.String, IsNullable = true, MaxLength = 64, Collation = PortableCollation.UnicodeOrdinalIgnoreCase },
+            new() { Name = "ascii", Type = PortableType.String, IsNullable = true, MaxLength = 64, Collation = PortableCollation.OrdinalIgnoreCase },
+            new() { Name = "ordinal", Type = PortableType.String, IsNullable = true, MaxLength = 64, Collation = PortableCollation.Ordinal }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes =
+        [
+            new IndexDefinition { Name = "by-folded", Columns = [new IndexColumn("folded")] },
+            new IndexDefinition { Name = "by-ascii", Columns = [new IndexColumn("ascii")] },
+            new IndexDefinition { Name = "by-ordinal", Columns = [new IndexColumn("ordinal")] }
+        ]
+    };
+
     private static StorageUnit SemanticEdgeUnit => new()
     {
         Id = new StorageUnitId(SemanticEdgeTableName),
@@ -910,6 +982,21 @@ public sealed class CorpusDifferentialTests
             ["guidKey"] = index % 9 == 0 ? null : Guid.Parse($"00112233-4455-6677-8899-{index:D12}"),
             ["binaryValue"] = index % 8 == 0 ? null : new byte[] { (byte)index, (byte)(255 - index), 0 }
         }).ToArray();
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> PrefixRows =>
+    [
+        new Dictionary<string, object?> { ["id"] = 1L, ["folded"] = null, ["ascii"] = null, ["ordinal"] = null },
+        new Dictionary<string, object?> { ["id"] = 2L, ["folded"] = string.Empty, ["ascii"] = string.Empty, ["ordinal"] = string.Empty },
+        new Dictionary<string, object?> { ["id"] = 3L, ["folded"] = "I", ["ascii"] = "I", ["ordinal"] = "I" },
+        new Dictionary<string, object?> { ["id"] = 4L, ["folded"] = "i", ["ascii"] = "i", ["ordinal"] = "i" },
+        new Dictionary<string, object?> { ["id"] = 5L, ["folded"] = "İ", ["ascii"] = "S", ["ordinal"] = "\uD7FF" },
+        new Dictionary<string, object?> { ["id"] = 6L, ["folded"] = "ı", ["ascii"] = "s", ["ordinal"] = "\U00010000" },
+        new Dictionary<string, object?> { ["id"] = 7L, ["folded"] = "Straße", ["ascii"] = "Open", ["ordinal"] = "\uE000" },
+        new Dictionary<string, object?> { ["id"] = 8L, ["folded"] = "STRASSE", ["ascii"] = "other", ["ordinal"] = "\uDBFF\uDFFF" },
+        new Dictionary<string, object?> { ["id"] = 9L, ["folded"] = "𐐀", ["ascii"] = "TURKISH", ["ordinal"] = "\uDBFF\uDFFFsuffix" },
+        new Dictionary<string, object?> { ["id"] = 10L, ["folded"] = "𐐨", ["ascii"] = "value", ["ordinal"] = "max" },
+        new Dictionary<string, object?> { ["id"] = 11L, ["folded"] = "\U0010FFFF", ["ascii"] = "~", ["ordinal"] = "z" }
+    ];
 
     private static CorpusSession OpenSqlite() => OpenSqlite(Unit, Rows);
 

@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
+using Groundwork.Testing;
 
 namespace Groundwork.MongoDb;
 
@@ -93,14 +94,22 @@ public sealed class MongoStorageKey
 
 public sealed record MongoWriteOptions
 {
-    public long? ExpectedVersion { get; init; }
+    private WritePrecondition precondition = WritePrecondition.Unconditional;
+
+    public WritePrecondition Precondition
+    {
+        get => precondition;
+        init => precondition = value ?? throw new ArgumentNullException(nameof(value));
+    }
 
     public IWritePathObserver? Observer { get; init; }
 
     public static MongoWriteOptions Unconditional { get; } = new();
 
-    public static MongoWriteOptions ForVersion(long expectedVersion) =>
-        new() { ExpectedVersion = expectedVersion };
+    public static MongoWriteOptions CreateOnly { get; } = new() { Precondition = WritePrecondition.CreateOnly };
+
+    public static MongoWriteOptions IfVersion(long expectedVersion) =>
+        new() { Precondition = WritePrecondition.IfVersion(expectedVersion) };
 }
 
 public enum MongoWriteOutcomeStatus
@@ -205,7 +214,8 @@ public enum MongoSchemaChangeKind
     CreateStorageUnit,
     AddColumn,
     CreateIndex,
-    AddDerivedColumn
+    AddDerivedColumn,
+    RebuildIndex
 }
 
 public sealed record MongoSchemaChange(MongoSchemaChangeKind Kind, string Identity);

@@ -215,6 +215,8 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        ConcurrencyDeclaration.ValidateDeclaration(desired);
+        desired = SearchKeyProjection.Expand(desired);
         lock (database.Gate)
         {
             return new SchemaDiff(BuildChanges(desired, database.Units.TryGetValue(desired.Id, out var current)
@@ -226,6 +228,8 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        ConcurrencyDeclaration.ValidateDeclaration(desired);
+        desired = SearchKeyProjection.Expand(desired);
         lock (database.Gate)
         {
             database.Units.TryGetValue(desired.Id, out var current);
@@ -236,9 +240,20 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
 
             var merged = Merge(current?.Unit, desired);
             var physicalIndexes = current?.PhysicalIndexes.ToList() ?? [];
-            foreach (var index in desired.Indexes.Where(index =>
-                         physicalIndexes.All(existing => existing.Name != index.Name)))
+            foreach (var index in desired.Indexes)
             {
+                var existing = physicalIndexes.FirstOrDefault(item => item.Name == index.Name);
+                var previous = current?.Unit.Indexes.FirstOrDefault(item => item.Name == index.Name);
+                if (existing is not null && previous is not null &&
+                    SearchKeyProjection.IsIndexRetarget(previous, index, desired.DerivedColumns))
+                {
+                    physicalIndexes.Remove(existing);
+                }
+                else if (existing is not null)
+                {
+                    continue;
+                }
+
                 physicalIndexes.Add(new ProviderIndex(
                     index.Name,
                     index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
@@ -261,6 +276,8 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
                 replacement.Revision = checked(current.Revision + 1);
                 next = replacement;
             }
+
+            BackfillSearchKeys(next, desired, current?.Unit);
 
             next.PhysicalIndexes.AddRange(physicalIndexes);
 
@@ -337,7 +354,12 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
             if (previous is null)
                 changes.Add(new SchemaChange(SchemaChangeKind.CreateIndex, index.Name));
             else if (!SchemaIdentity.IndexEquals(previous, index))
-                throw new SchemaConflictException($"Index '{index.Name}' changed non-additively.");
+            {
+                if (SearchKeyProjection.IsIndexRetarget(previous, index, desired.DerivedColumns))
+                    changes.Add(new SchemaChange(SchemaChangeKind.CreateIndex, index.Name));
+                else
+                    throw new SchemaConflictException($"Index '{index.Name}' changed non-additively.");
+            }
         }
 
         foreach (var previous in current.Indexes)
@@ -347,6 +369,27 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         }
 
         return changes;
+    }
+
+    private static void BackfillSearchKeys(
+        InMemoryUnitState state,
+        StorageUnit desired,
+        StorageUnit? previous)
+    {
+        var previousDerived = previous?.DerivedColumns.ToDictionary(column => column.Name, StringComparer.Ordinal) ?? [];
+        var pending = desired.DerivedColumns.Where(column =>
+            !previousDerived.TryGetValue(column.Name, out var prior) || prior != column).ToArray();
+        if (pending.Length == 0)
+            return;
+
+        foreach (var partition in state.Partitions.Values)
+        {
+            foreach (var pair in partition.ToArray())
+            {
+                var projected = SearchKeyProjection.Populate(desired, pair.Value.Values);
+                partition[pair.Key] = pair.Value.With(projected, pair.Value.Version);
+            }
+        }
     }
 
     private static StorageUnit Merge(StorageUnit? current, StorageUnit desired)
@@ -381,7 +424,9 @@ internal static class SchemaIdentity
         column.MaxLength,
         column.Precision,
         column.Scale,
-        column.Collation,
+        column.Type == PortableType.String && (column.Collation is null or PortableCollation.Ordinal)
+            ? PortableCollation.Ordinal
+            : column.Collation,
         column.Default is null ? "default:absent" : $"default:present:{Value(column.Default.Value)}",
         column.Generation);
 
@@ -466,7 +511,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Read(CurrentState(), partition, key);
+            var entry = Mutation.Read(CurrentState(), partition, key);
+            return entry is null
+                ? null
+                : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
         }
     }
 
@@ -476,31 +524,32 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, SearchKeyQueryMappings.For(Unit));
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns
             .Select(name => QueryColumn(name))
             .Where(column => column is not null)
             .Select(column => column!));
-        var validation = PortableQuerySemantics.Validate(request);
+        var validation = PortableQuerySemantics.Validate(executionRequest);
         if (!validation.IsPortable)
         {
             var refusal = validation.Refusals[0];
             throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
         }
-        ValidateInBudget(request.Where, suppliedOptions.InValueLimit, request.Table.Value);
+        ValidateInBudget(executionRequest.Where, suppliedOptions.InValueLimit, request.Table.Value);
         lock (database.Gate)
         {
             ThrowIfDisposed();
             var rows = CurrentState().Partitions.TryGetValue(partition, out var entries)
                 ? entries.Values
-                    .Where(entry => PortableQuerySemantics.Evaluate(request.Where, entry.Values))
+                    .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
                     .Select(entry => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(entry.Values, StringComparer.Ordinal))
                     .ToList()
                 : new List<IReadOnlyDictionary<string, object?>>();
 
-            if (request.LatestPerKey is not null)
-                rows = LatestPerKeyRows(rows, request.LatestPerKey, renderOptions.TieBreakColumns);
+            if (executionRequest.LatestPerKey is not null)
+                rows = LatestPerKeyRows(rows, executionRequest.LatestPerKey, renderOptions.TieBreakColumns);
 
-            var order = renderOptions.GetEffectiveOrder(request);
+            var order = renderOptions.GetEffectiveOrder(executionRequest);
             if (order.Length != 0)
                 rows.Sort(new MemoryRowComparer(order));
 
@@ -541,6 +590,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     private ColumnRef? QueryColumn(string name)
     {
         var column = Unit.Columns.Single(item => item.Name == name);
+        if (Unit.Concurrency.IsOptimistic &&
+            string.Equals(Unit.Concurrency.TokenColumn, column.Name, StringComparison.Ordinal))
+            return null;
         return column.Type switch
         {
             PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
@@ -700,17 +752,31 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         return left.Length.CompareTo(right.Length);
     }
 
-    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Insert);
+    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
+        return Mutate(values, options, MutationKind.Insert);
+    }
 
-    public WriteOutcome Update(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Update);
+    public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
+        return Mutate(values, options, MutationKind.Update);
+    }
 
-    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Upsert, preserveCreatedAt: true);
+    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
+        return Mutate(values, options, MutationKind.Upsert, preserveCreatedAt: true);
+    }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         options?.Observer?.Observe(new WritePathEvent("in-memory.conditional-upsert", null, IsProbe: false));
         return Mutate(values, options, MutationKind.Upsert, exactOutcome: true, preserveCreatedAt: true);
     }
@@ -718,6 +784,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(key);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
         lock (database.Gate)
         {
             ThrowIfDisposed();
@@ -735,6 +802,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         bool preserveCreatedAt = false)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         lock (database.Gate)
         {
             ThrowIfDisposed();
@@ -906,7 +974,11 @@ internal static class Mutation
         bool exactOutcome = false,
         bool preserveCreatedAt = false)
     {
-        ValidateValues(state.Unit, values.Values, kind);
+        ValidateValues(
+            state.Unit,
+            values.Values,
+            requireAllNonNullable: kind == MutationKind.Insert,
+            rejectGeneratedInsert: kind == MutationKind.Insert);
         var sequence = state.Unit.Columns.FirstOrDefault(column =>
             column.Generation == ColumnGeneration.ProviderSequence);
         var generated = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -931,24 +1003,35 @@ internal static class Mutation
         if (kind == MutationKind.Upsert && hasSequenceLocator && existing is null)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
 
-        var expected = options?.ExpectedVersion;
-        if (expected is not null && state.Unit.Concurrency == ConcurrencyDeclaration.None)
-            throw new InvalidOperationException(
-                $"Storage unit '{state.Unit.Name}' does not declare version machinery.");
-
-        if (existing is not null && state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
+        if (state.Unit.Concurrency.IsOptimistic)
         {
-            if (expected is null || expected != existing.Version)
+            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
                 return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            if (precondition.Kind == WritePreconditionKind.IfVersion &&
+                (existing is null || precondition.Version != existing.Version))
+                return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
         }
 
-        if (existing is null && expected is not null && state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
-            return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict);
+        var storedValues = sourceValues;
+        if (existing is not null && kind != MutationKind.Insert)
+        {
+            var merged = existing.Values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            foreach (var pair in sourceValues)
+                merged[pair.Key] = pair.Value;
+            storedValues = merged;
+        }
 
-        if (!UniqueIndexesAllow(state.Unit, entries, identity, sourceValues))
+        ValidateValues(
+            state.Unit,
+            storedValues,
+            requireAllNonNullable: true,
+            rejectGeneratedInsert: false);
+
+        if (!UniqueIndexesAllow(state.Unit, entries, identity, storedValues))
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version);
 
-        long? version = state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic
+        long? version = state.Unit.Concurrency.IsOptimistic
             ? existing?.Version + 1 ?? 1
             : null;
         var status = kind switch
@@ -960,11 +1043,10 @@ internal static class Mutation
             MutationKind.Upsert when exactOutcome => WriteOutcomeStatus.Updated,
             _ => WriteOutcomeStatus.Upserted
         };
-        var storedValues = sourceValues;
         if ((exactOutcome || preserveCreatedAt) && existing is not null &&
             existing.Values.TryGetValue("createdAt", out var existingCreatedAt))
         {
-            var preserved = values.Values.ToDictionary(
+            var preserved = storedValues.ToDictionary(
                 pair => pair.Key,
                 pair => pair.Value,
                 StringComparer.Ordinal);
@@ -987,17 +1069,15 @@ internal static class Mutation
         if (!entries.TryGetValue(identity, out var existing))
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
 
-        if (options?.ExpectedVersion is not null && state.Unit.Concurrency == ConcurrencyDeclaration.None)
-            throw new InvalidOperationException(
-                $"Storage unit '{state.Unit.Name}' does not declare version machinery.");
-        if (state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic &&
-            (options?.ExpectedVersion is null || options.ExpectedVersion != existing.Version))
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
+        if (state.Unit.Concurrency.IsOptimistic && precondition.Kind == WritePreconditionKind.IfVersion &&
+            precondition.Version != existing.Version)
             return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
 
         entries.Remove(identity);
         state.Revision = checked(state.Revision + 1);
         return new WriteOutcome(WriteOutcomeStatus.Deleted,
-            state.Unit.Concurrency == ConcurrencyDeclaration.Optimistic ? existing.Version : null);
+            state.Unit.Concurrency.IsOptimistic ? existing.Version : null);
     }
 
     private static Dictionary<string, InMemoryEntry> GetEntries(
@@ -1070,22 +1150,27 @@ internal static class Mutation
     private static void ValidateValues(
         StorageUnit unit,
         IReadOnlyDictionary<string, object?> values,
-        MutationKind kind)
+        bool requireAllNonNullable,
+        bool rejectGeneratedInsert)
     {
         var known = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.Where(key => !known.Contains(key)).OrderBy(key => key, StringComparer.Ordinal).FirstOrDefault();
         if (unknown is not null)
             throw new ArgumentException($"Column '{unknown}' is not declared by '{unit.Name}'.", nameof(values));
 
-        foreach (var column in unit.Columns.Where(column => !column.IsNullable))
+        foreach (var column in unit.Columns.Where(column =>
+                     !column.IsNullable &&
+                     !(unit.Concurrency.IsOptimistic &&
+                       string.Equals(unit.Concurrency.TokenColumn, column.Name, StringComparison.Ordinal))))
         {
             if (column.Generation == ColumnGeneration.ProviderSequence)
             {
-                if (kind == MutationKind.Insert && values.ContainsKey(column.Name))
+                if (rejectGeneratedInsert && values.ContainsKey(column.Name))
                     throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by the in-memory provider and cannot be supplied for Insert.", nameof(values));
                 continue;
             }
-            if (!values.TryGetValue(column.Name, out var value) || value is null)
+            if ((values.TryGetValue(column.Name, out var value) && value is null) ||
+                (requireAllNonNullable && !values.ContainsKey(column.Name)))
                 throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
         }
     }

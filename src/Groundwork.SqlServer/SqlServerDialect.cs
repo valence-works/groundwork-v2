@@ -18,6 +18,8 @@ internal sealed class SqlServerDialect : RelationalDialect
 
     public override string MapType(ColumnDefinition definition) => definition.Type switch
     {
+        PortableType.String when definition.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal) =>
+            definition.MaxLength is { } searchLength ? $"varchar({searchLength})" : "varchar(max)",
         PortableType.String or PortableType.Json => definition.MaxLength is { } length ? $"nvarchar({length})" : "nvarchar(max)",
         PortableType.Int32 => "int",
         PortableType.Int64 => "bigint",
@@ -52,6 +54,15 @@ internal sealed class SqlServerDialect : RelationalDialect
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
     {
+        if (string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+        {
+            RelationalSearchKeyCatalog.Apply(
+                connection,
+                transaction,
+                definition,
+                "IF EXISTS (SELECT 1 FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table AND [column_name]=@column) UPDATE [__groundwork_search_key_algorithms] SET [algorithm_id]=@algorithm WHERE [table_name]=@table AND [column_name]=@column ELSE INSERT INTO [__groundwork_search_key_algorithms] ([table_name],[column_name],[algorithm_id]) VALUES (@table,@column,@algorithm);");
+            return;
+        }
         if (!string.Equals(definition.Kind, SqlServerSchemaCoordinator.BatchTypeKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported SQL Server provider definition '{definition.Kind}'.");
 
@@ -146,8 +157,12 @@ internal sealed class SqlServerDialect : RelationalDialect
 
     public override void Validate(ColumnDefinition definition)
     {
-        if (definition.MaxLength is <= 0 || definition.MaxLength is > 8000 && definition.Type == PortableType.Binary ||
-            definition.Type is PortableType.String or PortableType.Json && definition.MaxLength is > 4000 ||
+        if (definition.MaxLength is <= 0 ||
+            definition.MaxLength is > 8000 && definition.Type == PortableType.Binary ||
+            definition.Type is PortableType.String or PortableType.Json &&
+            definition.MaxLength is > 0 &&
+            ((definition.Type == PortableType.String && definition.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal) && definition.MaxLength > 8000) ||
+             (!(definition.Type == PortableType.String && definition.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal)) && definition.MaxLength > 4000)) ||
             definition.Precision is <= 0 or > 38 || definition.Scale is < 0 ||
             definition.Precision is not null && definition.Scale is not null && definition.Scale > definition.Precision)
             throw new ArgumentException($"Invalid SQL Server declaration metadata for column '{definition.Name}'.", nameof(definition));
@@ -265,9 +280,25 @@ internal sealed class SqlServerDialect : RelationalDialect
                 fence bigint NOT NULL,
                 owner nvarchar(64) NOT NULL,
                 CONSTRAINT [PK___groundwork_schema_fences] PRIMARY KEY NONCLUSTERED (subject_id, provider_name));
+            IF OBJECT_ID(N'[__groundwork_search_key_algorithms]', N'U') IS NULL
+            CREATE TABLE [__groundwork_search_key_algorithms] (
+                table_name nvarchar(450) NOT NULL,
+                column_name nvarchar(450) NOT NULL,
+                algorithm_id nvarchar(512) NOT NULL,
+                CONSTRAINT [PK___groundwork_search_key_algorithms] PRIMARY KEY NONCLUSTERED (table_name, column_name));
             """;
         command.ExecuteNonQuery();
     }
+
+    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table)
+        => RelationalSearchKeyCatalog.Read(
+            connection,
+            transaction,
+            table,
+            "SELECT [column_name],[algorithm_id] FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table;");
 
     public override PhysicalSchemaHistoryState ReadHistory(DbConnection connection, PhysicalSchemaTargetIdentity target)
     {

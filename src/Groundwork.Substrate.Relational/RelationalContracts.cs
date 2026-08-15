@@ -11,6 +11,9 @@ namespace Groundwork.Substrate.Relational;
 /// </summary>
 public abstract class RelationalDialect
 {
+    public const string SearchKeyDefinitionKind = "search-key-algorithm";
+    public const string SearchKeyDefinitionSeparator = "\u001f";
+
     public abstract string ProviderName { get; }
 
     /// <summary>Whether CreateTableSql materializes the complete column set in one statement.</summary>

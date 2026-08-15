@@ -47,11 +47,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var executionSource = WithScopePredicate(request);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(
                 index => index.Name,
                 index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal)
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
@@ -88,42 +90,76 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key) => Execute(() => ReadCore(key));
+    public StoredEntry? Read(StorageKey key) => Execute(() => PublicEntry(ReadCore(key)));
 
-    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, Mutation.Insert);
+    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
+        ? null
+        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
-    public WriteOutcome Update(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, Mutation.Update);
+    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
+        return Mutate(values, options, Mutation.Insert);
+    }
 
-    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, Mutation.Upsert);
+    public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
+        return Mutate(values, options, Mutation.Update);
+    }
 
-    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        Execute(() => ConditionalUpsertCore(values, options));
+    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
+        return Mutate(values, options, Mutation.Upsert);
+    }
+
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
+        return Execute(() => ConditionalUpsertCore(values, options));
+    }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
         ExecuteWrite(() => ApplyBatchCore(writes));
 
-    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
+    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
-        var existing = ReadCore(key);
-        ValidateExpected(options, existing, Mutation.Delete);
-        if (existing is null)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        var (where, parameters) = KeyPredicate(key.Values);
-        if (VersionColumn is not null)
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
+        return ExecuteWrite(() =>
         {
-            where += $" AND {Quote(VersionColumn.Name)}=@expected";
-            parameters["@expected"] = options!.ExpectedVersion!.Value;
-        }
-        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
-        AddParameters(command, parameters);
-        var affected = command.ExecuteNonQuery();
-        return affected == 0
-            ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
-            : new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-    });
+            if (Unit.Concurrency.IsNone)
+            {
+                var (noneWhere, noneParameters) = KeyPredicate(key.Values);
+                using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+                AddParameters(noneCommand, noneParameters);
+                return noneCommand.ExecuteNonQuery() == 0
+                    ? new WriteOutcome(WriteOutcomeStatus.NotFound)
+                    : new WriteOutcome(WriteOutcomeStatus.Deleted);
+            }
+
+            var existing = ReadCore(key);
+            ValidateExpected(options, existing, Mutation.Delete);
+            if (existing is null)
+                return new WriteOutcome(WriteOutcomeStatus.NotFound);
+            var (where, parameters) = KeyPredicate(key.Values);
+            if (VersionColumn is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumn.Name)}=@expected";
+                parameters["@expected"] = options.Precondition.Version!.Value;
+            }
+            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            AddParameters(command, parameters);
+            var affected = command.ExecuteNonQuery();
+            return affected == 0
+                ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
+                : new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
+        });
+    }
 
     internal void Close() => closed = true;
 
@@ -134,14 +170,18 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             return [];
         if (SequenceColumn is not null)
             return ApplyBatchFallback(writes);
-        if (writes.Any(write => write.Options.ExpectedVersion is not null))
+        if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
-        return writes[0].Mode switch
+        if (writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() != 1)
+            return ApplyBatchFallback(writes);
+
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+        return physicalWrites[0].Mode switch
         {
-            RowWriteMode.Insert => ApplyInsertBatch(writes),
-            RowWriteMode.Upsert => ApplyUpsertBatch(writes),
+            RowWriteMode.Insert => ApplyInsertBatch(physicalWrites),
+            RowWriteMode.Upsert => ApplyUpsertBatch(physicalWrites),
             _ => ApplyBatchFallback(writes)
         };
     }
@@ -272,7 +312,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
@@ -318,6 +358,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, mutation == Mutation.Insert,
             allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
 
@@ -333,13 +374,15 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         }
 
         var key = KeyFromValues(values.Values);
-        var existing = ReadCore(key);
+        // None mode has no token to inspect. Keep direct writes single-statement and let the
+        // database report uniqueness/not-found from the write itself.
+        var existing = Unit.Concurrency.IsNone ? null : ReadCore(key);
         if (mutation == Mutation.Insert && existing is not null)
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
-        if (mutation == Mutation.Update && existing is null)
+        if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
         if (mutation == Mutation.Upsert && SequenceColumn is not null &&
-            values.Values.ContainsKey(SequenceColumn.Name) && existing is null)
+            values.Values.ContainsKey(SequenceColumn.Name) && existing is null && Unit.Concurrency.IsOptimistic)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
         ValidateExpected(options, existing, mutation);
         return mutation switch
@@ -357,8 +400,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, requireAllNonNullable: false);
-        if (options?.ExpectedVersion is not null && VersionColumn is null)
+        if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumn is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
 
         var key = KeyFromValues(values.Values);
@@ -383,10 +427,12 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var conflictPredicate = PartialKeyPredicate();
         var conflict = $"({string.Join(", ", Unit.Key.Columns.Select(Quote))})" +
             (conflictPredicate is null ? string.Empty : $" WHERE {conflictPredicate}");
-        var actionPredicate = VersionColumn is null
+        var actionPredicate = VersionColumn is null || options?.Precondition.Kind == WritePreconditionKind.Unconditional
             ? string.Empty
-            : $" WHERE @expected::bigint IS NOT NULL AND {Quote(Unit.Name)}.{Quote(VersionColumn.Name)}=@expected::bigint";
-        var source = VersionColumn is null || options?.ExpectedVersion is null
+            : options?.Precondition.Kind == WritePreconditionKind.CreateOnly
+                ? " WHERE FALSE"
+                : $" WHERE {Quote(Unit.Name)}.{Quote(VersionColumn.Name)}=@expected::bigint";
+        var source = VersionColumn is null || options?.Precondition.Version is null
             ? $"VALUES ({string.Join(", ", columns.Select(column => "@" + column))})"
             : $"SELECT {string.Join(", ", columns.Select(column => "@" + column))} WHERE EXISTS (SELECT 1 FROM {Quote(Unit.Name)} WHERE {keyPredicate} AND {Quote(VersionColumn.Name)}=@expected::bigint)";
         var returning = VersionColumn is null
@@ -401,7 +447,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             if (!physical.ContainsKey(pair.Key.TrimStart('@')))
                 Add(command, pair.Key.TrimStart('@'), pair.Value);
         if (VersionColumn is not null)
-            Add(command, "expected", options?.ExpectedVersion);
+            Add(command, "expected", options?.Precondition.Version);
         options?.Observer?.Observe(new WritePathEvent("postgresql.conditional-upsert", sql, IsProbe: false));
         try
         {
@@ -482,7 +528,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome UpdateCore(
         StorageValues values,
         StorageKey key,
-        StoredEntry existing,
+        StoredEntry? existing,
         WriteOptions? options)
     {
         var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name) &&
@@ -494,17 +540,29 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         if (VersionColumn is not null)
         {
             sets.Add($"{Quote(VersionColumn.Name)}={Quote(VersionColumn.Name)}+1");
-            where += $" AND {Quote(VersionColumn.Name)}=@expected";
-            parameters["@expected"] = options!.ExpectedVersion!.Value;
+            if (options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumn.Name)}=@expected";
+                parameters["@expected"] = options.Precondition.Version!.Value;
+            }
         }
         if (sets.Count == 0)
-            return new WriteOutcome(WriteOutcomeStatus.Updated, existing.Version);
-        using var command = Command($"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};");
+        {
+            var noOpColumn = Unit.Key.Columns.First(column =>
+                column != PostgreSqlSchemaCoordinator.ScopeColumn);
+            sets.Add($"{Quote(noOpColumn)}={Quote(noOpColumn)}");
+        }
+        var sql = $"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};";
+        using var command = Command(sql);
         AddParameters(command, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("postgresql.update", sql, IsProbe: false));
         if (command.ExecuteNonQuery() == 0)
-            return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            return new WriteOutcome(Unit.Concurrency.IsNone
+                ? WriteOutcomeStatus.NotFound
+                : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
         return new WriteOutcome(WriteOutcomeStatus.Updated,
-            VersionColumn is null ? null : existing.Version + 1);
+            VersionColumn is null ? null : existing!.Version + 1);
     }
 
     private WriteOutcome UpsertCore(
@@ -540,7 +598,12 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         using var command = Command(sql);
         AddParameters(command, physical);
         if (exactOutcome && VersionColumn is not null)
-            Add(command, "expected", options?.ExpectedVersion);
+            Add(command, "expected", options?.Precondition.Version);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent(
+                exactOutcome ? "postgresql.conditional-upsert" : "postgresql.upsert",
+                sql,
+                IsProbe: false));
         try
         {
             if (!exactOutcome)
@@ -660,17 +723,23 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
     {
-        if (options?.ExpectedVersion is not null && VersionColumn is null)
-            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
         if (VersionColumn is null)
             return;
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
         if (mutation == Mutation.Insert)
+            return;
+
+        if (mutation == Mutation.Upsert)
         {
-            if (existing is null && options?.ExpectedVersion is not null)
-                throw new ConcurrencyConflictException();
+            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
+                throw new ConcurrencyConflictException(existing.Version);
+            if (precondition.Kind == WritePreconditionKind.IfVersion &&
+                (existing is null || precondition.Version != existing.Version))
+                throw new ConcurrencyConflictException(existing?.Version);
             return;
         }
-        if (existing is null ? options?.ExpectedVersion is not null : options?.ExpectedVersion != existing.Version)
+        if (precondition.Kind == WritePreconditionKind.IfVersion &&
+            (existing is null || precondition.Version != existing.Version))
             throw new ConcurrencyConflictException(existing?.Version);
     }
 

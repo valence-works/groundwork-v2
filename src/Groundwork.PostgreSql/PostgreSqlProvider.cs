@@ -20,13 +20,15 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
     private readonly string connectionString;
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly ConcurrentBag<NpgsqlConnection> ownedConnections = [];
+    private readonly PostgreSqlSchemaCoordinator schemaCoordinator;
     private bool disposed;
 
     public PostgreSqlProviderConnection(string connectionString)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         this.connectionString = connectionString;
-        Schema = new PostgreSqlSchemaCoordinator(this);
+        schemaCoordinator = new PostgreSqlSchemaCoordinator(this);
+        Schema = schemaCoordinator;
         Catalog = new PostgreSqlProviderCatalog(this);
     }
 
@@ -58,6 +60,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = OpenConnection();
         OwnConnection(connection);
         return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null);
@@ -83,6 +86,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         {
             ArgumentNullException.ThrowIfNull(unit);
             PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+            schemaCoordinator.EnsureRuntimeAdmission(unit);
         }
 
         var connection = OpenConnection();
@@ -159,6 +163,25 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
+    internal void EnsureRuntimeAdmission(StorageUnit desired)
+    {
+        var physical = Physicalize(desired);
+        if (physical.DerivedColumns.Count == 0)
+            return;
+        var target = Target(physical);
+        var inspection = executor.InspectHistory(target);
+        var applied = inspection.History.AppliedState;
+        if (applied is null)
+            return;
+        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
+            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
+        {
+            throw new InvalidOperationException(
+                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
+                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
+        }
+    }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
@@ -184,7 +207,15 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
-        new(new SchemaSubject(physical), new ProviderIdentity("PostgreSQL", "1.0"));
+        new(
+            new SchemaSubject(physical),
+            new ProviderIdentity("PostgreSQL", "1.0"),
+            physical.DerivedColumns.Select(derived => new ProviderPhysicalSchemaDefinition(
+                "PostgreSQL",
+                physical.Id,
+                RelationalDialect.SearchKeyDefinitionKind,
+                physical.Name + RelationalDialect.SearchKeyDefinitionSeparator + derived.Name,
+                derived.AlgorithmId ?? throw new InvalidOperationException($"Derived search-key column '{derived.Name}' is missing its algorithm identity."))).ToArray());
 
     internal static void ValidateAccess(StorageUnit unit, StorageAccess access)
     {
@@ -208,6 +239,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
                     portability.Refusals.Select(refusal =>
                         $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
         }
+        source = SearchKeyProjection.Expand(source);
         var columns = source.Columns.ToList();
         var key = source.Key.Columns.ToList();
         var indexes = source.Indexes.ToList();
@@ -226,8 +258,11 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
                 SchemaVersion = index.SchemaVersion
             }).ToList();
         }
-        if (source.Concurrency == ConcurrencyDeclaration.Optimistic)
-            columns.Add(new ColumnDefinition { Name = VersionColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(1L) });
+        if (source.Concurrency.IsOptimistic)
+        {
+            RemoveDeclaredToken(source, columns);
+            columns.Add(new ColumnDefinition { Name = VersionColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) });
+        }
         return new StorageUnit
         {
             Id = source.Id,
@@ -241,6 +276,20 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
             Timestamps = source.Timestamps,
             SchemaVersion = source.SchemaVersion
         };
+    }
+
+    private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)
+    {
+        var token = source.Concurrency.TokenColumn!;
+        var declared = columns.FirstOrDefault(column => column.Name == token);
+        if (declared is null) return;
+        if (declared.Type != PortableType.Int64 || declared.IsNullable ||
+            declared.Default?.Value is not long defaultValue || defaultValue != 0)
+        {
+            throw new ArgumentException(
+                $"Optimistic token column '{token}' must be a non-null Int64 with default 0.", nameof(source));
+        }
+        columns.Remove(declared);
     }
 
     private void Remember(StorageUnit original, StorageUnit physical) => units[original.Id] = physical;

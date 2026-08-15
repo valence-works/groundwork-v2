@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Testing;
 using Groundwork.Sqlite;
 using Groundwork.Query.Linq;
@@ -176,6 +177,103 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Folded_schema_migration_backfills_and_partial_updates_preserve_the_key()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var original = new StorageUnit
+        {
+            Id = new StorageUnitId("folded-migration"),
+            Name = "folded_migration",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(original).Applied);
+        Assert.Equal(WriteOutcomeStatus.Inserted, connection.OpenSession(original, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+
+        var folded = original with
+        {
+            Columns = [.. original.Columns.Select(column => column.Name == "status"
+                ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                : column)],
+            Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+        };
+        Assert.Contains(SearchKeyProjection.Expand(folded).Columns, column => column.Name == "__groundwork_search_status");
+        var foldedDiff = connection.Schema.Diff(folded);
+        using (var historyConnection = new SqliteConnection(store.ConnectionString))
+        {
+            historyConnection.Open();
+            using var historyCommand = historyConnection.CreateCommand();
+            historyCommand.CommandText = "SELECT state_json FROM __groundwork_schema_history WHERE subject_id='folded-migration'";
+            var state = PhysicalSchemaAppliedStateSerializer.Deserialize((string)historyCommand.ExecuteScalar()!);
+            var target = SqliteSchemaCoordinator.Target(SqliteSchemaCoordinator.Physicalize(folded));
+            var plan = PhysicalSchemaDiffPlanner.Plan(
+                target,
+                PhysicalSchemaHistoryState.FromApplied(state),
+                DateTimeOffset.UnixEpoch);
+            Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Code + ":" + refusal.Message)));
+            Assert.Contains(plan.Operations, operation => operation is BackfillColumnOperation backfill &&
+                backfill.Derived is not null && backfill.RequiresAuthorization);
+            Assert.Contains(plan.Operations, operation => operation is FinalizeColumnOperation finalize &&
+                finalize.Column.Name == SearchKeyProjection.ColumnName("status"));
+        }
+        var foldedApply = connection.Schema.Apply(folded);
+        Assert.True(foldedApply.Applied, string.Join("; ", foldedDiff.Changes.Select(change => change.Kind + ":" + change.Identity)) + " / " + string.Join("; ", foldedApply.Diff.Changes.Select(change => change.Kind + ":" + change.Identity)));
+
+        var status = new ColumnRef(
+            new TableId(folded.Name), "status", Groundwork.Query.Model.QueryType.String, false, 32,
+            stringComparison: Groundwork.Query.Model.QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var session = connection.OpenSession(folded, StorageAccess.Global);
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.NotNull(stored);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored!.Values.Values.Keys);
+        var result = session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None));
+        Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+
+        var indexed = session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None),
+            new QueryRenderOptions(
+                [new QueryIndexDeclaration("by-status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.Pinned)],
+                selectedIndex: "by-status"));
+        Assert.Equal("by-status", indexed.SelectedIndex);
+        Assert.Equal([1], indexed.Rows.Select(row => Assert.IsType<int>(row["id"])));
+
+        Assert.Equal(WriteOutcomeStatus.Updated, session.Update(new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })).Status);
+        Assert.Single(session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None)).Rows);
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, folded);
+        work.Stage(RowWrite.Update(folded, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })));
+        Assert.True(work.CommitWithOutcomes().IsSuccessful);
+        Assert.Single(session.Query(new Groundwork.Query.Model.QueryRequest(
+            new Groundwork.Query.Model.TableId(folded.Name),
+            new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
+            [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None)).Rows);
+
+        using (var tamper = new SqliteConnection(store.ConnectionString))
+        {
+            tamper.Open();
+            using var command = tamper.CreateCommand();
+            command.CommandText = "UPDATE __groundwork_search_key_algorithms SET algorithm_id='stale-search-key-v0' WHERE table_name='folded_migration' AND column_name='__groundwork_search_status';";
+            command.ExecuteNonQuery();
+        }
+        var admission = Assert.Throws<InvalidOperationException>(() => connection.OpenSession(folded, StorageAccess.Global));
+        Assert.Contains("rebuild", admission.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Store_lock_is_held_for_connection_lifetime()
     {
         using var store = TemporaryStore.Create();
@@ -286,7 +384,7 @@ public sealed class SqliteProviderTests
         {
             Id = new StorageUnitId("batched-versions"),
             Name = "batched_versions",
-            Concurrency = ConcurrencyDeclaration.Optimistic
+            Concurrency = ConcurrencyDeclaration.Optimistic()
         };
         connection.Schema.Apply(unit);
 

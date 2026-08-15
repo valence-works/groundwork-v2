@@ -84,6 +84,7 @@ public sealed class SchemaSubject
 
     private static void Validate(StorageUnit unit)
     {
+        ConcurrencyDeclaration.ValidateDeclaration(unit);
         if (string.IsNullOrWhiteSpace(unit.Id.Value))
             throw new ArgumentException("A schema subject requires a non-empty storage-unit id.", nameof(unit));
         if (string.IsNullOrWhiteSpace(unit.Name))
@@ -99,6 +100,23 @@ public sealed class SchemaSubject
             unit.Key.Columns.Any(column => !columnSet.Contains(column)))
         {
             throw new ArgumentException("A schema subject key must name one or more declared columns.", nameof(unit));
+        }
+
+        var concurrency = unit.Concurrency ?? throw new ArgumentException(
+            "A schema subject requires a concurrency declaration.", nameof(unit));
+        if (concurrency.IsNone && concurrency.TokenColumn is not null)
+            throw new ArgumentException("A non-optimistic concurrency declaration cannot name a token column.", nameof(unit));
+        if (concurrency.IsOptimistic)
+        {
+            if (string.IsNullOrWhiteSpace(concurrency.TokenColumn))
+                throw new ArgumentException("An optimistic concurrency declaration requires a token column name.", nameof(unit));
+            var token = columns.FirstOrDefault(column => column.Name == concurrency.TokenColumn);
+            if (token is not null && (token.Type != PortableType.Int64 || token.IsNullable ||
+                                      token.Default?.Value is not long defaultValue || defaultValue != 0))
+            {
+                throw new ArgumentException(
+                    $"Optimistic token column '{concurrency.TokenColumn}' must be a non-null Int64 with default 0.", nameof(unit));
+            }
         }
 
         var indexes = unit.Indexes ?? [];
@@ -121,7 +139,8 @@ public sealed class SchemaSubject
         {
             Name = derived.Name,
             SourceColumn = derived.SourceColumn,
-            Projection = derived.Projection
+            Projection = derived.Projection,
+            AlgorithmId = derived.AlgorithmId
         }).ToImmutableArray(),
         Indexes = (source.Indexes ?? []).Select(index => new IndexDefinition
         {
@@ -146,6 +165,7 @@ public sealed class SchemaSubject
         Precision = source.Precision,
         Scale = source.Scale,
         Collation = source.Collation,
+        LogicalCollation = source.LogicalCollation,
         Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
         Generation = source.Generation
     };
@@ -160,22 +180,15 @@ public sealed class SchemaSubject
             column.Precision?.ToString(CultureInfo.InvariantCulture),
             column.Scale?.ToString(CultureInfo.InvariantCulture),
             column.Collation?.ToString(),
+            column.LogicalCollation?.ToString(),
             column.Generation.ToString(),
             column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
         ]);
 
     private static string CanonicalDerivedColumn(DerivedColumnDefinition column) =>
-        SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString()]);
+        SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString(), column.AlgorithmId]);
 
-    private static string CanonicalIndex(IndexDefinition index) =>
-        SchemaFingerprint.Canonicalize(
-        [
-            index.Name,
-            index.IsUnique.ToString(CultureInfo.InvariantCulture),
-            index.MissingValues.ToString(),
-            index.SchemaVersion.ToString(CultureInfo.InvariantCulture),
-            .. index.Columns.Select(column => $"{column.Column}:{column.Direction}")
-        ]);
+    private static string CanonicalIndex(IndexDefinition index) => CanonicalIndexPayload.From(index).Canonical;
 }
 
 /// <summary>Provider-owned schema materialization metadata carried through the neutral plan.</summary>

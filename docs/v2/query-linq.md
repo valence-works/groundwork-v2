@@ -47,3 +47,8 @@ together:
 
 Closed terms are read from constants and closure fields without compiling an expression per query
 call. Unsupported expression nodes are rejected rather than evaluated on the client.
+
+Prefix matching is index-coverable when its comparison policy matches the declared column:
+ordinal prefixes use an exact range on the base column, while ASCII and Unicode folded prefixes
+use the schema-owned versioned search-key column. Culture/ICU policies and forged policy metadata
+are refused before provider I/O.

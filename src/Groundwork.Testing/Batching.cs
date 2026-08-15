@@ -99,6 +99,19 @@ public sealed class RowWrite
         Key = key;
         Options = options ?? WriteOptions.Unconditional;
 
+        WritePreconditionValidator.Validate(
+            unit,
+            mode switch
+            {
+                RowWriteMode.Insert => WriteOperation.Insert,
+                RowWriteMode.Update => WriteOperation.Update,
+                RowWriteMode.Upsert => WriteOperation.Upsert,
+                RowWriteMode.ConditionalUpsert => WriteOperation.ConditionalUpsert,
+                RowWriteMode.Delete => WriteOperation.Delete,
+                _ => throw new ArgumentOutOfRangeException(nameof(mode))
+            },
+            Options);
+
         if (mode == RowWriteMode.Delete)
         {
             if (key is null)
@@ -114,6 +127,9 @@ public sealed class RowWrite
         {
             throw new ArgumentException("Only a delete may provide a separate key.", nameof(key));
         }
+
+        if (values is not null)
+            WritePreconditionValidator.ValidateSystemOwnedValues(unit, values.Values);
     }
 
     public StorageUnit Unit { get; }
@@ -173,6 +189,21 @@ public sealed class RowWrite
     }
 
     internal string Identity => IdentityFor(Unit, Key?.Values ?? Values!.Values);
+
+    internal RowWrite PopulateSearchKeyValues()
+    {
+        if (Values is null)
+            return this;
+        var values = SearchKeyProjection.Populate(Unit, Values.Values);
+        return Mode switch
+        {
+            RowWriteMode.Insert => Insert(Unit, new StorageValues(values), Options),
+            RowWriteMode.Update => Update(Unit, new StorageValues(values), Options),
+            RowWriteMode.Upsert => Upsert(Unit, new StorageValues(values), Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(Unit, new StorageValues(values), Options),
+            _ => this
+        };
+    }
 
     internal static string IdentityFor(
         StorageUnit unit,
@@ -453,15 +484,19 @@ internal sealed class BatchContext
                     throw new InvalidOperationException(
                         $"Storage unit '{group.Key.Id.Value}' has no open session in this unit of work.");
 
-                var finalWrites = group.Select(item => item.Final).ToArray();
+                var groupItems = group.ToArray();
+                var finalWrites = groupItems.Select(item => item.Final).ToArray();
                 var groupOutcomes = session.ApplyBatch(finalWrites, exactOutcomes);
                 if (groupOutcomes.Count != finalWrites.Length)
                     throw new InvalidOperationException(
                         $"The provider returned {groupOutcomes.Count} outcomes for a batch of {finalWrites.Length} writes.");
-                foreach (var outcome in groupOutcomes)
+                for (var index = 0; index < groupOutcomes.Count; index++)
                 {
-                    var item = group.Single(candidate =>
-                        ReferenceEquals(candidate.Final, outcome.Write));
+                    // ApplyBatch outcomes are positionally aligned with finalWrites. Ordinal
+                    // correlation remains stable when an adapter physicalizes a RowWrite and
+                    // when a generated key has not yet been assigned to the declaration.
+                    var item = groupItems[index];
+                    var outcome = groupOutcomes[index];
                     foreach (var original in item.Originals)
                         outcomes[original] = outcome.Outcome;
                 }
@@ -596,7 +631,7 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
         {
             RowWriteMode.Insert => inner.Insert(write.Values!, write.Options),
             RowWriteMode.Update => inner.Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => inner is IConcurrencyStorageSession expectedConcurrency
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => inner is IConcurrencyStorageSession expectedConcurrency
                 ? expectedConcurrency.ConditionalUpsert(write.Values!, write.Options)
                 : throw new NotSupportedException("The provider session does not support conditional upsert."),
             RowWriteMode.Upsert => inner.Upsert(write.Values!, write.Options),
