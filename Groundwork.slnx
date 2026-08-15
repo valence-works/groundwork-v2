@@ -30,6 +30,9 @@
   <Folder Name="/src/Groundwork.Query.Linq/">
     <Project Path="src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Query.Linq.Sqlite/">
+    <Project Path="src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Schema/">
     <Project Path="src/Groundwork.Schema/Groundwork.Schema.csproj" />
   </Folder>

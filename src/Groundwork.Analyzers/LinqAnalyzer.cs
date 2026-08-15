@@ -77,9 +77,9 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
                 _ => string.Empty
             };
-            if (name is "StartsWith" or "Contains" or "EndsWith" && node.ArgumentList.Arguments.Count == 1)
+            if (name is "StartsWith" or "Contains" or "EndsWith" && IsStringInvocation(node) && node.ArgumentList.Arguments.Count == 1)
                 ReportStringComparison(node, "bare string matching is not portable; use the overload with StringComparison.Ordinal/OrdinalIgnoreCase matching the column's folding");
-            else if (name is "StartsWith" or "Contains" or "EndsWith" && node.ArgumentList.Arguments.Count == 2)
+            else if (name is "StartsWith" or "Contains" or "EndsWith" && IsStringInvocation(node) && node.ArgumentList.Arguments.Count == 2)
             {
                 var declared = DeclaredStringComparison(node);
                 var supplied = context.SemanticModel.GetConstantValue(node.ArgumentList.Arguments[1].Expression).Value?.ToString();
@@ -94,7 +94,11 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 Report("GW-LINQ-105", node, "GW-LINQ-105: use `.LatestPer(...)` for grouped top-1");
             else if (name is "Any" or "All" && node.ArgumentList.Arguments.Count > 0 && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && !IsEquality(nested.Body))
                 Report("GW-LINQ-106", node, "GW-LINQ-106: declare the element set");
-            else if (symbol is not null && symbol.ContainingType?.SpecialType == SpecialType.None && !HasFragmentAttribute(symbol))
+            else if (name is "AddDays" or "AddHours" or "AddMinutes" or "AddSeconds" && symbol?.ContainingType?.ToDisplayString() == "System.DateTimeOffset")
+            {
+                // Approved BCL instant arithmetic remains a closed term.
+            }
+            else if (symbol is not null && symbol.ContainingType?.SpecialType == SpecialType.None && !HasFragmentAttribute(symbol) && !IsKnownQueryMethod(symbol))
                 Report("GW-LINQ-107", node, "GW-LINQ-107: opaque helpers are not portable; mark it `[GwQueryFragment]`");
             base.VisitInvocationExpression(node);
         }
@@ -108,7 +112,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 ((instant.ContainingType?.ToDisplayString() == "System.DateTime" && instant.Name is "Now" or "Today") ||
                  (instant.ContainingType?.ToDisplayString() == "System.DateTimeOffset" && instant.Name == "Now")))
                 Report("GW-LINQ-109", node, "GW-LINQ-109: use `DateTimeOffset.UtcNow`");
-            if (node.Name.Identifier.ValueText is not ("Value" or "Date" or "Year") &&
+            if (symbol is IPropertySymbol && node.Name.Identifier.ValueText is not ("Value" or "Date" or "Year") &&
                 node.Expression is MemberAccessExpressionSyntax nested && HasLambdaParameter(nested))
                 Report("GW-LINQ-104", node, "GW-LINQ-104: v2 has no joins; use a declared element set or two queries");
             base.VisitMemberAccessExpression(node);
@@ -150,7 +154,9 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             return node.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().Any(identifier => names.Contains(identifier.Identifier.ValueText, StringComparer.Ordinal));
         }
         private bool HasDistinctMemberOperands(ExpressionSyntax left, ExpressionSyntax right) => left is MemberAccessExpressionSyntax && right is MemberAccessExpressionSyntax && HasLambdaParameter(left) && HasLambdaParameter(right);
+        private bool IsStringInvocation(InvocationExpressionSyntax node) => node.Expression is MemberAccessExpressionSyntax member && context.SemanticModel.GetTypeInfo(member.Expression).Type?.SpecialType == SpecialType.System_String;
         private static bool IsEquality(CSharpSyntaxNode node) => node is BinaryExpressionSyntax binary && binary.IsKind(SyntaxKind.EqualsExpression);
+        private static bool IsKnownQueryMethod(IMethodSymbol symbol) => symbol.ContainingType?.ToDisplayString().StartsWith("System.Linq.Enumerable", StringComparison.Ordinal) == true;
         private void ReportStringComparison(InvocationExpressionSyntax node, string message)
         {
             var declared = DeclaredStringComparison(node);

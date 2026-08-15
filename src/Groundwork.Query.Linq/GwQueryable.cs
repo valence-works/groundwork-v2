@@ -7,16 +7,17 @@ namespace Groundwork.Query.Linq;
 internal sealed class GwQueryable<T> : IGwQueryable<T>
 {
     private readonly GwTableModel<T>? model;
+    private readonly IGwQueryExecutor? executor;
     private readonly GwQueryState state;
 
-    internal GwQueryable(GwTableModel<T> model)
-        : this(model, new GwQueryState(model.Table))
+    internal GwQueryable(GwTableModel<T> model, IGwQueryExecutor? executor = null)
+        : this(model, executor, new GwQueryState(model.Table))
     {
     }
 
-    private GwQueryable(GwTableModel<T>? model, GwQueryState state)
+    private GwQueryable(GwTableModel<T>? model, IGwQueryExecutor? executor, GwQueryState state)
     {
-        this.model = model;
+        this.model = model; this.executor = executor;
         this.state = state;
     }
 
@@ -68,7 +69,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         var columns = ProjectionColumns(selector.Body, selector.Parameters[0]).ToArray();
         if (columns.Length == 0)
             throw new LinqTranslationException(new[] { new LinqDiagnostic("GW-LINQ-101", "Select must contain mapped columns; declare a computed column; expressions over columns are not portable", selector.Body) });
-        return new GwQueryable<TResult>(null, state with { Projection = Projection.ColumnsOnly(columns) });
+        return new GwQueryable<TResult>(null, executor, state with { Projection = Projection.ColumnsOnly(columns) });
     }
 
     public IGwQueryable<T> AcceptScan(string id, string reason, string owner, DateTimeOffset expiresOn) =>
@@ -78,13 +79,16 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         New(state with { LatestPerKey = new LatestPerKey(ExpressionLowerer.LowerColumn(key, RequireModel()), ExpressionLowerer.LowerColumn(timestamp, RequireModel())) });
 
     public LinqTerminal<T> ToList() => new(ToQueryRequest());
+    public Task<IReadOnlyList<T>> ToListAsync(CancellationToken cancellationToken = default) =>
+        (executor ?? throw new InvalidOperationException("Configure GwQueryDatabase with an IGwQueryExecutor before using ToListAsync."))
+            .ToListAsync<T>(ToQueryRequest(), cancellationToken);
 
     public LinqTerminal<long> Count() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.None, ResultShape.TotalCount.Instance, state.LatestPerKey, state.AcceptedScan));
 
     public LinqTerminal<bool> Any() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.OffsetLimit(0, 1), ResultShape.Rows.Instance, state.LatestPerKey, state.AcceptedScan));
 
     private GwTableModel<T> RequireModel() => model ?? throw new InvalidOperationException("A projection is terminal; apply filters and ordering before Select.");
-    private GwQueryable<T> New(GwQueryState next) => new(model, next);
+    private GwQueryable<T> New(GwQueryState next) => new(model, executor, next);
 
     private OrderTerm Order<TKey>(Expression<Func<T, TKey>> selector, OrderDirection direction)
     {

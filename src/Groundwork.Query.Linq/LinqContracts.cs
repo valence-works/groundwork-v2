@@ -80,9 +80,15 @@ public sealed class GwTableModel<T>
                 core == typeof(decimal) ? QueryType.Decimal : core == typeof(DateTimeOffset) ? QueryType.DateTimeOffset :
                 core == typeof(Guid) ? QueryType.Guid : core == typeof(byte[]) ? QueryType.Binary :
                 throw new NotSupportedException($"Member '{member.Name}' has no portable query type.");
+            var comparison = member.GetCustomAttributes(typeof(GwStringComparisonAttribute), inherit: true).OfType<GwStringComparisonAttribute>().FirstOrDefault()?.Comparison switch
+            {
+                StringComparison.OrdinalIgnoreCase => QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase,
+                _ => QueryStringComparisonPolicy.Ordinal
+            };
             result.Add(new GwColumn<T>(member.Name, member.Name, queryType, nullable,
                 DecimalPrecision: queryType == QueryType.Decimal ? (byte)18 : null,
-                DecimalScale: queryType == QueryType.Decimal ? (byte)4 : null));
+                DecimalScale: queryType == QueryType.Decimal ? (byte)4 : null,
+                StringComparison: comparison));
         }
         return new GwTableModel<T>(name, result);
     }
@@ -115,6 +121,7 @@ public interface IGwQueryable<T>
     IGwQueryable<T> AcceptScan(string id, string reason, string owner, DateTimeOffset expiresOn);
     IGwQueryable<T> LatestPer<TKey, TTimestamp>(Expression<Func<T, TKey>> key, Expression<Func<T, TTimestamp>> timestamp);
     LinqTerminal<T> ToList();
+    Task<IReadOnlyList<T>> ToListAsync(CancellationToken cancellationToken = default);
     LinqTerminal<long> Count();
     LinqTerminal<bool> Any();
 }
@@ -151,9 +158,11 @@ public static class GwQueryAsyncExtensions
 /// <summary>Creates closed typed query roots.</summary>
 public sealed class GwQueryDatabase
 {
+    private readonly IGwQueryExecutor? executor;
+    public GwQueryDatabase(IGwQueryExecutor? executor = null) => this.executor = executor;
     public GwQueryTable<T> Table<T>() => Table<T>(typeof(T).Name);
-    public GwQueryTable<T> Table<T>(string name) => new(GwTableModel<T>.Infer(name));
-    public GwQueryTable<T> Table<T>(GwTableModel<T> model) => new(model ?? throw new ArgumentNullException(nameof(model)));
+    public GwQueryTable<T> Table<T>(string name) => new(GwTableModel<T>.Infer(name), executor);
+    public GwQueryTable<T> Table<T>(GwTableModel<T> model) => new(model ?? throw new ArgumentNullException(nameof(model)), executor);
 }
 
 /// <summary>Convenience factory for applications that do not need a database object.</summary>
@@ -165,8 +174,9 @@ public static class GwQuery
 public sealed class GwQueryTable<T> : IGwQueryable<T>
 {
     private readonly GwTableModel<T> model;
-    internal GwQueryTable(GwTableModel<T> model) => this.model = model;
-    public IGwQueryable<T> Query => new GwQueryable<T>(model);
+    private readonly IGwQueryExecutor? executor;
+    internal GwQueryTable(GwTableModel<T> model, IGwQueryExecutor? executor = null) { this.model = model; this.executor = executor; }
+    public IGwQueryable<T> Query => new GwQueryable<T>(model, executor);
     public IGwQueryable<T> AsQueryable() => Query;
     private IGwQueryable<T> Root => Query;
     public QueryRequest ToQueryRequest() => Root.ToQueryRequest();
@@ -182,6 +192,7 @@ public sealed class GwQueryTable<T> : IGwQueryable<T>
     public IGwQueryable<T> AcceptScan(string id, string reason, string owner, DateTimeOffset expiresOn) => Root.AcceptScan(id, reason, owner, expiresOn);
     public IGwQueryable<T> LatestPer<TKey, TTimestamp>(Expression<Func<T, TKey>> key, Expression<Func<T, TTimestamp>> timestamp) => Root.LatestPer(key, timestamp);
     public LinqTerminal<T> ToList() => Root.ToList();
+    public Task<IReadOnlyList<T>> ToListAsync(CancellationToken cancellationToken = default) => Root.ToListAsync(cancellationToken);
     public LinqTerminal<long> Count() => Root.Count();
     public LinqTerminal<bool> Any() => Root.Any();
 }

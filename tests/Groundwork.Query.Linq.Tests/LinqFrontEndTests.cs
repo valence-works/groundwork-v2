@@ -8,6 +8,13 @@ namespace Groundwork.Query.Linq.Tests;
 
 public sealed class LinqFrontEndTests
 {
+    private sealed class FoldedTicket
+    {
+        [GwStringComparison(StringComparison.OrdinalIgnoreCase)] public string Name { get; set; } = string.Empty;
+        [GwStringComparison(StringComparison.OrdinalIgnoreCase)] public string Code = string.Empty;
+    }
+    private static int sideEffectReads;
+    private static int SideEffectValue => Interlocked.Increment(ref sideEffectReads);
     public sealed class Ticket
     {
         public int TenantId { get; set; }
@@ -65,6 +72,14 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
+    public void Infer_reads_string_comparison_metadata_from_properties_and_fields()
+    {
+        var model = GwTableModel<FoldedTicket>.Infer("folded");
+        Assert.Equal(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, model.Columns[nameof(FoldedTicket.Name)].StringComparison);
+        Assert.Equal(QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, model.Columns[nameof(FoldedTicket.Code)].StringComparison);
+    }
+
+    [Fact]
     public void WhereIf_and_terminals_are_closed_operations()
     {
         var query = new GwQueryDatabase().Table(Tickets).Query
@@ -100,6 +115,15 @@ public sealed class LinqFrontEndTests
         var arithmetic = ExpressionLowerer.Diagnose<Ticket>(ticket => ticket.TenantId + 1 > 2, Tickets);
         Assert.Contains(arithmetic, diagnostic => diagnostic.Code == "GW-LINQ-102");
         Assert.All(bare.Concat(arithmetic), diagnostic => Assert.NotEqual(ExpressionType.Lambda, diagnostic.Span.NodeType));
+    }
+
+    [Fact]
+    public void Rejected_closed_properties_are_not_invoked()
+    {
+        sideEffectReads = 0;
+        var diagnostics = ExpressionLowerer.Diagnose<Ticket>(ticket => ticket.TenantId == SideEffectValue, Tickets);
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-107");
+        Assert.Equal(0, sideEffectReads);
     }
 
     [Fact]
@@ -151,6 +175,9 @@ public sealed class LinqFrontEndTests
         });
         var predicate = ExpressionLowerer.Lower(ExternalFragments.IsOpen, model);
         Assert.IsType<Predicate.Equal>(predicate);
+        Expression<Func<ExternalTicket, bool>> unmarked = ticket => ExternalFragments.UnmarkedTerm(ticket);
+        var rejected = ExpressionLowerer.Diagnose(unmarked, model);
+        Assert.Contains(rejected, diagnostic => diagnostic.Code == "GW-LINQ-107");
     }
 
     [Fact]
@@ -171,13 +198,19 @@ public sealed class LinqFrontEndTests
         var before = GetClosedAccessorCount();
         var first = ExpressionLowerer.Lower<Ticket>(MakeTenantPredicate(7), Tickets);
         var second = ExpressionLowerer.Lower<Ticket>(MakeTenantPredicate(8), Tickets);
+        var other = ExpressionLowerer.Lower<Ticket>(OtherClosure.Make(9), Tickets);
         var after = GetClosedAccessorCount();
-        Assert.InRange(after - before, 1, 3);
+        Assert.InRange(after - before, 1, 5);
         Assert.Equal(7, Assert.IsType<Predicate.Equal>(first).Value.Value);
         Assert.Equal(8, Assert.IsType<Predicate.Equal>(second).Value.Value);
+        Assert.Equal(9, Assert.IsType<Predicate.Equal>(other).Value.Value);
     }
 
     private static Expression<Func<Ticket, bool>> MakeTenantPredicate(int tenant) => ticket => ticket.TenantId == tenant;
+    private static class OtherClosure
+    {
+        public static Expression<Func<Ticket, bool>> Make(int tenant) => ticket => ticket.TenantId == tenant;
+    }
 
     private static int GetClosedAccessorCount() =>
         (int)typeof(ExpressionLowerer).GetProperty("ClosedAccessorCount", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;

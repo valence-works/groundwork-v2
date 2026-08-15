@@ -53,9 +53,9 @@ public static class ExpressionLowerer
 
         try
         {
-            var key = expression.NodeType + "|" + expression.Type.AssemblyQualifiedName + "|" + expression;
+            var key = ClosedShapeKey(expression);
             var accessor = ClosedAccessors.GetOrAdd(key, _ => new Lazy<ClosedAccessorPlan>(
-                () => new ClosedAccessorPlan(expression),
+                () => new ClosedAccessorPlan(),
                 LazyThreadSafetyMode.ExecutionAndPublication));
             return accessor.Value.Read(expression);
         }
@@ -79,57 +79,42 @@ public static class ExpressionLowerer
 
     private sealed class ClosedAccessorPlan
     {
-        private readonly Type? closureType;
-        private readonly Func<object, object?>? compiled;
-        private readonly Expression? closedExpression;
+        // A cached structural plan deliberately interprets only the closed-value grammar. It
+        // never compiles or invokes arbitrary user expression trees.
+        public object? Read(Expression expression) => ReadClosed(expression);
+    }
 
-        public ClosedAccessorPlan(Expression expression)
+    private static string ClosedShapeKey(Expression expression)
+    {
+        var builder = new System.Text.StringBuilder();
+        new ClosedShapeVisitor(builder).Visit(expression);
+        return builder.ToString();
+    }
+
+    private sealed class ClosedShapeVisitor : ExpressionVisitor
+    {
+        private readonly System.Text.StringBuilder builder;
+        public ClosedShapeVisitor(System.Text.StringBuilder builder) => this.builder = builder;
+        public override Expression? Visit(Expression? node)
         {
-            var closure = FindClosure(expression);
-            if (closure?.Value is null)
-            {
-                closedExpression = expression;
-                return;
-            }
-
-            closureType = closure.Type;
-            var root = Expression.Parameter(typeof(object), "closure");
-            var typedRoot = Expression.Convert(root, closureType);
-            var rewritten = new ClosureReplacer(closure, typedRoot).Visit(expression)!;
-            compiled = Expression.Lambda<Func<object, object?>>(Expression.Convert(rewritten, typeof(object)), root).Compile();
+            if (node is null) return null;
+            builder.Append('[').Append(node.NodeType).Append('|').Append(node.Type.AssemblyQualifiedName).Append(']');
+            return base.Visit(node);
         }
-
-        public object? Read(Expression expression)
+        protected override Expression VisitConstant(ConstantExpression node)
         {
-            if (compiled is null) return ReadClosed(closedExpression!);
-            var closure = FindClosure(expression)?.Value;
-            return closure is null ? ReadClosed(expression) : compiled(closure);
+            builder.Append("const:").Append(node.Type.AssemblyQualifiedName);
+            return node;
         }
-
-        private static ConstantExpression? FindClosure(Expression expression)
+        protected override Expression VisitMember(MemberExpression node)
         {
-            ConstantExpression? result = null;
-            new ClosureFinder(candidate => result ??= candidate).Visit(expression);
-            return result;
+            builder.Append("member:").Append(node.Member.DeclaringType?.AssemblyQualifiedName).Append('|').Append(node.Member.Name).Append('|').Append(node.Member.MemberType);
+            return base.VisitMember(node);
         }
-
-        private sealed class ClosureFinder : ExpressionVisitor
+        protected override Expression VisitMethodCall(MethodCallExpression node)
         {
-            private readonly Action<ConstantExpression> found;
-            public ClosureFinder(Action<ConstantExpression> found) => this.found = found;
-            protected override Expression VisitConstant(ConstantExpression node)
-            {
-                if (node.Value is not null && node.Type.Name.Contains("DisplayClass", StringComparison.Ordinal)) found(node);
-                return node;
-            }
-        }
-
-        private sealed class ClosureReplacer : ExpressionVisitor
-        {
-            private readonly ConstantExpression source;
-            private readonly Expression replacement;
-            public ClosureReplacer(ConstantExpression source, Expression replacement) { this.source = source; this.replacement = replacement; }
-            protected override Expression VisitConstant(ConstantExpression node) => node.Type == source.Type ? replacement : node;
+            builder.Append("method:").Append(node.Method.DeclaringType?.AssemblyQualifiedName).Append('|').Append(node.Method.Name);
+            return base.VisitMethodCall(node);
         }
     }
 
@@ -152,6 +137,7 @@ public static class ExpressionLowerer
             var value = ReadClosed(conversion.Operand);
             if (value is null) return null;
             var target = Nullable.GetUnderlyingType(conversion.Type) ?? conversion.Type;
+            if (target == typeof(object)) return value;
             return target.IsInstanceOfType(value) ? value : Convert.ChangeType(value, target, System.Globalization.CultureInfo.InvariantCulture);
         }
         expression = Unwrap(expression);
@@ -161,16 +147,15 @@ public static class ExpressionLowerer
             case MemberExpression member:
             {
                 var instance = member.Expression is null ? null : ReadClosed(member.Expression);
-                return member.Member switch
-                {
-                    FieldInfo field => field.GetValue(instance),
-                    PropertyInfo property => property.GetValue(instance, null),
-                    _ => throw new InvalidOperationException()
-                };
+                if (member.Expression is null && member.Member.DeclaringType == typeof(DateTimeOffset) && member.Member.Name == "UtcNow")
+                    return DateTimeOffset.UtcNow;
+                if (member.Member is FieldInfo field && field.DeclaringType?.Name.Contains("DisplayClass", StringComparison.Ordinal) == true)
+                    return field.GetValue(instance);
+                throw new InvalidOperationException("Only compiler closure fields and approved BCL values are readable.");
             }
             case NewArrayExpression array:
                 return array.Expressions.Select(ReadClosed).ToArray();
-            case NewExpression created:
+            case NewExpression created when created.Constructor?.DeclaringType == typeof(DateTime) || created.Constructor?.DeclaringType == typeof(DateTimeOffset):
                 return created.Constructor!.Invoke(created.Arguments.Select(ReadClosed).ToArray());
             case BinaryExpression binary:
                 return ReadBinary(binary);
@@ -185,10 +170,14 @@ public static class ExpressionLowerer
             }
             case UnaryExpression unary:
                 return ReadClosed(unary.Operand);
-            case MethodCallExpression call when call.Method.Name is "op_Implicit" or "AsEnumerable":
+            case MethodCallExpression call when call.Method.Name == "op_Implicit" && call.Arguments.Count == 1 && call.Arguments[0].Type.IsArray:
                 return ReadClosed(call.Arguments[0]);
+            case MethodCallExpression call when call.Object is not null &&
+                call.Object.Type == typeof(DateTimeOffset) &&
+                call.Method.Name is "AddDays" or "AddHours" or "AddMinutes" or "AddSeconds" or "AddTicks":
+                return call.Method.Invoke(ReadClosed(call.Object), call.Arguments.Select(ReadClosed).ToArray());
             default:
-                throw new InvalidOperationException();
+                throw new InvalidOperationException("The closed term contains an opaque method, property, or constructor.");
         }
     }
 
@@ -202,15 +191,27 @@ public static class ExpressionLowerer
             ExpressionType.Subtract or ExpressionType.SubtractChecked => Subtract(left, right),
             ExpressionType.Multiply or ExpressionType.MultiplyChecked => Multiply(left, right),
             ExpressionType.Divide => Divide(left, right),
+            ExpressionType.Equal => Equals(left, right),
+            ExpressionType.NotEqual => !Equals(left, right),
+            ExpressionType.GreaterThan => CompareClosed(left, right) > 0,
+            ExpressionType.GreaterThanOrEqual => CompareClosed(left, right) >= 0,
+            ExpressionType.LessThan => CompareClosed(left, right) < 0,
+            ExpressionType.LessThanOrEqual => CompareClosed(left, right) <= 0,
+            ExpressionType.AndAlso => (bool)left! && (bool)right!,
+            ExpressionType.OrElse => (bool)left! || (bool)right!,
             _ => throw new InvalidOperationException()
         };
     }
+
+    private static int CompareClosed(object? left, object? right) => left is IComparable comparable ? comparable.CompareTo(right) : throw new InvalidOperationException();
 
     private static object Add(object? left, object? right) => (left, right) switch
     {
         (int a, int b) => a + b,
         (long a, long b) => a + b,
         (decimal a, decimal b) => a + b,
+        (string a, string b) => a + b,
+        (string a, object b) => a + (b?.ToString() ?? string.Empty),
         (DateTimeOffset a, TimeSpan b) => a + b,
         _ => throw new InvalidOperationException()
     };

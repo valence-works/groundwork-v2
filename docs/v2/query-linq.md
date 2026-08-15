@@ -23,5 +23,10 @@ together:
 | GW-LINQ-109 | Use `DateTimeOffset.UtcNow`. |
 | GW-LINQ-110 | The value has more scale/range than `decimal(10,2)`. |
 
+| Decision | Corpus forms |
+| --- | --- |
+| Accepted ASTs | And, ElementOf, Equal, In, Not, Or, Range, StartsWith, Substring |
+| Rejected diagnostics | GW-LINQ-101, GW-LINQ-102, GW-LINQ-103, GW-LINQ-104, GW-LINQ-105, GW-LINQ-106, GW-LINQ-107, GW-LINQ-108, GW-LINQ-109, GW-LINQ-110 |
+
 Closed terms are read from constants and closure fields without compiling an expression per query
 call. Unsupported expression nodes are rejected rather than evaluated on the client.
