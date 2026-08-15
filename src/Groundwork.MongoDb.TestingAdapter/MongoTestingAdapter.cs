@@ -27,6 +27,8 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
                 exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
                 batchCost: "uses unordered BulkWrite for aggregate commits");
             return descriptors
+                .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
+                                     inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ProviderSequence ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Select(descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence
@@ -138,6 +140,14 @@ internal sealed class MongoTestingSession(
         return ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
     }
 
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
+        return ToTesting(inner.Append(operationId, native));
+    }
+
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
         => ApplyBatch(writes, exactOutcomes: false);
 
@@ -222,6 +232,7 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
     {
         ArgumentNullException.ThrowIfNull(write);
         ThrowIfTerminal();
+        EnsureNativeActive();
         if (!sessions.ContainsKey(write.Unit.Id))
             _ = OpenSession(write.Unit);
         batch.Stage(write);
@@ -241,6 +252,7 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
     private IReadOnlyList<RowWriteOutcome> CompleteCommit()
     {
         ThrowIfTerminal();
+        EnsureNativeActive();
         try
         {
             batch.FlushAll();
@@ -271,15 +283,28 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
     public void Rollback()
     {
         ThrowIfTerminal();
+        if (inner is IMongoUnitOfWorkState state && !state.IsActive)
+        {
+            terminal = true;
+            return;
+        }
         try { inner.Rollback(); }
         finally { terminal = true; }
     }
 
     public void Dispose()
     {
-        if (!terminal)
+        if (!terminal && (inner is not IMongoUnitOfWorkState state || state.IsActive))
             Rollback();
+        else
+            terminal = true;
         inner.Dispose();
+    }
+
+    private void EnsureNativeActive()
+    {
+        if (inner is IMongoUnitOfWorkState state)
+            state.EnsureActive();
     }
 
     private void ThrowIfTerminal()
