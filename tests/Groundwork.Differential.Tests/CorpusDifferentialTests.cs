@@ -110,7 +110,8 @@ public sealed class CorpusDifferentialTests
         var cases = new[]
         {
             ("unicode-I", folded, "i", new long[] { 3, 4 }),
-            ("sharp-S-prefix", folded, "STRAẞ", new long[] { 7 }),
+            ("sharp-S-prefix", folded, "Straß", new long[] { 7 }),
+            ("sharp-SS-prefix", folded, "STRAS", new long[] { 8 }),
             ("supplementary", folded, "𐐀", new long[] { 9, 10 }),
             ("unicode-maximum", folded, "\U0010FFFF", new long[] { 11 }),
             ("unicode-empty", folded, "", Enumerable.Range(2, 10).Select(value => (long)value).ToArray()),
