@@ -37,6 +37,11 @@ public sealed class GeneratorContractTests
         Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
         Assert.Contains(result.Generated, generated => generated.Contains("TicketStorageUnit", StringComparison.Ordinal));
         Assert.Contains(result.Generated, generated => generated.Contains("GroundworkSchema", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("MaxLength = 64", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("Precision = 12", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("Scale = 2", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("OrdinalIgnoreCase", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("SortDirection.Descending", StringComparison.Ordinal));
 
         var assemblyAttribute = result.OutputCompilation.Assembly.GetAttributes()
             .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName);
@@ -47,6 +52,38 @@ public sealed class GeneratorContractTests
         Assert.Contains("\"includeNulls\":false", json, StringComparison.Ordinal);
         Assert.Contains("created_at", json, StringComparison.Ordinal);
         Assert.Contains("\"nullable\":true", json, StringComparison.Ordinal);
+
+        using var emitted = new MemoryStream();
+        Assert.True(result.OutputCompilation.Emit(emitted).Success);
+        var runtimeAssembly = System.Reflection.Assembly.Load(emitted.ToArray());
+        var definition = (Groundwork.Kernel.StorageUnit)runtimeAssembly
+            .GetType("TicketStorageUnit")!
+            .GetProperty("Definition")!
+            .GetValue(null)!;
+        Assert.Equal(json, GroundworkSchemaCanonical.Serialize(new SchemaDocument(
+            [new SchemaTable(
+                definition.Name,
+                definition.Columns.Select(column => new SchemaColumn(
+                    column.Name,
+                    (SchemaValueType)Enum.Parse(typeof(SchemaValueType), column.Type.ToString()),
+                    column.IsNullable,
+                    column.MaxLength,
+                    column.Precision,
+                    column.Scale,
+                    column.Collation == Groundwork.Kernel.PortableCollation.OrdinalIgnoreCase
+                        ? TextFolding.AsciiIgnoreCase
+                        : TextFolding.None,
+                    column.Generation == Groundwork.Kernel.ColumnGeneration.ProviderSequence
+                        ? SchemaGeneration.ProviderSequence
+                        : SchemaGeneration.Supplied)),
+                definition.Key.Columns,
+                definition.Indexes.Select(index => new SchemaIndex(
+                    index.Name,
+                    index.Columns.Select(column => new SchemaIndexColumn(
+                        column.Column,
+                        column.Direction == Groundwork.Kernel.SortDirection.Descending)),
+                    index.MissingValues == Groundwork.Kernel.MissingValueBehavior.Included,
+                    index.IsUnique)))])));
     }
 
     [Fact]
@@ -72,6 +109,67 @@ public sealed class GeneratorContractTests
     }
 
     [Fact]
+    public void All_variables_in_a_field_declaration_are_generated()
+    {
+        const string source = "using Groundwork.Schema; [GwTable(\"tickets\")] public partial class Ticket { [GwKey, GwColumn] public string Id = \"\", Other = \"\"; }";
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(result.Generated, generated => generated.Contains("Name = \"other\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Duplicate_column_names_are_diagnosed()
+    {
+        const string source = "using Groundwork.Schema; [GwTable(\"tickets\")] public partial class Ticket { [GwKey, GwColumn(Name = \"same\")] public string Id { get; set; } = \"\"; [GwColumn(Name = \"same\")] public string Other { get; set; } = \"\"; }";
+
+        var result = Run(source);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Id == "GW_SCHEMA_COLUMN_002");
+    }
+
+    [Fact]
+    public void Same_clr_type_name_in_different_namespaces_has_unique_generated_sources()
+    {
+        const string source = "using Groundwork.Schema; namespace A { [GwTable(\"a_tickets\")] public partial class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; } } namespace B { [GwTable(\"b_tickets\")] public partial class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; } }";
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(2, result.Generated.Count(generated => generated.Contains("StorageUnit Definition", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Partial_table_declarations_are_combined_into_one_schema()
+    {
+        const string source = "using Groundwork.Schema; [GwTable(\"tickets\")] public partial class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; } public partial class Ticket { [GwColumn] public string Status { get; set; } = \"\"; }";
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(result.Generated, generated => generated.Contains("Name = \"status\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Repeated_generator_runs_have_identical_outputs_and_fingerprints()
+    {
+        const string source = "using Groundwork.Schema; [GwTable(\"tickets\")] public partial class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; }";
+
+        var first = Run(source);
+        var second = Run(source);
+
+        Assert.Equal(first.Generated, second.Generated);
+        var firstFingerprint = first.OutputCompilation.Assembly.GetAttributes()
+            .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName)
+            .ConstructorArguments[1].Value;
+        var secondFingerprint = second.OutputCompilation.Assembly.GetAttributes()
+            .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName)
+            .ConstructorArguments[1].Value;
+        Assert.Equal(firstFingerprint, secondFingerprint);
+    }
+
+    [Fact]
     public void Additional_file_round_trip_emits_the_same_canonical_fingerprint()
     {
         const string json = "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}],\"key\":[\"id\"],\"indexes\":[]}] }";
@@ -85,6 +183,42 @@ public sealed class GeneratorContractTests
         var fingerprint = (string)assemblyAttribute.ConstructorArguments[1].Value!;
         Assert.Equal(GroundworkSchemaCanonical.Fingerprint(GroundworkSchemaCanonical.Parse(canonical)), fingerprint);
         Assert.Equal(GroundworkSchemaCanonical.Fingerprint(GroundworkSchemaCanonical.Parse(json)), fingerprint);
+        Assert.Contains(result.Generated, generated => generated.Contains("ticketsStorageUnit", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Additional_file_does_not_mask_an_invalid_attribute_schema()
+    {
+        const string json = "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}],\"key\":[\"id\"],\"indexes\":[]}] }";
+        const string source = "using Groundwork.Schema; [GwTable(\"invalid\")] public partial class Invalid { [GwColumn] public string Id { get; set; } = \"\"; }";
+
+        var result = Run(source, new InMemoryAdditionalText("schema/groundwork.json", json));
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Id == "GW_SCHEMA_TABLE_001");
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("ticketsStorageUnit", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Referenced_schema_fingerprint_is_verified_before_consumption()
+    {
+        const string source = "using Groundwork.Schema; [assembly: GroundworkSchema(\"{\\\"tables\\\":[]}\", \"stale\")] public static class Empty { }";
+        var referenceCompilation = CSharpCompilation.Create(
+            "StaleSchema",
+            [CSharpSyntaxTree.ParseText(SourceText.From(source))],
+            References(typeof(GroundworkSchemaAttribute), typeof(object)),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        using var stream = new MemoryStream();
+        Assert.True(referenceCompilation.Emit(stream).Success);
+        stream.Position = 0;
+
+        var consumer = CSharpCompilation.Create(
+            "Consumer",
+            [CSharpSyntaxTree.ParseText(SourceText.From("public static class Query { }"))],
+            References(typeof(GroundworkSchemaAttribute), typeof(object)),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        Assert.Throws<FormatException>(() => GroundworkSchemaMetadata.Read(
+            consumer.AddReferences(MetadataReference.CreateFromStream(stream))));
     }
 
     [Fact]

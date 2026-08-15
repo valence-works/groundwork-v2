@@ -24,6 +24,18 @@ public sealed class SchemaGenerator : ISourceGenerator
         "Column '{0}' has unsupported type '{1}'.",
         "Groundwork.Schema", DiagnosticSeverity.Error, isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor DuplicateColumn = new(
+        "GW_SCHEMA_COLUMN_002",
+        "Column name is duplicated",
+        "Table '{0}' declares multiple members as column '{1}'.",
+        "Groundwork.Schema", DiagnosticSeverity.Error, isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor DuplicateTable = new(
+        "GW_SCHEMA_TABLE_002",
+        "Table name is duplicated",
+        "Schema table name '{0}' is declared more than once.",
+        "Groundwork.Schema", DiagnosticSeverity.Error, isEnabledByDefault: true);
+
     private static readonly DiagnosticDescriptor InvalidIndex = new(
         "GW_SCHEMA_INDEX_001",
         "Index specification is invalid",
@@ -43,6 +55,8 @@ public sealed class SchemaGenerator : ISourceGenerator
     public void Execute(GeneratorExecutionContext context)
     {
         var tables = new List<GeneratedTable>();
+        var hasTableDeclaration = false;
+        var tableNames = new HashSet<string>(StringComparer.Ordinal);
         var seenTypes = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
         foreach (var tree in context.Compilation.SyntaxTrees)
         {
@@ -53,36 +67,63 @@ public sealed class SchemaGenerator : ISourceGenerator
                 if (semanticModel.GetDeclaredSymbol(declaration, context.CancellationToken) is not INamedTypeSymbol symbol ||
                     FindAttribute(symbol, "GwTableAttribute") is not { } tableAttribute)
                     continue;
+                hasTableDeclaration = true;
                 if (!seenTypes.Add(symbol))
                     continue;
 
-                var table = BuildTable(context, semanticModel, declaration, symbol, tableAttribute);
-                if (table is not null)
-                    tables.Add(new GeneratedTable(table, symbol.Name, symbol.ContainingNamespace.IsGlobalNamespace ? null : symbol.ContainingNamespace.ToDisplayString()));
+                var table = BuildTable(context, GetClassParts(context, symbol), symbol, tableAttribute);
+                if (table is null)
+                    continue;
+
+                if (!tableNames.Add(table.Name))
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        DuplicateTable,
+                        tableAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
+                        table.Name));
+                    continue;
+                }
+
+                tables.Add(new GeneratedTable(table, symbol.Name, symbol.ContainingNamespace.IsGlobalNamespace ? null : symbol.ContainingNamespace.ToDisplayString()));
             }
         }
 
-        if (tables.Count == 0)
+        if (!hasTableDeclaration)
         {
             var schemaFile = ReadAdditionalSchema(context);
             if (schemaFile is not null)
             {
                 tables.AddRange(schemaFile.Tables.Select(table => new GeneratedTable(table, Identifier(table.Name), null)));
+                EmitStorageUnits(context, tables);
                 EmitSchemaAttribute(context, schemaFile);
             }
             return;
         }
 
         var schema = new SchemaDocument(tables.Select(item => item.Table));
-        foreach (var item in tables)
-            context.AddSource($"{Identifier(item.TypeName)}.g.cs", RenderStorageUnit(item.Table, item.TypeName, item.NamespaceName));
+        EmitStorageUnits(context, tables);
         EmitSchemaAttribute(context, schema);
+    }
+
+    private static void EmitStorageUnits(
+        GeneratorExecutionContext context,
+        IReadOnlyList<GeneratedTable> tables)
+    {
+        for (var index = 0; index < tables.Count; index++)
+        {
+            var item = tables[index];
+            var qualifiedName = string.IsNullOrWhiteSpace(item.NamespaceName)
+                ? item.TypeName
+                : $"{item.NamespaceName}_{item.TypeName}";
+            context.AddSource(
+                $"{Identifier(qualifiedName)}_{index}.g.cs",
+                RenderStorageUnit(item.Table, item.TypeName, item.NamespaceName));
+        }
     }
 
     private static SchemaTable? BuildTable(
         GeneratorExecutionContext context,
-        SemanticModel semanticModel,
-        ClassDeclarationSyntax declaration,
+        IReadOnlyList<ClassPart> declarations,
         INamedTypeSymbol symbol,
         AttributeData tableAttribute)
     {
@@ -91,64 +132,98 @@ public sealed class SchemaGenerator : ISourceGenerator
         var keys = new List<string>();
         var columnSymbols = new Dictionary<string, ISymbol>(StringComparer.Ordinal);
 
-        foreach (var member in declaration.Members)
+        foreach (var part in declarations)
         {
-            if (member is not PropertyDeclarationSyntax and not FieldDeclarationSyntax)
-                continue;
-            var declared = member switch
+            var declaration = part.Declaration;
+            var semanticModel = part.SemanticModel;
+            foreach (var member in declaration.Members)
             {
-                PropertyDeclarationSyntax property => semanticModel.GetDeclaredSymbol(property, context.CancellationToken),
-                FieldDeclarationSyntax field => field.Declaration.Variables.Select(variable => semanticModel.GetDeclaredSymbol(variable, context.CancellationToken)).FirstOrDefault(),
-                _ => null
-            };
-            if (declared is not ISymbol memberSymbol || FindAttribute(memberSymbol, "GwColumnAttribute") is not { } columnAttribute)
-                continue;
+                if (member is not PropertyDeclarationSyntax and not FieldDeclarationSyntax)
+                    continue;
 
-            var memberType = memberSymbol switch
-            {
-                IPropertySymbol property => property.Type,
-                IFieldSymbol field => field.Type,
-                _ => null
-            };
-            if (memberType is null || !TryMapType(memberType, out var type))
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    UnsupportedType,
-                    columnAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
-                    memberSymbol.Name,
-                    memberType?.ToDisplayString() ?? "<unknown>"));
-                continue;
+                var declaredMembers = member switch
+                {
+                    PropertyDeclarationSyntax property => new[] { semanticModel.GetDeclaredSymbol(property, context.CancellationToken) },
+                    FieldDeclarationSyntax field => field.Declaration.Variables
+                        .Select(variable => semanticModel.GetDeclaredSymbol(variable, context.CancellationToken)),
+                    _ => Array.Empty<ISymbol?>()
+                };
+
+                foreach (var declared in declaredMembers)
+                {
+                    if (declared is not ISymbol memberSymbol || FindAttribute(memberSymbol, "GwColumnAttribute") is not { } columnAttribute)
+                        continue;
+
+                    var memberType = memberSymbol switch
+                    {
+                        IPropertySymbol property => property.Type,
+                        IFieldSymbol field => field.Type,
+                        _ => null
+                    };
+                    if (memberType is null || !TryMapType(memberType, out var type))
+                    {
+                        context.ReportDiagnostic(Diagnostic.Create(
+                            UnsupportedType,
+                            columnAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
+                            memberSymbol.Name,
+                            memberType?.ToDisplayString() ?? "<unknown>"));
+                        continue;
+                    }
+
+                    var name = StringNamedArgument(columnAttribute, "Name") ?? ToSnakeCase(memberSymbol.Name);
+                    var nullable = IsNullable(memberType) && !BooleanNamedArgument(columnAttribute, "Required");
+                    var column = new SchemaColumn(
+                        name,
+                        type,
+                        nullable,
+                        IntNamedArgument(columnAttribute, "Length"),
+                        IntNamedArgument(columnAttribute, "Precision"),
+                        IntNamedArgument(columnAttribute, "Scale"),
+                        EnumNamedArgument(columnAttribute, "Folding", TextFolding.None),
+                        EnumNamedArgument(columnAttribute, "Generation", SchemaGeneration.Supplied));
+                    if (columnSymbols.ContainsKey(name))
+                    {
+                        context.ReportDiagnostic(Diagnostic.Create(
+                            DuplicateColumn,
+                            columnAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
+                            tableName,
+                            name));
+                        continue;
+                    }
+
+                    columns.Add(column);
+                    columnSymbols[name] = memberSymbol;
+                    if (FindAttribute(memberSymbol, "GwKeyAttribute") is not null)
+                        keys.Add(name);
+                }
             }
-
-            var name = StringNamedArgument(columnAttribute, "Name") ?? ToSnakeCase(memberSymbol.Name);
-            var nullable = IsNullable(memberType) && !BooleanNamedArgument(columnAttribute, "Required");
-            var column = new SchemaColumn(
-                name,
-                type,
-                nullable,
-                IntNamedArgument(columnAttribute, "Length"),
-                IntNamedArgument(columnAttribute, "Precision"),
-                IntNamedArgument(columnAttribute, "Scale"),
-                EnumNamedArgument(columnAttribute, "Folding", TextFolding.None),
-                EnumNamedArgument(columnAttribute, "Generation", SchemaGeneration.Supplied));
-            columns.Add(column);
-            columnSymbols[name] = memberSymbol;
-            if (FindAttribute(memberSymbol, "GwKeyAttribute") is not null)
-                keys.Add(name);
         }
 
         if (keys.Count == 0)
         {
             context.ReportDiagnostic(Diagnostic.Create(
                 MissingKey,
-                tableAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
+                tableAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ??
+                declarations.FirstOrDefault()?.Declaration.GetLocation() ?? Location.None,
                 tableName));
             return null;
         }
 
         var indexes = new List<SchemaIndex>();
+        var indexNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var indexAttribute in symbol.GetAttributes().Where(attribute => IsAttribute(attribute, "GwIndexAttribute")))
         {
+            var indexName = StringArgument(indexAttribute, 0) ?? "<unnamed>";
+            if (!indexNames.Add(indexName))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    InvalidIndex,
+                    IndexSpecificationLocation(indexAttribute, context.CancellationToken),
+                    indexName,
+                    "an index with this name is already declared on the table."));
+                continue;
+            }
+
             if (!TryParseIndex(context, indexAttribute, columnSymbols.Keys, out var index))
                 continue;
             indexes.Add(new SchemaIndex(
@@ -159,6 +234,28 @@ public sealed class SchemaGenerator : ISourceGenerator
         }
 
         return new SchemaTable(tableName, columns, keys, indexes);
+    }
+
+    private static IReadOnlyList<ClassPart> GetClassParts(
+        GeneratorExecutionContext context,
+        INamedTypeSymbol target)
+    {
+        var parts = new List<ClassPart>();
+        foreach (var tree in context.Compilation.SyntaxTrees)
+        {
+            var root = tree.GetRoot(context.CancellationToken);
+            var semanticModel = context.Compilation.GetSemanticModel(tree);
+            foreach (var declaration in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
+            {
+                if (semanticModel.GetDeclaredSymbol(declaration, context.CancellationToken) is INamedTypeSymbol symbol &&
+                    SymbolEqualityComparer.Default.Equals(symbol, target))
+                {
+                    parts.Add(new ClassPart(declaration, semanticModel));
+                }
+            }
+        }
+
+        return parts;
     }
 
     private static bool TryParseIndex(
@@ -479,9 +576,18 @@ public sealed class SchemaGenerator : ISourceGenerator
 
     private static string Literal(string value) => Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(value, quote: true);
 
-    private static bool PathsEqual(string left, string right) =>
-        string.Equals(left, right, StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(System.IO.Path.GetFileName(left), System.IO.Path.GetFileName(right), StringComparison.OrdinalIgnoreCase);
+    private static bool PathsEqual(string left, string right)
+    {
+        var normalizedLeft = left.Replace('\\', '/');
+        var normalizedRight = right.Trim().Trim('"').Replace('\\', '/').TrimStart('/');
+        if (string.Equals(normalizedLeft.TrimStart('/'), normalizedRight, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return !System.IO.Path.IsPathRooted(right) &&
+            normalizedLeft.EndsWith('/' + normalizedRight, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record ClassPart(ClassDeclarationSyntax Declaration, SemanticModel SemanticModel);
 
     private sealed record GeneratedTable(SchemaTable Table, string TypeName, string? NamespaceName);
 }

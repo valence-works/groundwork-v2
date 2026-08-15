@@ -19,14 +19,30 @@ public static class GroundworkSchemaMetadata
         {
             foreach (var attribute in assembly.GetAttributes().Where(IsSchemaAttribute))
             {
-                if (attribute.ConstructorArguments.Length < 1 || attribute.ConstructorArguments[0].Value is not string json)
+                if (attribute.ConstructorArguments.Length < 2 ||
+                    attribute.ConstructorArguments[0].Value is not string json ||
+                    attribute.ConstructorArguments[1].Value is not string fingerprint)
                     continue;
-                result.Add(GroundworkSchemaCanonical.Parse(json));
+
+                var schema = GroundworkSchemaCanonical.Parse(json);
+                if (!string.Equals(
+                        GroundworkSchemaCanonical.Fingerprint(schema),
+                        fingerprint,
+                        StringComparison.Ordinal))
+                {
+                    throw new FormatException(
+                        $"Assembly '{assembly.Name}' contains a Groundwork schema attribute with a stale fingerprint.");
+                }
+
+                result.Add(schema);
             }
         }
         return result;
     }
 
     private static bool IsSchemaAttribute(AttributeData attribute) =>
-        string.Equals(attribute.AttributeClass?.Name, "GroundworkSchemaAttribute", StringComparison.Ordinal);
+        string.Equals(
+            attribute.AttributeClass?.ToDisplayString(),
+            typeof(GroundworkSchemaAttribute).FullName,
+            StringComparison.Ordinal);
 }
