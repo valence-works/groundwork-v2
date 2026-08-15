@@ -13,5 +13,6 @@
     <ProjectReference Include="../../src/Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
     <ProjectReference Include="../../src/Groundwork.MongoDb.TestingAdapter/Groundwork.MongoDb.TestingAdapter.csproj" />
     <ProjectReference Include="../../src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Records/Groundwork.Records.csproj" />
   </ItemGroup>
 </Project>

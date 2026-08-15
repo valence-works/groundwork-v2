@@ -72,6 +72,17 @@ public sealed class StorageDeclarationBuilder
         return this;
     }
 
+    /// <summary>Opts the unit into a system-owned Int64 optimistic-concurrency token.</summary>
+    public StorageDeclarationBuilder OptimisticConcurrency(string tokenColumn = "version")
+    {
+        state.SetOptimisticConcurrency(tokenColumn);
+        return this;
+    }
+
+    /// <summary>Alias for <see cref="OptimisticConcurrency"/>.</summary>
+    public StorageDeclarationBuilder Optimistic(string tokenColumn = "version") =>
+        OptimisticConcurrency(tokenColumn);
+
     public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns)
     {
         state.AddIndex(name, columns.Select(column => new IndexColumn(column)), unique: true);

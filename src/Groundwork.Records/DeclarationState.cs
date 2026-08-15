@@ -10,6 +10,7 @@ internal sealed class DeclarationState
     private readonly string id;
     private readonly string name;
     private KeyDefinition? key;
+    private ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.None;
 
     public DeclarationState(string id, string name)
     {
@@ -46,6 +47,27 @@ internal sealed class DeclarationState
         key = new KeyDefinition { Columns = names };
     }
 
+    public void SetOptimisticConcurrency(string tokenColumn)
+    {
+        if (string.IsNullOrWhiteSpace(tokenColumn))
+            throw new ArgumentException("A concurrency token column must be non-empty.", nameof(tokenColumn));
+
+        var existing = columns.FindIndex(column => string.Equals(column.Name, tokenColumn, StringComparison.Ordinal));
+        var token = new ColumnDefinition
+        {
+            Name = tokenColumn,
+            Type = PortableType.Int64,
+            IsNullable = false,
+            Default = new PortableDefault(0L)
+        };
+        if (existing < 0)
+            columns.Add(token);
+        else
+            columns[existing] = token;
+
+        concurrency = ConcurrencyDeclaration.Optimistic(tokenColumn);
+    }
+
     public void AddIndex(string name, IEnumerable<IndexColumn> indexColumns, bool unique)
     {
         var indexName = RequireText(name, nameof(name));
@@ -75,6 +97,7 @@ internal sealed class DeclarationState
             {
                 Columns = Array.AsReadOnly((key?.Columns ?? Array.Empty<string>()).ToArray())
             },
+            Concurrency = concurrency,
             Indexes = Array.AsReadOnly(indexes.ToArray())
         };
 

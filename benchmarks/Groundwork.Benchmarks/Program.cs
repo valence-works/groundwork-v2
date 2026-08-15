@@ -4,18 +4,22 @@ using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
+using Groundwork.Records;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
-if (args.Length == 0 || (args[0] is not "roundtrips" and not "linq"))
+if (args.Length == 0 || (args[0] is not "roundtrips" and not "linq" and not "records"))
 {
-    Console.Error.WriteLine("Usage: roundtrips --workload upsert|commit --n <count> [--provider sqlite|postgresql|sqlserver|mongodb] | linq --n <count>");
+    Console.Error.WriteLine("Usage: roundtrips --workload upsert|commit --n <count> [--provider sqlite|postgresql|sqlserver|mongodb] | linq --n <count> | records --n <count>");
     return 2;
 }
 
 if (string.Equals(args[0], "linq", StringComparison.OrdinalIgnoreCase))
     return RunLinqBenchmark(args);
+if (string.Equals(args[0], "records", StringComparison.OrdinalIgnoreCase))
+    return RunRecordsBenchmark(args);
 
 var workload = Option(args, "--workload") ?? "upsert";
 var count = int.TryParse(Option(args, "--n"), out var parsed) && parsed > 0 ? parsed : 1;
@@ -110,6 +114,25 @@ static int RunLinqBenchmark(string[] args)
     return 0;
 }
 
+static int RunRecordsBenchmark(string[] args)
+{
+    var count = int.TryParse(Option(args, "--n"), out var parsed) && parsed > 0 ? parsed : 1_000;
+    var table = RecordTable.For<BenchmarkRecord>("benchmark_records")
+        .Key(record => record.Id)
+        .Column(record => record.Name, column => column.MaxLength(200))
+        .Build();
+    var before = RecordTable<BenchmarkRecord>.AccessorCompilationCount;
+    var record = new BenchmarkRecord(Guid.NewGuid(), "benchmark");
+    for (var value = 0; value < count; value++)
+        _ = table.ToRowValues(record);
+
+    var compilationDelta = RecordTable<BenchmarkRecord>.AccessorCompilationCount - before;
+    if (compilationDelta != 0)
+        throw new InvalidOperationException($"Records accessors compiled {compilationDelta} times during {count} operations; expected zero hot-path compilations.");
+    Console.WriteLine($"provider=none workload=records mappings={count} accessor_compilations={compilationDelta} reflection_hot_path=false");
+    return 0;
+}
+
 static Expression<Func<BenchmarkTicket, bool>> ClosedPredicate(int value) => ticket => ticket.Id == value;
 
 static (IStorageProviderConnection Provider, string ConnectionString, string? TemporaryDirectory) CreateProvider(string name) =>
@@ -130,7 +153,7 @@ static (IStorageProviderConnection Provider, string ConnectionString, string? Te
     return (new SqliteProviderFactory().Create(connectionString), connectionString, directory);
 }
 
-static StorageUnit Unit(string provider) => new()
+static KernelStorageUnit Unit(string provider) => new()
 {
     // Keep each process independent: the table name is randomized and the schema
     // subject must be randomized with it so a second run cannot collide with the
@@ -149,7 +172,7 @@ static StorageUnit Unit(string provider) => new()
 
 static void RunCommitWorkload(
     IStorageProviderConnection provider,
-    StorageUnit unit,
+    KernelStorageUnit unit,
     int count,
     string providerName)
 {
@@ -182,3 +205,5 @@ sealed class BenchmarkTicket
 {
     public int Id { get; set; }
 }
+
+sealed record BenchmarkRecord(Guid Id, string Name);
