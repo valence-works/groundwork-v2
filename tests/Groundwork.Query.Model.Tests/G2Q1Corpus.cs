@@ -68,8 +68,8 @@ internal static class G2Q1Corpus
         AddPredicateShapes(shapes, ref number, Text, "q-textSearch",
             [Q1CorpusOperation.Equal, Q1CorpusOperation.In, Q1CorpusOperation.Contains, Q1CorpusOperation.NotEqual, Q1CorpusOperation.StartsWith, Q1CorpusOperation.NotContains],
             [null, string.Empty, "I", "i", "İ", "ı", "Straße", "e\u0301", "é"],
-            (operation, value) => operation is Q1CorpusOperation.StartsWith or Q1CorpusOperation.NotContains ||
-                operation == Q1CorpusOperation.Contains && value is null,
+            (operation, value) => operation is Q1CorpusOperation.NotContains ||
+                operation is Q1CorpusOperation.Contains or Q1CorpusOperation.StartsWith && value is null,
             "portable-string-search-key");
         AddPredicateShapes(shapes, ref number, Number, "q-numberValue",
             [Q1CorpusOperation.Equal, Q1CorpusOperation.In, Q1CorpusOperation.GreaterThan, Q1CorpusOperation.GreaterThanOrEqual, Q1CorpusOperation.LessThan, Q1CorpusOperation.LessThanOrEqual, Q1CorpusOperation.NotEqual],

@@ -232,11 +232,16 @@ public sealed record WriteOutcome
 {
     private readonly Lazy<WriteOutcomeDetail> detail;
 
-    public WriteOutcome(WriteOutcomeStatus status, long? version = null, string? uniqueIndexName = null)
+    public WriteOutcome(
+        WriteOutcomeStatus status,
+        long? version = null,
+        string? uniqueIndexName = null,
+        IReadOnlyDictionary<string, object?>? generatedValues = null)
     {
         Status = status;
         Version = version;
-        detail = new(() => new WriteOutcomeDetail(status, version, uniqueIndexName));
+        GeneratedValues = SnapshotGeneratedValues(generatedValues);
+        detail = new(() => new WriteOutcomeDetail(status, version, uniqueIndexName, GeneratedValues: GeneratedValues));
     }
 
     private WriteOutcome(
@@ -246,6 +251,7 @@ public sealed record WriteOutcome
     {
         Status = status;
         Version = version;
+        GeneratedValues = ImmutableGeneratedValues.Empty;
         detail = new(resolveDetail ?? throw new ArgumentNullException(nameof(resolveDetail)));
     }
 
@@ -264,6 +270,19 @@ public sealed record WriteOutcome
 
     public long? Version { get; }
 
+    /// <summary>Provider-assigned values returned by a successful write, keyed by column name.</summary>
+    public IReadOnlyDictionary<string, object?> GeneratedValues { get; }
+
+    public T GeneratedValue<T>(string column)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(column);
+        if (!GeneratedValues.TryGetValue(column, out var value))
+            throw new KeyNotFoundException($"Generated column '{column}' was not returned by this write.");
+        return value is T typed
+            ? typed
+            : throw new InvalidCastException($"Generated column '{column}' returned '{value?.GetType().Name ?? "null"}', not '{typeof(T).Name}'.");
+    }
+
     /// <summary>
     /// Resolves failure detail lazily and caches the result. Successful outcomes already
     /// have complete detail and do not issue a read.
@@ -278,6 +297,15 @@ public sealed record WriteOutcome
         WriteOutcomeStatus.Deleted;
 
     public bool Replayed => Status == WriteOutcomeStatus.Replayed;
+
+    private static IReadOnlyDictionary<string, object?> SnapshotGeneratedValues(
+        IReadOnlyDictionary<string, object?>? values) =>
+        values is null || values.Count == 0
+            ? ImmutableGeneratedValues.Empty
+            : new ReadOnlyDictionary<string, object?>(values.ToDictionary(
+                pair => pair.Key,
+                pair => StorageValues.CloneValue(pair.Value),
+                StringComparer.Ordinal));
 }
 
 /// <summary>Resolved write result detail, including lazy failure disambiguation.</summary>
@@ -285,7 +313,14 @@ public sealed record WriteOutcomeDetail(
     WriteOutcomeStatus Status,
     long? Version = null,
     string? UniqueIndexName = null,
-    string? Message = null);
+    string? Message = null,
+    IReadOnlyDictionary<string, object?>? GeneratedValues = null);
+
+internal static class ImmutableGeneratedValues
+{
+    internal static IReadOnlyDictionary<string, object?> Empty { get; } =
+        new ReadOnlyDictionary<string, object?>(new Dictionary<string, object?>(StringComparer.Ordinal));
+}
 
 /// <summary>Thread-safe command observer used by provider-neutral write-path proofs.</summary>
 public sealed class WritePathObserver : IWritePathObserver
@@ -414,10 +449,19 @@ public interface IStorageSession
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
 
+    /// <summary>
+    /// Inserts a row. A ProviderSequence key must be omitted and is returned through
+    /// <see cref="WriteOutcome.GeneratedValues"/>.
+    /// </summary>
     WriteOutcome Insert(StorageValues values, WriteOptions? options = null);
 
+    /// <summary>A ProviderSequence key is accepted only as the immutable row locator.</summary>
     WriteOutcome Update(StorageValues values, WriteOptions? options = null);
 
+    /// <summary>
+    /// With ProviderSequence, an omitted key inserts a generated row. A supplied key is
+    /// an immutable locator: it updates an existing row or returns NotFound, never inserts it.
+    /// </summary>
     WriteOutcome Upsert(StorageValues values, WriteOptions? options = null);
 
     WriteOutcome Delete(StorageKey key, WriteOptions? options = null);

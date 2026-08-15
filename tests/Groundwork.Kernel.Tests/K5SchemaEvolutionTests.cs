@@ -11,6 +11,24 @@ public sealed class K5SchemaEvolutionTests
     private static readonly DateTimeOffset PlannedAt = new(2026, 8, 15, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void Canonical_index_payload_refuses_malformed_or_noncanonical_fields()
+    {
+        var malformed = new[]
+        {
+            SchemaFingerprint.Canonicalize(["by-name", "not-a-bool", "Included", "0", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Unknown", "0", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "not-an-int", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "0", "name:Sideways"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "0", " :Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "00", "name:Ascending"]),
+            SchemaFingerprint.Canonicalize(["by-name", "False", "Included", "0"])
+        };
+
+        foreach (var canonical in malformed)
+            Assert.False(CanonicalIndexPayload.TryParse(canonical, out _));
+    }
+
+    [Fact]
     public void A_columns_only_subject_plans_without_a_route_and_applies()
     {
         var target = CreateTarget(CreateUnit(includePriority: true));
@@ -222,6 +240,66 @@ public sealed class K5SchemaEvolutionTests
         Assert.Equal(PhysicalSchemaApplicationOutcome.AuthorizationRequired, result.Application!.Outcome);
         Assert.Contains(result.Refusals, diagnostic => diagnostic.Code == "GW-RUNTIME-002");
         Assert.Null(executor.AppliedState);
+    }
+
+    [Fact]
+    public void Derived_search_key_backfill_requires_authorization_for_startup_auto_apply()
+    {
+        var baseUnit = CreateUnit(includePriority: false);
+        var logical = baseUnit with
+        {
+            Columns = [.. baseUnit.Columns.Select(column =>
+                column.Name == "name"
+                    ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                    : column)]
+        };
+        var target = CreateTarget(SearchKeyProjection.Expand(logical));
+        var executor = new FakeExecutor();
+
+        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+            executor,
+            target,
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
+
+        Assert.False(result.IsReady);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.AuthorizationRequired, result.Application!.Outcome);
+        Assert.Contains(result.Plan.Operations, operation => operation is BackfillColumnOperation backfill && backfill.Derived is not null);
+        Assert.Contains(result.Refusals, diagnostic => diagnostic.Code == "GW-RUNTIME-002" &&
+            diagnostic.Message.Contains("backfill-column", StringComparison.Ordinal));
+        Assert.Null(executor.AppliedState);
+    }
+
+    [Fact]
+    public void Adding_folding_rebuilds_an_existing_logical_index_after_backfill()
+    {
+        var initialUnit = CreateUnit(includePriority: false) with
+        {
+            Indexes = [new IndexDefinition
+            {
+                Name = "by-name",
+                Columns = [new IndexColumn("name")]
+            }]
+        };
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(initialUnit), executor, PlannedAt.AddMinutes(1));
+
+        var folded = initialUnit with
+        {
+            Columns = [.. initialUnit.Columns.Select(column =>
+                column.Name == "name"
+                    ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                    : column)]
+        };
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(SearchKeyProjection.Expand(folded)),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var backfill = Assert.Single(plan.Operations.OfType<BackfillColumnOperation>(), operation => operation.Derived is not null);
+        var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>(), operation => operation.Index.Name == "by-name");
+        Assert.True(Array.IndexOf(plan.Operations.ToArray(), backfill) < Array.IndexOf(plan.Operations.ToArray(), rebuild));
+        Assert.DoesNotContain(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-003");
     }
 
     [Fact]

@@ -134,6 +134,39 @@ public sealed record QueryIndexDeclaration
     }
 }
 
+/// <summary>Provider-neutral policy for a physical prefix search-key column.</summary>
+public enum QuerySearchKeyPolicy
+{
+    Ordinal,
+    AsciiIgnoreCase,
+    UnicodeOrdinalIgnoreCase
+}
+
+/// <summary>Maps one logical text column to its physical search-key representation.</summary>
+public sealed record QuerySearchKeyColumn
+{
+    public QuerySearchKeyColumn(
+        string sourceColumn,
+        string physicalColumn,
+        QuerySearchKeyPolicy policy,
+        int? maxLength = null)
+    {
+        if (string.IsNullOrWhiteSpace(sourceColumn))
+            throw new ArgumentException("A source column is required.", nameof(sourceColumn));
+        if (string.IsNullOrWhiteSpace(physicalColumn))
+            throw new ArgumentException("A physical column is required.", nameof(physicalColumn));
+        SourceColumn = sourceColumn;
+        PhysicalColumn = physicalColumn;
+        Policy = policy;
+        MaxLength = maxLength;
+    }
+
+    public string SourceColumn { get; }
+    public string PhysicalColumn { get; }
+    public QuerySearchKeyPolicy Policy { get; }
+    public int? MaxLength { get; }
+}
+
 /// <summary>Provider-neutral knobs passed to a native query renderer.</summary>
 public sealed record QueryRenderOptions
 {
@@ -152,6 +185,7 @@ public sealed record QueryRenderOptions
         if (TieBreakColumns.Any(column => column is null))
             throw new ArgumentException("Tie-break columns cannot contain null references.", nameof(tieBreakColumns));
         PhysicalIndexNames = ImmutableDictionary<string, string>.Empty.WithComparers(StringComparer.Ordinal);
+        SearchKeyColumns = ImmutableDictionary<string, QuerySearchKeyColumn>.Empty.WithComparers(StringComparer.Ordinal);
     }
 
     /// <summary>Provider defaults are used unless a declaration explicitly requests pinning.</summary>
@@ -164,6 +198,9 @@ public sealed record QueryRenderOptions
 
     /// <summary>Provider-resolved physical names for declared logical indexes.</summary>
     public IReadOnlyDictionary<string, string> PhysicalIndexNames { get; init; }
+
+    /// <summary>Provider-resolved logical-to-physical prefix search-key mappings.</summary>
+    public IReadOnlyDictionary<string, QuerySearchKeyColumn> SearchKeyColumns { get; init; }
 
     /// <summary>The maximum number of distinct values in one <c>In</c> predicate.</summary>
     public int InValueLimit { get; init; } = 1_000;
@@ -201,14 +238,23 @@ public sealed record QueryRenderOptions
 
     public QueryIndexDeclaration? FindPinnedIndex()
     {
+        var selected = FindSelectedIndex();
+        return selected?.Pinning == QueryIndexPinning.Pinned ? selected : null;
+    }
+
+    /// <summary>
+    /// Returns the declared index named by <see cref="SelectedIndex"/>, or the first pinned
+    /// declaration when no name was supplied. Providers may use this as an explain expectation
+    /// without turning a provider-default declaration into a native hint.
+    /// </summary>
+    public QueryIndexDeclaration? FindSelectedIndex()
+    {
         var selected = SelectedIndex is null
             ? null
             : Indexes.SingleOrDefault(index => string.Equals(index.Name, SelectedIndex, StringComparison.Ordinal));
         if (SelectedIndex is not null && selected is null)
             throw new ArgumentException($"Selected index '{SelectedIndex}' was not declared.", nameof(SelectedIndex));
-        if (selected is not null)
-            return selected.Pinning == QueryIndexPinning.Pinned ? selected : null;
-        return Indexes.SingleOrDefault(index => index.Pinning == QueryIndexPinning.Pinned);
+        return selected ?? Indexes.SingleOrDefault(index => index.Pinning == QueryIndexPinning.Pinned);
     }
 }
 

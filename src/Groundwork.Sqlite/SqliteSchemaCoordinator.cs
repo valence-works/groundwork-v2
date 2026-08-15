@@ -24,6 +24,25 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
+    internal void EnsureRuntimeAdmission(StorageUnit desired)
+    {
+        var physical = Physicalize(desired);
+        if (physical.DerivedColumns.Count == 0)
+            return;
+        var target = Target(physical);
+        var inspection = executor.InspectHistory(target);
+        var applied = inspection.History.AppliedState;
+        if (applied is null)
+            return;
+        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
+            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
+        {
+            throw new InvalidOperationException(
+                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
+                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
+        }
+    }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
@@ -49,7 +68,15 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
-        new(new SchemaSubject(physical), new ProviderIdentity("SQLite", "1.0"));
+        new(
+            new SchemaSubject(physical),
+            new ProviderIdentity("SQLite", "1.0"),
+            physical.DerivedColumns.Select(derived => new ProviderPhysicalSchemaDefinition(
+                "SQLite",
+                physical.Id,
+                RelationalDialect.SearchKeyDefinitionKind,
+                physical.Name + RelationalDialect.SearchKeyDefinitionSeparator + derived.Name,
+                derived.AlgorithmId ?? throw new InvalidOperationException($"Derived search-key column '{derived.Name}' is missing its algorithm identity."))).ToArray());
 
     internal static void ValidateAccess(StorageUnit unit, StorageAccess access)
     {
@@ -64,6 +91,16 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+        {
+            var portability = PortabilityValidator.Validate(source);
+            if (!portability.IsPortable)
+                throw new InvalidOperationException(string.Join(
+                    Environment.NewLine,
+                    portability.Refusals.Select(refusal =>
+                        $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
+        }
+        source = SearchKeyProjection.Expand(source);
         var columns = source.Columns.ToList();
         var key = source.Key.Columns.ToList();
         var indexes = source.Indexes.ToList();
@@ -72,7 +109,11 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         if (source.Scope == ScopePolicy.Scoped)
         {
             columns.Add(new ColumnDefinition { Name = ScopeColumn, Type = PortableType.String, IsNullable = false, Default = new PortableDefault(string.Empty) });
-            key.Insert(0, ScopeColumn);
+            // An AUTOINCREMENT column must remain SQLite's sole physical primary key.
+            // Its values are unit-wide, so the generated identity is already globally
+            // unique; scope remains an access predicate rather than part of this key.
+            if (!source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+                key.Insert(0, ScopeColumn);
             indexes = indexes.Select(index => new IndexDefinition
             {
                 Name = index.Name,

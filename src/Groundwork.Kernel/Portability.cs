@@ -79,7 +79,7 @@ public static class PortabilityValidator
         ValidateDecimalShape(columns, diagnostics);
         ValidateBoundedIndexKeys(indexes, byName, diagnostics);
         ValidateIndexBudget(indexes, byName, diagnostics);
-        ValidateGeneration(columns, diagnostics);
+        ValidateGeneration(unit, columns, diagnostics);
         ValidateCollation(columns, diagnostics);
         ValidateRetention(context.Retention, byName, diagnostics);
         ValidateMongoKeyOrder(unit, context, diagnostics);
@@ -297,17 +297,22 @@ public static class PortabilityValidator
     }
 
     private static void ValidateGeneration(
+        StorageUnit unit,
         IReadOnlyList<ColumnDefinition> columns,
         ICollection<PortabilityRefusal> diagnostics)
     {
-        foreach (var column in columns.Where(column => column is not null && column.Generation == ColumnGeneration.ProviderSequence))
+        var generated = columns
+            .Where(column => column is not null && column.Generation == ColumnGeneration.ProviderSequence)
+            .ToArray();
+        foreach (var column in generated)
         {
-            if (column.Type == PortableType.Int64 && !column.IsNullable)
+            if (column.Type == PortableType.Int64 && !column.IsNullable &&
+                generated.Length == 1 && unit.Key.Columns.Count == 1 && unit.Key.Columns[0] == column.Name)
                 continue;
 
             diagnostics.Add(new(
                 "GW-PORT-005",
-                $"Column '{column.Name}' uses ProviderSequence but must be a non-nullable Int64.",
+                $"Column '{column.Name}' uses ProviderSequence but must be the sole non-nullable Int64 primary-key column of its storage unit.",
                 $"columns.{column.Name}"));
         }
     }
