@@ -24,7 +24,21 @@ public static class AggregationSessionExecutor
         ArgumentNullException.ThrowIfNull(query);
         var profile = AggregationProfileValidator.ResolveOrThrow(unit, query.ProfileName);
         AggregationProfileValidator.Validate(unit, profile);
-        var columns = unit.Columns.ToDictionary(column => column.Name, QueryColumn, StringComparer.Ordinal);
+        var requiredColumns = profile.GroupByColumns
+            .Concat(profile.Aggregates.SelectMany(aggregate => aggregate switch
+            {
+                Aggregate.Min min => [min.Column],
+                Aggregate.Max max => [max.Column],
+                Aggregate.Sum sum => [sum.Column],
+                Aggregate.SetUnion set => [set.Column],
+                Aggregate.FirstBy first => [first.Column, first.OrderColumn],
+                _ => Array.Empty<string>()
+            }))
+            .Concat(unit.Key.Columns)
+            .ToHashSet(StringComparer.Ordinal);
+        var columns = unit.Columns
+            .Where(column => requiredColumns.Contains(column.Name))
+            .ToDictionary(column => column.Name, QueryColumn, StringComparer.Ordinal);
         var order = unit.Key.Columns
             .Where(columns.ContainsKey)
             .Select(name => new OrderTerm(columns[name], OrderDirection.Ascending, NullOrder.First))

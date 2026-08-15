@@ -1,3 +1,5 @@
+using Groundwork.Kernel;
+
 namespace Groundwork.Records;
 
 /// <summary>A provider-neutral declaration diagnostic exposed by an authoring surface.</summary>
@@ -46,5 +48,15 @@ public sealed class StorageDeclarationException : Exception
     {
         return "The storage declaration is not portable: " +
             string.Join("; ", diagnostics.Select(diagnostic => diagnostic.Code + ": " + diagnostic.Message));
+    }
+}
+
+internal static class DiagnosticsCompatibility
+{
+    public static StorageDeclarationException ToRecords(DeclarationBuildException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return new StorageDeclarationException(exception.Findings.Select(finding =>
+            new GroundworkDiagnostic(finding.Code, finding.Message, finding.Path)));
     }
 }
