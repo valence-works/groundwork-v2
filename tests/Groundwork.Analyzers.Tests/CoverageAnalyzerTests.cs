@@ -216,9 +216,11 @@ public sealed class CoverageAnalyzerTests
 
         var warning = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
         Assert.Contains(warning, item => item.Id == "GW_COVER_904" && item.Severity == DiagnosticSeverity.Warning);
+        Assert.Contains(warning, item => item.Id == "GW_COVER_905" && item.Severity == DiagnosticSeverity.Info);
 
         var error = await Analyze(source, now: new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero));
         Assert.Contains(error, item => item.Id == "GW_COVER_903" && item.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(error, item => item.Id == "GW_COVER_905" && item.Severity == DiagnosticSeverity.Info);
     }
 
     private static async Task<ImmutableArray<Diagnostic>> Analyze(

@@ -124,15 +124,15 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
                                 "GW-COVER-904: accepted scan '" + id + "' expires on " +
                                 acceptance.ExpiresOn!.Value.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + "."));
                         }
-                        if (acceptedScansEnabled)
-                        {
-                            context.ReportDiagnostic(Diagnostic.Create(
-                                AnalyzerDiagnostics.For("GW-COVER-905"),
-                                location,
-                                "GW-COVER-905: accepted scan '" + id + "' reason='" + acceptance.Reason +
-                                "' owner='" + acceptance.Owner + "' expiresOn='" +
-                                acceptance.ExpiresOn!.Value.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + "'."));
-                        }
+                    }
+                    if (acceptedScansEnabled)
+                    {
+                        context.ReportDiagnostic(Diagnostic.Create(
+                            AnalyzerDiagnostics.For("GW-COVER-905"),
+                            location,
+                            "GW-COVER-905: accepted scan '" + id + "' reason='" + acceptance.Reason +
+                            "' owner='" + acceptance.Owner + "' expiresOn='" +
+                            acceptance.ExpiresOn!.Value.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + "'."));
                     }
                 }
             }
