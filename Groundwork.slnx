@@ -6,6 +6,9 @@
   <Folder Name="/src/Groundwork.Records/">
     <Project Path="src/Groundwork.Records/Groundwork.Records.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Records.TestingAdapter/">
+    <Project Path="src/Groundwork.Records.TestingAdapter/Groundwork.Records.TestingAdapter.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Testing/">
     <Project Path="src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </Folder>
@@ -126,5 +129,8 @@
   </Folder>
   <Folder Name="/tests/Groundwork.StreamCapabilities.Tests/">
     <Project Path="tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Records.Tests/">
+    <Project Path="tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj" />
   </Folder>
 </Solution>

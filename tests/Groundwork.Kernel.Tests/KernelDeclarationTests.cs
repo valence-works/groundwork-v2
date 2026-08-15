@@ -70,6 +70,30 @@ public sealed class KernelDeclarationTests
     }
 
     [Fact]
+    public void Shared_concurrency_validation_rejects_an_index_over_the_system_owned_token()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("versioned"),
+            Name = "versioned",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "version", Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "by-version", Columns = [new IndexColumn("version")] }],
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+
+        var error = Assert.Throws<ArgumentException>(() =>
+            ConcurrencyDeclaration.ValidateDeclaration(unit));
+
+        Assert.Contains("index 'by-version'", error.Message, StringComparison.Ordinal);
+        Assert.Contains("system-owned", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Supporting_projection_and_value_contracts_are_provider_neutral()
     {
         var definition = new DerivedColumnDefinition

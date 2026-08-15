@@ -10,6 +10,7 @@ internal sealed class DeclarationState
     private readonly string id;
     private readonly string name;
     private KeyDefinition? key;
+    private ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.None;
     private RetentionDeclaration? retention;
 
     public DeclarationState(string id, string name)
@@ -47,6 +48,23 @@ internal sealed class DeclarationState
         key = new KeyDefinition { Columns = names };
     }
 
+    public void SetOptimisticConcurrency(string tokenColumn)
+    {
+        if (string.IsNullOrWhiteSpace(tokenColumn))
+            throw new ArgumentException("A concurrency token column must be non-empty.", nameof(tokenColumn));
+
+        var existing = columns.FindIndex(column => string.Equals(column.Name, tokenColumn, StringComparison.Ordinal));
+        var token = existing < 0
+            ? new ColumnDefinition { Name = tokenColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) }
+            : columns[existing];
+        if (existing < 0)
+            columns.Add(token);
+        else if (token.Type == PortableType.Int64 && !token.IsNullable && token.Default is null)
+            columns[existing] = token with { Default = new PortableDefault(0L) };
+
+        concurrency = ConcurrencyDeclaration.Optimistic(tokenColumn);
+    }
+
     public void SetRetention(RetentionDeclaration declaration) =>
         retention = declaration ?? throw new ArgumentNullException(nameof(declaration));
 
@@ -79,11 +97,23 @@ internal sealed class DeclarationState
             {
                 Columns = Array.AsReadOnly((key?.Columns ?? Array.Empty<string>()).ToArray())
             },
+            Concurrency = concurrency,
             Indexes = Array.AsReadOnly(indexes.ToArray()),
             Retention = retention
         };
 
-        var declarationDiagnostics = ValidateReferences(unit, key is null);
+        var declarationDiagnostics = ValidateReferences(unit, key is null).ToList();
+        try
+        {
+            ConcurrencyDeclaration.ValidateDeclaration(unit);
+        }
+        catch (ArgumentException exception)
+        {
+            declarationDiagnostics.Add(new GroundworkDiagnostic(
+                "GW-DECL-CONCURRENCY-001",
+                $"The concurrency declaration is invalid: {exception.Message}",
+                "concurrency"));
+        }
         var validationContext = context is null || context.Retention is not null || retention is null
             ? context
             : new PortabilityValidationContext(
@@ -165,6 +195,17 @@ internal sealed class DeclarationState
                         "GW-DECL-INDEX-002",
                         $"Index '{index.Name}' column '{column}' is listed more than once.",
                         $"indexes.{index.Name}.columns"));
+                }
+
+                var declaration = unit.Columns.FirstOrDefault(candidate =>
+                    candidate is not null && string.Equals(candidate.Name, column, StringComparison.Ordinal));
+                if (declaration?.Type == PortableType.Json)
+                {
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-003",
+                        $"Index '{index.Name}' column '{column}' is JSON and cannot be represented as a portable query index key. " +
+                        "Leave the JSON column unindexed or index a declared scalar projection instead.",
+                        $"indexes.{index.Name}.columns[{columnIndex}]"));
                 }
             }
         }
