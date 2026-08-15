@@ -128,6 +128,16 @@ public abstract class RelationalDialect
         DbTransaction transaction,
         string table);
 
+    /// <summary>
+    /// Reads provider-persisted search-key algorithm ids for derived columns. Providers that do
+    /// not persist derived search keys return an empty map; a target declaring one is then
+    /// conservatively refused during runtime admission rather than admitted without evidence.
+    /// </summary>
+    public virtual IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table) => new Dictionary<string, string>(StringComparer.Ordinal);
+
     public abstract RelationalIndexMetadata? ReadIndex(
         DbConnection connection,
         DbTransaction transaction,
@@ -258,7 +268,8 @@ public sealed record RelationalColumnMetadata(
     int PrimaryKeyOrder,
     bool IsComputed = false,
     bool IsPersisted = false,
-    string? ComputedDefinition = null);
+    string? ComputedDefinition = null,
+    ColumnGeneration Generation = ColumnGeneration.Supplied);
 
 public sealed record RelationalIndexColumnMetadata(string Name, SortDirection Direction);
 

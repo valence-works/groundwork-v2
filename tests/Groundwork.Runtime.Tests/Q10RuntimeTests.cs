@@ -55,6 +55,7 @@ public sealed class Q10RuntimeTests
 
         Assert.True(inspection.IsAppliedSchemaValid);
         Assert.True(inspection.HasIndexDrift);
+        Assert.True(result.IsReady);
         Assert.Contains("ix_status", result.Refusals.Single().Message, StringComparison.Ordinal);
     }
 
