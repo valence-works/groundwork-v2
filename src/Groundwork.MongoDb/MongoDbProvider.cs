@@ -20,14 +20,15 @@ namespace Groundwork.MongoDb;
 /// <summary>The capability declared by MongoDB for provider-assigned sequence columns.</summary>
 public static class MongoCapabilities
 {
-    public static readonly CapabilityId ProviderSequence = new("groundwork.storage.provider-sequence");
+    public static readonly CapabilityId ProviderSequence = new("groundwork.column.provider-sequence");
 
     public static CapabilityDescriptor ProviderSequenceDescriptor { get; } = new(
         ProviderSequence,
         "Provider-assigned monotonic sequence",
-        "MongoDB allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment.",
+        "MongoDB monotonically allocates a sequence in a counter collection and commits it with the row in a transaction-capable deployment; concurrent commit order may differ and each inserted row/coalesced exact write uses one additional counter command.",
         EvidenceGatedByDefault: true,
-        OwningModule: "groundwork-mongodb");
+        OwningModule: "groundwork-mongodb",
+        AdditionalProviderCommandsPerWrite: 1);
 }
 
 public sealed class MongoCapabilityModule : IGroundworkModule
@@ -63,6 +64,10 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
     public IMongoProviderCatalog Catalog { get; }
 
     public IMongoSchemaCoordinator Schema { get; }
+
+    public ProviderFit ProviderSequenceFit => state.Context.SupportsTransactions()
+        ? new ProviderFit.Supported()
+        : new ProviderFit.Unsupported([MongoCapabilities.ProviderSequence]);
 
     /// <summary>Provides read-only access to the native database for catalog/evidence tests.</summary>
     public IMongoDatabase Database => state.Context.Database;
@@ -1175,7 +1180,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         new() { Precondition = options.Precondition, Observer = options.Observer };
 
     private static WriteOutcome ToTesting(MongoWriteOutcome outcome) =>
-        new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName);
+        new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName, outcome.GeneratedValues);
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
@@ -1210,10 +1215,33 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         bool exactOutcome = false)
     {
         values = new MongoStorageValues(SearchKeyProjection.Populate(Unit, values.Values));
+        var sequence = Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.ProviderSequence);
+        var generatedValues = new Dictionary<string, object?>(StringComparer.Ordinal);
         var keyValues = values.Values;
+        var hasSequenceLocator = sequence is not null && keyValues.ContainsKey(sequence.Name);
+        if (hasSequenceLocator && kind == MutationKind.Insert)
+            throw new ArgumentException(
+                $"ProviderSequence column '{sequence!.Name}' is assigned by MongoDB and cannot be supplied for Insert.",
+                nameof(values));
+        if (sequence is not null && !hasSequenceLocator && (kind is MutationKind.Insert or MutationKind.Upsert))
+        {
+            var copied = keyValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            var generated = NextSequence(sequence, options?.Observer);
+            copied[sequence.Name] = generated;
+            values = new MongoStorageValues(copied);
+            keyValues = values.Values;
+            generatedValues[sequence.Name] = generated;
+        }
         var identity = MongoDocumentMapper.EncodeKey(Unit, keyValues);
         if (!Unit.Concurrency.IsOptimistic)
-            return MutateNoneCore(values, options, kind, identity);
+            return MutateNoneCore(
+                values,
+                options,
+                kind,
+                identity,
+                hasSequenceLocator,
+                generatedValues);
 
         var existing = FindOne(identity);
         var existingVersion = Version(identity, existing);
@@ -1222,17 +1250,22 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, existingVersion);
         if (kind == MutationKind.Update && existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
+        if (kind == MutationKind.Upsert && hasSequenceLocator && existing is null)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
         if (!ConcurrencyAllows(existing, existingVersion, options, kind))
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion);
 
         var nextVersion = NextVersion(existingVersion);
         var document = MongoDocumentMapper.EncodeDocument(
             Unit,
-            values.Values,
+            keyValues,
             identity,
             existing,
-            column => NextSequence(column, options?.Observer),
-            preserveCreatedAt: exactOutcome);
+            column => sequence is not null && column.Name == sequence.Name && generatedValues.TryGetValue(column.Name, out var generated)
+                ? Convert.ToInt64(generated, System.Globalization.CultureInfo.InvariantCulture)
+                : NextSequence(column, options?.Observer),
+            preserveCreatedAt: exactOutcome,
+            generatedValues: generatedValues);
         if (nextVersion is not null)
             document[MongoDocumentMapper.VersionField] = nextVersion.Value;
         var inserted = kind == MutationKind.Insert;
@@ -1260,7 +1293,8 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 else
                 {
                     var result = ReplaceOne(filter, document,
-                        isUpsert: !Unit.Concurrency.IsOptimistic || existing is null);
+                        isUpsert: !hasSequenceLocator &&
+                                  (!Unit.Concurrency.IsOptimistic || existing is null));
                     inserted = result.UpsertedId is not null;
                     if (Unit.Concurrency.IsOptimistic && result.MatchedCount == 0)
                         return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
@@ -1281,6 +1315,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         {
             MutationKind.Insert => MongoWriteOutcomeStatus.Inserted,
             MutationKind.Update => MongoWriteOutcomeStatus.Updated,
+            MutationKind.Upsert when hasSequenceLocator => MongoWriteOutcomeStatus.Updated,
             _ => MongoWriteOutcomeStatus.Upserted
         };
         if (exactOutcome && kind == MutationKind.Upsert)
@@ -1289,14 +1324,16 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 ? MongoWriteOutcomeStatus.Inserted
                 : MongoWriteOutcomeStatus.Updated;
         }
-        return new MongoWriteOutcome(status, nextVersion);
+        return new MongoWriteOutcome(status, nextVersion, generatedValues: generatedValues);
     }
 
     private MongoWriteOutcome MutateNoneCore(
         MongoStorageValues values,
         MongoWriteOptions? options,
         MutationKind kind,
-        BsonValue identity)
+        BsonValue identity,
+        bool hasSequenceLocator,
+        IReadOnlyDictionary<string, object?> generatedValues)
     {
         var missingRequired = Unit.Columns.FirstOrDefault(column =>
             column.Generation == ColumnGeneration.Supplied &&
@@ -1304,14 +1341,15 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             !column.IsNullable &&
             column.Default is null &&
             !values.Values.ContainsKey(column.Name));
-        var canInsert = missingRequired is null;
+        var canInsert = missingRequired is null && !hasSequenceLocator;
         var document = kind == MutationKind.Insert || canInsert
             ? MongoDocumentMapper.EncodeDocument(
                 Unit,
                 values.Values,
                 identity,
                 existing: null,
-                column => NextSequence(column, options?.Observer))
+                column => NextSequence(column, options?.Observer),
+                generatedValues: generatedValues)
             : null;
         options?.Observer?.Observe(new WritePathEvent(
             "mongodb.none-write",
@@ -1328,7 +1366,9 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             if (kind == MutationKind.Insert)
             {
                 InsertOne(document!);
-                return new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted);
+                return new MongoWriteOutcome(
+                    MongoWriteOutcomeStatus.Inserted,
+                    generatedValues: generatedValues);
             }
 
             var set = new BsonDocument();
@@ -1355,20 +1395,23 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             var update = new BsonDocument("$set", set);
             if (setOnInsert.ElementCount != 0)
                 update["$setOnInsert"] = setOnInsert;
-            var isUpsert = kind == MutationKind.Upsert && canInsert;
+            var isUpsert = kind == MutationKind.Upsert && canInsert && !hasSequenceLocator;
             var updateOptions = new UpdateOptions { IsUpsert = isUpsert };
             var result = transactionSession is null
                 ? collection.UpdateOne(filter, update, updateOptions)
                 : collection.UpdateOne(transactionSession, filter, update, updateOptions);
             if (result.MatchedCount == 0 && result.UpsertedId is null)
             {
-                if (kind == MutationKind.Update)
+                if (kind == MutationKind.Update || hasSequenceLocator)
                     return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
                 throw new InvalidOperationException($"Column '{missingRequired!.Name}' is required.");
             }
-            return new MongoWriteOutcome(kind == MutationKind.Update
+            var status = kind == MutationKind.Update || hasSequenceLocator
                 ? MongoWriteOutcomeStatus.Updated
-                : MongoWriteOutcomeStatus.Upserted);
+                : kind == MutationKind.Insert
+                    ? MongoWriteOutcomeStatus.Inserted
+                    : MongoWriteOutcomeStatus.Upserted;
+            return new MongoWriteOutcome(status, generatedValues: generatedValues);
         }
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
@@ -1774,21 +1817,56 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             return operation(this);
 
         state.Context.RequireTransactions("ProviderSequence");
-        using var session = state.Context.StartSession();
-        session.StartTransaction();
-        var transactional = new MongoStorageSession(state, applied, Access, collection, session);
-        try
+        MongoException? lastTransientFailure = null;
+        for (var attempt = 0; attempt < 5; attempt++)
         {
-            var result = operation(transactional);
-            session.CommitTransaction();
-            transactional.Close();
-            return result;
+            using var session = state.Context.StartSession();
+            session.StartTransaction();
+            var transactional = new MongoStorageSession(state, applied, Access, collection, session);
+            var operationCompleted = false;
+            try
+            {
+                var result = operation(transactional);
+                operationCompleted = true;
+                CommitTransactionWithRetry(session);
+                return result;
+            }
+            catch (MongoException exception) when (
+                exception.HasErrorLabel("TransientTransactionError") && attempt < 4)
+            {
+                lastTransientFailure = exception;
+            }
+            finally
+            {
+                if (!operationCompleted && session.IsInTransaction)
+                {
+                    try { session.AbortTransaction(); }
+                    catch (MongoException) { }
+                }
+                transactional.Close();
+            }
         }
-        catch
+
+        if (lastTransientFailure is not null)
+            throw lastTransientFailure;
+        throw new InvalidOperationException("MongoDB ProviderSequence transaction retries were exhausted.");
+    }
+
+    internal static void CommitTransactionWithRetry(IClientSessionHandle session)
+    {
+        for (var attempt = 0; ; attempt++)
         {
-            session.AbortTransaction();
-            transactional.Close();
-            throw;
+            try
+            {
+                session.CommitTransaction();
+                return;
+            }
+            catch (MongoException exception) when (
+                exception.HasErrorLabel("UnknownTransactionCommitResult") && attempt < 4)
+            {
+                // The transaction body must not be replayed when only the commit result is
+                // unknown. Retrying commit is the MongoDB-prescribed resolution.
+            }
         }
     }
 
@@ -1840,7 +1918,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
         ThrowIfTerminal();
         try
         {
-            session.CommitTransaction();
+            MongoStorageSession.CommitTransactionWithRetry(session);
             terminal = true;
             CloseSessions();
         }
@@ -1919,7 +1997,8 @@ internal static class MongoDocumentMapper
         BsonValue identity,
         BsonDocument? existing,
         Func<ColumnDefinition, long> nextSequence,
-        bool preserveCreatedAt = false)
+        bool preserveCreatedAt = false,
+        IReadOnlyDictionary<string, object?>? generatedValues = null)
     {
         var known = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
@@ -1934,10 +2013,12 @@ internal static class MongoDocumentMapper
             var isPresent = values.TryGetValue(column.Name, out var value);
             if (column.Generation == ColumnGeneration.ProviderSequence)
             {
-                if (isPresent && existing is null)
+                var generatedInternally = generatedValues is not null && generatedValues.ContainsKey(column.Name);
+                if (isPresent && existing is null && !generatedInternally)
                     throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by MongoDB and cannot be supplied.", nameof(values));
-                var generated = existing?.GetValue(column.Name, BsonNull.Value) ?? new BsonInt64(nextSequence(column));
-                if (isPresent && existing is not null &&
+                var generated = existing?.GetValue(column.Name, BsonNull.Value) ??
+                    (generatedInternally ? MongoValueCodec.Encode(generatedValues![column.Name], column) : new BsonInt64(nextSequence(column)));
+                if (isPresent && existing is not null && !generatedInternally &&
                     !MongoValueCodec.Encode(value, column).Equals(generated))
                 {
                     throw new ArgumentException(

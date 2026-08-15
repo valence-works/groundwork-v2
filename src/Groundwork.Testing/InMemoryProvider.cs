@@ -138,6 +138,10 @@ internal sealed class InMemoryUnitState
     // Compare-and-swap token used by unit-of-work commits.
     internal long Revision { get; set; }
 
+    // ProviderSequence values are unit-wide, matching a relational identity/sequence rather
+    // than a scope partition. Gaps are intentionally allowed when a staged transaction rolls back.
+    internal long Sequence { get; set; }
+
     internal Dictionary<string, Dictionary<string, InMemoryEntry>> Partitions { get; } = [];
 
     internal List<ProviderIndex> PhysicalIndexes { get; } = [];
@@ -146,6 +150,7 @@ internal sealed class InMemoryUnitState
     {
         var clone = new InMemoryUnitState(Unit);
         clone.Revision = Revision;
+        clone.Sequence = Sequence;
         foreach (var partition in Partitions)
         {
             clone.Partitions[partition.Key] = partition.Value.ToDictionary(
@@ -969,14 +974,33 @@ internal static class Mutation
         bool exactOutcome = false,
         bool preserveCreatedAt = false)
     {
-        ValidateValues(state.Unit, values.Values, requireAllNonNullable: kind == MutationKind.Insert);
-        var identity = Key(state.Unit, values.Values);
+        ValidateValues(
+            state.Unit,
+            values.Values,
+            requireAllNonNullable: kind == MutationKind.Insert,
+            rejectGeneratedInsert: kind == MutationKind.Insert);
+        var sequence = state.Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.ProviderSequence);
+        var generated = new Dictionary<string, object?>(StringComparer.Ordinal);
+        var sourceValues = values.Values;
+        var hasSequenceLocator = sequence is not null && sourceValues.ContainsKey(sequence.Name);
+        if (sequence is not null && !hasSequenceLocator && (kind is MutationKind.Insert or MutationKind.Upsert))
+        {
+            var copy = sourceValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            var value = checked(++state.Sequence);
+            copy[sequence.Name] = value;
+            sourceValues = new StorageValues(copy).Values;
+            generated[sequence.Name] = value;
+        }
+        var identity = Key(state.Unit, sourceValues);
         var entries = GetEntries(state, partition);
         entries.TryGetValue(identity, out var existing);
 
         if (kind == MutationKind.Insert && existing is not null)
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (kind == MutationKind.Update && existing is null)
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        if (kind == MutationKind.Upsert && hasSequenceLocator && existing is null)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
 
         var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
@@ -989,16 +1013,20 @@ internal static class Mutation
                 return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
         }
 
-        var storedValues = values.Values;
+        var storedValues = sourceValues;
         if (existing is not null && kind != MutationKind.Insert)
         {
             var merged = existing.Values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-            foreach (var pair in values.Values)
+            foreach (var pair in sourceValues)
                 merged[pair.Key] = pair.Value;
             storedValues = merged;
         }
 
-        ValidateValues(state.Unit, storedValues, requireAllNonNullable: true);
+        ValidateValues(
+            state.Unit,
+            storedValues,
+            requireAllNonNullable: true,
+            rejectGeneratedInsert: false);
 
         if (!UniqueIndexesAllow(state.Unit, entries, identity, storedValues))
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version);
@@ -1010,6 +1038,7 @@ internal static class Mutation
         {
             MutationKind.Insert => WriteOutcomeStatus.Inserted,
             MutationKind.Update => WriteOutcomeStatus.Updated,
+            MutationKind.Upsert when hasSequenceLocator => WriteOutcomeStatus.Updated,
             MutationKind.Upsert when exactOutcome && existing is null => WriteOutcomeStatus.Inserted,
             MutationKind.Upsert when exactOutcome => WriteOutcomeStatus.Updated,
             _ => WriteOutcomeStatus.Upserted
@@ -1026,7 +1055,7 @@ internal static class Mutation
         }
         entries[identity] = new InMemoryEntry(storedValues, version);
         state.Revision = checked(state.Revision + 1);
-        return new WriteOutcome(status, version);
+        return new WriteOutcome(status, version, generatedValues: generated);
     }
 
     internal static WriteOutcome Delete(
@@ -1121,7 +1150,8 @@ internal static class Mutation
     private static void ValidateValues(
         StorageUnit unit,
         IReadOnlyDictionary<string, object?> values,
-        bool requireAllNonNullable)
+        bool requireAllNonNullable,
+        bool rejectGeneratedInsert)
     {
         var known = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.Where(key => !known.Contains(key)).OrderBy(key => key, StringComparer.Ordinal).FirstOrDefault();
@@ -1133,6 +1163,12 @@ internal static class Mutation
                      !(unit.Concurrency.IsOptimistic &&
                        string.Equals(unit.Concurrency.TokenColumn, column.Name, StringComparison.Ordinal))))
         {
+            if (column.Generation == ColumnGeneration.ProviderSequence)
+            {
+                if (rejectGeneratedInsert && values.ContainsKey(column.Name))
+                    throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by the in-memory provider and cannot be supplied for Insert.", nameof(values));
+                continue;
+            }
             if ((values.TryGetValue(column.Name, out var value) && value is null) ||
                 (requireAllNonNullable && !values.ContainsKey(column.Name)))
                 throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));

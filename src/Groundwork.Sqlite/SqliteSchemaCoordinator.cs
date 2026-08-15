@@ -91,6 +91,15 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+        {
+            var portability = PortabilityValidator.Validate(source);
+            if (!portability.IsPortable)
+                throw new InvalidOperationException(string.Join(
+                    Environment.NewLine,
+                    portability.Refusals.Select(refusal =>
+                        $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
+        }
         source = SearchKeyProjection.Expand(source);
         var columns = source.Columns.ToList();
         var key = source.Key.Columns.ToList();
@@ -100,7 +109,11 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         if (source.Scope == ScopePolicy.Scoped)
         {
             columns.Add(new ColumnDefinition { Name = ScopeColumn, Type = PortableType.String, IsNullable = false, Default = new PortableDefault(string.Empty) });
-            key.Insert(0, ScopeColumn);
+            // An AUTOINCREMENT column must remain SQLite's sole physical primary key.
+            // Its values are unit-wide, so the generated identity is already globally
+            // unique; scope remains an access predicate rather than part of this key.
+            if (!source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+                key.Insert(0, ScopeColumn);
             indexes = indexes.Select(index => new IndexDefinition
             {
                 Name = index.Name,

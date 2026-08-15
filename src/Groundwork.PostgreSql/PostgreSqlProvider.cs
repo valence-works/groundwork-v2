@@ -230,6 +230,15 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+        {
+            var portability = PortabilityValidator.Validate(source);
+            if (!portability.IsPortable)
+                throw new InvalidOperationException(string.Join(
+                    Environment.NewLine,
+                    portability.Refusals.Select(refusal =>
+                        $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
+        }
         source = SearchKeyProjection.Expand(source);
         var columns = source.Columns.ToList();
         var key = source.Key.Columns.ToList();

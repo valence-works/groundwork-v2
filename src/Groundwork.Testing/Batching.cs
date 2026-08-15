@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
@@ -7,6 +6,14 @@ namespace Groundwork.Testing;
 /// <summary>Capability descriptors exposed by providers that implement staged writes.</summary>
 public static class BatchWriteCapabilities
 {
+    public static CapabilityId ProviderSequence { get; } = new("groundwork.column.provider-sequence");
+
+    public static CapabilityDescriptor ProviderSequenceDescriptor { get; } = new(
+        ProviderSequence,
+        "Provider-assigned monotonic sequence",
+        "Relational providers monotonically allocate a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required.",
+        AdditionalProviderCommandsPerWrite: 0);
+
     public static CapabilityId StagedUnitOfWork { get; } = new("groundwork.storage.batched-unit-of-work");
 
     public static CapabilityId PerRowOutcomes { get; } = new("groundwork.storage.batched-outcomes");
@@ -29,7 +36,7 @@ public static class BatchWriteCapabilities
         "Executes grouped writes through the provider's native multi-row command or bulk-write primitive.");
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -38,6 +45,10 @@ public static class BatchWriteCapabilities
         string batchCost) =>
         Array.AsReadOnly(
         [
+            ProviderSequenceDescriptor with
+            {
+                Description = $"{provider} monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required."
+            },
             StagedUnitOfWorkDescriptor with
             {
                 Description = $"Stages and coalesces writes for {provider}; {batchCost}."
@@ -73,6 +84,8 @@ public enum RowWriteMode
 /// <summary>One provider-neutral row mutation staged in a unit of work.</summary>
 public sealed class RowWrite
 {
+    private readonly object generatedKeyOccurrence = new();
+
     private RowWrite(
         StorageUnit unit,
         RowWriteMode mode,
@@ -156,7 +169,34 @@ public sealed class RowWrite
         ? string.Join("\u001f", Unit.Key.Columns)
         : string.Join("\u001f", Values!.Values.Keys.OrderBy(value => value, StringComparer.Ordinal));
 
-    internal string Identity => IdentityFor(Unit, KeyValues);
+    internal object CoalescingIdentity
+    {
+        get
+        {
+            if (HasUnassignedProviderSequenceKey)
+            {
+                // A generated key cannot identify an uncommitted insert. A private object
+                // token gives the declaration collision-free reference identity until the
+                // provider returns its real key.
+                return generatedKeyOccurrence;
+            }
+
+            return Identity;
+        }
+    }
+
+    internal bool HasUnassignedProviderSequenceKey
+    {
+        get
+        {
+            var values = Key?.Values ?? Values!.Values;
+            return Unit.Key.Columns.Any(column =>
+                Unit.Columns.FirstOrDefault(definition => definition.Name == column)?.Generation == ColumnGeneration.ProviderSequence &&
+                !values.ContainsKey(column));
+        }
+    }
+
+    internal string Identity => IdentityFor(Unit, Key?.Values ?? Values!.Values);
 
     internal RowWrite PopulateSearchKeyValues()
     {
@@ -185,6 +225,8 @@ public sealed class RowWrite
     internal bool Matches(StorageKey key)
     {
         ArgumentNullException.ThrowIfNull(key);
+        if (HasUnassignedProviderSequenceKey)
+            return false;
         foreach (var column in Unit.Key.Columns)
         {
             if (!KeyValues.TryGetValue(column, out var left) ||
@@ -411,7 +453,9 @@ internal sealed class BatchContext
     internal IReadOnlyList<RowWriteOutcome> FlushFor(StorageUnit unit, StorageKey key)
     {
         EnsureHealthy();
-        var writes = staged.Where(write => write.Unit.Id == unit.Id && write.Matches(key)).ToArray();
+        var writes = staged.Where(write =>
+            write.Unit.Id == unit.Id &&
+            (write.HasUnassignedProviderSequenceKey || write.Matches(key))).ToArray();
         return writes.Length == 0 ? [] : Flush(writes);
     }
 
@@ -441,7 +485,7 @@ internal sealed class BatchContext
             // declaration-order final write wins even when earlier writes used another
             // mode or column set; only the final writes are sent to the provider.
             var coalesced = writes
-                .GroupBy(write => (write.Unit.Id, write.Identity))
+                .GroupBy(write => (write.Unit.Id, write.CoalescingIdentity))
                 .Select(group => new CoalescedWrite(group.ToArray()))
                 .ToArray();
             var outcomes = new Dictionary<RowWrite, WriteOutcome>(ReferenceEqualityComparer.Instance);
@@ -452,19 +496,19 @@ internal sealed class BatchContext
                     throw new InvalidOperationException(
                         $"Storage unit '{group.Key.Id.Value}' has no open session in this unit of work.");
 
-                var finalWrites = group.Select(item => item.Final).ToArray();
+                var groupItems = group.ToArray();
+                var finalWrites = groupItems.Select(item => item.Final).ToArray();
                 var groupOutcomes = session.ApplyBatch(finalWrites, exactOutcomes);
                 if (groupOutcomes.Count != finalWrites.Length)
                     throw new InvalidOperationException(
                         $"The provider returned {groupOutcomes.Count} outcomes for a batch of {finalWrites.Length} writes.");
-                foreach (var outcome in groupOutcomes)
+                for (var index = 0; index < groupOutcomes.Count; index++)
                 {
-                    // Provider adapters may add provider-owned projection values and therefore
-                    // return a value-equivalent RowWrite instance. The logical key remains the
-                    // stable correlation identity across that physicalization boundary.
-                    var item = group.Single(candidate =>
-                        ReferenceEquals(candidate.Final, outcome.Write) ||
-                        candidate.Final.Identity == outcome.Write.Identity);
+                    // ApplyBatch outcomes are positionally aligned with finalWrites. Ordinal
+                    // correlation remains stable when an adapter physicalizes a RowWrite and
+                    // when a generated key has not yet been assigned to the declaration.
+                    var item = groupItems[index];
+                    var outcome = groupOutcomes[index];
                     foreach (var original in item.Originals)
                         outcomes[original] = outcome.Outcome;
                 }
@@ -472,7 +516,10 @@ internal sealed class BatchContext
 
             var finalByOriginal = coalesced
                 .SelectMany(item => item.Originals.Select(original => (original, item.Final)))
-                .ToDictionary(item => item.original, item => item.Final, ReferenceEqualityComparer.Instance);
+                .ToDictionary(
+                    item => item.original,
+                    item => item.Final,
+                    (IEqualityComparer<RowWrite>)ReferenceEqualityComparer.Instance);
             var ordered = writes.Select(write =>
             {
                 var providerOutcome = outcomes[write];
@@ -607,13 +654,4 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
     }
-}
-
-internal sealed class ReferenceEqualityComparer : IEqualityComparer<RowWrite>
-{
-    internal static ReferenceEqualityComparer Instance { get; } = new();
-
-    public bool Equals(RowWrite? x, RowWrite? y) => ReferenceEquals(x, y);
-
-    public int GetHashCode(RowWrite obj) => RuntimeHelpers.GetHashCode(obj);
 }

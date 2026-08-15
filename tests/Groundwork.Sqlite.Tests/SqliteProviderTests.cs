@@ -12,6 +12,97 @@ namespace Groundwork.Sqlite.Tests;
 
 public sealed class SqliteProviderTests
 {
+    [Fact]
+    public void Provider_sequence_uses_sqlite_autoincrement_and_returns_generated_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = SequenceUnit("sqlite-sequence-" + Guid.NewGuid().ToString("N"));
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var first = session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "first" }));
+        var second = session.Upsert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "second" }));
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, first.Status);
+        Assert.Equal(1L, first.GeneratedValue<long>("sequence"));
+        Assert.Equal(WriteOutcomeStatus.Upserted, second.Status);
+        Assert.Equal(2L, second.GeneratedValue<long>("sequence"));
+        Assert.Equal("first", session.Read(new StorageKey(new Dictionary<string, object?> { ["sequence"] = 1L }))!
+            .Values.Values["payload"]);
+        Assert.Throws<ArgumentException>(() => session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["sequence"] = 99L,
+            ["payload"] = "caller-supplied"
+        })));
+    }
+
+    [Fact]
+    public void Provider_sequence_batch_returns_one_generated_value_per_exact_row()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = SequenceUnit("sqlite-sequence-batch-" + Guid.NewGuid().ToString("N"));
+        connection.Schema.Apply(unit);
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["payload"] = "one" })));
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["payload"] = "two" })));
+
+        var report = work.CommitWithOutcomes();
+
+        Assert.True(report.IsSuccessful);
+        Assert.Equal([1L, 2L], report.Outcomes.Select(outcome => outcome.Outcome.GeneratedValue<long>("sequence")));
+    }
+
+    [Fact]
+    public void Scoped_provider_sequence_is_unit_wide_and_scope_isolates_reads()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = SequenceUnit("sqlite-scoped-sequence-" + Guid.NewGuid().ToString("N")) with
+        {
+            Scope = ScopePolicy.Scoped
+        };
+        connection.Schema.Apply(unit);
+
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("first")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("second")));
+        var firstSequence = first.Insert(Values("first")).GeneratedValue<long>("sequence");
+        var secondSequence = second.Insert(Values("second")).GeneratedValue<long>("sequence");
+
+        Assert.Equal(1L, firstSequence);
+        Assert.Equal(2L, secondSequence);
+        Assert.NotNull(first.Read(Key(firstSequence)));
+        Assert.Null(first.Read(Key(secondSequence)));
+        Assert.NotNull(second.Read(Key(secondSequence)));
+        Assert.Null(second.Read(Key(firstSequence)));
+    }
+
+    [Fact]
+    public void Provider_sequence_only_insert_uses_default_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var name = "sqlite-sequence-only-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        connection.Schema.Apply(unit);
+
+        var inserted = connection.OpenSession(unit, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?>()));
+
+        Assert.Equal(1L, inserted.GeneratedValue<long>("sequence"));
+    }
+
     private sealed class LinqTicket
     {
         public string Id { get; set; } = string.Empty;
@@ -366,6 +457,24 @@ public sealed class SqliteProviderTests
             ]
             : [new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] }]
     };
+
+    private static StorageUnit SequenceUnit(string name) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "payload", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["sequence"] }
+    };
+
+    private static StorageValues Values(string payload) => new(
+        new Dictionary<string, object?> { ["payload"] = payload });
+
+    private static StorageKey Key(long sequence) => new(
+        new Dictionary<string, object?> { ["sequence"] = sequence });
 
     private sealed class TemporaryStore : IDisposable
     {

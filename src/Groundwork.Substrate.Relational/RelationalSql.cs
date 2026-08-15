@@ -13,10 +13,13 @@ public static class RelationalSql
         if (unit.Key.Columns is null || unit.Key.Columns.Count == 0)
             throw new ArgumentException("A relational table requires a non-empty key.", nameof(unit));
 
-        var columns = (unit.Columns ?? throw new ArgumentException("A relational table requires columns.", nameof(unit)))
+        var declaredColumns = unit.Columns ?? throw new ArgumentException("A relational table requires columns.", nameof(unit));
+        var columns = declaredColumns
             .Select(column => ColumnDefinitionSql(dialect, column))
             .ToArray();
-        return dialect.CreateTableSql(unit.Name, columns, unit.Key.Columns);
+        var providerSequence = declaredColumns.SingleOrDefault(column =>
+            column.Generation == ColumnGeneration.ProviderSequence)?.Name;
+        return dialect.CreateTableSql(unit.Name, columns, unit.Key.Columns, providerSequence);
     }
 
     public static string AddColumn(
@@ -88,6 +91,8 @@ public static class RelationalSql
             .Append(dialect.QuoteIdentifier(column.Name))
             .Append(' ')
             .Append(dialect.MapType(column));
+        if (dialect.MapGeneration(column) is { } generation)
+            builder.Append(' ').Append(generation);
         if (dialect.MapCollation(column) is { } collation)
             builder.Append(" COLLATE ").Append(collation);
         builder.Append(column.IsNullable ? " NULL" : " NOT NULL");

@@ -31,6 +31,11 @@ internal sealed class SqlServerDialect : RelationalDialect
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
 
+    public override string? MapGeneration(ColumnDefinition definition) =>
+        definition.Generation == ColumnGeneration.ProviderSequence
+            ? "IDENTITY(1,1)"
+            : null;
+
     public override string? MapCollation(ColumnDefinition definition) => definition.Type is PortableType.String or PortableType.Json
         ? definition.Collation switch
         {
@@ -346,7 +351,7 @@ internal sealed class SqlServerDialect : RelationalDialect
         command.CommandText = """
             SELECT c.name, t.name, c.max_length, c.precision, c.scale, c.is_nullable,
                    dc.definition, c.collation_name, ISNULL(ic.key_ordinal,0), c.is_computed,
-                   cc.is_persisted, cc.definition
+                   cc.is_persisted, cc.definition, c.is_identity
             FROM sys.columns c JOIN sys.tables tb ON tb.object_id=c.object_id
             JOIN sys.types t ON t.user_type_id=c.user_type_id
             LEFT JOIN sys.default_constraints dc ON dc.parent_object_id=c.object_id AND dc.parent_column_id=c.column_id
@@ -368,7 +373,8 @@ internal sealed class SqlServerDialect : RelationalDialect
             result[name] = new(name, StoreType(type, maxLength, precision, scale), reader.GetBoolean(5),
                 reader.IsDBNull(6) ? null : NormalizeDefault(reader.GetString(6)),
                 reader.IsDBNull(7) ? null : reader.GetString(7), Convert.ToInt32(reader.GetValue(8), CultureInfo.InvariantCulture), reader.GetBoolean(9),
-                !reader.IsDBNull(10) && reader.GetBoolean(10), reader.IsDBNull(11) ? null : reader.GetString(11));
+                !reader.IsDBNull(10) && reader.GetBoolean(10), reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.GetBoolean(12) ? ColumnGeneration.ProviderSequence : ColumnGeneration.Supplied);
         }
         return result;
     }
