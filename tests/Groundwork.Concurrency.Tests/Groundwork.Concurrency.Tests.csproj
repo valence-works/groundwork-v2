@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.skippablefact" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
+    <ProjectReference Include="../../src/Groundwork.MongoDb.TestingAdapter/Groundwork.MongoDb.TestingAdapter.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
+  </ItemGroup>
+
+</Project>
