@@ -113,6 +113,37 @@ public sealed class SqliteProviderTests
             .Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "one" })));
     }
 
+    [Fact]
+    public void Batched_upserts_accept_heterogeneous_column_shapes()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Model(includePriority: true);
+        connection.Schema.Apply(unit);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "full", ["value"] = "full", ["uniqueValue"] = "full", ["priority"] = 7
+        })));
+        work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "partial", ["value"] = "partial", ["uniqueValue"] = "partial"
+        })));
+
+        var summary = work.CommitWithOutcomes();
+
+        Assert.True(summary.IsSuccessful);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(7, session.Read(new StorageKey(new Dictionary<string, object?>
+        {
+            ["id"] = "full"
+        }))!.Values.Values["priority"]);
+        Assert.Equal(0, session.Read(new StorageKey(new Dictionary<string, object?>
+        {
+            ["id"] = "partial"
+        }))!.Values.Values["priority"]);
+    }
+
     private static StorageUnit Model(bool includePriority) => new()
     {
         Id = new StorageUnitId("rebuild"), Name = "rebuild",

@@ -219,6 +219,75 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Batched_coalescing_happens_before_mode_and_column_grouping()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://batched-mixed-shapes");
+        var unit = TestingFixture.GlobalUnit("batched-mixed-shapes");
+        connection.Schema.Apply(unit);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+
+        work.Stage(RowWrite.Insert(unit, TestingFixture.Values("same", "inserted", "unique")));
+        work.Stage(RowWrite.Update(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "same", ["value"] = "updated"
+        })));
+        work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "same", ["value"] = "final"
+        })));
+
+        var summary = work.CommitWithOutcomes();
+
+        Assert.Equal(3, summary.Submitted);
+        Assert.All(summary.Outcomes, outcome => Assert.True(outcome.Outcome.Succeeded));
+        Assert.Equal("final", connection.OpenSession(unit, StorageAccess.Global)
+            .Read(TestingFixture.Key("same"))!.Values.Values["value"]);
+    }
+
+    [Fact]
+    public void Batched_identity_is_collision_free_for_composite_delimiter_values()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://batched-composite-identity");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("batched-composite-identity"),
+            Name = "CompositeIdentity",
+            Columns =
+            [
+                new() { Name = "left", Type = PortableType.String, IsNullable = false },
+                new() { Name = "right", Type = PortableType.String, IsNullable = false },
+                new() { Name = "value", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["left", "right"] }
+        };
+        connection.Schema.Apply(unit);
+        var first = new StorageValues(new Dictionary<string, object?>
+        {
+            ["left"] = "a\u001e", ["right"] = "b", ["value"] = "first"
+        });
+        var second = new StorageValues(new Dictionary<string, object?>
+        {
+            ["left"] = "a", ["right"] = "\u001eb", ["value"] = "second"
+        });
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        work.Stage(RowWrite.Upsert(unit, first));
+        work.Stage(RowWrite.Upsert(unit, second));
+
+        var summary = work.CommitWithOutcomes();
+
+        Assert.Equal(2, summary.Submitted);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal("first", session.Read(new StorageKey(new Dictionary<string, object?>
+        {
+            ["left"] = "a\u001e", ["right"] = "b"
+        }))!.Values.Values["value"]);
+        Assert.Equal("second", session.Read(new StorageKey(new Dictionary<string, object?>
+        {
+            ["left"] = "a", ["right"] = "\u001eb"
+        }))!.Values.Values["value"]);
+    }
+
+    [Fact]
     public async Task Batched_unit_of_work_honors_flush_cap_and_async_commit()
     {
         var factory = new InMemoryProviderFactory();
@@ -237,6 +306,27 @@ public sealed class InMemoryProviderTests
         var summary = await work.CommitWithOutcomesAsync();
         Assert.Equal(3, summary.Submitted);
         Assert.True(summary.IsSuccessful);
+    }
+
+    [Fact]
+    public void Failed_cap_flush_poisoning_prevents_later_commit_or_staging()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://batched-poisoned");
+        var unit = TestingFixture.GlobalUnit("batched-poisoned");
+        connection.Schema.Apply(unit);
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            new BatchWriteOptions { MaxRowsPerFlush = 2 },
+            unit);
+
+        work.Stage(RowWrite.Insert(unit, TestingFixture.Values("one", "one", "duplicate")));
+        Assert.Throws<BatchWriteException>(() => work.Stage(
+            RowWrite.Insert(unit, TestingFixture.Values("two", "two", "duplicate"))));
+
+        Assert.Throws<InvalidOperationException>(() => work.Stage(
+            RowWrite.Insert(unit, TestingFixture.Values("three", "three", "three"))));
+        Assert.Throws<InvalidOperationException>(() => work.Commit());
+        Assert.Null(connection.OpenSession(unit, StorageAccess.Global).Read(TestingFixture.Key("one")));
     }
 
     [Fact]

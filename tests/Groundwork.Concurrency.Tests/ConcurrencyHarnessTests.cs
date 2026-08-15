@@ -2,6 +2,7 @@ using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
+using Groundwork.SqlServer;
 using Groundwork.Testing;
 using MongoDB.Driver;
 using Npgsql;
@@ -81,6 +82,50 @@ public sealed class ConcurrencyHarnessTests
             });
 
         Assert.True(report.Passed, Describe(report));
+    }
+
+    [Fact]
+    public void In_memory_batched_upsert_preserves_atomic_concurrency_and_created_at()
+    {
+        AssertBatchedProvider(new InMemoryProviderFactory(), "memory://w3-batched-memory", "memory");
+    }
+
+    [Fact]
+    public void Sqlite_batched_upsert_preserves_atomic_concurrency_and_created_at()
+    {
+        using var store = TemporarySqliteStore.Create();
+        AssertBatchedProvider(new SqliteProviderFactory(), store.ConnectionString, "sqlite");
+    }
+
+    [SkippableFact]
+    public void PostgreSql_batched_upsert_preserves_atomic_concurrency_and_created_at()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_POSTGRES_CONNECTION to run the live PostgreSQL batched W3 proof.");
+        AssertBatchedProvider(new PostgreSqlProviderFactory(), connectionString!, "postgresql");
+    }
+
+    [SkippableFact]
+    public void SqlServer_batched_upsert_preserves_atomic_concurrency_and_created_at()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_SQLSERVER_CONNECTION to run the live SQL Server batched W3 proof.");
+        AssertBatchedProvider(new SqlServerProviderFactory(), connectionString!, "sqlserver");
+    }
+
+    [SkippableFact]
+    public void Mongo_batched_upsert_preserves_atomic_concurrency_and_created_at()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run the live MongoDB batched W3 proof.");
+        var isolatedConnection = new MongoUrlBuilder(connectionString!)
+        {
+            DatabaseName = "w3_batched_" + Guid.NewGuid().ToString("N")
+        }.ToMongoUrl().ToString();
+        AssertBatchedProvider(new MongoDbTestingFactory(), isolatedConnection, "mongodb");
     }
 
     [SkippableTheory]
@@ -203,6 +248,64 @@ public sealed class ConcurrencyHarnessTests
         string.Join(Environment.NewLine, report.Scenarios.SelectMany(scenario =>
             scenario.Invariants.Select(invariant =>
                 $"seed={scenario.Seed} {invariant.Name}: {invariant.Passed} ({invariant.Detail})")));
+
+    private static void AssertBatchedProvider(
+        IStorageProviderFactory factory,
+        string connectionString,
+        string providerName)
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("w3-batched-" + providerName + "-" + Guid.NewGuid().ToString("N")),
+            Name = "w3_batched_" + providerName + "_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
+                new() { Name = "value", Type = PortableType.String, MaxLength = 256 },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic
+        };
+        using var connection = factory.Create(connectionString);
+        connection.Schema.Apply(unit);
+        var firstCreatedAt = DateTimeOffset.UnixEpoch.AddDays(1);
+        var secondCreatedAt = DateTimeOffset.UnixEpoch.AddDays(2);
+        var thirdCreatedAt = DateTimeOffset.UnixEpoch.AddDays(3);
+
+        using (var first = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        {
+            first.Stage(RowWrite.Upsert(unit, Values("same", "first", firstCreatedAt)));
+            Assert.True(first.Commit().IsSuccessful);
+        }
+
+        using (var second = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        {
+            second.Stage(RowWrite.Upsert(unit, Values("same", "second", secondCreatedAt), WriteOptions.ForVersion(1)));
+            var summary = second.Commit();
+            Assert.True(summary.IsSuccessful);
+        }
+
+        var read = connection.OpenSession(unit, StorageAccess.Global)
+            .Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "same" }));
+        Assert.NotNull(read);
+        Assert.Equal("second", read!.Values.Values["value"]);
+        Assert.Equal(firstCreatedAt, read.Values.Values["createdAt"]);
+        Assert.Equal(2, read.Version);
+
+        using var stale = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        stale.Stage(RowWrite.Upsert(unit, Values("same", "stale", thirdCreatedAt), WriteOptions.ForVersion(1)));
+        var error = Assert.Throws<BatchWriteException>(() => stale.CommitWithOutcomes());
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, error.Outcomes.Single().Outcome.Status);
+        Assert.Equal("second", connection.OpenSession(unit, StorageAccess.Global)
+            .Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "same" }))!.Values.Values["value"]);
+    }
+
+    private static StorageValues Values(string id, string value, DateTimeOffset createdAt) =>
+        new(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = id, ["value"] = value, ["createdAt"] = createdAt
+        });
 }
 
 internal sealed class BrokenConcurrencyFactory : IConcurrencyProviderFactory

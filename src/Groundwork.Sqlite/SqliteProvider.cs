@@ -49,7 +49,10 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.All;
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "SQLite", nativeBatch: true,
+        exactOutcomeCost: "one RETURNING result per native batch",
+        batchCost: "uses one multi-row INSERT/UPSERT command per grouped shape");
 
     internal object Gate => gate;
 

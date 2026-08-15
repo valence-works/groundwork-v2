@@ -140,7 +140,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         foreach (var write in writes)
         {
             ValidateValues(write.Values!.Values, requireAllNonNullable: true);
-            if (write.Values!.Values.Keys.Except(supplied.Select(column => column.Name), StringComparer.Ordinal).Any())
+            var writeColumns = UserColumns
+                .Where(column => write.Values!.Values.ContainsKey(column.Name))
+                .Select(column => column.Name)
+                .ToArray();
+            if (!writeColumns.SequenceEqual(supplied.Select(column => column.Name), StringComparer.Ordinal))
                 return ApplyBatchFallback(writes);
         }
 
@@ -172,7 +176,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-insert", "SQLite multi-row INSERT", IsProbe: false));
         try
         {
-            var inserted = ReadReturnedKeys(command);
+            var inserted = ReadReturnedKeys(command, writes[0].Unit);
             var version = VersionColumnDefinition is null ? (long?)null : 1;
             return writes.Select(write => new RowWriteOutcome(write,
                 inserted.Contains(write.Identity)
@@ -221,7 +225,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
 
         var updateColumns = supplied
             .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
-                             column.Name != SqliteSchemaCoordinator.ScopeColumn)
+                             column.Name != SqliteSchemaCoordinator.ScopeColumn &&
+                             column.Name != "createdAt")
             .Select(column => $"{Quote(column.Name)}=excluded.{Quote(column.Name)}")
             .ToList();
         if (VersionColumnDefinition is not null)
@@ -235,7 +240,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-upsert", "SQLite multi-row INSERT ON CONFLICT", IsProbe: false));
         try
         {
-            var returned = ReadReturnedKeys(command);
+            var returned = ReadReturnedKeys(command, writes[0].Unit);
             return writes.Select(write => new RowWriteOutcome(write,
                 returned.Contains(write.Identity)
                     ? new WriteOutcome(WriteOutcomeStatus.Upserted)
@@ -248,7 +253,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         }
     }
 
-    private HashSet<string> ReadReturnedKeys(SqliteCommand command)
+    private HashSet<string> ReadReturnedKeys(SqliteCommand command, StorageUnit logicalUnit)
     {
         var identities = new HashSet<string>(StringComparer.Ordinal);
         using var reader = command.ExecuteReader();
@@ -261,27 +266,19 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
                 if (column != SqliteSchemaCoordinator.ScopeColumn)
                     values[column] = FromSqlite(reader.GetValue(index), Column(column));
             }
-            identities.Add(BatchIdentity(values));
+            identities.Add(RowWrite.IdentityFor(logicalUnit, values));
         }
         return identities;
     }
-
-    private string BatchIdentity(IReadOnlyDictionary<string, object?> values) => string.Join("\u001e",
-        LogicalKeyColumns.Select(column => values[column] switch
-        {
-            null => "<null>",
-            byte[] bytes => Convert.ToBase64String(bytes),
-            DateTimeOffset timestamp => timestamp.UtcTicks.ToString(CultureInfo.InvariantCulture),
-            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "",
-            _ => values[column]?.ToString() ?? ""
-        }));
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
         writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
@@ -504,7 +501,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var updateColumns = columns.Where(column =>
             !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
             column.Name != SqliteSchemaCoordinator.ScopeColumn &&
-            (!exactOutcome || column.Name != "createdAt")).ToArray();
+            column.Name != "createdAt").ToArray();
         if (VersionColumnDefinition is not null && updateColumns.All(column => column.Name != VersionColumnDefinition.Name))
             updateColumns = updateColumns.Append(VersionColumnDefinition).ToArray();
         var keyNames = Unit.Key.Columns;

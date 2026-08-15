@@ -57,17 +57,16 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public void Commit()
-    {
-        _ = CommitWithOutcomes();
-    }
+    public BatchWriteSummary Commit() => CompleteCommit(exactOutcomes: false);
 
-    public BatchWriteSummary CommitWithOutcomes()
+    public BatchWriteSummary CommitWithOutcomes() => CompleteCommit(exactOutcomes: true);
+
+    private BatchWriteSummary CompleteCommit(bool exactOutcomes)
     {
         ThrowIfTerminal();
         try
         {
-            batch.FlushAll();
+            batch.FlushAll(exactOutcomes);
             transaction.Commit();
             return new BatchWriteSummary(batch.DrainCompleted());
         }
@@ -90,8 +89,11 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
         return ValueTask.FromResult(CommitWithOutcomes());
     }
 
-    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
-        CommitWithOutcomesAsync(cancellationToken);
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(Commit());
+    }
 
     public void Rollback()
     {

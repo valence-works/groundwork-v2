@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Testing;
@@ -10,6 +11,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
 {
     internal const string ScopeColumn = "__groundwork_scope";
     internal const string VersionColumn = "__groundwork_version";
+    internal const string BatchTypeKind = "table-valued-parameter";
     private readonly RelationalSchemaExecutor executor;
     private readonly SqlServerDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
@@ -46,7 +48,28 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
-        new(new SchemaSubject(physical), new ProviderIdentity("SQLServer", "1.0"));
+        new(
+            new SchemaSubject(physical),
+            new ProviderIdentity("SQLServer", "1.0"),
+            [new ProviderPhysicalSchemaDefinition(
+                "SQLServer",
+                physical.Id,
+                BatchTypeKind,
+                BatchTypeName(physical),
+                BatchTypeCanonicalDefinition(physical))]);
+
+    internal static string BatchTypeName(StorageUnit physical) =>
+        SqlServerPhysicalName.Normalize("__groundwork_batch_type_" + physical.Id.Value);
+
+    private static string BatchTypeCanonicalDefinition(StorageUnit physical) =>
+        JsonSerializer.Serialize(physical.Columns.Select(column => new
+        {
+            column.Name,
+            Type = (int)column.Type,
+            column.MaxLength,
+            column.Precision,
+            column.Scale
+        }));
 
     internal static void ValidateAccess(StorageUnit unit, StorageAccess access)
     {

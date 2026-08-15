@@ -105,6 +105,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             return [];
         if (writes.Any(write => write.Options.ExpectedVersion is not null))
             return ApplyBatchFallback(writes);
+        if (HasSecondaryUniqueIndex(writes[0].Unit))
+            return ApplyBatchFallback(writes);
         if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
             return ApplyBatchFallback(writes);
 
@@ -116,14 +118,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 return ApplyBatchFallback(writes);
         }
 
-        // SQL Server's parameter limit is 2,100. The VALUES source is deliberately
-        // chunked below that limit; a future schema executor can replace this with
-        // a declared table-valued parameter without changing this public contract.
-        var rowsPerCommand = Math.Max(1, 2_000 / columns.Count);
-        var outcomes = new List<RowWriteOutcome>(writes.Count);
-        foreach (var chunk in writes.Chunk(rowsPerCommand))
-            outcomes.AddRange(ApplyMergeBatch(chunk, columns));
-        return outcomes;
+        return ApplyMergeBatch(writes, columns);
     }
 
     private IReadOnlyList<ColumnDefinition> PhysicalBatchColumns(RowWrite write)
@@ -140,6 +135,87 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         IReadOnlyList<RowWrite> writes,
         IReadOnlyList<ColumnDefinition> columns)
     {
+        try
+        {
+            return ApplyMergeBatchTableValued(writes, columns);
+        }
+        catch (SqlException exception) when (exception.Message.Contains("table type", StringComparison.OrdinalIgnoreCase) ||
+                                              exception.Message.Contains("type name", StringComparison.OrdinalIgnoreCase))
+        {
+            // Existing installations can be upgraded before the provider definition is
+            // materialized. Preserve a VALUES fallback while the durable TVP catches up.
+            return ApplyMergeBatchValues(writes, columns);
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatchTableValued(
+        IReadOnlyList<RowWrite> writes,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        using var command = Command(string.Empty);
+        var table = new DataTable();
+        foreach (var column in Unit.Columns)
+            table.Columns.Add(column.Name, ClrType(column.Type));
+        foreach (var write in writes)
+        {
+            var row = table.NewRow();
+            foreach (var column in Unit.Columns)
+            {
+                row[column.Name] = column.Name == SqlServerSchemaCoordinator.VersionColumn
+                    ? 1L
+                    : column.Name == SqlServerSchemaCoordinator.ScopeColumn
+                        ? Access.Scope?.Value ?? (object)DBNull.Value
+                        : write.Values!.Values.TryGetValue(column.Name, out var value)
+                            ? SqlServerProviderConnection.ToSqlServerValue(value, column) ?? DBNull.Value
+                            : DBNull.Value;
+            }
+            table.Rows.Add(row);
+        }
+        var parameter = command.Parameters.Add("@rows", SqlDbType.Structured);
+        parameter.TypeName = $"dbo.{SqlServerSchemaCoordinator.BatchTypeName(writes[0].Unit)}";
+        parameter.Value = table;
+
+        var match = string.Join(" AND ", Unit.Key.Columns.Select(column =>
+            $"target.{Quote(column)}=source.{Quote(column)}"));
+        var sql = $"MERGE {Quote(Unit.Name)} WITH (HOLDLOCK) AS target USING @rows AS source ON {match} ";
+        if (writes[0].Mode == RowWriteMode.Upsert)
+        {
+            var updates = columns
+                .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                                 column.Name != SqlServerSchemaCoordinator.ScopeColumn &&
+                                 column.Name != "createdAt" &&
+                                 column.Name != SqlServerSchemaCoordinator.VersionColumn)
+                .Select(column => $"target.{Quote(column.Name)}=source.{Quote(column.Name)}")
+                .ToList();
+            if (VersionColumnDefinition is not null)
+                updates.Add($"target.{Quote(VersionColumnDefinition.Name)}=target.{Quote(VersionColumnDefinition.Name)}+1");
+            if (updates.Count == 0)
+                updates.Add($"target.{Quote(Unit.Key.Columns[0])}=target.{Quote(Unit.Key.Columns[0])}");
+            sql += $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", updates)} ";
+        }
+        sql += $"WHEN NOT MATCHED BY TARGET THEN INSERT ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))}) OUTPUT $action, {string.Join(", ", Unit.Key.Columns.Select(column => $"inserted.{Quote(column)}"))}{(VersionColumnDefinition is null ? string.Empty : $", inserted.{Quote(VersionColumnDefinition.Name)}")};";
+        command.CommandText = sql;
+        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlserver.batch-merge-tvp", "SQL Server MERGE table-valued parameter", IsProbe: false));
+        try
+        {
+            var returned = ReadMergeOutcomes(command, writes[0].Unit);
+            return MapMergeOutcomes(writes, returned);
+        }
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out var indexName))
+        {
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName)))).ToArray();
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatchValues(
+        IReadOnlyList<RowWrite> writes,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        var maxRows = Math.Max(1, 2_000 / columns.Count);
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(chunk => ApplyMergeBatchValues(chunk, columns)).ToArray();
+
         using var command = Command(string.Empty);
         var rows = new List<string>(writes.Count);
         for (var row = 0; row < writes.Count; row++)
@@ -168,7 +244,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         {
             var updates = columns
                 .Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
-                                 column.Name != SqlServerSchemaCoordinator.ScopeColumn)
+                                 column.Name != SqlServerSchemaCoordinator.ScopeColumn &&
+                                 column.Name != "createdAt" &&
+                                 column.Name != SqlServerSchemaCoordinator.VersionColumn)
                 .Select(column => $"target.{Quote(column.Name)}=source.{Quote(column.Name)}")
                 .ToList();
             if (VersionColumnDefinition is not null)
@@ -182,7 +260,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         writes[0].Options.Observer?.Observe(new WritePathEvent("sqlserver.batch-merge", "SQL Server MERGE batch", IsProbe: false));
         try
         {
-            var returned = ReadMergeOutcomes(command);
+            var returned = ReadMergeOutcomes(command, writes[0].Unit);
             return writes.Select(write =>
             {
                 if (!returned.TryGetValue(write.Identity, out var result))
@@ -200,7 +278,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         }
     }
 
-    private Dictionary<string, (string Action, long? Version)> ReadMergeOutcomes(SqlCommand command)
+    private Dictionary<string, (string Action, long? Version)> ReadMergeOutcomes(
+        SqlCommand command,
+        StorageUnit logicalUnit)
     {
         var returned = new Dictionary<string, (string, long?)>(StringComparer.Ordinal);
         using var reader = command.ExecuteReader();
@@ -217,30 +297,53 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             var version = VersionColumnDefinition is null || reader.IsDBNull(versionOrdinal)
                 ? (long?)null
                 : Convert.ToInt64(reader.GetValue(versionOrdinal), CultureInfo.InvariantCulture);
-            returned[BatchIdentity(values)] = (reader.GetString(0), version);
+            returned[RowWrite.IdentityFor(logicalUnit, values)] = (reader.GetString(0), version);
         }
         return returned;
     }
 
-    private string BatchIdentity(IReadOnlyDictionary<string, object?> values) => string.Join("\u001e",
-        LogicalKeyColumns.Select(column => values[column] switch
+    private IReadOnlyList<RowWriteOutcome> MapMergeOutcomes(
+        IReadOnlyList<RowWrite> writes,
+        IReadOnlyDictionary<string, (string Action, long? Version)> returned) =>
+        writes.Select(write =>
         {
-            null => "<null>",
-            byte[] bytes => Convert.ToBase64String(bytes),
-            DateTimeOffset timestamp => timestamp.UtcTicks.ToString(CultureInfo.InvariantCulture),
-            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "",
-            _ => values[column]?.ToString() ?? ""
-        }));
+            if (!returned.TryGetValue(write.Identity, out var result))
+                return new RowWriteOutcome(write, new WriteOutcome(WriteOutcomeStatus.UniqueViolation));
+            var status = string.Equals(result.Action, "INSERT", StringComparison.Ordinal)
+                ? WriteOutcomeStatus.Inserted
+                : WriteOutcomeStatus.Updated;
+            return new RowWriteOutcome(write, new WriteOutcome(status, result.Version));
+        }).ToArray();
+
+    private static Type ClrType(PortableType type) => type switch
+    {
+        PortableType.String or PortableType.Json => typeof(string),
+        PortableType.Int32 => typeof(int),
+        PortableType.Int64 => typeof(long),
+        PortableType.Decimal => typeof(decimal),
+        PortableType.Boolean => typeof(bool),
+        PortableType.DateTimeOffset => typeof(DateTimeOffset),
+        PortableType.Guid => typeof(Guid),
+        PortableType.Binary => typeof(byte[]),
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
         writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
+
+    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
+        logicalUnit.Indexes.Any(index => index.IsUnique &&
+            !index.Columns.Select(column => column.Column)
+                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
     private ColumnRef? QueryColumn(string name)
     {
         var column = Unit.Columns.Single(item => item.Name == name);

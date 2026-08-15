@@ -33,7 +33,10 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.All;
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "SQL Server", nativeBatch: true,
+        exactOutcomeCost: "one OUTPUT result per MERGE batch",
+        batchCost: "uses parameter-limited MERGE VALUES batches; TVP is not yet available");
 
     internal object Gate => gate;
 

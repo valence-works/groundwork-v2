@@ -34,7 +34,10 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.All;
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "PostgreSQL", nativeBatch: true,
+        exactOutcomeCost: "one RETURNING result per native batch",
+        batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit");
 
     internal string ConnectionString => connectionString;
 

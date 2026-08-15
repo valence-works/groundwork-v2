@@ -53,7 +53,10 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.All;
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "the in-memory provider", nativeBatch: false,
+        exactOutcomeCost: "one provider operation per coalesced row",
+        batchCost: "uses provider-neutral per-row operations inside the transaction");
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
     {
@@ -699,12 +702,12 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         Mutate(values, options, MutationKind.Update);
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Upsert);
+        Mutate(values, options, MutationKind.Upsert, preserveCreatedAt: true);
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
         options?.Observer?.Observe(new WritePathEvent("in-memory.conditional-upsert", null, IsProbe: false));
-        return Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+        return Mutate(values, options, MutationKind.Upsert, exactOutcome: true, preserveCreatedAt: true);
     }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
@@ -723,13 +726,14 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         StorageValues values,
         WriteOptions? options,
         MutationKind kind,
-        bool exactOutcome = false)
+        bool exactOutcome = false,
+        bool preserveCreatedAt = false)
     {
         ArgumentNullException.ThrowIfNull(values);
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome);
+            return Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
         }
     }
 
@@ -798,15 +802,14 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public void Commit()
-    {
-        _ = CommitWithOutcomes();
-    }
+    public BatchWriteSummary Commit() => CompleteCommit(exactOutcomes: false);
 
-    public BatchWriteSummary CommitWithOutcomes()
+    public BatchWriteSummary CommitWithOutcomes() => CompleteCommit(exactOutcomes: true);
+
+    private BatchWriteSummary CompleteCommit(bool exactOutcomes)
     {
         ThrowIfTerminal();
-        batch.FlushAll();
+        batch.FlushAll(exactOutcomes);
         lock (database.Gate)
         {
             foreach (var pair in staged)
@@ -834,8 +837,11 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         return ValueTask.FromResult(CommitWithOutcomes());
     }
 
-    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
-        CommitWithOutcomesAsync(cancellationToken);
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(Commit());
+    }
 
     public void Rollback()
     {
@@ -887,7 +893,8 @@ internal static class Mutation
         StorageValues values,
         WriteOptions? options,
         MutationKind kind,
-        bool exactOutcome = false)
+        bool exactOutcome = false,
+        bool preserveCreatedAt = false)
     {
         ValidateValues(state.Unit, values.Values);
         var identity = Key(state.Unit, values.Values);
@@ -928,7 +935,7 @@ internal static class Mutation
             _ => WriteOutcomeStatus.Upserted
         };
         var storedValues = values.Values;
-        if (exactOutcome && existing is not null &&
+        if ((exactOutcome || preserveCreatedAt) && existing is not null &&
             existing.Values.TryGetValue("createdAt", out var existingCreatedAt))
         {
             var preserved = values.Values.ToDictionary(

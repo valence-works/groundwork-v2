@@ -11,6 +11,8 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId PerRowOutcomes { get; } = new("groundwork.storage.batched-outcomes");
 
+    public static CapabilityId NativeBatch { get; } = new("groundwork.storage.batched-native");
+
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
@@ -21,8 +23,31 @@ public static class BatchWriteCapabilities
         "Batched per-row outcomes",
         "Returns one outcome for each staged row through CommitWithOutcomesAsync; providers may use a native returning/output path or a documented fallback.");
 
+    public static CapabilityDescriptor NativeBatchDescriptor { get; } = new(
+        NativeBatch,
+        "Native batched writes",
+        "Executes grouped writes through the provider's native multi-row command or bulk-write primitive.");
+
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
         Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor });
+
+    public static IReadOnlyList<CapabilityDescriptor> ForProvider(
+        string provider,
+        bool nativeBatch,
+        string exactOutcomeCost,
+        string batchCost) =>
+        Array.AsReadOnly(
+        [
+            StagedUnitOfWorkDescriptor with
+            {
+                Description = $"Stages and coalesces writes for {provider}; {batchCost}."
+            },
+            PerRowOutcomesDescriptor with
+            {
+                Description = $"Returns one outcome per staged row for {provider}; exact evidence cost: {exactOutcomeCost}."
+            },
+            ..(nativeBatch ? [NativeBatchDescriptor] : Array.Empty<CapabilityDescriptor>())
+        ]);
 }
 
 /// <summary>The operation applied to one staged row.</summary>
@@ -31,6 +56,8 @@ public enum RowWriteMode
     Insert,
     Update,
     Upsert,
+    /// <summary>Executes the provider's atomic optimistic-concurrency upsert primitive.</summary>
+    ConditionalUpsert,
     Delete
 }
 
@@ -86,6 +113,9 @@ public sealed class RowWrite
     public static RowWrite Upsert(StorageUnit unit, StorageValues values, WriteOptions? options = null) =>
         new(unit, RowWriteMode.Upsert, values, null, options);
 
+    public static RowWrite ConditionalUpsert(StorageUnit unit, StorageValues values, WriteOptions? options = null) =>
+        new(unit, RowWriteMode.ConditionalUpsert, values, null, options);
+
     public static RowWrite Delete(StorageUnit unit, StorageKey key, WriteOptions? options = null) =>
         new(unit, RowWriteMode.Delete, null, key, options);
 
@@ -101,9 +131,16 @@ public sealed class RowWrite
         ? string.Join("\u001f", Unit.Key.Columns)
         : string.Join("\u001f", Values!.Values.Keys.OrderBy(value => value, StringComparer.Ordinal));
 
-    internal string Identity => string.Join(
-        "\u001e",
-        Unit.Key.Columns.Select(column => Canonical(KeyValues[column])));
+    internal string Identity => IdentityFor(Unit, KeyValues);
+
+    internal static string IdentityFor(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> keyValues) => string.Concat(
+        unit.Key.Columns.Select(column =>
+        {
+            var value = Canonical(keyValues[column]);
+            return $"{value.Length}:{value}";
+        }));
 
     internal bool Matches(StorageKey key)
     {
@@ -126,11 +163,12 @@ public sealed class RowWrite
 
     private static string Canonical(object? value) => value switch
     {
-        null => "<null>",
-        byte[] bytes => Convert.ToBase64String(bytes),
-        DateTimeOffset timestamp => timestamp.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        IFormattable formattable => formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture) ?? "",
-        _ => value.ToString() ?? ""
+        null => "n:",
+        string text => $"s:{text}",
+        byte[] bytes => $"b:{Convert.ToBase64String(bytes)}",
+        DateTimeOffset timestamp => $"d:{timestamp.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
+        IFormattable formattable => $"v:{value.GetType().FullName}:{formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture) ?? ""}",
+        _ => $"o:{value.GetType().FullName}:{value}"
     };
 }
 
@@ -186,6 +224,14 @@ public sealed class BatchWriteException : InvalidOperationException
 public interface IBatchedStorageSession
 {
     IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes);
+
+    /// <summary>
+    /// Applies a batch while allowing providers to select a more expensive exact-outcome
+    /// path for CommitWithOutcomes. Existing providers retain their ordinary path by default.
+    /// </summary>
+    IReadOnlyList<RowWriteOutcome> ApplyBatch(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes) => ApplyBatch(writes);
 }
 
 /// <summary>Shared staging, grouping, coalescing, and flush-on-read behavior.</summary>
@@ -194,7 +240,8 @@ internal sealed class BatchContext
     private readonly BatchWriteOptions options;
     private readonly List<RowWrite> staged = [];
     private readonly List<RowWriteOutcome> completed = [];
-    private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
+    private readonly Dictionary<StorageUnitId, IBatchedStorageSession> sessions = [];
+    private Exception? failure;
 
     internal BatchContext(BatchWriteOptions? options)
     {
@@ -204,29 +251,34 @@ internal sealed class BatchContext
 
     internal int Count => staged.Count;
 
-    internal void Register(BatchStorageSession session)
+    internal void Register(IStorageSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        sessions.TryAdd(session.Unit.Id, session);
+        if (session is not IBatchedStorageSession batched)
+            throw new ArgumentException("A batching session must implement IBatchedStorageSession.", nameof(session));
+        sessions.TryAdd(session.Unit.Id, batched);
     }
 
     internal void Stage(RowWrite write)
     {
+        EnsureHealthy();
         ArgumentNullException.ThrowIfNull(write);
         staged.Add(write);
     }
 
     internal IReadOnlyList<RowWriteOutcome> FlushFor(StorageUnit unit, StorageKey key)
     {
+        EnsureHealthy();
         var writes = staged.Where(write => write.Unit.Id == unit.Id && write.Matches(key)).ToArray();
         return writes.Length == 0 ? [] : Flush(writes);
     }
 
-    internal IReadOnlyList<RowWriteOutcome> FlushAll()
+    internal IReadOnlyList<RowWriteOutcome> FlushAll(bool exactOutcomes = false)
     {
+        EnsureHealthy();
         if (staged.Count == 0)
             return [];
-        return Flush(staged.ToArray());
+        return Flush(staged.ToArray(), exactOutcomes);
     }
 
     internal IReadOnlyList<RowWriteOutcome> DrainCompleted()
@@ -238,43 +290,71 @@ internal sealed class BatchContext
 
     internal bool ReachedCap => staged.Count >= options.MaxRowsPerFlush;
 
-    private IReadOnlyList<RowWriteOutcome> Flush(IReadOnlyList<RowWrite> writes)
+    private IReadOnlyList<RowWriteOutcome> Flush(IReadOnlyList<RowWrite> writes, bool exactOutcomes = false)
     {
-        var outcomes = new List<RowWriteOutcome>(writes.Count);
-        foreach (var group in writes.GroupBy(write =>
-                     (write.Unit.Id, write.Mode, write.ColumnSet)))
+        EnsureHealthy();
+        try
         {
-            if (!sessions.TryGetValue(group.Key.Id, out var session))
-                throw new InvalidOperationException(
-                    $"Storage unit '{group.Key.Id.Value}' has no open session in this unit of work.");
-
-            var groupWrites = group.ToArray();
-            var coalesced = groupWrites
-                .GroupBy(write => write.Identity, StringComparer.Ordinal)
-                .Select(group => group.Last())
+            // Coalescing is intentionally performed before provider grouping. A key's
+            // declaration-order final write wins even when earlier writes used another
+            // mode or column set; only the final writes are sent to the provider.
+            var coalesced = writes
+                .GroupBy(write => (write.Unit.Id, write.Identity))
+                .Select(group => new CoalescedWrite(group.ToArray()))
                 .ToArray();
-            var groupOutcomes = session.ApplyBatch(coalesced);
-            if (groupOutcomes.Count != coalesced.Length)
-                throw new InvalidOperationException(
-                    $"The provider returned {groupOutcomes.Count} outcomes for a batch of {coalesced.Length} writes.");
-            foreach (var outcome in groupOutcomes)
+            var outcomes = new Dictionary<RowWrite, WriteOutcome>(ReferenceEqualityComparer.Instance);
+            foreach (var group in coalesced.GroupBy(item =>
+                         (item.Final.Unit.Id, item.Final.Mode, item.Final.ColumnSet)))
             {
-                var original = groupWrites.Where(write => write.Identity == outcome.Write.Identity).ToArray();
-                outcomes.AddRange(original.Select(write => new RowWriteOutcome(write, outcome.Outcome)));
-            }
-        }
+                if (!sessions.TryGetValue(group.Key.Id, out var session))
+                    throw new InvalidOperationException(
+                        $"Storage unit '{group.Key.Id.Value}' has no open session in this unit of work.");
 
-        var flushed = writes.ToHashSet(ReferenceEqualityComparer.Instance);
-        staged.RemoveAll(write => flushed.Contains(write));
-        completed.AddRange(outcomes);
-        if (outcomes.Any(item => !item.Outcome.Succeeded))
-        {
-            var failures = outcomes.Where(item => !item.Outcome.Succeeded)
-                .Select(item => $"{item.Write.Unit.Id.Value}/{KeyDescription(item.Write)}: {item.Outcome.Status}");
-            throw new BatchWriteException(
-                $"A staged row write failed ({string.Join(", ", failures)}); the unit of work must be rolled back.", outcomes);
+                var finalWrites = group.Select(item => item.Final).ToArray();
+                var groupOutcomes = session.ApplyBatch(finalWrites, exactOutcomes);
+                if (groupOutcomes.Count != finalWrites.Length)
+                    throw new InvalidOperationException(
+                        $"The provider returned {groupOutcomes.Count} outcomes for a batch of {finalWrites.Length} writes.");
+                foreach (var outcome in groupOutcomes)
+                {
+                    var item = group.Single(candidate =>
+                        ReferenceEquals(candidate.Final, outcome.Write));
+                    foreach (var original in item.Originals)
+                        outcomes[original] = outcome.Outcome;
+                }
+            }
+
+            var ordered = writes.Select(write => new RowWriteOutcome(write, outcomes[write])).ToArray();
+            staged.RemoveAll(write => writes.Contains(write, ReferenceEqualityComparer.Instance));
+            completed.AddRange(ordered);
+            if (ordered.Any(item => !item.Outcome.Succeeded))
+            {
+                var failures = ordered.Where(item => !item.Outcome.Succeeded)
+                    .Select(item => $"{item.Write.Unit.Id.Value}/{KeyDescription(item.Write)}: {item.Outcome.Status}");
+                throw new BatchWriteException(
+                    $"A staged row write failed ({string.Join(", ", failures)}); the unit of work must be rolled back.", ordered);
+            }
+            return ordered;
         }
-        return outcomes;
+        catch (Exception exception)
+        {
+            failure = exception;
+            throw;
+        }
+    }
+
+    private void EnsureHealthy()
+    {
+        if (failure is not null)
+            throw new InvalidOperationException(
+                "The unit of work contains a failed batch and must be rolled back.", failure);
+    }
+
+    private sealed class CoalescedWrite(IReadOnlyList<RowWrite> originals)
+    {
+        internal IReadOnlyList<RowWrite> Originals { get; } = originals;
+
+        internal RowWrite Final => Originals[^1];
     }
 
     private static string KeyDescription(RowWrite write)
@@ -331,15 +411,24 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
             : throw new NotSupportedException("The provider session does not support conditional upsert.");
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+        => ApplyBatch(writes, exactOutcomes: false);
+
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
         if (inner is IBatchedStorageSession batched)
-            return batched.ApplyBatch(writes);
+            return batched.ApplyBatch(writes, exactOutcomes);
 
         return writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
             RowWriteMode.Insert => inner.Insert(write.Values!, write.Options),
             RowWriteMode.Update => inner.Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => inner is IConcurrencyStorageSession expectedConcurrency
+                ? expectedConcurrency.ConditionalUpsert(write.Values!, write.Options)
+                : throw new NotSupportedException("The provider session does not support conditional upsert."),
             RowWriteMode.Upsert => inner.Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => inner is IConcurrencyStorageSession concurrency
+                ? concurrency.ConditionalUpsert(write.Values!, write.Options)
+                : throw new NotSupportedException("The provider session does not support conditional upsert."),
             RowWriteMode.Delete => inner.Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();

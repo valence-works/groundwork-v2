@@ -332,7 +332,8 @@ public interface IUnitOfWork : IDisposable
     /// <summary>Stages a row write for the next provider batch.</summary>
     void Stage(RowWrite write);
 
-    void Commit();
+    /// <summary>Commits staged writes and returns aggregate success counts.</summary>
+    BatchWriteSummary Commit();
 
     /// <summary>Commits staged writes and returns one outcome for every staged write.</summary>
     BatchWriteSummary CommitWithOutcomes();

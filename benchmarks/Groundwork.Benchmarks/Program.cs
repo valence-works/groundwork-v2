@@ -131,7 +131,9 @@ static void RunCommitWorkload(
         }), new WriteOptions { Observer = observer }));
     }
 
-    var summary = work.CommitWithOutcomes();
+    // Measure the aggregate-cost path. CommitWithOutcomes is intentionally more
+    // expensive on providers such as MongoDB because it requests exact row evidence.
+    var summary = work.Commit();
     // The observer counts provider write commands. An explicit unit of work also
     // has one transaction-open and one commit exchange, so include those in the
     // proof's round-trip estimate.

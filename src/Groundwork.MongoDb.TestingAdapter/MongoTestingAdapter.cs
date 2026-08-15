@@ -18,7 +18,10 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
 
     public ISchemaCoordinator Schema { get; } = new MongoTestingSchema(inner.Schema);
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.All;
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "MongoDB", nativeBatch: true,
+        exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
+        batchCost: "uses unordered BulkWrite for aggregate commits");
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access) =>
         new MongoTestingSession(inner.OpenSession(unit, ToNative(access)));
@@ -101,15 +104,20 @@ internal sealed class MongoTestingSession(
         ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+        => ApplyBatch(writes, exactOutcomes: false);
+
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
         ArgumentNullException.ThrowIfNull(writes);
         if (inner is IBatchedStorageSession native)
-            return native.ApplyBatch(writes);
+            return native.ApplyBatch(writes, exactOutcomes);
         return writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
@@ -152,18 +160,14 @@ internal sealed class MongoTestingSession(
 internal sealed class MongoTestingUnitOfWork : IUnitOfWork
 {
     private readonly IMongoUnitOfWork inner;
-    private readonly BatchWriteOptions options;
-    private readonly Dictionary<StorageUnitId, MongoTestingSession> sessions = [];
-    private readonly List<RowWrite> staged = [];
-    private readonly List<RowWriteOutcome> completed = [];
+    private readonly BatchContext batch;
+    private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
     private bool terminal;
 
     internal MongoTestingUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options)
     {
         this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
-        this.options = options ?? throw new ArgumentNullException(nameof(options));
-        if (options.MaxRowsPerFlush <= 0)
-            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerFlush));
+        batch = new BatchContext(options ?? throw new ArgumentNullException(nameof(options)));
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -172,8 +176,9 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
         ThrowIfTerminal();
         if (sessions.TryGetValue(unit.Id, out var existing))
             return existing;
-        var session = new MongoTestingSession(inner.OpenSession(unit), key => FlushFor(unit, key));
+        var session = new BatchStorageSession(new MongoTestingSession(inner.OpenSession(unit)), batch);
         sessions.Add(unit.Id, session);
+        batch.Register(session);
         return session;
     }
 
@@ -183,22 +188,24 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
         ThrowIfTerminal();
         if (!sessions.ContainsKey(write.Unit.Id))
             _ = OpenSession(write.Unit);
-        staged.Add(write);
-        if (staged.Count >= options.MaxRowsPerFlush)
-            FlushAll();
+        batch.Stage(write);
+        if (batch.ReachedCap)
+            batch.FlushAll();
     }
 
-    public void Commit() => _ = CommitWithOutcomes();
+    public BatchWriteSummary Commit() => CompleteCommit(exactOutcomes: false);
 
-    public BatchWriteSummary CommitWithOutcomes()
+    public BatchWriteSummary CommitWithOutcomes() => CompleteCommit(exactOutcomes: true);
+
+    private BatchWriteSummary CompleteCommit(bool exactOutcomes)
     {
         ThrowIfTerminal();
         try
         {
-            FlushAll();
+            batch.FlushAll(exactOutcomes);
             inner.Commit();
             terminal = true;
-            return new BatchWriteSummary(completed.ToArray());
+            return new BatchWriteSummary(batch.DrainCompleted());
         }
         catch
         {
@@ -214,8 +221,11 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
         return ValueTask.FromResult(CommitWithOutcomes());
     }
 
-    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
-        CommitWithOutcomesAsync(cancellationToken);
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(Commit());
+    }
 
     public void Rollback()
     {
@@ -231,55 +241,10 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
         inner.Dispose();
     }
 
-    private void FlushFor(StorageUnit unit, StorageKey key)
-    {
-        var writes = staged.Where(write => write.Unit.Id == unit.Id && write.Matches(key)).ToArray();
-        if (writes.Length == 0)
-            return;
-        Flush(writes);
-    }
-
-    private void FlushAll()
-    {
-        if (staged.Count != 0)
-            Flush(staged.ToArray());
-    }
-
-    private void Flush(IReadOnlyList<RowWrite> writes)
-    {
-        foreach (var group in writes.GroupBy(write => (write.Unit.Id, write.Mode, write.ColumnSet)))
-        {
-            var session = sessions[group.Key.Id];
-            var groupWrites = group.ToArray()
-                .GroupBy(write => write.Identity, StringComparer.Ordinal)
-                .Select(group => group.Last())
-                .ToArray();
-            var groupOutcomes = session.ApplyBatch(groupWrites);
-            if (groupOutcomes.Count != groupWrites.Length)
-                throw new InvalidOperationException($"The provider returned {groupOutcomes.Count} outcomes for a batch of {groupWrites.Length} writes.");
-            foreach (var outcome in groupOutcomes)
-            {
-                foreach (var original in writes.Where(item => item.Identity == outcome.Write.Identity))
-                    completed.Add(new RowWriteOutcome(original, outcome.Outcome));
-                if (!outcome.Outcome.Succeeded)
-                    throw new BatchWriteException(
-                        $"A staged row write failed ({outcome.Write.Unit.Id.Value}/{DescribeKey(outcome.Write)}: {outcome.Outcome.Status}); the unit of work must be rolled back.",
-                        completed);
-            }
-        }
-        staged.RemoveAll(write => writes.Contains(write));
-    }
-
     private void ThrowIfTerminal()
     {
         if (terminal)
             throw new InvalidOperationException("The unit of work is already terminal.");
     }
 
-    private static string DescribeKey(RowWrite write)
-    {
-        var values = write.Key?.Values ?? write.Values!.Values;
-        return string.Join(",", write.Unit.Key.Columns.Select(column =>
-            $"{column}={values.GetValueOrDefault(column)}"));
-    }
 }

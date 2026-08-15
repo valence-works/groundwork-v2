@@ -117,6 +117,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             return [];
         if (writes.Any(write => write.Options.ExpectedVersion is not null))
             return ApplyBatchFallback(writes);
+        if (HasSecondaryUniqueIndex(writes[0].Unit))
+            return ApplyBatchFallback(writes);
         return writes[0].Mode switch
         {
             RowWriteMode.Insert => ApplyInsertBatch(writes),
@@ -134,13 +136,16 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
                 return ApplyBatchFallback(writes);
         }
+        var maxRows = Math.Max(1, Math.Min(1_000, 32_000 / columns.Length));
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(ApplyInsertBatch).ToArray();
         using var command = Command(string.Empty);
         var rows = AddBatchValues(command, writes, columns);
         command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT DO NOTHING RETURNING {string.Join(", ", Unit.Key.Columns.Select(Quote))};";
         writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-insert", "PostgreSQL multi-row INSERT", IsProbe: false));
         try
         {
-            var returned = ReadReturnedKeys(command);
+            var returned = ReadReturnedKeys(command, writes[0].Unit);
             var version = VersionColumn is null ? (long?)null : 1;
             return writes.Select(write => new RowWriteOutcome(write,
                 returned.Contains(write.Identity)
@@ -163,6 +168,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
                 return ApplyBatchFallback(writes);
         }
+        var maxRows = Math.Max(1, Math.Min(1_000, 32_000 / columns.Length));
+        if (writes.Count > maxRows)
+            return writes.Chunk(maxRows).SelectMany(ApplyUpsertBatch).ToArray();
         using var command = Command(string.Empty);
         var rows = AddBatchValues(command, writes, columns);
         var conflictPredicate = PartialKeyPredicate();
@@ -170,7 +178,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             (conflictPredicate is null ? string.Empty : $" WHERE {conflictPredicate}");
         var updates = columns
             .Where(column => !Unit.Key.Columns.Contains(column, StringComparer.Ordinal) &&
-                             column != PostgreSqlSchemaCoordinator.ScopeColumn)
+                             column != PostgreSqlSchemaCoordinator.ScopeColumn &&
+                             column != "createdAt" &&
+                             column != PostgreSqlSchemaCoordinator.VersionColumn)
             .Select(column => $"{Quote(column)}=EXCLUDED.{Quote(column)}")
             .ToList();
         if (VersionColumn is not null)
@@ -181,7 +191,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-upsert", "PostgreSQL multi-row INSERT ON CONFLICT", IsProbe: false));
         try
         {
-            var returned = ReadReturnedKeys(command);
+            var returned = ReadReturnedKeys(command, writes[0].Unit);
             return writes.Select(write => new RowWriteOutcome(write,
                 returned.Contains(write.Identity)
                     ? new WriteOutcome(WriteOutcomeStatus.Upserted)
@@ -212,7 +222,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         return rows;
     }
 
-    private HashSet<string> ReadReturnedKeys(NpgsqlCommand command)
+    private HashSet<string> ReadReturnedKeys(NpgsqlCommand command, StorageUnit logicalUnit)
     {
         var identities = new HashSet<string>(StringComparer.Ordinal);
         using var reader = command.ExecuteReader();
@@ -225,30 +235,28 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 if (column != PostgreSqlSchemaCoordinator.ScopeColumn)
                     values[column] = FromDatabase(reader.GetValue(index), Column(column));
             }
-            identities.Add(BatchIdentity(values));
+            identities.Add(RowWrite.IdentityFor(logicalUnit, values));
         }
         return identities;
     }
 
-    private string BatchIdentity(IReadOnlyDictionary<string, object?> values) => string.Join("\u001e",
-        Unit.Key.Columns.Where(column => column != PostgreSqlSchemaCoordinator.ScopeColumn).Select(column => values[column] switch
-        {
-            null => "<null>",
-            byte[] bytes => Convert.ToBase64String(bytes),
-            DateTimeOffset timestamp => timestamp.UtcTicks.ToString(CultureInfo.InvariantCulture),
-            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "",
-            _ => values[column]?.ToString() ?? ""
-        }));
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
         writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
+
+    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
+        logicalUnit.Indexes.Any(index => index.IsUnique &&
+            !index.Columns.Select(column => column.Column)
+                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
     private ColumnRef? QueryColumn(string name)
     {
         var column = Unit.Columns.Single(item => item.Name == name);
@@ -449,7 +457,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var updateColumns = columns.Where(column =>
             !Unit.Key.Columns.Contains(column, StringComparer.Ordinal) &&
             column != PostgreSqlSchemaCoordinator.ScopeColumn &&
-            (!exactOutcome || column != "createdAt") &&
+            column != "createdAt" &&
             column != PostgreSqlSchemaCoordinator.VersionColumn).ToArray();
         var conflictPredicate = PartialKeyPredicate();
         var conflict = $"({string.Join(", ", Unit.Key.Columns.Select(Quote))})" +

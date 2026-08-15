@@ -42,6 +42,40 @@ internal sealed class SqlServerDialect : RelationalDialect
         ? null
         : SqlLiteral(definition.Default.Value, definition.Type);
 
+    public override void ApplyProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        if (!string.Equals(definition.Kind, SqlServerSchemaCoordinator.BatchTypeKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported SQL Server provider definition '{definition.Kind}'.");
+
+        using var document = JsonDocument.Parse(definition.CanonicalDefinition);
+        var columns = document.RootElement.EnumerateArray().Select(element => new ColumnDefinition
+        {
+            Name = element.GetProperty("Name").GetString()!,
+            Type = (PortableType)element.GetProperty("Type").GetInt32(),
+            MaxLength = ReadNullableInt(element, "MaxLength"),
+            Precision = ReadNullableInt(element, "Precision"),
+            Scale = ReadNullableInt(element, "Scale")
+        }).ToArray();
+        if (columns.Length == 0)
+            throw new InvalidOperationException("A SQL Server batch table type must declare at least one column.");
+
+        var typeName = $"[dbo].{SqlServerProviderConnection.QuoteIdentifier(definition.SubjectIdentity)}";
+        var body = string.Join(", ", columns.Select(column =>
+            $"{SqlServerProviderConnection.QuoteIdentifier(column.Name)} {MapType(column)} NULL"));
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"IF TYPE_ID(N'dbo.{definition.SubjectIdentity.Replace("'", "''", StringComparison.Ordinal)}') IS NOT NULL DROP TYPE {typeName}; CREATE TYPE {typeName} AS TABLE ({body});";
+        command.ExecuteNonQuery();
+    }
+
+    private static int? ReadNullableInt(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var property) && property.ValueKind != JsonValueKind.Null
+            ? property.GetInt32()
+            : null;
+
     public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey)
     {
         var body = string.Join(", ", columns);
