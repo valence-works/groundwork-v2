@@ -32,6 +32,21 @@ public static class QueryCoverageChecker
         var suggested = SuggestIndex(request, constraints);
 
         var refusals = new List<Refusal>();
+        foreach (var order in request.Order)
+        {
+            if (order.NullOrder == NullOrder.ProviderDefault)
+                refusals.Add(new Refusal(
+                    "GW-COVER-016",
+                    "Provider-default null ordering is not portable; choose explicit nulls-first or nulls-last ordering."));
+            if (order.Column.Type is QueryType.Boolean or QueryType.Double or QueryType.Binary)
+                refusals.Add(new Refusal(
+                    "GW-COVER-016",
+                    "Ordering this type is not portable; order a declared portable projection or key instead."));
+        }
+        if (constraints.HasUnsupportedRange)
+            refusals.Add(new Refusal(
+                "GW-COVER-016",
+                "Range ordering for column '" + constraints.UnsupportedRangeColumn + "' is not portable; use equality/membership or a declared orderable projection instead."));
         if (constraints.HasCrossColumnDisjunction)
             refusals.Add(new Refusal("GW-COVER-016", "A cross-column Or is not index-covered; only a single-column Or folded to In is portable."));
         if (constraints.HasNonCoveringPredicate)
@@ -90,7 +105,7 @@ public static class QueryCoverageChecker
     private static Refusal? CheckIndex(QueryRequest request, ConstraintSet constraints, CoverageIndex index)
     {
         if (index.MissingValues == IndexMissingValueBehavior.Excluded &&
-            index.Columns.Any(column => !constraints.ProvesNonNull(column.Column)))
+            index.Columns.Any(column => column.IsNullable && !constraints.ProvesNonNull(column.Column)))
         {
             return new Refusal(
                 "GW-COVER-009",
@@ -293,12 +308,16 @@ public static class QueryCoverageChecker
             ImmutableArray<Constraint> constraints,
             ImmutableArray<string> referencedColumns,
             bool crossColumn,
-            bool nonCovering)
+            bool nonCovering,
+            bool unsupportedRange,
+            string? unsupportedRangeColumn)
         {
             Constraints = constraints;
             ReferencedColumns = referencedColumns;
             HasCrossColumnDisjunction = crossColumn;
             HasNonCoveringPredicate = nonCovering;
+            HasUnsupportedRange = unsupportedRange;
+            UnsupportedRangeColumn = unsupportedRangeColumn;
             RangeColumn = constraints.FirstOrDefault(item => item.Kind == ConstraintKind.Range)?.Column;
             RangeCount = constraints.Count(item => item.Kind == ConstraintKind.Range);
         }
@@ -307,6 +326,8 @@ public static class QueryCoverageChecker
         public ImmutableArray<string> ReferencedColumns { get; }
         public bool HasCrossColumnDisjunction { get; }
         public bool HasNonCoveringPredicate { get; }
+        public bool HasUnsupportedRange { get; }
+        public string? UnsupportedRangeColumn { get; }
         public string? RangeColumn { get; }
         public int RangeCount { get; }
         public bool HasBound => Constraints.Any(item => item.Kind is ConstraintKind.Equality or ConstraintKind.Range);
@@ -338,6 +359,8 @@ public static class QueryCoverageChecker
             var referencedColumns = CollectReferencedColumns(predicate).ToImmutableArray();
             var crossColumn = false;
             var nonCovering = false;
+            var unsupportedRange = false;
+            string? unsupportedRangeColumn = null;
             foreach (var term in Flatten(predicate))
             {
                 switch (term)
@@ -349,6 +372,11 @@ public static class QueryCoverageChecker
                         constraints.Add(Constraint.Equality(membership.Column.Name, membership.Values.Length == 1, membership.Values.All(value => value.Kind != QueryConstantKind.Null)));
                         break;
                     case Predicate.Range range:
+                        if (!IsPortableRangeType(range.Column.Type))
+                        {
+                            unsupportedRange = true;
+                            unsupportedRangeColumn ??= range.Column.Name;
+                        }
                         constraints.Add(Constraint.Range(range.Column.Name, provesNonNull: true));
                         break;
                     case Predicate.StartsWith startsWith:
@@ -388,8 +416,18 @@ public static class QueryCoverageChecker
                 .ToArray();
             if (duplicateRanges.Length > 1)
                 nonCovering = true;
-            return new ConstraintSet(constraints.ToImmutableArray(), referencedColumns, crossColumn, nonCovering);
+            return new ConstraintSet(
+                constraints.ToImmutableArray(),
+                referencedColumns,
+                crossColumn,
+                nonCovering,
+                unsupportedRange,
+                unsupportedRangeColumn);
         }
+
+        private static bool IsPortableRangeType(QueryType type) => type is
+            QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or
+            QueryType.DateTimeOffset or QueryType.Guid;
 
         private static IEnumerable<string> CollectReferencedColumns(Predicate predicate)
         {
@@ -425,6 +463,9 @@ public static class QueryCoverageChecker
                 case Predicate.Not not:
                     foreach (var column in CollectReferencedColumns(not.Inner))
                         yield return column;
+                    yield break;
+                case Predicate.ElementOf elementOf:
+                    yield return elementOf.Set.Name;
                     yield break;
             }
         }

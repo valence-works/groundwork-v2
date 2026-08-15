@@ -20,7 +20,10 @@ public enum IndexMissingValueBehavior
 /// <summary>A provider-neutral ordered index column used by the coverage checker.</summary>
 public sealed record CoverageIndexColumn
 {
-    public CoverageIndexColumn(string column, OrderDirection direction = OrderDirection.Ascending)
+    public CoverageIndexColumn(
+        string column,
+        OrderDirection direction = OrderDirection.Ascending,
+        bool isNullable = true)
     {
         if (string.IsNullOrWhiteSpace(column))
             throw new ArgumentException("An index column name cannot be blank.", nameof(column));
@@ -29,10 +32,14 @@ public sealed record CoverageIndexColumn
 
         Column = column;
         Direction = direction;
+        IsNullable = isNullable;
     }
 
     public string Column { get; }
     public OrderDirection Direction { get; }
+
+    /// <summary>Whether the declared key can omit rows because its value is null or missing.</summary>
+    public bool IsNullable { get; }
 }
 
 /// <summary>A provider-neutral index declaration accepted by query planning.</summary>
@@ -48,6 +55,8 @@ public sealed record CoverageIndex
 
         Name = name;
         Columns = (columns ?? throw new ArgumentNullException(nameof(columns))).ToImmutableArray();
+        if (Columns.Any(column => column is null))
+            throw new ArgumentException("Index columns cannot contain null references.", nameof(columns));
         if (Columns.Length == 0)
             throw new ArgumentException("An index must declare at least one column.", nameof(columns));
         if (Columns.Select(column => column.Column).Distinct(StringComparer.Ordinal).Count() != Columns.Length)

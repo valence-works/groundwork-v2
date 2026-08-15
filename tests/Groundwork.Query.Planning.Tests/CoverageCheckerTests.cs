@@ -30,6 +30,47 @@ public sealed class CoverageCheckerTests
         Assert.Empty(result.Refusals);
     }
 
+    [Theory]
+    [InlineData(OrderDirection.Ascending, OrderDirection.Ascending)]
+    [InlineData(OrderDirection.Descending, OrderDirection.Descending)]
+    [InlineData(OrderDirection.Ascending, OrderDirection.Descending)]
+    [InlineData(OrderDirection.Descending, OrderDirection.Ascending)]
+    public void Compound_order_accepts_uniform_same_or_opposite_directions(
+        OrderDirection indexDirection,
+        OrderDirection requestedDirection)
+    {
+        var result = Check(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [new OrderTerm(Created, requestedDirection, NullOrderFor(requestedDirection))],
+            Paging.Continuation("cursor"),
+            Index(
+                "ix_status_created",
+                new CoverageIndexColumn("status", indexDirection),
+                new CoverageIndexColumn("created_at", indexDirection)));
+
+        Assert.True(result.IsCovered, result.Refusal?.Message);
+    }
+
+    [Fact]
+    public void Compound_order_rejects_mixed_direction_suffixes()
+    {
+        var result = Check(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [
+                new OrderTerm(Created, OrderDirection.Ascending, NullOrder.First),
+                new OrderTerm(Id, OrderDirection.Descending, NullOrder.Last)
+            ],
+            Paging.Continuation("cursor"),
+            Index(
+                "ix_status_created_id",
+                new CoverageIndexColumn("status"),
+                new CoverageIndexColumn("created_at"),
+                new CoverageIndexColumn("id")));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+    }
+
     [Fact]
     public void A_nonleading_predicate_is_refused_instead_of_using_a_skip_scan()
     {
@@ -73,6 +114,41 @@ public sealed class CoverageCheckerTests
             Index("ix_status", "status"));
 
         Assert.True(result.IsCovered, result.Refusal?.Message);
+    }
+
+    [Fact]
+    public void Nonportable_ordering_and_range_types_are_refused_by_the_checker()
+    {
+        var boolean = new ColumnRef(Table, "is_open", QueryType.Boolean);
+        var binary = new ColumnRef(Table, "payload", QueryType.Binary);
+        var order = Check(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(boolean, OrderDirection.Ascending, NullOrder.First)],
+            Paging.OffsetLimit(0, 10),
+            Index("ix_is_open", "is_open"));
+        var range = Check(
+            new Predicate.Range(binary, Bound.Inclusive(QueryConstant.Of(binary, new byte[] { 1 })), null),
+            [],
+            Paging.None,
+            Index("ix_payload", "payload"));
+
+        Assert.False(order.IsCovered);
+        Assert.Equal("GW-COVER-016", order.Refusal!.Code);
+        Assert.False(range.IsCovered);
+        Assert.Equal("GW-COVER-016", range.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Provider_default_null_ordering_is_refused()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Created, OrderDirection.Ascending)],
+            Paging.OffsetLimit(0, 10),
+            Index("ix_created", "created_at"));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
     }
 
     [Fact]
@@ -219,6 +295,38 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
+    public void Sparse_indexes_do_not_reject_nonnullable_keys_without_a_predicate()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Id, OrderDirection.Ascending, NullOrder.First)],
+            Paging.OffsetLimit(0, 20),
+            new CoverageIndex(
+                "ix_id_sparse",
+                [new CoverageIndexColumn("id", OrderDirection.Ascending, isNullable: false)],
+                IndexMissingValueBehavior.Excluded));
+
+        Assert.True(result.IsCovered, result.Refusal?.Message);
+    }
+
+    [Fact]
+    public void Unsupported_element_predicates_name_the_element_set_in_the_suggestion()
+    {
+        var result = Check(
+            new Predicate.ElementOf(
+                new ElementSetRef("ticket_id", QueryType.String),
+                [QueryConstant.Of(Status, "open")],
+                SetQuantifier.Any),
+            [],
+            Paging.None,
+            Index("ix_status", "status"));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Contains("ticket_id", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Refusal_diagnostic_names_nearest_index_and_emits_covering_declaration()
     {
         var result = Check(
@@ -254,6 +362,7 @@ public sealed class CoverageCheckerTests
     public void Index_contract_rejects_duplicate_columns_and_unknown_enum_values()
     {
         Assert.Throws<ArgumentException>(() => Index("duplicate", "status", "status"));
+        Assert.Throws<ArgumentException>(() => new CoverageIndex("null-column", new CoverageIndexColumn[] { null! }));
         Assert.Throws<ArgumentOutOfRangeException>(() => new CoverageIndexColumn("status", (OrderDirection)999));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             new CoverageIndex("invalid", [new CoverageIndexColumn("status")], (IndexMissingValueBehavior)999));
@@ -309,4 +418,7 @@ public sealed class CoverageCheckerTests
                 CoverageIndexColumn typed => typed,
                 _ => throw new ArgumentException("Unsupported test index column.", nameof(columns))
             }));
+
+    private static NullOrder NullOrderFor(OrderDirection direction) =>
+        direction == OrderDirection.Ascending ? NullOrder.First : NullOrder.Last;
 }
