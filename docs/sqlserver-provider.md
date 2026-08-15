@@ -20,5 +20,6 @@ serializable write transactions for optimistic concurrency. The conformance test
 an existing server by setting `GROUNDWORK_SQLSERVER_CONNECTION`; otherwise its fixture starts the
 SQL Server 2022 CU21 container used by CI.
 
-Future search-key expansion factors are covered by internal boundary tests only. Search-key
-materialization and Unicode projection are deliberately deferred to the later projection issue.
+Folded prefix indexes target provider-owned ASCII search-key columns. SQL Server validates their
+physical key budget against the logical source width using the declared expansion factor: `5x`
+for ASCII ignore-case and `7x` for Unicode ordinal ignore-case.

@@ -84,11 +84,13 @@ public sealed class SqlServerKeyBudgetTests
     }
 
     [Theory]
-    [InlineData(0, 341)]
-    [InlineData(1, 243)]
+    [InlineData(0, 341, 1705, "*5")]
+    [InlineData(1, 243, 1701, "*7")]
     public void Future_search_key_factors_refuse_at_the_first_over_budget_length(
         int policyValue,
-        int sourceLength)
+        int sourceLength,
+        int expectedBytes,
+        string expectedFactor)
     {
         var policy = (SqlServerSearchKeyExpansionPolicy)policyValue;
         var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
@@ -97,7 +99,35 @@ public sealed class SqlServerKeyBudgetTests
                 new Dictionary<string, SqlServerSearchKeyExpansionPolicy> { ["name"] = policy }));
 
         Assert.Contains("name=", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("name=" + sourceLength + expectedFactor, exception.Message, StringComparison.Ordinal);
+        Assert.Contains(expectedBytes.ToString(), exception.Message, StringComparison.Ordinal);
         Assert.Contains("1700", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Folded_physical_index_budget_reports_logical_source_length_and_policy()
+    {
+        var logical = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlserver-folded-budget"),
+            Name = "SqlServerFoldedBudget",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 243, Collation = PortableCollation.UnicodeOrdinalIgnoreCase }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "by-name", Columns = [new IndexColumn("name")] }]
+        };
+
+        var physical = SqlServerSchemaCoordinator.Physicalize(logical);
+        var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
+            SqlServerIndexKeyBudgetValidator.Validate(physical));
+
+        Assert.Equal("by-name", exception.IndexName);
+        Assert.Equal(1_701, exception.RequiredBytes);
+        Assert.Contains("name=243*7", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("__groundwork_search_name=1701*1", exception.Message, StringComparison.Ordinal);
     }
 
     private static StorageUnit Unit(params object[] values)

@@ -5,3 +5,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Groundwork.PostgreSql")]
 [assembly: InternalsVisibleTo("Groundwork.SqlServer")]
 [assembly: InternalsVisibleTo("Groundwork.MongoDb.TestingAdapter")]
+[assembly: InternalsVisibleTo("Groundwork.MongoDb")]

@@ -206,8 +206,8 @@ public sealed class QueryModelContractTests
         Assert.Equal(Enumerable.Range(1, G2Q1Corpus.ExpectedShapeCount), shapes.Select(shape => shape.Number));
         var duplicateKeys = shapes.GroupBy(shape => shape.CanonicalInput, StringComparer.Ordinal).Where(group => group.Count() > 1).Select(group => group.Key + " [" + string.Join(",", group.Select(shape => shape.Number)) + "]");
         Assert.True(shapes.Count == shapes.Select(shape => shape.CanonicalInput).Distinct(StringComparer.Ordinal).Count(), string.Join("; ", duplicateKeys));
-        Assert.Equal(243, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
-        Assert.Equal(57, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
+        Assert.Equal(251, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
+        Assert.Equal(49, shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
         Assert.Equal(9, shapes.Count(shape => shape.PublicConstructionRejects));
 
         foreach (var shape in shapes)

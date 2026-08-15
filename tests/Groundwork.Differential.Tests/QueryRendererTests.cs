@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Groundwork.Kernel;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -135,6 +136,135 @@ public sealed class QueryRendererTests
 
         Assert.True(command.IndexHintApplied);
         Assert.Contains("INDEX([__groundwork_ix_customers_ix_customers_id])", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_provider_default_expectation_keeps_the_optimizer_in_control()
+    {
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration("ix_customers_id", ["id"], QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_customers_id")
+        {
+            PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["ix_customers_id"] = "__groundwork_ix_customers_ix_customers_id"
+            }
+        };
+
+        var command = new MongoQueryRenderer().Render(
+            Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 7L)), [], Paging.None, ResultShape.Rows.Instance), options);
+
+        Assert.Null(command.Hint);
+        Assert.Equal("ix_customers_id", command.ExpectedIndex);
+    }
+
+    [Fact]
+    public void SqlServer_search_key_ranges_bind_as_the_physical_ansi_type()
+    {
+        var folded = new ColumnRef(
+            Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new(
+                    "name",
+                    SearchKeyProjection.ColumnName("name"),
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    700)
+            }
+        };
+
+        var command = new SqlServerQueryRenderer().Render(
+            Request(new Predicate.StartsWith(folded, "I"), [], Paging.None, ResultShape.Rows.Instance),
+            options);
+
+        Assert.Contains("CAST(@p0 AS varchar(700))", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("CAST(@p1 AS varchar(700))", command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("DATALENGTH([__groundwork_search_name]", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_folded_search_key_ranges_remain_native_index_bounds()
+    {
+        var folded = new ColumnRef(
+            Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var hidden = SearchKeyProjection.ColumnName("name");
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new(
+                    "name",
+                    hidden,
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    700)
+            }
+        };
+
+        var command = new MongoQueryRenderer().Render(
+            Request(new Predicate.StartsWith(folded, "I"), [], Paging.None, ResultShape.Rows.Instance),
+            options);
+
+        var bounds = Assert.IsType<BsonDocument>(command.Filter[hidden]);
+        Assert.Equal("|000049", bounds["$gte"].AsString);
+        Assert.Equal("|00004A", bounds["$lt"].AsString);
+        Assert.DoesNotContain("$expr", command.Filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("$function", command.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void All_four_renderers_refuse_a_forged_prefix_comparison_policy()
+    {
+        var forged = new ColumnRef(Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.Ordinal);
+        var request = Request(new Predicate.StartsWith(forged, "I"), [], Paging.None, ResultShape.Rows.Instance);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new("name", SearchKeyProjection.ColumnName("name"), QuerySearchKeyPolicy.AsciiIgnoreCase, 500)
+            }
+        };
+
+        foreach (var renderer in new object[]
+        {
+            new SqliteQueryRenderer(),
+            new PostgreSqlQueryRenderer(),
+            new SqlServerQueryRenderer(),
+            new MongoQueryRenderer()
+        })
+        {
+            var failure = Assert.Throws<QueryRenderException>(() => Render(renderer, request, options));
+            Assert.Equal("GW-QUERY-031", failure.Code);
+            Assert.Contains("matching comparison policy", failure.Message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void All_four_renderers_lower_ordinal_prefix_to_an_exact_base_column_range()
+    {
+        var request = Request(new Predicate.StartsWith(Name, "ab"), [], Paging.None, ResultShape.Rows.Instance);
+        var relational = new[]
+        {
+            new SqliteQueryRenderer().Render(request),
+            new PostgreSqlQueryRenderer().Render(request),
+            new SqlServerQueryRenderer().Render(request)
+        };
+
+        foreach (var command in relational)
+        {
+            Assert.Contains(command.Parameters, parameter => Equals(parameter.Value, "ab"));
+            Assert.Contains(command.Parameters, parameter => Equals(parameter.Value, "ac"));
+            Assert.DoesNotContain("LIKE", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var mongo = new MongoQueryRenderer().Render(request);
+        Assert.Contains("$gte", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$lt", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("$regex", mongo.Filter.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -445,6 +575,15 @@ public sealed class QueryRendererTests
         PostgreSqlQueryRenderer postgres => postgres.Render(request),
         SqlServerQueryRenderer sqlServer => sqlServer.Render(request),
         MongoQueryRenderer mongo => mongo.Render(request),
+        _ => throw new ArgumentOutOfRangeException(nameof(renderer))
+    };
+
+    private static object Render(object renderer, QueryRequest request, QueryRenderOptions options) => renderer switch
+    {
+        SqliteQueryRenderer sqlite => sqlite.Render(request, options),
+        PostgreSqlQueryRenderer postgres => postgres.Render(request, options),
+        SqlServerQueryRenderer sqlServer => sqlServer.Render(request, options),
+        MongoQueryRenderer mongo => mongo.Render(request, options),
         _ => throw new ArgumentOutOfRangeException(nameof(renderer))
     };
 

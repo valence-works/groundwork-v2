@@ -12,5 +12,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
   </ItemGroup>
 </Project>

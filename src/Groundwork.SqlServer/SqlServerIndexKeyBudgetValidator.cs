@@ -3,7 +3,7 @@ using Groundwork.Kernel;
 
 namespace Groundwork.SqlServer;
 
-/// <summary>Future search-key expansion factors reserved for the #256 projection contract.</summary>
+/// <summary>Search-key expansion policies used by the folded-column projection.</summary>
 internal enum SqlServerSearchKeyExpansionPolicy
 {
     AsciiFold,
@@ -33,8 +33,9 @@ public sealed class SqlServerKeyBudgetException : InvalidOperationException
 }
 
 /// <summary>
-/// Computes SQL Server's worst-case nonclustered key width before schema application. The optional
-/// search-key map is an arithmetic seam for #256 tests; it does not materialize a Q9 projection.
+/// Computes SQL Server's worst-case nonclustered key width before schema application. Folded
+/// derived keys are resolved back to their logical source so diagnostics describe the caller's
+/// bound and policy rather than the widened physical varchar column.
 /// </summary>
 internal static class SqlServerIndexKeyBudgetValidator
 {
@@ -55,6 +56,9 @@ internal static class SqlServerIndexKeyBudgetValidator
         ArgumentNullException.ThrowIfNull(unit);
         var columns = (unit.Columns ?? throw new ArgumentException("A storage unit requires columns.", nameof(unit)))
             .ToDictionary(column => column.Name, StringComparer.Ordinal);
+        var derived = (unit.DerivedColumns ?? [])
+            .Where(column => column.Projection == PortableProjection.BoundarySearchKey)
+            .ToDictionary(column => column.Name, StringComparer.Ordinal);
 
         ValidateIndex(
             new IndexDefinition
@@ -63,10 +67,11 @@ internal static class SqlServerIndexKeyBudgetValidator
                 Columns = unit.Key.Columns.Select(column => new IndexColumn(column)).ToArray()
             },
             columns,
+            derived,
             searchKeyPolicies);
 
         foreach (var index in unit.Indexes ?? [])
-            ValidateIndex(index, columns, searchKeyPolicies);
+            ValidateIndex(index, columns, derived, searchKeyPolicies);
     }
 
     internal static int EstimateSearchKeyBytes(int sourceLength, SqlServerSearchKeyExpansionPolicy policy)
@@ -84,6 +89,7 @@ internal static class SqlServerIndexKeyBudgetValidator
     private static void ValidateIndex(
         IndexDefinition index,
         IReadOnlyDictionary<string, ColumnDefinition> columns,
+        IReadOnlyDictionary<string, DerivedColumnDefinition> derived,
         IReadOnlyDictionary<string, SqlServerSearchKeyExpansionPolicy>? searchKeyPolicies)
     {
         ArgumentNullException.ThrowIfNull(index);
@@ -109,9 +115,15 @@ internal static class SqlServerIndexKeyBudgetValidator
             var expansion = searchKeyPolicies is not null &&
                             searchKeyPolicies.TryGetValue(indexColumn.Column, out var policy)
                 ? policy
-                : (SqlServerSearchKeyExpansionPolicy?)null;
+                : DerivedPolicy(indexColumn.Column, derived, columns);
+            var source = expansion is not null &&
+                         derived.TryGetValue(indexColumn.Column, out var derivedColumn) &&
+                         columns.TryGetValue(derivedColumn.SourceColumn, out var sourceColumn)
+                ? sourceColumn
+                : column;
+            var displayName = source == column ? null : source.Name;
             var width = expansion is { } searchPolicy
-                ? SearchKeyWidth(index.Name, column, searchPolicy, terms)
+                ? SearchKeyWidth(index.Name, source, searchPolicy, terms, displayName)
                 : DeclaredWidth(index.Name, column, terms);
             bytes = checked(bytes + width);
         }
@@ -131,7 +143,8 @@ internal static class SqlServerIndexKeyBudgetValidator
         string indexName,
         ColumnDefinition column,
         SqlServerSearchKeyExpansionPolicy policy,
-        ICollection<string> terms)
+        ICollection<string> terms,
+        string? displayName = null)
     {
         if (column.Type != PortableType.String || column.MaxLength is not (> 0))
         {
@@ -144,8 +157,32 @@ internal static class SqlServerIndexKeyBudgetValidator
 
         var width = EstimateSearchKeyBytes(column.MaxLength.Value, policy);
         var factor = policy == SqlServerSearchKeyExpansionPolicy.AsciiFold ? 5 : 7;
-        terms.Add($"{column.Name}={column.MaxLength.Value}*{factor}");
+        terms.Add($"{displayName ?? column.Name}={column.MaxLength.Value}*{factor}");
         return width;
+    }
+
+    private static SqlServerSearchKeyExpansionPolicy? DerivedPolicy(
+        string columnName,
+        IReadOnlyDictionary<string, DerivedColumnDefinition> derived,
+        IReadOnlyDictionary<string, ColumnDefinition> columns)
+    {
+        if (!derived.TryGetValue(columnName, out var projection))
+            return null;
+        if (!columns.TryGetValue(projection.SourceColumn, out var source) ||
+            source.Type != PortableType.String ||
+            !SearchKeyProjection.IsFolded(SearchKeyProjection.LogicalCollation(source)))
+        {
+            throw new InvalidOperationException(
+                $"SQL Server derived search-key column '{columnName}' does not resolve to a folded String source.");
+        }
+
+        return SearchKeyProjection.LogicalCollation(source) switch
+        {
+            PortableCollation.OrdinalIgnoreCase => SqlServerSearchKeyExpansionPolicy.AsciiFold,
+            PortableCollation.UnicodeOrdinalIgnoreCase => SqlServerSearchKeyExpansionPolicy.UnicodeFold,
+            _ => throw new InvalidOperationException(
+                $"SQL Server derived search-key column '{columnName}' has no supported folding policy.")
+        };
     }
 
     private static int DeclaredWidth(
@@ -165,8 +202,9 @@ internal static class SqlServerIndexKeyBudgetValidator
                         $"SQL Server physical index '{indexName}' requires bounded String key column '{column.Name}'.");
                 }
 
-                terms.Add($"{column.Name}={column.MaxLength.Value}*2");
-                return checked(column.MaxLength.Value * 2);
+                var factor = column.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal) ? 1 : 2;
+                terms.Add($"{column.Name}={column.MaxLength.Value}*{factor}");
+                return checked(column.MaxLength.Value * factor);
             case PortableType.Binary:
                 if (column.MaxLength is not (> 0))
                 {

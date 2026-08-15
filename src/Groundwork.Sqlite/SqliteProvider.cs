@@ -19,6 +19,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
     private readonly FileStream? schemaLock;
     private readonly List<SqliteConnection> sessionConnections = [];
     private readonly bool isMemory;
+    private readonly SqliteSchemaCoordinator schemaCoordinator;
     private bool disposed;
 
     public SqliteProviderConnection(string connectionString)
@@ -34,7 +35,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             schemaLock = acquiredLock;
             connection = opened;
             isMemory = builder.Mode == SqliteOpenMode.Memory || builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase);
-            Schema = new SqliteSchemaCoordinator(this);
+            schemaCoordinator = new SqliteSchemaCoordinator(this);
+            Schema = schemaCoordinator;
             Catalog = new SqliteProviderCatalog(this);
         }
         catch
@@ -80,6 +82,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         if (!isMemory)
             lock (gate) sessionConnections.Add(sessionConnection);
@@ -106,6 +109,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         {
             ArgumentNullException.ThrowIfNull(unit);
             SqliteSchemaCoordinator.ValidateAccess(unit, access);
+            schemaCoordinator.EnsureRuntimeAdmission(unit);
         }
 
         var transactional = CreateIndependentConnection();

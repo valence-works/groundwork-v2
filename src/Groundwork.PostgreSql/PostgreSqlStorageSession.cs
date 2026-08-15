@@ -47,11 +47,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         var executionSource = WithScopePredicate(request);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(
                 index => index.Name,
                 index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal)
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
@@ -88,7 +90,11 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key) => Execute(() => ReadCore(key));
+    public StoredEntry? Read(StorageKey key) => Execute(() => PublicEntry(ReadCore(key)));
+
+    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
+        ? null
+        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
@@ -166,10 +172,14 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
-        return writes[0].Mode switch
+        if (writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() != 1)
+            return ApplyBatchFallback(writes);
+
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+        return physicalWrites[0].Mode switch
         {
-            RowWriteMode.Insert => ApplyInsertBatch(writes),
-            RowWriteMode.Upsert => ApplyUpsertBatch(writes),
+            RowWriteMode.Insert => ApplyInsertBatch(physicalWrites),
+            RowWriteMode.Upsert => ApplyUpsertBatch(physicalWrites),
             _ => ApplyBatchFallback(writes)
         };
     }
@@ -346,6 +356,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, mutation == Mutation.Insert);
         var key = KeyFromValues(values.Values);
         // None mode has no token to inspect. Keep direct writes single-statement and let the
@@ -369,6 +380,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, requireAllNonNullable: false);
         if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumn is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");

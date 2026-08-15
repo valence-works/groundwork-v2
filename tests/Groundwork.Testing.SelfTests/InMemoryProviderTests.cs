@@ -6,6 +6,176 @@ namespace Groundwork.Testing.SelfTests;
 
 public sealed class InMemoryProviderTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("stale-search-key-v0")]
+    [InlineData("prefix-groundwork-ascii-lower-v1-suffix")]
+    public void Search_key_query_mapping_refuses_unknown_or_malformed_algorithm_ids(string? algorithmId)
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("malformed-search-key-mapping"),
+            Name = "malformed_search_key_mapping",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "status", Type = PortableType.String, Collation = PortableCollation.OrdinalIgnoreCase },
+                new ColumnDefinition { Name = "__groundwork_search_status", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            DerivedColumns =
+            [
+                new DerivedColumnDefinition
+                {
+                    Name = "__groundwork_search_status",
+                    SourceColumn = "status",
+                    Projection = PortableProjection.BoundarySearchKey,
+                    AlgorithmId = algorithmId
+                }
+            ]
+        };
+
+        var failure = Assert.Throws<InvalidOperationException>(() => SearchKeyQueryMappings.For(unit));
+
+        Assert.Contains("algorithm", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("rebuild", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Folded_starts_with_is_served_by_the_hidden_key_and_matches_null_contract()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("q9-folded"),
+            Name = "q9_folded",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "status", Type = PortableType.String, MaxLength = 32, Collation = PortableCollation.OrdinalIgnoreCase }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "ix_status", Columns = [new IndexColumn("status")] }]
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://q9-folded");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" }));
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 2, ["status"] = "other" }));
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 3, ["status"] = null }));
+        session.Update(new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }));
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.NotNull(stored);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored!.Values.Values.Keys);
+
+        var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, true, 32, stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var request = new QueryRequest(new TableId(unit.Name), new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None);
+        var result = session.Query(request);
+
+        Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+        Assert.Equal(["Open"], result.Rows.Select(row => Assert.IsType<string>(row["status"])));
+        Assert.Contains(connection.Catalog.ReadIndexes(unit.Id), index => index.Columns.Single().Column == "__groundwork_search_status");
+
+        var forged = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, true, 32,
+            stringComparison: QueryStringComparisonPolicy.Ordinal);
+        var failure = Assert.Throws<QueryRenderException>(() => session.Query(new QueryRequest(
+            new TableId(unit.Name), new Predicate.StartsWith(forged, "OP"), [], Projection.All, Paging.None)));
+        Assert.Equal("GW-QUERY-031", failure.Code);
+    }
+
+    [Fact]
+    public void Required_folded_partial_updates_preserve_values_through_direct_and_batched_paths()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("q9-required-folded-partial"),
+            Name = "q9_required_folded_partial",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition
+                {
+                    Name = "status",
+                    Type = PortableType.String,
+                    IsNullable = false,
+                    MaxLength = 32,
+                    Collation = PortableCollation.OrdinalIgnoreCase
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://q9-required-folded-partial");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" }));
+
+        Assert.Equal(WriteOutcomeStatus.Updated, session.Update(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })).Status);
+        using (var batch = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        {
+            batch.Stage(RowWrite.Update(unit,
+                new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })));
+            Assert.Equal(1, batch.Commit().Succeeded);
+        }
+
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.Equal("Open", stored!.Values.Values["status"]);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored.Values.Values.Keys);
+        var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, false, 32,
+            stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var result = session.Query(new QueryRequest(new TableId(unit.Name),
+            new Predicate.StartsWith(status, "op"), [], Projection.All, Paging.None));
+        Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+
+        var missingRequired = Assert.Throws<ArgumentException>(() => session.Upsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = 2 })));
+        Assert.Contains("status", missingRequired.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
+    }
+
+    [Fact]
+    public void Adding_folding_backfills_existing_rows_and_retargets_the_existing_index()
+    {
+        var initial = new StorageUnit
+        {
+            Id = new StorageUnitId("q9-folded-migration"),
+            Name = "q9_folded_migration",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "name", Type = PortableType.String, MaxLength = 32, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "ix_name", Columns = [new IndexColumn("name")] }]
+        };
+        var folded = initial with
+        {
+            Columns = [.. initial.Columns.Select(column =>
+                column.Name == "name"
+                    ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                    : column)]
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://q9-folded-migration");
+        connection.Schema.Apply(initial);
+        connection.OpenSession(initial, StorageAccess.Global).Insert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["name"] = "Open" }));
+
+        var migration = connection.Schema.Apply(folded);
+        Assert.Contains(migration.Diff.Changes,
+            change => change.Kind == SchemaChangeKind.CreateIndex && change.Identity == "ix_name");
+
+        var session = connection.OpenSession(folded, StorageAccess.Global);
+        var name = new ColumnRef(new TableId(folded.Name), "name", QueryType.String, false, 32,
+            stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var result = session.Query(new QueryRequest(
+            new TableId(folded.Name), new Predicate.StartsWith(name, "op"), [], Projection.All, Paging.None));
+
+        Assert.Equal([1], result.Rows.Select(row => row["id"]));
+        Assert.Equal("__groundwork_search_name",
+            Assert.Single(connection.Catalog.ReadIndexes(folded.Id), index => index.Name == "ix_name").Columns.Single().Column);
+    }
+
     [Fact]
     public void Full_contract_runs_through_an_external_factory()
     {

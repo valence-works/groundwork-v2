@@ -245,9 +245,39 @@ public sealed class PostgreSqlDialect : RelationalDialect
                 "fence" bigint NOT NULL,
                 PRIMARY KEY ("subject_id", "provider_name")
             );
+            CREATE TABLE IF NOT EXISTS "__groundwork_search_key_algorithms" (
+                "table_name" text NOT NULL,
+                "column_name" text NOT NULL,
+                "algorithm_id" text NOT NULL,
+                PRIMARY KEY ("table_name", "column_name")
+            );
             """);
         command.ExecuteNonQuery();
     }
+
+    public override void ApplyProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported PostgreSQL provider definition '{definition.Kind}'.");
+        RelationalSearchKeyCatalog.Apply(
+            connection,
+            transaction,
+            definition,
+            "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=EXCLUDED.\"algorithm_id\";");
+    }
+
+    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table)
+        => RelationalSearchKeyCatalog.Read(
+            connection,
+            transaction,
+            table,
+            "SELECT \"column_name\",\"algorithm_id\" FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table;");
 
     public override PhysicalSchemaHistoryState ReadHistory(
         DbConnection connection,
