@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Linq.Expressions;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
@@ -5,353 +6,105 @@ using Xunit;
 
 namespace Groundwork.Query.Linq.Tests;
 
-/// <summary>Versioned source spellings for the closed surface.</summary>
+/// <summary>Versioned source spellings and their expected public lowering decision.</summary>
 public sealed class LinqCorpusTests
 {
-    public sealed record CorpusCase(string Spelling, string Kind, int Value)
-    {
-        public long LongValue => Value;
-    }
-
+    private sealed record CorpusShape(string Spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> Build, string? ExpectedDiagnostic, Type? ExpectedAst);
+    public sealed record CorpusCase(string Spelling, int Value, string? ExpectedDiagnostic, Type? ExpectedAst, Expression<Func<LinqFrontEndTests.Ticket, bool>> Expression);
     public static IReadOnlyList<object[]> Corpus => Cases.Select(item => new object[] { item }).ToArray();
 
     [Fact]
     public void Corpus_and_documentation_vocabulary_are_versioned_together()
     {
         Assert.Equal(250, Cases.Count);
-        Assert.Equal(10, LinqDiagnosticCatalog.Entries.Count);
-        foreach (var entry in LinqDiagnosticCatalog.Entries)
-            Assert.Contains(entry.Code, LinqDiagnosticCatalog.GenerateMarkdownTable(), StringComparison.Ordinal);
-        var docs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../docs/v2/query-linq.md"));
-        if (File.Exists(docs))
-            Assert.Contains(LinqDiagnosticCatalog.GenerateMarkdownTable(), File.ReadAllText(docs), StringComparison.Ordinal);
+        var expectedCodes = Cases.Where(item => item.ExpectedDiagnostic is not null).Select(item => item.ExpectedDiagnostic!).Distinct(StringComparer.Ordinal).OrderBy(code => code, StringComparer.Ordinal).ToArray();
+        Assert.Equal(LinqDiagnosticCatalog.Entries.Select(entry => entry.Code).OrderBy(code => code, StringComparer.Ordinal), expectedCodes);
+        var docs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../docs/v2/query-linq.md"));
+        Assert.True(File.Exists(docs), $"Expected generated documentation at {docs}");
+        var document = File.ReadAllText(docs);
+        var start = document.IndexOf("| Code | AST equivalent / fix |", StringComparison.Ordinal);
+        Assert.True(start >= 0, "The generated diagnostic table is missing.");
+        var tableLines = document[start..].Split('\n').TakeWhile(line => line.StartsWith("|", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(LinqDiagnosticCatalog.GenerateMarkdownTable(), string.Join('\n', tableLines) + "\n");
     }
 
     [Theory]
     [MemberData(nameof(Corpus))]
-    public void Every_spelling_has_a_stable_public_decision(CorpusCase item)
+    public void Every_versioned_spelling_has_its_recorded_public_decision(CorpusCase item)
     {
-        var expression = Build(item);
-        var diagnostics = ExpressionLowerer.Diagnose<LinqFrontEndTests.Ticket>(expression, LinqFrontEndTests.Tickets);
-        var expectedDiagnostic = item.Kind switch
+        var diagnostics = ExpressionLowerer.Diagnose(item.Expression, LinqFrontEndTests.Tickets);
+        if (item.ExpectedDiagnostic is not null)
         {
-            "column" => "GW-LINQ-103",
-            "arith" => "GW-LINQ-102",
-            "bare" => "GW-LINQ-108",
-            "helper" => "GW-LINQ-107",
-            _ => null
-        };
-        if (expectedDiagnostic is not null)
-        {
-            Assert.Contains(diagnostics, diagnostic => diagnostic.Code == expectedDiagnostic);
+            Assert.Contains(diagnostics, diagnostic => diagnostic.Code == item.ExpectedDiagnostic);
             return;
         }
         Assert.Empty(diagnostics);
-        var predicate = ExpressionLowerer.Lower(expression, LinqFrontEndTests.Tickets);
-        var expectedType = item.Kind switch
-        {
-            "eq" or "stringeq" or "null" or "bool" => typeof(Predicate.Equal),
-            "gt" or "lt" or "longgt" or "year" or "date" or "datege" => typeof(Predicate.Range),
-            "decimal" => typeof(Predicate.Equal),
-            "hasvalue" => typeof(Predicate.Not),
-            "ne" or "notbool" => typeof(Predicate.Not),
-            "contains" => typeof(Predicate.Substring),
-            "starts" => typeof(Predicate.StartsWith),
-            "ends" => typeof(Predicate.Substring),
-            "in" => typeof(Predicate.In),
-            "element" => typeof(Predicate.ElementOf),
-            "and" => typeof(Predicate.And),
-            "or" => typeof(Predicate.Or),
-            _ => null
-        };
-        Assert.NotNull(expectedType);
-        Assert.IsType(expectedType, predicate);
+        Assert.IsType(item.ExpectedAst!, ExpressionLowerer.Lower(item.Expression, LinqFrontEndTests.Tickets));
     }
 
-    private static Expression<Func<LinqFrontEndTests.Ticket, bool>> Build(CorpusCase item) => item.Kind switch
+    private static IReadOnlyList<CorpusCase> Cases => Shapes.SelectMany(shape => Enumerable.Range(0, 5).Select(value => new CorpusCase(
+        string.Format(CultureInfo.InvariantCulture, shape.Spelling, value), value, shape.ExpectedDiagnostic, shape.ExpectedAst, shape.Build(value)))).ToArray();
+
+    private static IReadOnlyList<CorpusShape> Shapes { get; } = new CorpusShape[]
     {
-        "eq" => ticket => ticket.TenantId == item.Value,
-        "gt" => ticket => ticket.TenantId > item.Value,
-        "lt" => ticket => ticket.TenantId < item.Value,
-        "ne" => ticket => ticket.TenantId != item.Value,
-        "bool" => ticket => ticket.IsOpen,
-        "null" => ticket => ticket.Status == null,
-        "contains" => ticket => ticket.Status!.Contains("x", StringComparison.Ordinal),
-        "starts" => ticket => ticket.Status!.StartsWith("x", StringComparison.Ordinal),
-        "ends" => ticket => ticket.Status!.EndsWith("x", StringComparison.Ordinal),
-        "stringeq" => ticket => ticket.Status == "x",
-        "in" => ticket => new[] { item.Value, item.Value + 1 }.Contains(ticket.TenantId),
-        "decimal" => ticket => ticket.Amount == item.Value + 0.0m,
-        "longgt" => ticket => ticket.LongValue >= item.LongValue,
-        "datege" => ticket => ticket.CreatedAt >= DateTimeOffset.UtcNow,
-        "hasvalue" => ticket => ticket.OptionalAt.HasValue,
-        "notbool" => ticket => !ticket.IsOpen,
-        "and" => ticket => ticket.IsOpen && ticket.TenantId == item.Value,
-        "or" => ticket => ticket.IsOpen || ticket.TenantId == item.Value,
-        "element" => ticket => ticket.TagIds.Any(value => value == item.Value),
-        "year" => ticket => ticket.CreatedAt.Year == 2026,
-        "date" => ticket => ticket.CreatedAt.Date == new DateTime(2026, 1, 1),
-        "column" => ticket => ticket.TenantId == ticket.OtherTenant,
-        "arith" => ticket => ticket.TenantId + item.Value > 2,
-        "bare" => ticket => ticket.Status!.StartsWith("x"),
-        "helper" => ticket => IsOpen(ticket),
-        _ => throw new ArgumentOutOfRangeException(nameof(item.Kind))
+        Shape("ticket.TenantId == {0}", value => ticket => ticket.TenantId == value, typeof(Predicate.Equal)),
+        Shape("ticket.TenantId != {0}", value => ticket => ticket.TenantId != value, typeof(Predicate.Not)),
+        Shape("ticket.TenantId > {0}", value => ticket => ticket.TenantId > value, typeof(Predicate.Range)),
+        Shape("ticket.TenantId >= {0}", value => ticket => ticket.TenantId >= value, typeof(Predicate.Range)),
+        Shape("ticket.TenantId < {0}", value => ticket => ticket.TenantId < value, typeof(Predicate.Range)),
+        Shape("ticket.TenantId <= {0}", value => ticket => ticket.TenantId <= value, typeof(Predicate.Range)),
+        Shape("ticket.IsOpen", value => ticket => ticket.IsOpen == (value >= 0), typeof(Predicate.Equal)),
+        Shape("!ticket.IsOpen", value => ticket => !ticket.IsOpen, typeof(Predicate.Not)),
+        Shape("ticket.Status == null", value => ticket => ticket.Status == null, typeof(Predicate.Equal)),
+        Shape("ticket.Status != null", value => ticket => ticket.Status != null, typeof(Predicate.Not)),
+        Shape("ticket.Status == \"status-{0}\"", value => ticket => ticket.Status == "status-" + value, typeof(Predicate.Equal)),
+        Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.Ordinal)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.Ordinal), typeof(Predicate.Substring)),
+        Shape("ticket.Status!.StartsWith(\"x{0}\", StringComparison.Ordinal)", value => ticket => ticket.Status!.StartsWith("x" + value, StringComparison.Ordinal), typeof(Predicate.StartsWith)),
+        Shape("ticket.Status!.EndsWith(\"x{0}\", StringComparison.Ordinal)", value => ticket => ticket.Status!.EndsWith("x" + value, StringComparison.Ordinal), typeof(Predicate.Substring)),
+        Shape("new[] {{ {0}, {0}+1 }}.Contains(ticket.TenantId)", value => ticket => new[] { value, value + 1 }.Contains(ticket.TenantId), typeof(Predicate.In)),
+        Shape("ticket.Amount == {0}.01m", value => ticket => ticket.Amount == value + 0.01m, typeof(Predicate.Equal)),
+        Shape("ticket.LongValue >= (long){0}", LongAtLeast, typeof(Predicate.Range)),
+        Shape("ticket.CreatedAt >= DateTimeOffset.UtcNow.AddDays(-{0})", value => ticket => ticket.CreatedAt >= DateTimeOffset.UtcNow.AddDays(-value), typeof(Predicate.Range)),
+        Shape("ticket.OptionalAt.HasValue", value => ticket => ticket.OptionalAt.HasValue, typeof(Predicate.Not)),
+        Shape("ticket.OptionalAt!.Value >= DateTimeOffset.UtcNow", value => ticket => ticket.OptionalAt!.Value >= DateTimeOffset.UtcNow, typeof(Predicate.Range)),
+        Shape("ticket.IsOpen && ticket.TenantId == {0}", value => ticket => ticket.IsOpen && ticket.TenantId == value, typeof(Predicate.And)),
+        Shape("ticket.IsOpen || ticket.TenantId == {0}", value => ticket => ticket.IsOpen || ticket.TenantId == value, typeof(Predicate.Or)),
+        Shape("ticket.TagIds.Any(value => value == {0})", value => ticket => ticket.TagIds.Any(item => item == value), typeof(Predicate.ElementOf)),
+        Shape("ticket.TagIds.All(value => value == {0})", value => ticket => ticket.TagIds.All(item => item == value), typeof(Predicate.ElementOf)),
+        Shape("ticket.CreatedAt.Year == ({0} + 2026)", value => ticket => ticket.CreatedAt.Year == value + 2026, typeof(Predicate.Range)),
+        Shape("ticket.CreatedAt.Date == new DateTime({0} + 2026, 1, 1)", value => ticket => ticket.CreatedAt.Date == new DateTime(value + 2026, 1, 1), typeof(Predicate.Range)),
+        Shape("ticket.TenantId == ticket.OtherTenant", value => ticket => ticket.TenantId == ticket.OtherTenant, "GW-LINQ-103"),
+        Shape("ticket.TenantId + {0} > 2", value => ticket => ticket.TenantId + value > 2, "GW-LINQ-102"),
+        Shape("ticket.Status!.StartsWith(\"x{0}\")", value => ticket => ticket.Status!.StartsWith("x" + value), "GW-LINQ-108"),
+        Shape("IsOpen(ticket)", value => ticket => IsOpen(ticket), "GW-LINQ-107"),
+        Shape("ticket.Status!.ToLower() == \"x\" && ticket.IsOpen == ({0} >= 0)", value => ticket => ticket.Status!.ToLower() == "x" && ticket.IsOpen == (value >= 0), "GW-LINQ-101"),
+        Shape("ticket.Status!.Length > {0}", value => ticket => ticket.Status!.Length > value, "GW-LINQ-101"),
+        Shape("ticket.CreatedAt.UtcDateTime == DateTime.UtcNow", value => ticket => ticket.CreatedAt.UtcDateTime == DateTime.UtcNow, "GW-LINQ-104"),
+        Shape("ticket.TagIds.Any(value => value > {0})", value => ticket => ticket.TagIds.Any(item => item > value), "GW-LINQ-106"),
+        Shape("ticket.TagIds.All(value => value > {0})", value => ticket => ticket.TagIds.All(item => item > value), "GW-LINQ-106"),
+        Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.CurrentCulture)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.CurrentCulture), "GW-LINQ-108"),
+        Shape("ticket.CreatedAt == DateTimeOffset.Now", value => ticket => ticket.CreatedAt == DateTimeOffset.Now, "GW-LINQ-109"),
+        Shape("ticket.CreatedAt >= DateTimeOffset.Now", value => ticket => ticket.CreatedAt >= DateTimeOffset.Now, "GW-LINQ-109"),
+        Shape("ticket.Amount == 1.23456m + {0}m", value => ticket => ticket.Amount == 1.23456m + value, "GW-LINQ-110"),
+        Shape("ticket.OtherTenant == ticket.TenantId", value => ticket => ticket.OtherTenant == ticket.TenantId, "GW-LINQ-103"),
+        Shape("ticket.TenantId * {0} > 2", value => ticket => ticket.TenantId * value > 2, "GW-LINQ-102"),
+        Shape("ticket.Status!.Substring(0, {0}) == \"x\"", value => ticket => ticket.Status!.Substring(0, value) == "x", "GW-LINQ-101"),
+        Shape("ticket.Status!.Contains(\"x{0}\", StringComparison.OrdinalIgnoreCase)", value => ticket => ticket.Status!.Contains("x" + value, StringComparison.OrdinalIgnoreCase), "GW-LINQ-108"),
+        Shape("ticket.TenantId / ({0} + 1) > 0", value => ticket => ticket.TenantId / (value + 1) > 0, "GW-LINQ-102"),
+        Shape("ticket.TagIds.Any(value => value != {0})", value => ticket => ticket.TagIds.Any(item => item != value), "GW-LINQ-106"),
+        Shape("ticket.CreatedAt.Year != ({0} + 2026)", value => ticket => ticket.CreatedAt.Year != value + 2026, typeof(Predicate.Range)),
+        Shape("ticket.CreatedAt.Date <= new DateTime({0} + 2026, 1, 1)", value => ticket => ticket.CreatedAt.Date <= new DateTime(value + 2026, 1, 1), typeof(Predicate.Range)),
+        Shape("ticket.OtherTenant > ticket.TenantId", value => ticket => ticket.OtherTenant > ticket.TenantId, "GW-LINQ-103"),
+        Shape("ticket.TagIds.GroupBy(value => value).Any()", value => ticket => ticket.TagIds.GroupBy(item => item).Any(), "GW-LINQ-105"),
+        Shape("ticket.IsOpen == (0 == {0})", value => ticket => ticket.IsOpen == (0 == value), typeof(Predicate.Equal)),
     };
 
+    private static CorpusShape Shape(string spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> build, Type expectedAst) => new(spelling, build, null, expectedAst);
+    private static CorpusShape Shape(string spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> build, string expectedDiagnostic) => new(spelling, build, expectedDiagnostic, null);
+    private static Expression<Func<LinqFrontEndTests.Ticket, bool>> LongAtLeast(int value)
+    {
+        long threshold = value;
+        return ticket => ticket.LongValue >= threshold;
+    }
     private static bool IsOpen(LinqFrontEndTests.Ticket ticket) => ticket.IsOpen;
-
-    // Keep this list explicit: changing a value or spelling changes the compatibility corpus.
-    private static IReadOnlyList<CorpusCase> Cases { get; } = new CorpusCase[]
-    {
-        new CorpusCase("ticket.TenantId == 0", "eq", 0),
-new CorpusCase("ticket.TenantId == 1", "eq", 1),
-new CorpusCase("ticket.TenantId == 2", "eq", 2),
-new CorpusCase("ticket.TenantId == 3", "eq", 3),
-new CorpusCase("ticket.TenantId == 4", "eq", 4),
-new CorpusCase("ticket.TenantId == 5", "eq", 5),
-new CorpusCase("ticket.TenantId == 6", "eq", 6),
-new CorpusCase("ticket.TenantId == 7", "eq", 7),
-new CorpusCase("ticket.TenantId == 8", "eq", 8),
-new CorpusCase("ticket.TenantId == 9", "eq", 9),
-new CorpusCase("ticket.TenantId > 0", "gt", 0),
-new CorpusCase("ticket.TenantId > 1", "gt", 1),
-new CorpusCase("ticket.TenantId > 2", "gt", 2),
-new CorpusCase("ticket.TenantId > 3", "gt", 3),
-new CorpusCase("ticket.TenantId > 4", "gt", 4),
-new CorpusCase("ticket.TenantId > 5", "gt", 5),
-new CorpusCase("ticket.TenantId > 6", "gt", 6),
-new CorpusCase("ticket.TenantId > 7", "gt", 7),
-new CorpusCase("ticket.TenantId > 8", "gt", 8),
-new CorpusCase("ticket.TenantId > 9", "gt", 9),
-new CorpusCase("ticket.TenantId < 0", "lt", 0),
-new CorpusCase("ticket.TenantId < 1", "lt", 1),
-new CorpusCase("ticket.TenantId < 2", "lt", 2),
-new CorpusCase("ticket.TenantId < 3", "lt", 3),
-new CorpusCase("ticket.TenantId < 4", "lt", 4),
-new CorpusCase("ticket.TenantId < 5", "lt", 5),
-new CorpusCase("ticket.TenantId < 6", "lt", 6),
-new CorpusCase("ticket.TenantId < 7", "lt", 7),
-new CorpusCase("ticket.TenantId < 8", "lt", 8),
-new CorpusCase("ticket.TenantId < 9", "lt", 9),
-new CorpusCase("ticket.TenantId != 0", "ne", 0),
-new CorpusCase("ticket.TenantId != 1", "ne", 1),
-new CorpusCase("ticket.TenantId != 2", "ne", 2),
-new CorpusCase("ticket.TenantId != 3", "ne", 3),
-new CorpusCase("ticket.TenantId != 4", "ne", 4),
-new CorpusCase("ticket.TenantId != 5", "ne", 5),
-new CorpusCase("ticket.TenantId != 6", "ne", 6),
-new CorpusCase("ticket.TenantId != 7", "ne", 7),
-new CorpusCase("ticket.TenantId != 8", "ne", 8),
-new CorpusCase("ticket.TenantId != 9", "ne", 9),
-new CorpusCase("ticket.IsOpen", "bool", 0),
-new CorpusCase("ticket.IsOpen", "bool", 1),
-new CorpusCase("ticket.IsOpen", "bool", 2),
-new CorpusCase("ticket.IsOpen", "bool", 3),
-new CorpusCase("ticket.IsOpen", "bool", 4),
-new CorpusCase("ticket.IsOpen", "bool", 5),
-new CorpusCase("ticket.IsOpen", "bool", 6),
-new CorpusCase("ticket.IsOpen", "bool", 7),
-new CorpusCase("ticket.IsOpen", "bool", 8),
-new CorpusCase("ticket.IsOpen", "bool", 9),
-new CorpusCase("ticket.Status == null", "null", 0),
-new CorpusCase("ticket.Status == null", "null", 1),
-new CorpusCase("ticket.Status == null", "null", 2),
-new CorpusCase("ticket.Status == null", "null", 3),
-new CorpusCase("ticket.Status == null", "null", 4),
-new CorpusCase("ticket.Status == null", "null", 5),
-new CorpusCase("ticket.Status == null", "null", 6),
-new CorpusCase("ticket.Status == null", "null", 7),
-new CorpusCase("ticket.Status == null", "null", 8),
-new CorpusCase("ticket.Status == null", "null", 9),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 0),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 1),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 2),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 3),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 4),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 5),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 6),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 7),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 8),
-new CorpusCase("ticket.Status.Contains(\"x\", StringComparison.Ordinal)", "contains", 9),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 0),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 1),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 2),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 3),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 4),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 5),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 6),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 7),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 8),
-new CorpusCase("ticket.Status.StartsWith(\"x\", StringComparison.Ordinal)", "starts", 9),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 0),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 1),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 2),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 3),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 4),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 5),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 6),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 7),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 8),
-new CorpusCase("ticket.Status.EndsWith(\"x\", StringComparison.Ordinal)", "ends", 9),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 0),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 1),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 2),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 3),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 4),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 5),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 6),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 7),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 8),
-new CorpusCase("ticket.Status == \"x\"", "stringeq", 9),
-new CorpusCase("new[] {{ 0, 0+1 }}.Contains(ticket.TenantId)", "in", 0),
-new CorpusCase("new[] {{ 1, 1+1 }}.Contains(ticket.TenantId)", "in", 1),
-new CorpusCase("new[] {{ 2, 2+1 }}.Contains(ticket.TenantId)", "in", 2),
-new CorpusCase("new[] {{ 3, 3+1 }}.Contains(ticket.TenantId)", "in", 3),
-new CorpusCase("new[] {{ 4, 4+1 }}.Contains(ticket.TenantId)", "in", 4),
-new CorpusCase("new[] {{ 5, 5+1 }}.Contains(ticket.TenantId)", "in", 5),
-new CorpusCase("new[] {{ 6, 6+1 }}.Contains(ticket.TenantId)", "in", 6),
-new CorpusCase("new[] {{ 7, 7+1 }}.Contains(ticket.TenantId)", "in", 7),
-new CorpusCase("new[] {{ 8, 8+1 }}.Contains(ticket.TenantId)", "in", 8),
-new CorpusCase("new[] {{ 9, 9+1 }}.Contains(ticket.TenantId)", "in", 9),
-new CorpusCase("ticket.Amount == 0.0m", "decimal", 0),
-new CorpusCase("ticket.Amount == 1.0m", "decimal", 1),
-new CorpusCase("ticket.Amount == 2.0m", "decimal", 2),
-new CorpusCase("ticket.Amount == 3.0m", "decimal", 3),
-new CorpusCase("ticket.Amount == 4.0m", "decimal", 4),
-new CorpusCase("ticket.Amount == 5.0m", "decimal", 5),
-new CorpusCase("ticket.Amount == 6.0m", "decimal", 6),
-new CorpusCase("ticket.Amount == 7.0m", "decimal", 7),
-new CorpusCase("ticket.Amount == 8.0m", "decimal", 8),
-new CorpusCase("ticket.Amount == 9.0m", "decimal", 9),
-new CorpusCase("ticket.LongValue >= 0L", "longgt", 0),
-new CorpusCase("ticket.LongValue >= 1L", "longgt", 1),
-new CorpusCase("ticket.LongValue >= 2L", "longgt", 2),
-new CorpusCase("ticket.LongValue >= 3L", "longgt", 3),
-new CorpusCase("ticket.LongValue >= 4L", "longgt", 4),
-new CorpusCase("ticket.LongValue >= 5L", "longgt", 5),
-new CorpusCase("ticket.LongValue >= 6L", "longgt", 6),
-new CorpusCase("ticket.LongValue >= 7L", "longgt", 7),
-new CorpusCase("ticket.LongValue >= 8L", "longgt", 8),
-new CorpusCase("ticket.LongValue >= 9L", "longgt", 9),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 0),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 1),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 2),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 3),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 4),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 5),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 6),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 7),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 8),
-new CorpusCase("ticket.CreatedAt >= DateTimeOffset.UtcNow", "datege", 9),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 0),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 1),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 2),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 3),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 4),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 5),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 6),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 7),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 8),
-new CorpusCase("ticket.OptionalAt.HasValue", "hasvalue", 9),
-new CorpusCase("!ticket.IsOpen", "notbool", 0),
-new CorpusCase("!ticket.IsOpen", "notbool", 1),
-new CorpusCase("!ticket.IsOpen", "notbool", 2),
-new CorpusCase("!ticket.IsOpen", "notbool", 3),
-new CorpusCase("!ticket.IsOpen", "notbool", 4),
-new CorpusCase("!ticket.IsOpen", "notbool", 5),
-new CorpusCase("!ticket.IsOpen", "notbool", 6),
-new CorpusCase("!ticket.IsOpen", "notbool", 7),
-new CorpusCase("!ticket.IsOpen", "notbool", 8),
-new CorpusCase("!ticket.IsOpen", "notbool", 9),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 0", "and", 0),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 1", "and", 1),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 2", "and", 2),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 3", "and", 3),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 4", "and", 4),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 5", "and", 5),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 6", "and", 6),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 7", "and", 7),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 8", "and", 8),
-new CorpusCase("ticket.IsOpen && ticket.TenantId == 9", "and", 9),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 0", "or", 0),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 1", "or", 1),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 2", "or", 2),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 3", "or", 3),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 4", "or", 4),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 5", "or", 5),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 6", "or", 6),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 7", "or", 7),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 8", "or", 8),
-new CorpusCase("ticket.IsOpen || ticket.TenantId == 9", "or", 9),
-new CorpusCase("ticket.TagIds.Any(value => value == 0)", "element", 0),
-new CorpusCase("ticket.TagIds.Any(value => value == 1)", "element", 1),
-new CorpusCase("ticket.TagIds.Any(value => value == 2)", "element", 2),
-new CorpusCase("ticket.TagIds.Any(value => value == 3)", "element", 3),
-new CorpusCase("ticket.TagIds.Any(value => value == 4)", "element", 4),
-new CorpusCase("ticket.TagIds.Any(value => value == 5)", "element", 5),
-new CorpusCase("ticket.TagIds.Any(value => value == 6)", "element", 6),
-new CorpusCase("ticket.TagIds.Any(value => value == 7)", "element", 7),
-new CorpusCase("ticket.TagIds.Any(value => value == 8)", "element", 8),
-new CorpusCase("ticket.TagIds.Any(value => value == 9)", "element", 9),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 0),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 1),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 2),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 3),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 4),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 5),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 6),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 7),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 8),
-new CorpusCase("ticket.CreatedAt.Year == 2026", "year", 9),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 0),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 1),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 2),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 3),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 4),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 5),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 6),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 7),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 8),
-new CorpusCase("ticket.CreatedAt.Date == new DateTime(2026, 1, 1)", "date", 9),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 0),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 1),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 2),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 3),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 4),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 5),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 6),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 7),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 8),
-new CorpusCase("ticket.TenantId == ticket.OtherTenant", "column", 9),
-new CorpusCase("ticket.TenantId + 0 > 2", "arith", 0),
-new CorpusCase("ticket.TenantId + 1 > 2", "arith", 1),
-new CorpusCase("ticket.TenantId + 2 > 2", "arith", 2),
-new CorpusCase("ticket.TenantId + 3 > 2", "arith", 3),
-new CorpusCase("ticket.TenantId + 4 > 2", "arith", 4),
-new CorpusCase("ticket.TenantId + 5 > 2", "arith", 5),
-new CorpusCase("ticket.TenantId + 6 > 2", "arith", 6),
-new CorpusCase("ticket.TenantId + 7 > 2", "arith", 7),
-new CorpusCase("ticket.TenantId + 8 > 2", "arith", 8),
-new CorpusCase("ticket.TenantId + 9 > 2", "arith", 9),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 0),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 1),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 2),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 3),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 4),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 5),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 6),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 7),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 8),
-new CorpusCase("ticket.Status.StartsWith(\"x\")", "bare", 9),
-new CorpusCase("IsOpen(ticket)", "helper", 0),
-new CorpusCase("IsOpen(ticket)", "helper", 1),
-new CorpusCase("IsOpen(ticket)", "helper", 2),
-new CorpusCase("IsOpen(ticket)", "helper", 3),
-new CorpusCase("IsOpen(ticket)", "helper", 4),
-new CorpusCase("IsOpen(ticket)", "helper", 5),
-new CorpusCase("IsOpen(ticket)", "helper", 6),
-new CorpusCase("IsOpen(ticket)", "helper", 7),
-new CorpusCase("IsOpen(ticket)", "helper", 8),
-new CorpusCase("IsOpen(ticket)", "helper", 9),
-    };
 }

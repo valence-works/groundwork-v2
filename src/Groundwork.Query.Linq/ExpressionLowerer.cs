@@ -11,7 +11,7 @@ namespace Groundwork.Query.Linq;
 /// <summary>Converts the deliberately closed LINQ vocabulary to the existing query AST.</summary>
 public static class ExpressionLowerer
 {
-    private static readonly ConcurrentDictionary<string, Lazy<Func<object?>>> ClosedAccessors = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, Lazy<ClosedAccessorPlan>> ClosedAccessors = new(StringComparer.Ordinal);
 
     internal static int ClosedAccessorCount => ClosedAccessors.Count;
 
@@ -54,10 +54,10 @@ public static class ExpressionLowerer
         try
         {
             var key = expression.NodeType + "|" + expression.Type.AssemblyQualifiedName + "|" + expression;
-            var accessor = ClosedAccessors.GetOrAdd(key, _ => new Lazy<Func<object?>>(
-                () => Expression.Lambda<Func<object?>>(Expression.Convert(expression, typeof(object))).Compile(),
+            var accessor = ClosedAccessors.GetOrAdd(key, _ => new Lazy<ClosedAccessorPlan>(
+                () => new ClosedAccessorPlan(expression),
                 LazyThreadSafetyMode.ExecutionAndPublication));
-            return accessor.Value();
+            return accessor.Value.Read(expression);
         }
         catch (InvalidProgramException)
         {
@@ -74,6 +74,62 @@ public static class ExpressionLowerer
             diagnostics.Add(new LinqDiagnostic("GW-LINQ-107", "The expression contains an opaque helper; mark it [GwQueryFragment]", expression)
             { Path = exception.Message });
             return null;
+        }
+    }
+
+    private sealed class ClosedAccessorPlan
+    {
+        private readonly Type? closureType;
+        private readonly Func<object, object?>? compiled;
+        private readonly Expression? closedExpression;
+
+        public ClosedAccessorPlan(Expression expression)
+        {
+            var closure = FindClosure(expression);
+            if (closure?.Value is null)
+            {
+                closedExpression = expression;
+                return;
+            }
+
+            closureType = closure.Type;
+            var root = Expression.Parameter(typeof(object), "closure");
+            var typedRoot = Expression.Convert(root, closureType);
+            var rewritten = new ClosureReplacer(closure, typedRoot).Visit(expression)!;
+            compiled = Expression.Lambda<Func<object, object?>>(Expression.Convert(rewritten, typeof(object)), root).Compile();
+        }
+
+        public object? Read(Expression expression)
+        {
+            if (compiled is null) return ReadClosed(closedExpression!);
+            var closure = FindClosure(expression)?.Value;
+            return closure is null ? ReadClosed(expression) : compiled(closure);
+        }
+
+        private static ConstantExpression? FindClosure(Expression expression)
+        {
+            ConstantExpression? result = null;
+            new ClosureFinder(candidate => result ??= candidate).Visit(expression);
+            return result;
+        }
+
+        private sealed class ClosureFinder : ExpressionVisitor
+        {
+            private readonly Action<ConstantExpression> found;
+            public ClosureFinder(Action<ConstantExpression> found) => this.found = found;
+            protected override Expression VisitConstant(ConstantExpression node)
+            {
+                if (node.Value is not null && node.Type.Name.Contains("DisplayClass", StringComparison.Ordinal)) found(node);
+                return node;
+            }
+        }
+
+        private sealed class ClosureReplacer : ExpressionVisitor
+        {
+            private readonly ConstantExpression source;
+            private readonly Expression replacement;
+            public ClosureReplacer(ConstantExpression source, Expression replacement) { this.source = source; this.replacement = replacement; }
+            protected override Expression VisitConstant(ConstantExpression node) => node.Type == source.Type ? replacement : node;
         }
     }
 
@@ -284,7 +340,8 @@ public static class ExpressionLowerer
             var column = leftColumn ?? rightColumn;
             if (column is null)
             {
-                if (IsNavigation(left) || IsNavigation(right)) Add("GW-LINQ-104", "Navigation and Join are not portable; v2 has no joins; use a declared element set or two queries", binary);
+                if (HasUnsupportedColumnMethod(left) || HasUnsupportedColumnMethod(right) || HasUnsupportedColumnMember(left) || HasUnsupportedColumnMember(right)) Add("GW-LINQ-101", "A member method/property on a column is not portable; declare a computed column; expressions over columns are not portable", binary);
+                else if (IsNavigation(left) || IsNavigation(right)) Add("GW-LINQ-104", "Navigation and Join are not portable; v2 has no joins; use a declared element set or two queries", binary);
                 else if (HasColumn(binary)) Add("GW-LINQ-102", "Arithmetic on columns is not portable; declare a computed column; expressions over columns are not portable", binary);
                 else Add("GW-LINQ-107", "The expression contains an opaque helper; mark it [GwQueryFragment]", binary);
                 return AstPredicate.AlwaysFalse.Instance;
@@ -326,6 +383,11 @@ public static class ExpressionLowerer
         private Predicate MethodPredicate(MethodCallExpression call)
         {
             if (TryFragment(call, out var fragment)) return Predicate(fragment.Body);
+            if (ContainsGroupBy(call))
+            {
+                Add("GW-LINQ-105", "GroupBy is not portable; use `.LatestPer(...)` for grouped top-1", call);
+                return AstPredicate.AlwaysFalse.Instance;
+            }
             if (call.Method.Name == "Join")
             {
                 Add("GW-LINQ-104", "Navigation and Join are not portable; v2 has no joins; use a declared element set or two queries", call);
@@ -444,7 +506,9 @@ public static class ExpressionLowerer
         private bool IsForbiddenDate(Expression expression)
         {
             expression = Unwrap(expression);
-            if (expression is MemberExpression member && member.Member.DeclaringType == typeof(DateTime) && member.Member.Name is "Now" or "Today") return true;
+            if (expression is MemberExpression member &&
+                ((member.Member.DeclaringType == typeof(DateTime) && member.Member.Name is "Now" or "Today") ||
+                 (member.Member.DeclaringType == typeof(DateTimeOffset) && member.Member.Name == "Now"))) return true;
             return expression.Type == typeof(DateTime) && ClosedValue(expression, parameter, diagnostics) is DateTime date && date.Kind == DateTimeKind.Unspecified;
         }
 
@@ -465,6 +529,9 @@ public static class ExpressionLowerer
         }
         private bool HasColumn(Expression source) => ContainsParameter(source, parameter);
         private bool IsNavigation(Expression source) => Unwrap(source) is MemberExpression member && member.Expression is MemberExpression nested && HasColumn(nested);
+        private bool HasUnsupportedColumnMethod(Expression source) => Unwrap(source) is MethodCallExpression call && call.Object is not null && HasColumn(call.Object) && call.Method.Name is "ToLower" or "ToUpper" or "Substring" or "Trim";
+        private bool HasUnsupportedColumnMember(Expression source) => Unwrap(source) is MemberExpression member && member.Member.Name == "Length" && HasColumn(member.Expression!);
+        private static bool ContainsGroupBy(MethodCallExpression call) => call.Method.Name == "GroupBy" || call.Object is MethodCallExpression nested && ContainsGroupBy(nested) || call.Arguments.Any(argument => Unwrap(argument) is MethodCallExpression nested && ContainsGroupBy(nested));
         private bool HasNullConstant(Expression source) => Unwrap(source) is ConstantExpression constant && constant.Value is null;
         private void Add(string code, string message, Expression expression) => diagnostics.Add(new LinqDiagnostic(code, message, expression));
 

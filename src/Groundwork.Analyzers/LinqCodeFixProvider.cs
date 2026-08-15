@@ -19,10 +19,11 @@ public sealed class LinqCodeFixProvider : CodeFixProvider
         if (diagnostic is null) return;
         var root = await context.Document.GetSyntaxRootAsync(context.CancellationToken).ConfigureAwait(false);
         if (root?.FindNode(diagnostic.Location.SourceSpan) is not InvocationExpressionSyntax invocation || invocation.ArgumentList.Arguments.Count != 1) return;
+        if (!diagnostic.Properties.TryGetValue("gwComparison", out var comparison) || string.IsNullOrWhiteSpace(comparison)) return;
         context.RegisterCodeFix(
-            CodeAction.Create("Use an explicit ordinal comparison", cancellationToken =>
+            CodeAction.Create($"Use StringComparison.{comparison}", cancellationToken =>
                 Task.FromResult(context.Document.WithSyntaxRoot(root.ReplaceNode(invocation, invocation.WithArgumentList(invocation.ArgumentList.AddArguments(
-                    SyntaxFactory.Argument(SyntaxFactory.ParseExpression("global::System.StringComparison.Ordinal"))))))),
-                "Groundwork_LINQ_108_Ordinal"), diagnostic);
+                    SyntaxFactory.Argument(SyntaxFactory.ParseExpression("global::System.StringComparison." + comparison))))))),
+                "Groundwork_LINQ_108_" + comparison), diagnostic);
     }
 }

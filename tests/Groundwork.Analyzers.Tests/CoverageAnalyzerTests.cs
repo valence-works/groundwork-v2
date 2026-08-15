@@ -18,7 +18,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Linq_analyzer_reports_bare_startswith_at_the_subexpression()
     {
-        const string source = "using System; public sealed class Ticket { public string Name { get; set; } = \"\"; } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.Name.StartsWith(\"x\"); }";
+        const string source = "using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { [AttributeUsage(AttributeTargets.Property)] public sealed class GwStringComparisonAttribute : Attribute { public GwStringComparisonAttribute(StringComparison comparison) { } } public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { [Groundwork.Query.Linq.GwStringComparison(StringComparison.Ordinal)] public string Name { get; set; } = \"\"; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Name.StartsWith(\"x\")); } }";
         var diagnostics = await AnalyzeLinq(source);
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_LINQ_108"));
         Assert.Contains("StringComparison.Ordinal", diagnostic.GetMessage(), StringComparison.Ordinal);
@@ -28,7 +28,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Linq_analyzer_reports_column_arithmetic_and_column_comparison()
     {
-        var diagnostics = await AnalyzeLinq("using System; public sealed class Ticket { public int A { get; set; } public int B { get; set; } } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.A + 1 > 2 && ticket.A == ticket.B; }");
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int A { get; set; } public int B { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.A + 1 > 2 && ticket.A == ticket.B); } }");
         Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_102");
         Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_103");
     }
@@ -36,7 +36,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Linq_code_fix_inserts_the_explicit_ordinal_overload()
     {
-        const string source = "using System; public sealed class Ticket { public string Name { get; set; } = \"\"; } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.Name.StartsWith(\"x\"); }";
+        const string source = "using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { [AttributeUsage(AttributeTargets.Property)] public sealed class GwStringComparisonAttribute : Attribute { public GwStringComparisonAttribute(StringComparison comparison) { } } public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { [Groundwork.Query.Linq.GwStringComparison(StringComparison.Ordinal)] public string Name { get; set; } = \"\"; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Name.StartsWith(\"x\")); } }";
         var diagnostic = Assert.Single((await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_108"));
         using var workspace = new AdhocWorkspace();
         var project = workspace.AddProject("LinqCodeFix", LanguageNames.CSharp);
@@ -46,6 +46,29 @@ public sealed class CoverageAnalyzerTests
         var operation = Assert.Single(await Assert.Single(actions).GetOperationsAsync(CancellationToken.None));
         var changed = Assert.IsType<ApplyChangesOperation>(operation).ChangedSolution.GetDocument(document.Id)!;
         Assert.Contains("StringComparison.Ordinal", (await changed.GetTextAsync()).ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_ignores_unrelated_func_lambdas()
+    {
+        var diagnostics = await AnalyzeLinq("using System; public sealed class Ticket { public string Name { get; set; } = \"\"; public int A { get; set; } } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.Name.ToLower() == \"x\" && ticket.A + 1 > 2; }");
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_LINQ_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_accepts_an_attributed_fragment_body()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { [AttributeUsage(AttributeTargets.Property)] public sealed class GwQueryFragmentAttribute : Attribute { } } public sealed class Ticket { public bool IsOpen { get; set; } } public static class Fragments { [Groundwork.Query.Linq.GwQueryFragment] public static Expression<Func<Ticket, bool>> Open => ticket => ticket.IsOpen; }");
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_LINQ_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_uses_declared_ignore_case_folding_and_rejects_mismatch()
+    {
+        const string source = "using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { [AttributeUsage(AttributeTargets.Property)] public sealed class GwStringComparisonAttribute : Attribute { public GwStringComparisonAttribute(StringComparison comparison) { } } public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { [Groundwork.Query.Linq.GwStringComparison(StringComparison.OrdinalIgnoreCase)] public string Name { get; set; } = \"\"; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Name.StartsWith(\"x\", StringComparison.Ordinal)); } }";
+        var diagnostics = await AnalyzeLinq(source);
+        var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_LINQ_108"));
+        Assert.Contains("OrdinalIgnoreCase", diagnostic.GetMessage(), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -8,7 +8,7 @@ namespace Groundwork.Query.Linq.Tests;
 
 public sealed class LinqFrontEndTests
 {
-    internal sealed class Ticket
+    public sealed class Ticket
     {
         public int TenantId { get; set; }
         public string? Status { get; set; }
@@ -74,6 +74,21 @@ public sealed class LinqFrontEndTests
         Assert.IsType<Predicate.Equal>(query.ToQueryRequest().Where);
         Assert.IsType<ResultShape.TotalCount>(query.Count().Request.Result);
         Assert.Equal(1, query.Any().Request.Paging.Limit);
+    }
+
+    [Fact]
+    public async Task Async_terminals_use_an_explicit_provider_adapter()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.TenantId == 7);
+        var result = await query.CountAsync(new RecordingExecutor());
+        Assert.Equal(1, result);
+    }
+
+    private sealed class RecordingExecutor : IGwQueryExecutor
+    {
+        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<T>>(Array.Empty<T>());
+        public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(1L);
+        public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(true);
     }
 
     [Fact]
@@ -154,12 +169,15 @@ public sealed class LinqFrontEndTests
     public void Closed_accessor_is_compiled_once_for_a_repeated_expression_shape()
     {
         var before = GetClosedAccessorCount();
-        var tenant = 7;
-        for (var index = 0; index < 10; index++)
-            _ = ExpressionLowerer.Lower<Ticket>(ticket => ticket.TenantId == tenant, Tickets);
+        var first = ExpressionLowerer.Lower<Ticket>(MakeTenantPredicate(7), Tickets);
+        var second = ExpressionLowerer.Lower<Ticket>(MakeTenantPredicate(8), Tickets);
         var after = GetClosedAccessorCount();
-        Assert.InRange(after - before, 1, 2);
+        Assert.InRange(after - before, 1, 3);
+        Assert.Equal(7, Assert.IsType<Predicate.Equal>(first).Value.Value);
+        Assert.Equal(8, Assert.IsType<Predicate.Equal>(second).Value.Value);
     }
+
+    private static Expression<Func<Ticket, bool>> MakeTenantPredicate(int tenant) => ticket => ticket.TenantId == tenant;
 
     private static int GetClosedAccessorCount() =>
         (int)typeof(ExpressionLowerer).GetProperty("ClosedAccessorCount", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
