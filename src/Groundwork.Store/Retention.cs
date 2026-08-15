@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Store;
 
 /// <summary>Bounds one resumable retention pass.</summary>
 public sealed record RetentionExecutionOptions

@@ -1,9 +1,9 @@
 # SQLite provider
 
-`Groundwork.Sqlite` is the SQLite implementation of the provider-neutral testing and relational
-schema seams. It uses `Microsoft.Data.Sqlite` and keeps the provider-specific surface in the
-`Groundwork.Sqlite` assembly; relationship-transition execution is intentionally not part of this
-provider slice.
+`Groundwork.Sqlite` is the SQLite implementation of the production, provider-neutral
+`Groundwork.Store` contracts and relational schema behaviors. It uses `Microsoft.Data.Sqlite` and
+keeps the provider-specific surface in the `Groundwork.Sqlite` assembly; relationship-transition
+execution is intentionally not part of this provider slice.
 
 The provider enables WAL and a busy timeout when a store opens. Schema and unit-of-work writes use
 `BeginTransaction(IsolationLevel.Serializable, deferred: false)`, which Microsoft.Data.Sqlite maps

@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.Testing.SelfTests;

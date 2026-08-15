@@ -2,7 +2,7 @@ using System.Collections.Immutable;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Store;
 
 /// <summary>Shared provider adapter for the closed aggregation contract.</summary>
 public static class AggregationSessionExecutor

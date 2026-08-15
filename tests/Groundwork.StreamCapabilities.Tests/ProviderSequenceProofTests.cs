@@ -1,10 +1,10 @@
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
-using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.StreamCapabilities.Tests;
@@ -56,7 +56,7 @@ public sealed class ProviderSequenceProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB sequence proof.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         var unit = SequenceUnit("stream-sequence-mongodb-" + Guid.NewGuid().ToString("N"));
         try
         {

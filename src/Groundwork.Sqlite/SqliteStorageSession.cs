@@ -6,7 +6,8 @@ using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
@@ -87,7 +88,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
-        if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;
+        if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
         var logicalIndex = query.SelectedIndex!;
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
         using var explain = Command("EXPLAIN QUERY PLAN " + query.CommandText.TrimEnd().TrimEnd(';'));
@@ -97,7 +98,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         while (reader.Read())
             details.Add(string.Join('\t', Enumerable.Range(0, reader.FieldCount).Select(index => Convert.ToString(reader.GetValue(index), CultureInfo.InvariantCulture))));
         var rawPlan = string.Join(Environment.NewLine, details);
-        ExplainAssertTestMode.AssertChosenIndex(
+        ExplainAssertionMode.AssertChosenIndex(
             "SQLite", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
             SqliteExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
     }

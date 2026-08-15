@@ -1,7 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Store;
 
 /// <summary>Builds the logical-to-physical search-key map shared by provider sessions.</summary>
 public static class SearchKeyQueryMappings

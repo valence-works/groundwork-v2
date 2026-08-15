@@ -1,7 +1,8 @@
 using System.Collections.Concurrent;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 using Groundwork.Substrate.Relational;
 
 namespace Groundwork.Sqlite;

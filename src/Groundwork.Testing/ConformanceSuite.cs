@@ -2,6 +2,8 @@ using Groundwork.Kernel;
 
 namespace Groundwork.Testing;
 
+using Groundwork.Store;
+
 /// <summary>Runs the provider-neutral behavioral contract against one provider factory.</summary>
 public static class ConformanceSuite
 {

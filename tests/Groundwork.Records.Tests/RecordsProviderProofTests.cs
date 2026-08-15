@@ -3,10 +3,10 @@ using Microsoft.Data.Sqlite;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Records;
-using Groundwork.Records.TestingAdapter;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
+using Groundwork.Store;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using Npgsql;
@@ -58,6 +58,35 @@ public sealed class RecordsProviderProofTests
         }
     }
 
+    [Fact]
+    public void SQLite_typed_batch_unit_of_work_can_delete_by_record_key()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-records-batch-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create("Data Source=" + path);
+            var table = RecordTestFixture.CustomerTable("_records_batch_" + Guid.NewGuid().ToString("N"));
+            Assert.True(connection.Schema.Apply(table.Definition).Applied);
+            var customer = Customer.Create("Ada", "batch@example.test");
+            Assert.Equal(RecordWriteStatus.Inserted, table.Open(connection).Insert(customer).Status);
+
+            using (var work = table.BeginUnitOfWork(connection, BatchWriteOptions.Exact))
+            {
+                work.Delete(customer, RecordWriteOptions.IfVersion(1));
+                var report = work.CommitWithOutcomes();
+                Assert.True(report.IsSuccessful);
+                Assert.Equal(1, report.Succeeded);
+                Assert.Equal(RowWriteMode.Delete, report.Outcomes.Single().Write.Mode);
+            }
+
+            Assert.Empty(table.Open(connection).Query(table.Query.Where(row => row.Email == "batch@example.test")));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
     [SkippableFact]
     public void PostgreSQL_executes_typed_records()
     {
@@ -89,8 +118,9 @@ public sealed class RecordsProviderProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB records proof.");
-        using var connection = new MongoDbProviderFactory().Create(connectionString!);
-        var nativeConnection = Assert.IsType<MongoDbProviderConnection>(connection);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        using var nativeConnection = Assert.IsType<MongoDbProviderConnection>(
+            new MongoDbProviderFactory().Create(connectionString!));
         var table = RecordTestFixture.CustomerTable("records_mongo_" + Guid.NewGuid().ToString("N"));
         Assert.True(connection.Schema.Apply(table.Definition).Applied);
         AssertTypedCrud(table.Open(connection), table, "mongo@example.test");

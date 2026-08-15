@@ -1,7 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Store;
 
 /// <summary>Capability descriptors exposed by providers that implement staged writes.</summary>
 public static class BatchWriteCapabilities
@@ -608,7 +608,7 @@ internal sealed class BatchContext
     }
 }
 
-/// <summary>Testing-layer wrapper that makes staged-key reads flush before delegating.</summary>
+/// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
 internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly IStorageSession inner;

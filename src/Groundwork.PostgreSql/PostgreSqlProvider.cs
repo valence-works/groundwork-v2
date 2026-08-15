@@ -3,7 +3,8 @@ using System.Data;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Substrate.Relational;
-using Groundwork.Testing;
+using Groundwork.Store;
+using Groundwork.Diagnostics;
 using Npgsql;
 
 namespace Groundwork.PostgreSql;

@@ -1,5 +1,9 @@
 <Solution>
-  <Folder Name="/src/" />
+  <Folder Name="/src/">
+    <Project Path="src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
+    <Project Path="src/Groundwork.Records.Store/Groundwork.Records.Store.csproj" />
+    <Project Path="src/Groundwork.Store/Groundwork.Store.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Kernel/">
     <Project Path="src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
   </Folder>
@@ -8,9 +12,6 @@
   </Folder>
   <Folder Name="/src/Groundwork.Documents/">
     <Project Path="src/Groundwork.Documents/Groundwork.Documents.csproj" />
-  </Folder>
-  <Folder Name="/src/Groundwork.Records.TestingAdapter/">
-    <Project Path="src/Groundwork.Records.TestingAdapter/Groundwork.Records.TestingAdapter.csproj" />
   </Folder>
   <Folder Name="/src/Groundwork.Testing/">
     <Project Path="src/Groundwork.Testing/Groundwork.Testing.csproj" />
@@ -26,9 +27,6 @@
   </Folder>
   <Folder Name="/src/Groundwork.MongoDb/">
     <Project Path="src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
-  </Folder>
-  <Folder Name="/src/Groundwork.MongoDb.TestingAdapter/">
-    <Project Path="src/Groundwork.MongoDb.TestingAdapter/Groundwork.MongoDb.TestingAdapter.csproj" />
   </Folder>
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
@@ -63,9 +61,11 @@
   <Folder Name="/src/Groundwork.Analyzers/">
     <Project Path="src/Groundwork.Analyzers/Groundwork.Analyzers.csproj" />
   </Folder>
+  <Folder Name="/samples/" />
   <Folder Name="/samples/Groundwork.Samples.EventLog/">
     <Project Path="samples/Groundwork.Samples.EventLog/Groundwork.Samples.EventLog.csproj" />
   </Folder>
+  <Folder Name="/benchmarks/" />
   <Folder Name="/benchmarks/Groundwork.Benchmarks/">
     <Project Path="benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj" />
   </Folder>

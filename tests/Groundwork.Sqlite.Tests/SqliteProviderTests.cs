@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Groundwork.Sqlite;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;

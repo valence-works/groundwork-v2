@@ -1,10 +1,10 @@
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
-using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.StreamCapabilities.Tests;
@@ -68,7 +68,7 @@ public sealed class AggregationConformanceTests
         var connection = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connection),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB aggregation conformance.");
-        AssertProvider(new MongoDbTestingFactory(), connection!, "MongoDB");
+        AssertProvider(new MongoProviderFactory(), connection!, "MongoDB");
     }
 
     [Fact]

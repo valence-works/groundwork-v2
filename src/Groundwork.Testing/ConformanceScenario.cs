@@ -2,6 +2,8 @@ using Groundwork.Kernel;
 
 namespace Groundwork.Testing;
 
+using Groundwork.Store;
+
 /// <summary>
 /// Declares the storage-family-specific shape used by <see cref="ConformanceSuite"/>.
 /// Providers remain responsible for execution; a family supplies only its declaration and

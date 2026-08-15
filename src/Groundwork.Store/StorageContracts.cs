@@ -5,9 +5,9 @@ using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
-namespace Groundwork.Testing;
+namespace Groundwork.Store;
 
-/// <summary>Explicit access context for a testing session.</summary>
+/// <summary>Explicit access context for a storage session.</summary>
 public sealed record StorageAccess
 {
     private StorageAccess(ScopePolicy policy, StorageScope? scope)
@@ -441,6 +441,12 @@ public interface ISchemaCoordinator
     SchemaApplyResult Apply(StorageUnit desired);
 }
 
+/// <summary>
+/// Non-owning view over one declared storage unit. This interface is intentionally not disposable:
+/// a session opened from a provider connection is valid while that connection is alive, and a
+/// session opened from a unit of work is valid until that unit reaches a terminal state or is
+/// disposed.
+/// </summary>
 public interface IStorageSession
 {
     StorageUnit Unit { get; }
@@ -490,8 +496,14 @@ public interface IStorageSession
         Append(operationId, values);
 }
 
+/// <summary>
+/// Owns one staged transaction, the sessions it creates, and their provider resources. Commit and
+/// rollback are terminal operations; disposing a non-terminal unit rolls it back and releases its
+/// sessions. Sessions returned by <see cref="OpenSession"/> must not be used afterward.
+/// </summary>
 public interface IUnitOfWork : IDisposable
 {
+    /// <summary>Opens a session owned by this unit of work until it becomes terminal or is disposed.</summary>
     IStorageSession OpenSession(StorageUnit unit);
 
     /// <summary>Stages a row write for the next provider batch.</summary>
@@ -512,6 +524,11 @@ public interface IUnitOfWork : IDisposable
     void Rollback();
 }
 
+/// <summary>
+/// Owns the provider resources for a connection and the sessions opened directly from it. Dispose
+/// the connection after all of its sessions are no longer needed; disposal invalidates those
+/// non-owning session views.
+/// </summary>
 public interface IStorageProviderConnection : IDisposable
 {
     IProviderCatalog Catalog { get; }
@@ -521,10 +538,13 @@ public interface IStorageProviderConnection : IDisposable
     /// <summary>Provider capabilities relevant to staged writes and their outcome contract.</summary>
     IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
 
+    /// <summary>Opens a non-owning session view that remains valid while this connection is alive.</summary>
     IStorageSession OpenSession(StorageUnit unit, StorageAccess access);
 
+    /// <summary>Begins a unit of work that owns its transaction and staged sessions until terminal or disposed.</summary>
     IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units);
 
+    /// <summary>Begins a unit of work with explicit batch outcome and flush behavior.</summary>
     IUnitOfWork BeginUnitOfWork(
         StorageAccess access,
         BatchWriteOptions options,
@@ -538,33 +558,4 @@ public interface IStorageProviderConnection : IDisposable
 public interface IStorageProviderFactory
 {
     IStorageProviderConnection Create(string connectionString);
-}
-
-public sealed record ConformanceCheck(string Name, bool Passed, string? Failure = null);
-
-public sealed class ConformanceReport
-{
-    public ConformanceReport(IReadOnlyList<ConformanceCheck> checks)
-    {
-        ArgumentNullException.ThrowIfNull(checks);
-        Checks = Array.AsReadOnly(checks.ToArray());
-    }
-
-    public IReadOnlyList<ConformanceCheck> Checks { get; }
-
-    public bool Passed => Checks.All(check => check.Passed);
-
-    public IReadOnlyList<ConformanceCheck> Failures =>
-        Array.AsReadOnly(Checks.Where(check => !check.Passed).ToArray());
-}
-
-public sealed class ConformanceFailureException : Exception
-{
-    public ConformanceFailureException(string checkName, string message)
-        : base($"Conformance check '{checkName}' failed: {message}")
-    {
-        CheckName = checkName;
-    }
-
-    public string CheckName { get; }
 }
