@@ -37,6 +37,11 @@ write. Once the provider-recorded entry expires, the append is admitted again.
 Expired entries are reclaimed in bounded batches, so retention work cannot
 grow a single append without limit.
 
+When the same unit declares `RetentionTrigger.OnAppend`, newly committed payload rows request
+retention only after the ledger and payload transaction succeeds. A replay does not duplicate the
+payload and may safely request cleanup again, allowing an interrupted post-commit cleanup to
+converge on the declared newest-N watermark.
+
 Providers advertise the contract through
 `BatchWriteCapabilities.AppendIdempotency`; the stream-capability proof covers
 replay, provider-time skew, expiry, and rollback of a failed payload batch.

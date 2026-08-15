@@ -11,7 +11,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -165,11 +165,42 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        return Execute(() => ConditionalUpsertCore(values, options));
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        WriteOutcome outcome;
+        try
+        {
+            outcome = Execute(() => ConditionalUpsertCore(values, options));
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            throw;
+        }
+        CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted, options?.Observer);
+        return outcome;
     }
 
-    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
-        ExecuteWrite(() => ApplyBatchCore(writes));
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var nativeOnAppend = IsNativeAppendBatch(writes);
+        var registration = BeginOnAppend(nativeOnAppend);
+        IReadOnlyList<RowWriteOutcome> outcomes;
+        try
+        {
+            outcomes = ExecuteWrite(() => ApplyBatchCore(writes));
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            throw;
+        }
+        IWritePathObserver? observer = null;
+        var succeeded = nativeOnAppend &&
+            OnAppendRetentionCoordinator.TryGetObserver(outcomes, out observer);
+        CompleteOnAppend(registration, succeeded, observer);
+        return outcomes;
+    }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
@@ -203,13 +234,80 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         });
     }
 
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
+        ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
+
+    private RetentionResult ApplyRetentionCore(RetentionExecutionOptions options)
+    {
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keyColumns = Unit.Key.Columns;
+        var partition = declaration.PartitionColumns.Count == 0
+            ? string.Empty
+            : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+        var scope = Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn)
+            ? $" WHERE {Quote(SqlServerSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+            : string.Empty;
+        var keys = string.Join(", ", keyColumns.Select(Quote));
+        var ordering = string.Join(", ", [
+            $"{Quote(declaration.OrderColumn)} DESC",
+            .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+        var equality = string.Join(" AND ", keyColumns.Select(column =>
+            $"target.{Quote(column)}=victim.{Quote(column)}"));
+        var deleted = 0;
+        var batches = 0;
+        while (true)
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            using var command = Command($"WITH ranked AS (" +
+                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
+                $"SELECT TOP (@limit) {keys} FROM ranked WHERE __groundwork_retention_rank > @keep) " +
+                $"DELETE target FROM {Quote(Unit.Name)} AS target INNER JOIN victims AS victim ON {equality};");
+            SqlServerProviderConnection.AddParameter(command, "@keep", declaration.KeepNewest,
+                new ColumnDefinition { Name = "keep", Type = PortableType.Int32, IsNullable = false });
+            SqlServerProviderConnection.AddParameter(command, "@limit", options.MaxRowsPerBatch,
+                new ColumnDefinition { Name = "limit", Type = PortableType.Int32, IsNullable = false });
+            if (Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn))
+                SqlServerProviderConnection.AddParameter(command, "@__groundwork_scope", Access.Scope!.Value,
+                    new ColumnDefinition { Name = SqlServerSchemaCoordinator.ScopeColumn, Type = PortableType.String, MaxLength = 128, IsNullable = false });
+            var affected = command.ExecuteNonQuery();
+            options.Observer?.Observe(new WritePathEvent("sqlserver.retention-delete", command.CommandText, IsProbe: false));
+            if (affected == 0)
+                break;
+            deleted += affected;
+            batches++;
+            if (affected < options.MaxRowsPerBatch)
+                break;
+        }
+        return new RetentionResult(deleted, batches);
+    }
+
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
-        return ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        WriteOutcome outcome;
+        try
+        {
+            outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            throw;
+        }
+        CompleteOnAppend(
+            registration,
+            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            observer: null);
+        return outcome;
     }
 
     private WriteOutcome AppendCore(
@@ -340,6 +438,15 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
 
         return ApplyMergeBatch(physicalWrites, columns);
     }
+
+    private bool IsNativeAppendBatch(IReadOnlyList<RowWrite> writes) =>
+        Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+        writes.Count != 0 &&
+        SequenceColumnDefinition is null &&
+        writes.All(write => write.Options.Precondition.Kind == WritePreconditionKind.Unconditional) &&
+        !HasSecondaryUniqueIndex(writes[0].Unit) &&
+        writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() == 1 &&
+        writes[0].Mode is RowWriteMode.Insert or RowWriteMode.Upsert;
 
     private IReadOnlyList<ColumnDefinition> PhysicalBatchColumns(RowWrite write)
     {
@@ -598,7 +705,54 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         _ => null
     };
 
-    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
+    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation)
+    {
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            mutation is Mutation.Insert or Mutation.Upsert;
+        var registration = BeginOnAppend(onAppend);
+        WriteOutcome outcome;
+        try
+        {
+            outcome = MutateCore(values, options, mutation);
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            throw;
+        }
+        CompleteOnAppend(registration, onAppend && outcome.Succeeded, options?.Observer);
+        return outcome;
+    }
+
+    private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible) =>
+        eligible && transaction is null
+            ? OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value)
+            : null;
+
+    private void CompleteOnAppend(
+        OnAppendRetentionCoordinator.AppendRegistration? registration,
+        bool cleanupRequired,
+        IWritePathObserver? observer)
+    {
+        void Cleanup()
+        {
+            owner.ThrowIfDisposed();
+            ApplyRetentionCore(new RetentionExecutionOptions { Observer = observer });
+        }
+        if (registration is not null)
+        {
+            registration.Complete(cleanupRequired, Cleanup);
+            return;
+        }
+        if (!cleanupRequired)
+            return;
+        if (transaction is null)
+            OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup);
+        else
+            Cleanup();
+    }
+
+    private WriteOutcome MutateCore(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));

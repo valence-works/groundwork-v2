@@ -85,7 +85,7 @@ internal sealed class MongoTestingSchema(IMongoSchemaCoordinator inner) : ISchem
 
 internal sealed class MongoTestingSession(
     IMongoStorageSession inner,
-    Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
+    Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     public StorageUnit Unit => inner.Unit;
 
@@ -138,6 +138,13 @@ internal sealed class MongoTestingSession(
     {
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
         return ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
+    }
+
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        if (inner is IRetentionStorageSession native)
+            return native.ApplyRetention(options);
+        return RetentionSessionExtensions.ApplyRetention(this, options);
     }
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)

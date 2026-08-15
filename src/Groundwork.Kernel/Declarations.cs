@@ -198,5 +198,6 @@ public sealed record StorageUnit
     }
     public ConcurrencyDeclaration Concurrency { get; init; } = ConcurrencyDeclaration.None;
     public TimestampDeclaration Timestamps { get; init; } = TimestampDeclaration.None;
+    public RetentionDeclaration? Retention { get; init; }
     public int SchemaVersion { get; init; } = 1;
 }

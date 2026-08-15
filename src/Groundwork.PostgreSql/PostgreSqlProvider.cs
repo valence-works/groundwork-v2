@@ -230,6 +230,15 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (source.Retention is not null)
+        {
+            var portability = PortabilityValidator.Validate(source);
+            if (!portability.IsPortable)
+                throw new InvalidOperationException(string.Join(
+                    Environment.NewLine,
+                    portability.Refusals.Select(refusal =>
+                        $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
+        }
         if (source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
         {
             var portability = PortabilityValidator.Validate(source);
@@ -276,6 +285,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
             AppendIdempotency = source.AppendIdempotency,
             Concurrency = source.Concurrency,
             Timestamps = source.Timestamps,
+            Retention = source.Retention,
             SchemaVersion = source.SchemaVersion
         };
     }

@@ -12,7 +12,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -140,11 +140,20 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        return Execute(() => ConditionalUpsertCore(values, options));
+        var outcome = Execute(() => ConditionalUpsertCore(values, options));
+        if (outcome.Status == WriteOutcomeStatus.Inserted && Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
+            ApplyOnAppendRetention(options?.Observer);
+        return outcome;
     }
 
-    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
-        ExecuteWrite(() => ApplyBatchCore(writes));
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+    {
+        var nativeOnAppend = IsNativeAppendBatch(writes);
+        var outcomes = ExecuteWrite(() => ApplyBatchCore(writes));
+        if (nativeOnAppend && OnAppendRetentionCoordinator.TryGetObserver(outcomes, out var observer))
+            ApplyOnAppendRetention(observer);
+        return outcomes;
+    }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
@@ -180,13 +189,63 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         });
     }
 
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) => ExecuteWrite(() =>
+    {
+        options ??= new RetentionExecutionOptions();
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keyColumns = Unit.Key.Columns;
+        var partition = declaration.PartitionColumns.Count == 0
+            ? string.Empty
+            : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+        var scope = Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn)
+            ? $" WHERE {Quote(PostgreSqlSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+            : string.Empty;
+        var keys = string.Join(", ", keyColumns.Select(Quote));
+        var ordering = string.Join(", ", [
+            $"{Quote(declaration.OrderColumn)} DESC",
+            .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+        var equality = string.Join(" AND ", keyColumns.Select(column =>
+            $"target.{Quote(column)}=victim.{Quote(column)}"));
+        var deleted = 0;
+        var batches = 0;
+        while (true)
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            using var command = Command($"WITH ranked AS (" +
+                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
+                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
+                $"DELETE FROM {Quote(Unit.Name)} AS target USING victims AS victim WHERE {equality};");
+            Add(command, "keep", declaration.KeepNewest);
+            Add(command, "limit", options.MaxRowsPerBatch);
+            if (Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn))
+                Add(command, "__groundwork_scope", Access.Scope!.Value);
+            var affected = command.ExecuteNonQuery();
+            options.Observer?.Observe(new WritePathEvent("postgresql.retention-delete", command.CommandText, IsProbe: false));
+            if (affected == 0)
+                break;
+            deleted += affected;
+            batches++;
+            if (affected < options.MaxRowsPerBatch)
+                break;
+        }
+        return new RetentionResult(deleted, batches);
+    });
+
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
-        return ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        var outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return outcome;
     }
 
     private WriteOutcome AppendCore(
@@ -310,6 +369,15 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             _ => ApplyBatchFallback(writes)
         };
     }
+
+    private bool IsNativeAppendBatch(IReadOnlyList<RowWrite> writes) =>
+        Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+        writes.Count != 0 &&
+        SequenceColumn is null &&
+        writes.All(write => write.Options.Precondition.Kind == WritePreconditionKind.Unconditional) &&
+        !HasSecondaryUniqueIndex(writes[0].Unit) &&
+        writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() == 1 &&
+        writes[0].Mode is RowWriteMode.Insert or RowWriteMode.Upsert;
 
     private IReadOnlyList<RowWriteOutcome> ApplyInsertBatch(IReadOnlyList<RowWrite> writes)
     {
@@ -482,7 +550,25 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         _ => null
     };
 
-    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
+    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation)
+    {
+        var outcome = MutateCore(values, options, mutation);
+        if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            mutation is Mutation.Insert or Mutation.Upsert)
+            ApplyOnAppendRetention(options?.Observer);
+        return outcome;
+    }
+
+    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    {
+        void Cleanup() => ApplyRetention(new RetentionExecutionOptions { Observer = observer });
+        if (transaction is null)
+            OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup);
+        else
+            Cleanup();
+    }
+
+    private WriteOutcome MutateCore(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));

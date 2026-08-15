@@ -60,6 +60,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
 
     internal SqliteConnection Connection => connection;
 
+    internal bool UsesSharedSessionConnection => isMemory;
+
     internal SqliteConnection CreateIndependentConnection() =>
         CreateOpenConnection(connection.ConnectionString);
 
