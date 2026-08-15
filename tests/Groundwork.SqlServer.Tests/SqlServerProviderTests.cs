@@ -19,6 +19,52 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IClassFix
             report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1000)]
+    public void W2_concurrency_harness_holds_every_named_invariant(int keyCount)
+    {
+        fixture.Reset();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
+            fixture.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 32,
+                KeyCount = keyCount,
+                RepeatCount = 2,
+                Seed = 5245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                IncludePartialUniqueIndex = true
+            });
+
+        Assert.True(report.Passed, Describe(report));
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+    }
+
+    [Fact]
+    public void W2_none_mode_covers_the_non_versioned_non_partial_index_shape()
+    {
+        fixture.Reset();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
+            fixture.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 32,
+                KeyCount = 1,
+                RepeatCount = 2,
+                Seed = 6245,
+                Concurrency = ConcurrencyKind.None,
+                IncludePartialUniqueIndex = false
+            });
+
+        Assert.True(report.Passed, Describe(report));
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+    }
+
     [Fact]
     public void Customer_email_320_is_a_native_unique_index()
     {
@@ -60,6 +106,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IClassFix
         Assert.Contains("bounded String key column", exception.Message, StringComparison.Ordinal);
     }
 
+    private static string Describe(ConcurrencyHarnessReport report) =>
+        string.Join(Environment.NewLine, report.Scenarios.SelectMany(scenario =>
+            scenario.Invariants.Select(invariant =>
+                $"seed={scenario.Seed} {invariant.Name}: {invariant.Passed} ({invariant.Detail})")));
+
 }
 
 public sealed class SqlServerFixture : IAsyncLifetime
@@ -78,7 +129,8 @@ public sealed class SqlServerFixture : IAsyncLifetime
             SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
             FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
             WHERE t.name IN (N'conformance-global',N'conformance-scoped',N'__groundwork_schema_history',N'__groundwork_schema_fences')
-               OR t.name LIKE N'customer[_]%';
+               OR t.name LIKE N'customer[_]%'
+               OR t.name LIKE N'w2_sqlserver[_]%';
             IF @sql <> N'' EXEC sys.sp_executesql @sql;
             """;
         command.ExecuteNonQuery();

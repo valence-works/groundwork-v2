@@ -7,7 +7,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -34,6 +34,8 @@ internal sealed class SqlServerStorageSession : IStorageSession
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Insert);
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
+        Execute(() => ConditionalUpsertCore(values, options));
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
@@ -109,7 +111,11 @@ internal sealed class SqlServerStorageSession : IStorageSession
         if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
         using var command = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
         AddParameters(command, parameters);
-        try { command.ExecuteNonQuery(); return new WriteOutcome(WriteOutcomeStatus.Upserted, VersionColumnDefinition is null ? null : 1); }
+        try
+        {
+            command.ExecuteNonQuery();
+            return new WriteOutcome(WriteOutcomeStatus.Upserted, VersionColumnDefinition is null ? null : 1);
+        }
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
     }
 
@@ -138,6 +144,126 @@ internal sealed class SqlServerStorageSession : IStorageSession
         {
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         }
+    }
+
+    private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        ValidateValues(values.Values, requireAllNonNullable: false);
+        if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
+
+        var key = new StorageKey(LogicalKeyColumns.ToDictionary(
+            column => column,
+            column => values.Values.TryGetValue(column, out var value)
+                ? value
+                : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
+            StringComparer.Ordinal));
+        if (transaction is not null)
+            return ExecuteConditionalBatch(values, options, key);
+
+        using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable);
+        activeTransaction = writeTransaction;
+        try
+        {
+            var result = ExecuteConditionalBatch(values, options, key);
+            writeTransaction.Commit();
+            return result;
+        }
+        catch
+        {
+            writeTransaction.Rollback();
+            throw;
+        }
+        finally
+        {
+            activeTransaction = null;
+        }
+    }
+
+    private WriteOutcome ExecuteConditionalBatch(
+        StorageValues values,
+        WriteOptions? options,
+        StorageKey key)
+    {
+        var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
+        var updateColumns = supplied.Where(column =>
+            !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+            column.Name != "createdAt" &&
+            column.Name != SqlServerSchemaCoordinator.ScopeColumn).ToArray();
+        var updates = updateColumns.Select(column =>
+            $"{Quote(column.Name)}=@{column.Name}").ToList();
+        if (updates.Count == 0)
+        {
+            var noOpColumn = LogicalKeyColumns[0];
+            updates.Add($"{Quote(noOpColumn)}={Quote(noOpColumn)}");
+        }
+        if (VersionColumnDefinition is not null)
+            updates.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1");
+
+        var parameters = BuildParameters(values.Values, supplied);
+        var (_, keyParameters) = KeyPredicate(key.Values);
+        foreach (var pair in keyParameters)
+            parameters[pair.Key] = pair.Value;
+        if (VersionColumnDefinition is not null)
+            parameters["@expected"] = (options?.ExpectedVersion, VersionColumnDefinition);
+
+        var where = string.Join(" AND ", LogicalKeyColumns.Select(column =>
+            $"target.{Quote(column)}=@key_{column}"));
+        if (ScopeColumnDefinition is not null)
+            where += $" AND target.{Quote(ScopeColumnDefinition.Name)}=@__groundwork_scope";
+        var updateCondition = VersionColumnDefinition is null
+            ? "1=1"
+            : $"@expected IS NOT NULL AND target.{Quote(VersionColumnDefinition.Name)}=@expected";
+        var insertCondition = VersionColumnDefinition is null ? "1=1" : "@expected IS NULL";
+        var insertColumns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+        {
+            insertColumns.Add(VersionColumnDefinition);
+            parameters["@__groundwork_version"] = (1L, VersionColumnDefinition);
+        }
+        if (ScopeColumnDefinition is not null)
+        {
+            insertColumns.Add(ScopeColumnDefinition);
+            parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
+        }
+
+        var outputVersion = VersionColumnDefinition is null
+            ? "CONVERT(bigint, NULL)"
+            : $"inserted.{Quote(VersionColumnDefinition.Name)}";
+        var sql = $"DECLARE @result TABLE ([operation] nvarchar(6) NOT NULL, [version] bigint NULL); " +
+            $"UPDATE target WITH (UPDLOCK, SERIALIZABLE) SET {string.Join(", ", updates)} " +
+            $"OUTPUT N'UPDATE', {outputVersion} INTO @result ([operation], [version]) " +
+            $"FROM {Quote(Unit.Name)} AS target WHERE {where} AND ({updateCondition}); " +
+            $"IF @@ROWCOUNT = 0 AND ({insertCondition}) BEGIN " +
+            $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", insertColumns.Select(column => Quote(column.Name)))}) " +
+            $"OUTPUT N'INSERT', {(VersionColumnDefinition is null ? "CONVERT(bigint, NULL)" : "CONVERT(bigint, 1)")} " +
+            $"INTO @result ([operation], [version]) VALUES ({string.Join(", ", insertColumns.Select(column => "@" + column.Name))}); END; " +
+            "SELECT [operation], [version] FROM @result;";
+        using var command = Command(sql);
+        AddParameters(command, parameters);
+        try
+        {
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                var status = string.Equals(reader.GetString(0), "INSERT", StringComparison.Ordinal)
+                    ? WriteOutcomeStatus.Inserted
+                    : WriteOutcomeStatus.Updated;
+                var version = reader.IsDBNull(1)
+                    ? (long?)null
+                    : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+                return new WriteOutcome(status, version);
+            }
+        }
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
+        {
+            var existing = ReadCore(key);
+            return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+        }
+
+        var current = ReadCore(key);
+        return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, current?.Version);
     }
 
     private StoredEntry? ReadCore(StorageKey key)
@@ -226,7 +352,8 @@ internal sealed class SqlServerStorageSession : IStorageSession
         try
         {
             if (transaction is not null) return operation();
-            lock (owner.Gate) { owner.ThrowIfDisposed(); return operation(); }
+            owner.ThrowIfDisposed();
+            return operation();
         }
         catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
         {

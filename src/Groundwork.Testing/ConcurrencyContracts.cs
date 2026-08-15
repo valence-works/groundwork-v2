@@ -451,7 +451,8 @@ public static class ConcurrencyHarness
             Name = $"w2_{providerName}_{seed}",
             Columns =
             [
-                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                // Keep the probe key within the portable provider-neutral physical envelope.
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
                 new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 256 },
                 new ColumnDefinition { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
             ],
