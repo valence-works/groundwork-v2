@@ -470,7 +470,8 @@ public static class ExpressionLowerer
                 return AstPredicate.AlwaysFalse.Instance;
             }
             var target = call.Object is null ? null : Unwrap(call.Object);
-            if (call.Method.Name == "Contains" && target is MemberExpression setMember && model.ElementSets.ContainsKey(setMember.Member.Name) && call.Arguments.Count == 1)
+            if (call.Method.Name == "Contains" && target is MemberExpression setMember && model.ElementSets.ContainsKey(setMember.Member.Name) &&
+                call.Arguments.Count == 1 && IsPortableCollectionMembershipMethod(call.Method))
             {
                 var column = model.ElementSet(setMember.Member.Name);
                 var value = ClosedValue(call.Arguments[0], parameter, diagnostics);
@@ -519,12 +520,14 @@ public static class ExpressionLowerer
             }
             var collectionExpression = target ?? (call.Method.IsStatic && call.Arguments.Count != 0 ? Unwrap(call.Arguments[0]) : null);
             var lambdaArgument = call.Method.IsStatic && call.Arguments.Count != 0 ? call.Arguments[call.Arguments.Count - 1] : call.Arguments.SingleOrDefault();
-            if (call.Method.Name is "Any" or "All" && call.Method.DeclaringType?.FullName == typeof(Enumerable).FullName && collectionExpression is MemberExpression collection && model.ElementSets.ContainsKey(collection.Member.Name) && lambdaArgument is not null && Unwrap(lambdaArgument) is LambdaExpression lambda)
+            if (call.Method.Name is "Any" or "All" && call.Method.DeclaringType == typeof(Enumerable) && collectionExpression is MemberExpression collection && model.ElementSets.ContainsKey(collection.Member.Name) && lambdaArgument is not null && Unwrap(lambdaArgument) is LambdaExpression lambda)
             {
                 if (lambda.Body is BinaryExpression equality && equality.NodeType == ExpressionType.Equal)
                 {
-                    var constant = equality.Left == lambda.Parameters[0] ? equality.Right : equality.Right == lambda.Parameters[0] ? equality.Left : null;
-                    if (constant is not null)
+                    var leftIsElement = equality.Left == lambda.Parameters[0];
+                    var rightIsElement = equality.Right == lambda.Parameters[0];
+                    var constant = leftIsElement != rightIsElement ? (leftIsElement ? equality.Right : equality.Left) : null;
+                    if (constant is not null && !ContainsParameter(constant, lambda.Parameters[0]) && !ContainsParameter(constant, parameter))
                         return new AstPredicate.ElementOf(model.ElementSet(collection.Member.Name), new[] { QueryConstant.Of(ClosedValue(constant, parameter, diagnostics)) }, call.Method.Name == "Any" ? SetQuantifier.Any : SetQuantifier.All);
                 }
                 Add("GW-LINQ-106", "Nested Any/All predicates must be equality-only; declare the element set", call);
@@ -560,13 +563,13 @@ public static class ExpressionLowerer
         private static bool IsPortableMembershipMethod(MethodInfo method)
         {
             if (!method.IsStatic || method.Name != "Contains") return false;
-            if (method.DeclaringType?.FullName == typeof(Enumerable).FullName)
+            if (method.DeclaringType == typeof(Enumerable))
                 return method.GetParameters().Length == 2;
 
             // .NET 10 binds array.Contains(value) to this BCL overload, which is
             // expression-tree safe only for its exact ReadOnlySpan<T>, T shape.
             var parameters = method.GetParameters();
-            return method.DeclaringType?.FullName == "System.MemoryExtensions" &&
+            return method.DeclaringType == typeof(MemoryExtensions) &&
                 parameters.Length == 2 &&
                 parameters[0].ParameterType.FullName?.StartsWith("System.ReadOnlySpan`1", StringComparison.Ordinal) == true;
         }

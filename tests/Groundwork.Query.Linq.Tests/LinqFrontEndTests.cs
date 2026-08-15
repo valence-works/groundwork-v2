@@ -17,6 +17,15 @@ public sealed class LinqFrontEndTests
     {
         public string Display { get; set; } = string.Empty;
     }
+    private sealed class LookalikeElementSet
+    {
+        public bool Contains(int value) => true;
+    }
+    private sealed class ElementSetTicket
+    {
+        public int Id { get; set; }
+        public LookalikeElementSet Values { get; set; } = new();
+    }
     private static int sideEffectReads;
     private static int SideEffectValue => Interlocked.Increment(ref sideEffectReads);
     private static int evilInitializerReads;
@@ -254,6 +263,29 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
+    public void Element_set_equality_requires_one_direct_nested_element_and_one_closed_value()
+    {
+        var constantEquality = ExpressionLowerer.Diagnose<Ticket>(ticket => ticket.TagIds.Any(value => 1 == 2), Tickets);
+        var nestedElementExpression = ExpressionLowerer.Diagnose<Ticket>(ticket => ticket.TagIds.All(value => value == Math.Abs(value)), Tickets);
+        var outerRowCapture = ExpressionLowerer.Diagnose<Ticket>(ticket => ticket.TagIds.Any(value => value == ticket.TenantId), Tickets);
+
+        Assert.Equal("GW-LINQ-106", Assert.Single(constantEquality).Code);
+        Assert.Equal("GW-LINQ-106", Assert.Single(nestedElementExpression).Code);
+        Assert.Equal("GW-LINQ-106", Assert.Single(outerRowCapture).Code);
+    }
+
+    [Fact]
+    public void Collection_membership_requires_a_closed_collection_and_direct_row_column()
+    {
+        var values = new[] { 1, 2 };
+        var closedItem = ExpressionLowerer.Diagnose<Ticket>(ticket => values.Contains(7), Tickets);
+        var rowCollection = ExpressionLowerer.Diagnose<Ticket>(ticket => ticket.TagIds.Contains(ticket.TenantId), Tickets);
+
+        Assert.Contains(closedItem, diagnostic => diagnostic.Code == "GW-LINQ-107");
+        Assert.Contains(rowCollection, diagnostic => diagnostic.Code == "GW-LINQ-107");
+    }
+
+    [Fact]
     public void Static_contains_lookalikes_are_not_silently_lowered()
     {
         var diagnostics = ExpressionLowerer.Diagnose<Ticket>(ticket => EnumerableLookalike.Contains(new[] { 1, 2 }, ticket.TenantId), Tickets);
@@ -264,6 +296,32 @@ public sealed class LinqFrontEndTests
     public void Reduced_extension_contains_lookalikes_are_not_silently_lowered()
     {
         var diagnostics = ExpressionLowerer.Diagnose(Lookalikes.EnumerableExtensionFactory.Create(new Lookalikes.EnumerableExtensionFactory.CustomValues()), Tickets);
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-107");
+    }
+
+    [Fact]
+    public void Exact_name_enumerable_spoofs_are_not_silently_lowered()
+    {
+        var contains = ExpressionLowerer.Diagnose(Lookalikes.ExactNameEnumerableFactory.CreateContains(), Tickets);
+        var any = ExpressionLowerer.Diagnose(Lookalikes.ExactNameEnumerableFactory.CreateAny(), Tickets);
+
+        Assert.Contains(contains, diagnostic => diagnostic.Code == "GW-LINQ-107");
+        Assert.Contains(any, diagnostic => diagnostic.Code == "GW-LINQ-107");
+    }
+
+    [Fact]
+    public void Declared_element_sets_reject_instance_contains_lookalikes()
+    {
+        var model = new GwTableModel<ElementSetTicket>("element_sets", new[]
+        {
+            new GwColumn<ElementSetTicket>(nameof(ElementSetTicket.Id), "id", QueryType.Int32, false)
+        }, new[]
+        {
+            new GwElementSet<ElementSetTicket>(nameof(ElementSetTicket.Values), "values", QueryType.Int32)
+        });
+
+        var diagnostics = ExpressionLowerer.Diagnose<ElementSetTicket>(ticket => ticket.Values.Contains(7), model);
+
         Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-107");
     }
 

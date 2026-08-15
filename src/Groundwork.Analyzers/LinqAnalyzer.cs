@@ -124,7 +124,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 Report("GW-LINQ-104", node, "GW-LINQ-104: v2 has no joins; use a declared element set or two queries");
             else if (name == "GroupBy")
                 Report("GW-LINQ-105", node, "GW-LINQ-105: use `.LatestPer(...)` for grouped top-1");
-            else if (IsEnumerableAnyAll(symbol, node) && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && (!IsEquality(nested.Body) || ReferencesOuterParameter(nested.Body)))
+            else if (IsEnumerableAnyAll(symbol, node) && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && !IsSupportedElementEquality(nested, node))
                 Report("GW-LINQ-106", node, "GW-LINQ-106: declare the element set");
             else if (name is "AddDays" or "AddHours" or "AddMinutes" or "AddSeconds" && symbol?.ContainingType?.ToDisplayString() == "System.DateTimeOffset")
             {
@@ -187,48 +187,112 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         }
         private bool HasDistinctMemberOperands(ExpressionSyntax left, ExpressionSyntax right) => left is MemberAccessExpressionSyntax && right is MemberAccessExpressionSyntax && HasLambdaParameter(left) && HasLambdaParameter(right);
         private bool IsStringInvocation(InvocationExpressionSyntax node) => node.Expression is MemberAccessExpressionSyntax member && context.SemanticModel.GetTypeInfo(member.Expression).Type?.SpecialType == SpecialType.System_String;
-        private static bool IsEquality(CSharpSyntaxNode node) => node is BinaryExpressionSyntax binary && binary.IsKind(SyntaxKind.EqualsExpression);
         private bool IsKnownQueryMethod(IMethodSymbol symbol, InvocationExpressionSyntax node)
         {
             if (symbol.Name == "Contains")
             {
                 if (symbol.ReturnType.SpecialType != SpecialType.System_Boolean || node.Expression is not MemberAccessExpressionSyntax member)
                     return false;
-                var containingType = symbol.ContainingType?.ToDisplayString();
-                if (containingType == "System.Linq.Enumerable")
+                var original = symbol.ReducedFrom ?? symbol;
+                if (IsTrustedFrameworkType(original.ContainingType, "System.Linq.Enumerable"))
                 {
                     var reduced = symbol.ReducedFrom is not null;
                     var expectedArguments = reduced ? 1 : 2;
-                    var original = symbol.ReducedFrom ?? symbol;
-                    return original.Parameters.Length == 2 && node.ArgumentList.Arguments.Count == expectedArguments &&
-                        (reduced || symbol.IsStatic) && member.Expression is not null;
+                    if (original.Parameters.Length != 2 || node.ArgumentList.Arguments.Count != expectedArguments ||
+                        (!reduced && !symbol.IsStatic)) return false;
+                    return HasSupportedMembershipOperands(
+                        reduced ? member.Expression : node.ArgumentList.Arguments[0].Expression,
+                        node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression);
                 }
-                if (containingType == "System.MemoryExtensions")
+                if (IsTrustedFrameworkType(original.ContainingType, "System.MemoryExtensions"))
                 {
                     var reduced = symbol.ReducedFrom is not null;
-                    var original = symbol.ReducedFrom ?? symbol;
-                    return original.Parameters.Length == 2 &&
-                        original.Parameters[0].Type.ToDisplayString().StartsWith("System.ReadOnlySpan<", StringComparison.Ordinal) &&
-                        node.ArgumentList.Arguments.Count == (reduced ? 1 : 2) &&
-                        (reduced || symbol.IsStatic);
+                    if (original.Parameters.Length != 2 ||
+                        !original.Parameters[0].Type.ToDisplayString().StartsWith("System.ReadOnlySpan<", StringComparison.Ordinal) ||
+                        node.ArgumentList.Arguments.Count != (reduced ? 1 : 2) || (!reduced && !symbol.IsStatic)) return false;
+                    return HasSupportedMembershipOperands(
+                        reduced ? member.Expression : node.ArgumentList.Arguments[0].Expression,
+                        node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression);
                 }
                 return symbol.ReducedFrom is null && !symbol.IsStatic && symbol.Parameters.Length == 1 &&
-                    node.ArgumentList.Arguments.Count == 1 && IsBclCollectionType(symbol.ContainingType);
+                    node.ArgumentList.Arguments.Count == 1 && IsBclCollectionType(symbol.ContainingType) &&
+                    (HasSupportedMembershipOperands(member.Expression, node.ArgumentList.Arguments[0].Expression) ||
+                     HasSupportedElementMembershipOperands(member.Expression, node.ArgumentList.Arguments[0].Expression));
             }
             if (!IsEnumerableAnyAll(symbol, node)) return false;
             var elementCollection = symbol.ReducedFrom is null ? node.ArgumentList.Arguments[0].Expression : (node.Expression as MemberAccessExpressionSyntax)?.Expression;
             var lambda = node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression as LambdaExpressionSyntax;
-            return elementCollection is MemberAccessExpressionSyntax && lambda is not null && IsEquality(lambda.Body) && !ReferencesOuterParameter(lambda.Body, node);
+            return elementCollection is MemberAccessExpressionSyntax && lambda is not null && IsSupportedElementEquality(lambda, node);
         }
 
-        private static bool IsEnumerableAnyAll(IMethodSymbol? symbol, InvocationExpressionSyntax node) => symbol is not null &&
-            symbol.ContainingType?.ToDisplayString() == "System.Linq.Enumerable" &&
+        private bool IsSupportedElementEquality(LambdaExpressionSyntax nested, InvocationExpressionSyntax invocation)
+        {
+            if (nested.Body is not BinaryExpressionSyntax equality || !equality.IsKind(SyntaxKind.EqualsExpression)) return false;
+            var parameter = nested switch
+            {
+                SimpleLambdaExpressionSyntax simple => context.SemanticModel.GetDeclaredSymbol(simple.Parameter),
+                ParenthesizedLambdaExpressionSyntax { ParameterList.Parameters.Count: 1 } parenthesized => context.SemanticModel.GetDeclaredSymbol(parenthesized.ParameterList.Parameters[0]),
+                _ => null
+            };
+            if (parameter is null) return false;
+            var leftIsElement = IsParameterOperand(equality.Left, parameter);
+            var rightIsElement = IsParameterOperand(equality.Right, parameter);
+            if (leftIsElement == rightIsElement) return false;
+            var value = leftIsElement ? equality.Right : equality.Left;
+            return !ReferencesParameter(value, parameter) && !ReferencesOuterParameter(nested.Body, invocation);
+        }
+
+        private bool IsParameterOperand(ExpressionSyntax operand, IParameterSymbol parameter)
+        {
+            while (operand is ParenthesizedExpressionSyntax parenthesized) operand = parenthesized.Expression;
+            return operand is IdentifierNameSyntax identifier && SymbolEqualityComparer.Default.Equals(context.SemanticModel.GetSymbolInfo(identifier).Symbol, parameter);
+        }
+
+        private bool ReferencesParameter(SyntaxNode source, IParameterSymbol parameter) => source.DescendantNodesAndSelf()
+            .OfType<IdentifierNameSyntax>()
+            .Any(identifier => SymbolEqualityComparer.Default.Equals(context.SemanticModel.GetSymbolInfo(identifier).Symbol, parameter));
+
+        private bool HasSupportedMembershipOperands(ExpressionSyntax collection, ExpressionSyntax item) =>
+            !HasLambdaParameter(collection) && IsDirectOuterColumn(item);
+
+        private bool HasSupportedElementMembershipOperands(ExpressionSyntax collection, ExpressionSyntax item) =>
+            IsDirectOuterColumn(collection) && !HasLambdaParameter(item);
+
+        private bool IsDirectOuterColumn(ExpressionSyntax source)
+        {
+            while (source is ParenthesizedExpressionSyntax parenthesized) source = parenthesized.Expression;
+            if (source is not MemberAccessExpressionSyntax member) return false;
+            if (member.Name.Identifier.ValueText == "Value" && member.Expression is MemberAccessExpressionSyntax nullable)
+                member = nullable;
+            if (member.Expression is not IdentifierNameSyntax receiver) return false;
+            var outerParameters = lambda switch
+            {
+                SimpleLambdaExpressionSyntax simple => new[] { context.SemanticModel.GetDeclaredSymbol(simple.Parameter) },
+                ParenthesizedLambdaExpressionSyntax parenthesized => parenthesized.ParameterList.Parameters.Select(parameter => context.SemanticModel.GetDeclaredSymbol(parameter)),
+                _ => Enumerable.Empty<IParameterSymbol?>()
+            };
+            var symbol = context.SemanticModel.GetSymbolInfo(receiver).Symbol;
+            return outerParameters.Any(parameter => parameter is not null && SymbolEqualityComparer.Default.Equals(symbol, parameter));
+        }
+
+        private bool IsEnumerableAnyAll(IMethodSymbol? symbol, InvocationExpressionSyntax node) => symbol is not null &&
+            IsTrustedFrameworkType((symbol.ReducedFrom ?? symbol).ContainingType, "System.Linq.Enumerable") &&
             symbol.Name is "Any" or "All" && (symbol.ReducedFrom ?? symbol).Parameters.Length == 2 &&
             node.ArgumentList.Arguments.Count == (symbol.ReducedFrom is null ? 2 : 1) &&
             node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax;
-        private static bool IsBclCollectionType(INamedTypeSymbol? type) => type is not null &&
-            type.ContainingAssembly.Identity.Name is "System.Private.CoreLib" or "System.Runtime" &&
-            type.ContainingNamespace.ToDisplayString() == "System.Collections.Generic";
+        private bool IsBclCollectionType(INamedTypeSymbol? type)
+        {
+            var trustedCollection = context.Compilation.GetTypeByMetadataName("System.Collections.Generic.List`1");
+            return type is not null && trustedCollection is not null &&
+                SymbolEqualityComparer.Default.Equals(type.ContainingAssembly, trustedCollection.ContainingAssembly) &&
+                type.ContainingNamespace.ToDisplayString() == "System.Collections.Generic";
+        }
+        private bool IsTrustedFrameworkType(INamedTypeSymbol? type, string metadataName)
+        {
+            var trustedType = context.Compilation.GetTypeByMetadataName(metadataName);
+            return type is not null && trustedType is not null &&
+                SymbolEqualityComparer.Default.Equals(type.OriginalDefinition, trustedType.OriginalDefinition);
+        }
         private bool ReferencesOuterParameter(SyntaxNode body, InvocationExpressionSyntax? invocation = null)
         {
             var outerNames = lambda switch

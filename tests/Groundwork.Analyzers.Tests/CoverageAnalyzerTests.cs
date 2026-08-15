@@ -106,10 +106,37 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Linq_analyzer_rejects_contains_without_a_closed_collection_and_direct_row_column()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq; using System.Linq.Expressions; public sealed class Ticket { public int Id { get; set; } public int[] Tags { get; set; } = Array.Empty<int>(); } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => ids.Contains(7) || ticket.Tags.Contains(ticket.Id)); } }");
+        Assert.Equal(2, diagnostics.Count(item => item.Id == "GW_LINQ_107"));
+    }
+
+    [Fact]
     public async Task Linq_analyzer_rejects_reduced_extension_contains_lookalikes()
     {
         var diagnostics = await AnalyzeLinq("using System; using System.Linq.Expressions; using CustomExtensions; public sealed class Ticket { public int Id { get; set; } } namespace CustomExtensions { public sealed class CustomValues { } public static class CustomValueExtensions { public static bool Contains(this CustomValues values, int value) => false; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, CustomValues values) { table.Where(ticket => values.Contains(ticket.Id)); } }");
         Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_107");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_rejects_exact_name_enumerable_spoofs_from_an_aliased_assembly()
+    {
+        using var stream = new MemoryStream();
+        var spoof = CSharpCompilation.Create(
+            "SpoofEnumerable",
+            [CSharpSyntaxTree.ParseText("namespace System.Linq { public static class Enumerable { public static bool Contains<T>(System.Collections.Generic.IEnumerable<T> values, T value) => true; public static bool Any<T>(System.Collections.Generic.IEnumerable<T> values, System.Func<T, bool> predicate) => true; } }")],
+            References(),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        Assert.True(spoof.Emit(stream).Success);
+        stream.Position = 0;
+        var reference = MetadataReference.CreateFromStream(stream, new MetadataReferenceProperties(aliases: ["spoof"]));
+
+        var diagnostics = await AnalyzeLinq(
+            "extern alias spoof; using System; using System.Linq.Expressions; public sealed class Ticket { public int Id { get; set; } public int[] Tags { get; set; } = Array.Empty<int>(); } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => spoof::System.Linq.Enumerable.Contains(ids, ticket.Id) && spoof::System.Linq.Enumerable.Any(ticket.Tags, value => value == 7)); } }",
+            [reference]);
+
+        Assert.Equal(2, diagnostics.Count(item => item.Id == "GW_LINQ_107"));
     }
 
     [Fact]
@@ -130,6 +157,20 @@ public sealed class CoverageAnalyzerTests
     public async Task Linq_analyzer_rejects_element_set_predicates_that_capture_the_outer_row()
     {
         var diagnostics = await AnalyzeLinq("using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Tags.Any(value => value == ticket.Id)); } }");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_106");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_requires_element_set_equality_to_compare_the_nested_element_once()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Tags.Any(value => 1 == 2) || ticket.Tags.All(value => value == value)); } }");
+        Assert.Equal(2, diagnostics.Count(item => item.Id == "GW_LINQ_106"));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_rejects_element_set_equality_with_a_nested_element_expression()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Tags.Any(value => value == Math.Abs(value))); } }");
         Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_106");
     }
 
@@ -377,12 +418,12 @@ public sealed class CoverageAnalyzerTests
         return result;
     }
 
-    private static async Task<ImmutableArray<Diagnostic>> AnalyzeLinq(string source)
+    private static async Task<ImmutableArray<Diagnostic>> AnalyzeLinq(string source, IEnumerable<MetadataReference>? references = null)
     {
         var compilation = CSharpCompilation.Create(
             "LinqInput",
             [CSharpSyntaxTree.ParseText(SourceText.From(NormalizeLinqSource(source), Encoding.UTF8))],
-            References(),
+            References().Concat(references ?? Array.Empty<MetadataReference>()),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         return await compilation.WithAnalyzers(
             [new LinqAnalyzer()],
