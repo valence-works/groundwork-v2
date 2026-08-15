@@ -7,7 +7,8 @@ using Xunit;
 
 namespace Groundwork.SqlServer.Tests;
 
-public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
+[Collection("SQL Server provider")]
+public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [Fact]
     public void Provider_passes_provider_neutral_conformance()
@@ -19,50 +20,39 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IClassFix
             report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
     }
 
-    [Theory]
-    [InlineData(1)]
-    [InlineData(1000)]
-    public void W2_concurrency_harness_holds_every_named_invariant(int keyCount)
+    [Fact]
+    public void W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix()
     {
-        fixture.Reset();
-        var report = ConcurrencyHarness.Run(
-            new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
-            fixture.ConnectionString,
-            new ConcurrencyProbeOptions
-            {
-                WriterCount = 32,
-                KeyCount = keyCount,
-                RepeatCount = 2,
-                Seed = 5245,
-                Concurrency = ConcurrencyKind.Optimistic,
-                IncludePartialUniqueIndex = true
-            });
+        foreach (var (keyCount, includePartialUniqueIndex, optimistic) in W2Shapes())
+        {
+            fixture.Reset();
+            var report = ConcurrencyHarness.Run(
+                new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
+                fixture.ConnectionString,
+                new ConcurrencyProbeOptions
+                {
+                    WriterCount = 32,
+                    KeyCount = keyCount,
+                    RepeatCount = 2,
+                    Seed = 5245 + (keyCount == 1000 ? 1000 : 0) +
+                        (includePartialUniqueIndex ? 100 : 0) + (optimistic ? 10 : 0),
+                    Concurrency = optimistic ? ConcurrencyKind.Optimistic : ConcurrencyKind.None,
+                    IncludePartialUniqueIndex = includePartialUniqueIndex
+                });
 
-        Assert.True(report.Passed, Describe(report));
-        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
-            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+            var shape = $"M={keyCount}, partial={includePartialUniqueIndex}, optimistic={optimistic}";
+            Assert.True(report.Passed, $"{shape}{Environment.NewLine}{Describe(report)}");
+            Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+                Assert.True(invariant.Passed, $"{shape}: {invariant.Name}: {invariant.Detail}"));
+        }
     }
 
-    [Fact]
-    public void W2_none_mode_covers_the_non_versioned_non_partial_index_shape()
+    private static IEnumerable<(int KeyCount, bool IncludePartialUniqueIndex, bool Optimistic)> W2Shapes()
     {
-        fixture.Reset();
-        var report = ConcurrencyHarness.Run(
-            new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
-            fixture.ConnectionString,
-            new ConcurrencyProbeOptions
-            {
-                WriterCount = 32,
-                KeyCount = 1,
-                RepeatCount = 2,
-                Seed = 6245,
-                Concurrency = ConcurrencyKind.None,
-                IncludePartialUniqueIndex = false
-            });
-
-        Assert.True(report.Passed, Describe(report));
-        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
-            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+        foreach (var keyCount in new[] { 1, 1000 })
+        foreach (var includePartialUniqueIndex in new[] { false, true })
+        foreach (var optimistic in new[] { false, true })
+            yield return (keyCount, includePartialUniqueIndex, optimistic);
     }
 
     [Fact]
@@ -111,6 +101,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture) : IClassFix
             scenario.Invariants.Select(invariant =>
                 $"seed={scenario.Seed} {invariant.Name}: {invariant.Passed} ({invariant.Detail})")));
 
+}
+
+[CollectionDefinition("SQL Server provider", DisableParallelization = true)]
+public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>
+{
 }
 
 public sealed class SqlServerFixture : IAsyncLifetime
