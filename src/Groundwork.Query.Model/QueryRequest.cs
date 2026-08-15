@@ -167,6 +167,8 @@ public sealed record QueryRequest
     public string CanonicalPredicate { get; internal init; }
     public string ShapeFingerprint { get; }
     public string ContinuationFingerprint { get; internal init; }
+
+    internal string? ContinuationBindingDiscriminator { get; init; }
 }
 
 public sealed record QueryResult<T>

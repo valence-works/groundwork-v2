@@ -570,9 +570,25 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
             .GroupBy(row => ValueIdentity(row.TryGetValue(latest.Key.Name, out var key) ? key : null), StringComparer.Ordinal)
             .Select(group => group
                 .OrderByDescending(row => ((DateTimeOffset)row[latest.Timestamp.Name]!).UtcTicks)
-                .ThenBy(row => string.Join("\u001f", tieBreakColumns.Select(column => ValueIdentity(row.TryGetValue(column.Name, out var value) ? value : null))), StringComparer.Ordinal)
-                .First())
+                .Aggregate((best, candidate) => CompareTie(candidate, best, tieBreakColumns) < 0 ? candidate : best))
             .ToList();
+    }
+
+    private static int CompareTie(
+        IReadOnlyDictionary<string, object?> left,
+        IReadOnlyDictionary<string, object?> right,
+        IReadOnlyList<ColumnRef> columns)
+    {
+        foreach (var column in columns)
+        {
+            left.TryGetValue(column.Name, out var leftValue);
+            right.TryGetValue(column.Name, out var rightValue);
+            var comparison = CompareForOrder(leftValue, rightValue,
+                new OrderTerm(column, OrderDirection.Ascending, NullOrder.First));
+            if (comparison != 0)
+                return comparison;
+        }
+        return 0;
     }
 
     private static bool IsAfter(

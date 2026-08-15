@@ -1,6 +1,8 @@
 using System.Collections;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Groundwork.Query.Model;
 
@@ -183,8 +185,16 @@ public static class QueryResultMaterializer
 /// <summary>Builds the internal execution request without changing the public query binding.</summary>
 public static class QueryRequestExecution
 {
+    public static string ScopeBindingDiscriminator(string scope)
+    {
+        if (string.IsNullOrWhiteSpace(scope))
+            throw new ArgumentException("A scope binding discriminator requires a non-blank scope.", nameof(scope));
+        using var hash = SHA256.Create();
+        return BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(scope))).Replace("-", string.Empty);
+    }
+
     /// <summary>Builds a provider execution request while preserving the caller's continuation binding.</summary>
-    public static QueryRequest WithProviderPredicate(QueryRequest request, Predicate predicate)
+    public static QueryRequest WithProviderPredicate(QueryRequest request, Predicate predicate, string? bindingDiscriminator = null)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (predicate is null) throw new ArgumentNullException(nameof(predicate));
@@ -192,7 +202,8 @@ public static class QueryRequestExecution
             request.Result, request.LatestPerKey, request.AcceptedScan)
         {
             CanonicalPredicate = request.CanonicalPredicate,
-            ContinuationFingerprint = request.ContinuationFingerprint
+            ContinuationFingerprint = request.ContinuationFingerprint,
+            ContinuationBindingDiscriminator = bindingDiscriminator ?? request.ContinuationBindingDiscriminator
         };
     }
 
@@ -230,7 +241,8 @@ public static class QueryRequestExecution
                 // The extra projected tie-break fields are an execution detail, not a new
                 // continuation identity. Keep the token bound to the caller's projection.
                 CanonicalPredicate = request.CanonicalPredicate,
-                ContinuationFingerprint = request.ContinuationFingerprint
+                ContinuationFingerprint = request.ContinuationFingerprint,
+                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
             };
     }
 }

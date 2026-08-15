@@ -42,7 +42,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var executionSource = WithScopePredicate(request);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null && column.Name != SqliteSchemaCoordinator.ScopeColumn)!.Select(column => column!)) with
         {
             Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(
@@ -58,7 +58,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
         });
-        return QueryResultMaterializer.Materialize(request, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
     });
@@ -68,7 +68,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         : QueryRequestExecution.WithProviderPredicate(request, new Predicate.And([
             request.Where,
             new Predicate.Equal(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String),
-                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]));
+                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
+            QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
     public StoredEntry? Read(StorageKey key) => Execute(() =>
     {

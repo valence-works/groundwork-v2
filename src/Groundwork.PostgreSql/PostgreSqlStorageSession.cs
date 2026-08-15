@@ -45,7 +45,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var executionSource = WithScopePredicate(request);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null && column.Name != PostgreSqlSchemaCoordinator.ScopeColumn)!.Select(column => column!)) with
         {
             Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
@@ -58,7 +58,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
         });
-        return QueryResultMaterializer.Materialize(request, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
     });
@@ -68,7 +68,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         : QueryRequestExecution.WithProviderPredicate(request, new Predicate.And([
             request.Where,
             new Predicate.Equal(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String),
-                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]));
+                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
+            QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
     public StoredEntry? Read(StorageKey key) => Execute(() => ReadCore(key));
 

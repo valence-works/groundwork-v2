@@ -97,7 +97,7 @@ public sealed class MongoQueryRenderer
     private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
         options.GetEffectiveOrder(request);
 
-    private static BsonDocument RenderPredicate(Predicate predicate, int inValueLimit, string table)
+    private BsonDocument RenderPredicate(Predicate predicate, int inValueLimit, string table)
     {
         switch (predicate)
         {
@@ -118,6 +118,8 @@ public sealed class MongoQueryRenderer
                     : new BsonDocument(membership.Column.Name, new BsonDocument("$in", new BsonArray(membership.Values.Select(ToBson))));
             case Predicate.Range range:
             {
+                if (range.Column.Type == QueryType.String)
+                    return RenderStringRange(range);
                 var operators = new BsonDocument();
                 if (range.Lower is not null)
                     operators.Add(range.Lower.IsInclusive ? "$gte" : "$gt", ToBson(range.Lower.Value));
@@ -221,6 +223,25 @@ public sealed class MongoQueryRenderer
         return new BsonDocument(term.Column.Name, value.Kind == QueryConstantKind.Null
             ? BsonNull.Value
             : ToBson(value));
+    }
+
+    private BsonDocument RenderStringRange(Predicate.Range range)
+    {
+        var clauses = new BsonArray
+        {
+            new BsonDocument("$ne", new BsonArray { "$" + range.Column.Name, BsonNull.Value })
+        };
+        if (range.Lower is { } lower)
+            clauses.Add(new BsonDocument(lower.IsInclusive ? "$gte" : "$gt", new BsonArray
+            {
+                RenderOrdinalKey("$" + range.Column.Name), RenderOrdinalKey(lower.Value)
+            }));
+        if (range.Upper is { } upper)
+            clauses.Add(new BsonDocument(upper.IsInclusive ? "$lte" : "$lt", new BsonArray
+            {
+                RenderOrdinalKey("$" + range.Column.Name), RenderOrdinalKey(upper.Value)
+            }));
+        return new BsonDocument("$expr", new BsonDocument("$and", clauses));
     }
 
     private BsonDocument RenderAfter(OrderTerm term, QueryConstant value)
@@ -392,6 +413,17 @@ public sealed class MongoQueryRenderer
 
         if (includesTotalCount)
         {
+            if (cursor is null && paging.Offset is null && paging.Limit is null)
+            {
+                // Keep an unpaged count streaming. A facet would collect every document
+                // into one BSON array and can exceed MongoDB's 16 MB document limit.
+                data.Add(new BsonDocument("$setWindowFields", new BsonDocument
+                {
+                    { "output", new BsonDocument("__groundwork_total_count", new BsonDocument("$count", new BsonDocument())) }
+                }));
+                prefix.AddRange(data);
+                return prefix;
+            }
             prefix.Add(new BsonDocument("$facet", new BsonDocument
             {
                 { "metadata", new BsonArray { new BsonDocument("$count", "__groundwork_total_count") } },

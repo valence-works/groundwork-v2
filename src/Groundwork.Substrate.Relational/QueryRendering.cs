@@ -187,8 +187,6 @@ public abstract class RelationalQueryRenderer
                 page += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
             else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
                 page += " ORDER BY (SELECT 1)";
-            if (RequiresOrderForOffset && request.Paging.Offset is null && request.Paging.Limit is null)
-                page += " OFFSET 0 ROWS";
             page += RenderPaging(request.Paging, parameters, ref parameterIndex);
             var countWhere = request.LatestPerKey is null ? string.Empty : " WHERE __groundwork_latest_rank = 1";
             var aggregate = RenderCountAggregate();

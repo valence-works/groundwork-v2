@@ -309,7 +309,8 @@ public static class QueryContinuationToken
         PredicateCanonicalizer.Column(term.Column) + ":" + term.Direction + ":" + term.NullOrder;
 
     private static string Binding(QueryRequest request, IEnumerable<OrderTerm> order) =>
-        request.CanonicalPredicate + "|" + request.ContinuationFingerprint + "|" + string.Join(";", order.Select(OrderBinding));
+        request.CanonicalPredicate + "|" + request.ContinuationFingerprint + "|" +
+        request.ContinuationBindingDiscriminator + "|" + string.Join(";", order.Select(OrderBinding));
 
     private static QueryConstant DecodeValue(string encoded, ColumnRef column)
     {

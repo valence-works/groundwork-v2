@@ -17,6 +17,44 @@ public sealed class CorpusDifferentialTests
     private static readonly string SparseTableName = "g2-sparse-" + Guid.NewGuid().ToString("N");
     private static readonly string SemanticEdgeTableName = "g2-semantic-edge-" + Guid.NewGuid().ToString("N");
     private static readonly string LatestTableName = "g2-latest-" + Guid.NewGuid().ToString("N");
+    private static readonly string ScopedTableName = "g2-scoped-" + Guid.NewGuid().ToString("N");
+
+    [SkippableFact]
+    public void Scoped_relational_queries_isolate_rows_counts_and_continuation_tokens()
+    {
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
+        var unit = ScopedUnit;
+        using var sqlite = new SqliteProviderFactory().Create("Data Source=file:g2q4_scope_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
+        using var pg = new PostgreSqlProviderFactory().Create(postgres);
+        using var sql = new SqlServerProviderFactory().Create(sqlServer);
+        foreach (var connection in new IStorageProviderConnection[] { sqlite, pg, sql })
+        {
+            connection.Schema.Apply(unit);
+            var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+            var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+            foreach (var id in new[] { 1L, 2L })
+            {
+                first.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = id, ["value"] = "a" + id }));
+                second.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = id, ["value"] = "b" + id }));
+            }
+            var table = new TableId(ScopedTableName);
+            var idColumn = new ColumnRef(table, "id", QueryType.Int64, false);
+            var valueColumn = new ColumnRef(table, "value", QueryType.String, false);
+            QueryRequest Request(Paging paging) => new(table, Predicate.AlwaysTrue.Instance,
+                [new OrderTerm(idColumn, OrderDirection.Ascending, NullOrder.First)],
+                Projection.ColumnsOnly(valueColumn), paging, ResultShape.TotalCount.Instance);
+
+            var firstPage = first.Query(Request(Paging.Keyset(1)));
+            var secondPage = second.Query(Request(Paging.Keyset(1)));
+            Assert.Equal(2L, firstPage.TotalCount);
+            Assert.Equal(2L, secondPage.TotalCount);
+            Assert.Equal("a1", firstPage.Rows.Single()["value"]);
+            Assert.Equal("b1", secondPage.Rows.Single()["value"]);
+            Assert.NotNull(firstPage.NextContinuationToken);
+            Assert.Throws<QueryRenderException>(() => second.Query(Request(Paging.Continuation(firstPage.NextContinuationToken!, 1))));
+        }
+    }
 
     [SkippableFact]
     public void Pinned_40_row_300_shape_corpus_is_bit_identical_through_public_provider_sessions()
@@ -505,6 +543,19 @@ public sealed class CorpusDifferentialTests
             new() { Name = "groupKey", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
             new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false },
             new() { Name = "value", Type = PortableType.Int32, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    private static StorageUnit ScopedUnit => new()
+    {
+        Id = new StorageUnitId(ScopedTableName),
+        Name = ScopedTableName,
+        Scope = ScopePolicy.Scoped,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "value", Type = PortableType.String, IsNullable = false, MaxLength = 32 }
         ],
         Key = new KeyDefinition { Columns = ["id"] }
     };

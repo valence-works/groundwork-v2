@@ -217,9 +217,9 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         ref int parameterIndex)
     {
         var parameter = AddParameter(column, bound.Value, parameters, ref parameterIndex);
-        var operatorText = isLower
-            ? bound.IsInclusive ? ">=" : ">"
-            : bound.IsInclusive ? "<=" : "<";
+        // SQL Server treats trailing spaces as equal in ordinary comparisons. Use a
+        // strict lexical arm plus an explicit length tie-break for portable ordinal text.
+        var operatorText = isLower ? ">" : "<";
         var lengthOperator = isLower
             ? bound.IsInclusive ? ">=" : ">"
             : bound.IsInclusive ? "<=" : "<";

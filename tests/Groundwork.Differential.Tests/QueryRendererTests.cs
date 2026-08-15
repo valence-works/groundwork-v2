@@ -59,6 +59,20 @@ public sealed class QueryRendererTests
         var sqlServerCount = new SqlServerQueryRenderer().Render(
             Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 1L)), [], Paging.None, ResultShape.TotalCount.Instance));
         Assert.Contains("COUNT_BIG(*)", sqlServerCount.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("OFFSET 0 ROWS", sqlServerCount.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Sql_server_string_ranges_use_strict_comparison_and_length_tie_breaks()
+    {
+        var request = Request(new Predicate.Range(Name,
+                Bound.Inclusive(QueryConstant.Of(Name, "a")),
+                Bound.Inclusive(QueryConstant.Of(Name, "a "))),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var command = new SqlServerQueryRenderer().Render(request);
+        Assert.Contains("> @p", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("< @p", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("DATALENGTH", command.CommandText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -188,6 +202,23 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Scoped_continuations_bind_anonymous_scope_discriminators()
+    {
+        var request = Request(Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Id, OrderDirection.Ascending, NullOrder.First)], Paging.Keyset(1), ResultShape.Rows.Instance);
+        var scopeColumn = new ColumnRef(Table, "__groundwork_scope", QueryType.String, false);
+        var scopedA = QueryRequestExecution.WithProviderPredicate(request,
+            new Predicate.And([request.Where, new Predicate.Equal(scopeColumn, QueryConstant.Of(scopeColumn, "scope-a"))]),
+            QueryRequestExecution.ScopeBindingDiscriminator("scope-a"));
+        var scopedB = QueryRequestExecution.WithProviderPredicate(request,
+            new Predicate.And([request.Where, new Predicate.Equal(scopeColumn, QueryConstant.Of(scopeColumn, "scope-b"))]),
+            QueryRequestExecution.ScopeBindingDiscriminator("scope-b"));
+        var token = QueryContinuationToken.Encode(scopedA, QueryRenderOptions.Default, [QueryConstant.Of(Id, 1L)]);
+        Assert.DoesNotContain("scope-a", token, StringComparison.Ordinal);
+        Assert.Throws<FormatException>(() => QueryContinuationToken.Decode(token, scopedB, QueryRenderOptions.Default));
+    }
+
+    [Fact]
     public void Provider_cursor_and_json_array_renderers_preserve_contract_guards()
     {
         var guid = new ColumnRef(Table, "guid", QueryType.Guid, false);
@@ -225,6 +256,28 @@ public sealed class QueryRendererTests
         var pipeline = string.Join("\n", command.Pipeline.Select(stage => stage.ToString()));
         Assert.Contains("_groundwork_latest_tie_key_0", pipeline, StringComparison.Ordinal);
         Assert.Contains("charCodeAt", pipeline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_string_ranges_use_the_portable_ordinal_key()
+    {
+        var request = Request(new Predicate.Range(Name,
+                Bound.Inclusive(QueryConstant.Of(Name, "\U00010000")),
+                Bound.Exclusive(QueryConstant.Of(Name, "\uE000"))),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var command = new MongoQueryRenderer().Render(request);
+        Assert.Contains("charCodeAt", command.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$gte", command.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_unpaged_count_streams_without_a_facet_array()
+    {
+        var command = new MongoQueryRenderer().Render(Request(
+            Predicate.AlwaysTrue.Instance, [], Paging.None, ResultShape.TotalCount.Instance));
+        var pipeline = string.Join("\n", command.Pipeline.Select(stage => stage.ToString()));
+        Assert.DoesNotContain("$facet", pipeline, StringComparison.Ordinal);
+        Assert.Contains("$setWindowFields", pipeline, StringComparison.Ordinal);
     }
 
     [Fact]
