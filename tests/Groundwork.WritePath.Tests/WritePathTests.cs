@@ -1,5 +1,5 @@
 using Groundwork.Kernel;
-using Groundwork.MongoDb.TestingAdapter;
+using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
@@ -43,7 +43,7 @@ public sealed class WritePathTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB write-path tests.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertOneRoundTripAndCreatedAt(connection, "mongodb");
     }
 
@@ -414,7 +414,7 @@ public sealed class WritePathTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB write-path tests.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         var unit = Unit("mongodb-unique", ConcurrencyDeclaration.Optimistic(), includePartialUniqueIndex: true);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
@@ -615,7 +615,7 @@ public sealed class WritePathTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB write-path tests.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("mongodb-provider-sequence-" + Guid.NewGuid().ToString("N")),

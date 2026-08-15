@@ -1,6 +1,5 @@
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
-using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
@@ -245,7 +244,7 @@ public sealed class IdempotencyProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB generated-key append proof.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         try
         {
             AssertGeneratedAppend(connection, "mongodb");
@@ -279,7 +278,7 @@ public sealed class IdempotencyProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB duplicate idempotency proof.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         try
         {
             AssertDuplicateAppendRejected(connection, "mongodb");
@@ -403,8 +402,8 @@ public sealed class IdempotencyProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB duplicate race proof.");
-        using var firstConnection = new MongoDbTestingFactory().Create(connectionString!);
-        using var secondConnection = new MongoDbTestingFactory().Create(connectionString!);
+        using var firstConnection = new MongoProviderFactory().Create(connectionString!);
+        using var secondConnection = new MongoProviderFactory().Create(connectionString!);
         var unit = Unit("idempotency-mongo-race-" + Guid.NewGuid().ToString("N"));
         Assert.True(firstConnection.Schema.Apply(unit).Applied);
         using var barrier = new Barrier(2);
@@ -495,7 +494,7 @@ public sealed class IdempotencyProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB idempotency proof.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         try
         {
             AssertReplaySemantics(connection, "mongodb");
@@ -551,7 +550,7 @@ public sealed class IdempotencyProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB expiry proof.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         try
         {
             AssertExpiryAndRollback(connection, "mongodb");

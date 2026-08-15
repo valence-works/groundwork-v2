@@ -1,5 +1,5 @@
 using Groundwork.Kernel;
-using Groundwork.MongoDb.TestingAdapter;
+using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Samples.EventLog;
 using Groundwork.SqlServer;
@@ -62,8 +62,8 @@ public sealed class EventLogConformanceTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION for event-log conformance.");
-        AssertShippedConformance(new MongoDbTestingFactory(), connectionString!);
-        AssertEventLog(new MongoDbTestingFactory(), connectionString!);
+        AssertShippedConformance(new MongoProviderFactory(), connectionString!);
+        AssertEventLog(new MongoProviderFactory(), connectionString!);
     }
 
     private static void AssertShippedConformance(IStorageProviderFactory factory, string connectionString)

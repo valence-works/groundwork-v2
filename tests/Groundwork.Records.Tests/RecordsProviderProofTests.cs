@@ -58,6 +58,35 @@ public sealed class RecordsProviderProofTests
         }
     }
 
+    [Fact]
+    public void SQLite_typed_batch_unit_of_work_can_delete_by_record_key()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-records-batch-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create("Data Source=" + path);
+            var table = RecordTestFixture.CustomerTable("_records_batch_" + Guid.NewGuid().ToString("N"));
+            Assert.True(connection.Schema.Apply(table.Definition).Applied);
+            var customer = Customer.Create("Ada", "batch@example.test");
+            Assert.Equal(RecordWriteStatus.Inserted, table.Open(connection).Insert(customer).Status);
+
+            using (var work = table.BeginUnitOfWork(connection, BatchWriteOptions.Exact))
+            {
+                work.Delete(customer, RecordWriteOptions.IfVersion(1));
+                var report = work.CommitWithOutcomes();
+                Assert.True(report.IsSuccessful);
+                Assert.Equal(1, report.Succeeded);
+                Assert.Equal(RowWriteMode.Delete, report.Outcomes.Single().Write.Mode);
+            }
+
+            Assert.Empty(table.Open(connection).Query(table.Query.Where(row => row.Email == "batch@example.test")));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
     [SkippableFact]
     public void PostgreSQL_executes_typed_records()
     {

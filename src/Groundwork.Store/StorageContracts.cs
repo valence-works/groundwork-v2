@@ -7,7 +7,7 @@ using Groundwork.Query.Model;
 
 namespace Groundwork.Store;
 
-/// <summary>Explicit access context for a testing session.</summary>
+/// <summary>Explicit access context for a storage session.</summary>
 public sealed record StorageAccess
 {
     private StorageAccess(ScopePolicy policy, StorageScope? scope)

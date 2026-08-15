@@ -1,6 +1,5 @@
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
-using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
 using Groundwork.Store;
@@ -254,7 +253,7 @@ public sealed class MongoProviderIntegrationTests
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         var url = new MongoUrlBuilder(connectionString) { DatabaseName = "p1conformance_" + Guid.NewGuid().ToString("N") };
 
-        var report = ConformanceSuite.Run(new MongoDbTestingFactory(), url.ToMongoUrl().ToString());
+        var report = ConformanceSuite.Run(new MongoProviderFactory(), url.ToMongoUrl().ToString());
 
         Assert.True(report.Passed, string.Join(Environment.NewLine,
             report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));

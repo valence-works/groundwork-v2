@@ -1073,28 +1073,28 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
 
     public MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, ToTestingOptions(options));
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Insert);
     }
 
     public MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, ToTestingOptions(options));
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Update);
     }
 
     public MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, ToTestingOptions(options));
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Upsert);
     }
 
     public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, ToTestingOptions(options));
+        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return ConditionalUpsertCore(values, options);
     }
@@ -1142,7 +1142,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         if (exactOutcomes)
         {
             return writes.Zip(physicalWrites, (write, physical) =>
-                new RowWriteOutcome(write, ToTesting(
+                new RowWriteOutcome(write, ToStore(
                     ExactOutcomeUpsert(
                         new MongoStorageValues(physical.Values!.Values),
                         ToNative(write.Options))))).ToArray();
@@ -1243,24 +1243,24 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
         writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
-            RowWriteMode.Insert => ToTesting(Insert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Update => ToTesting(Update(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ToTesting(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Upsert => ToTesting(Upsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.ConditionalUpsert => ToTesting(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Delete => ToTesting(Delete(new MongoStorageKey(write.Key!.Values), ToNative(write.Options))),
+            RowWriteMode.Insert => ToStore(Insert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Update => ToStore(Update(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ToStore(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Upsert => ToStore(Upsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.ConditionalUpsert => ToStore(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Delete => ToStore(Delete(new MongoStorageKey(write.Key!.Values), ToNative(write.Options))),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
 
     private static MongoWriteOptions? ToNative(WriteOptions options) =>
         new() { Precondition = options.Precondition, Observer = options.Observer };
 
-    private static WriteOutcome ToTesting(MongoWriteOutcome outcome) =>
+    private static WriteOutcome ToStore(MongoWriteOutcome outcome) =>
         new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName, outcome.GeneratedValues);
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, ToTestingOptions(options));
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, ToStoreOptions(options));
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
         return ExecuteWithTransactionIfNeeded(transactional => transactional.DeleteCore(key, options));
@@ -1551,7 +1551,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         return new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted);
     }
 
-    private static WriteOptions? ToTestingOptions(MongoWriteOptions? options) => options is null
+    private static WriteOptions? ToStoreOptions(MongoWriteOptions? options) => options is null
         ? null
         : new WriteOptions { Precondition = options.Precondition, Observer = options.Observer };
 

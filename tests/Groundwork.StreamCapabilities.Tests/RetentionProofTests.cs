@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
-using Groundwork.MongoDb.TestingAdapter;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
@@ -114,7 +113,7 @@ public sealed class RetentionProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB retention proof.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertRetention(connection, "mongodb");
         AssertMongoRetentionDriftIsRefused(connection);
         AssertMongoLargePartitionUsesBoundedWatermarks(connection);
@@ -125,7 +124,7 @@ public sealed class RetentionProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB OnAppend proof.");
-        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
 
         var serial = await MeasureOnAppend(connection, "mngs", concurrent: false);
         var concurrent = await MeasureOnAppend(connection, "mngc", concurrent: true);

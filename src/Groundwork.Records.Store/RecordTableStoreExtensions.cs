@@ -3,8 +3,9 @@ using Groundwork.Store;
 namespace Groundwork.Records;
 
 /// <summary>
-/// Opens a typed Records table on the production provider contract. The Records package owns
-/// this bridge so ordinary consumers do not need a testing adapter or provider-specific helper.
+/// Opens a typed Records table on the production provider contract. The
+/// Groundwork.Records.Store integration package owns this bridge so ordinary consumers do not
+/// need a provider-specific helper.
 /// </summary>
 public static class RecordTableStoreExtensions
 {
@@ -31,31 +32,38 @@ public static class RecordTableStoreExtensions
     public static RecordTableStoreUnitOfWork<T> BeginUnitOfWork<T>(
         this RecordTable<T> table,
         IStorageProviderConnection connection,
-        BatchWriteOptions? options = null) =>
-        new(
+        BatchWriteOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        ArgumentNullException.ThrowIfNull(connection);
+        return new RecordTableStoreUnitOfWork<T>(
             table,
             connection.BeginUnitOfWork(
                 StorageAccess.Global,
                 options ?? BatchWriteOptions.Default,
                 table.Definition));
+    }
 
     public static RecordTableStoreUnitOfWork<T> BeginUnitOfWork<T>(
         this RecordTable<T> table,
         IStorageProviderConnection connection,
         StorageAccess access,
-        BatchWriteOptions? options = null) =>
-        new(
+        BatchWriteOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(access);
+        return new RecordTableStoreUnitOfWork<T>(
             table,
             connection.BeginUnitOfWork(
                 access,
                 options ?? BatchWriteOptions.Default,
                 table.Definition));
+    }
 }
 
 internal sealed class StorageSessionRecordStore : IRecordStore
 {
-    private readonly IStorageProviderConnection connection;
-    private readonly StorageAccess access;
     private readonly IStorageSession session;
 
     internal StorageSessionRecordStore(
@@ -63,8 +71,8 @@ internal sealed class StorageSessionRecordStore : IRecordStore
         StorageAccess access,
         Groundwork.Kernel.StorageUnit unit)
     {
-        this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
-        this.access = access ?? throw new ArgumentNullException(nameof(access));
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(access);
         session = connection.OpenSession(unit, access);
     }
 
@@ -136,6 +144,9 @@ public sealed class RecordTableStoreUnitOfWork<T> : IDisposable
         Stage(RowWrite.Upsert(table.Definition, new StorageValues(table.ToRowValues(value).Values),
             ToWriteOptions(options)));
 
+    public void Delete(T value, RecordWriteOptions? options = null) =>
+        Stage(RowWrite.Delete(table.Definition, ToKey(value), ToWriteOptions(options)));
+
     public BatchWriteSummary Commit() => inner.Commit();
 
     public BatchWriteReport CommitWithOutcomes() => inner.CommitWithOutcomes();
@@ -145,6 +156,15 @@ public sealed class RecordTableStoreUnitOfWork<T> : IDisposable
     public void Dispose() => inner.Dispose();
 
     private void Stage(RowWrite write) => inner.Stage(write);
+
+    private StorageKey ToKey(T value)
+    {
+        var mapped = table.ToRowValues(value);
+        return new StorageKey(table.Definition.Key.Columns.ToDictionary(
+            name => name,
+            name => mapped.Values[name],
+            StringComparer.Ordinal));
+    }
 
     private static WriteOptions? ToWriteOptions(RecordWriteOptions? options) =>
         options?.ExpectedVersion is { } version

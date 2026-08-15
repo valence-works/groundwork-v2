@@ -1,12 +1,13 @@
 using System.Linq.Expressions;
 using Groundwork.Kernel;
-using Groundwork.MongoDb.TestingAdapter;
+using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Groundwork.Records;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
+using Groundwork.Store;
 using Groundwork.Testing;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
@@ -149,7 +150,7 @@ static (IStorageProviderConnection Provider, string ConnectionString, string? Te
         "sqlite" => CreateSqlite(),
         "postgresql" or "postgres" => (new PostgreSqlProviderFactory().Create(Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION") ?? throw new InvalidOperationException("GROUNDWORK_POSTGRES_CONNECTION is required.")), "", null),
         "sqlserver" => (new SqlServerProviderFactory().Create(Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION") ?? throw new InvalidOperationException("GROUNDWORK_SQLSERVER_CONNECTION is required.")), "", null),
-        "mongodb" or "mongo" => (new MongoDbTestingFactory().Create(Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION") ?? throw new InvalidOperationException("GROUNDWORK_MONGO_CONNECTION is required.")), "", null),
+        "mongodb" or "mongo" => (new MongoProviderFactory().Create(Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION") ?? throw new InvalidOperationException("GROUNDWORK_MONGO_CONNECTION is required.")), "", null),
         _ => throw new ArgumentException($"Unsupported provider '{name}'.")
     };
 
