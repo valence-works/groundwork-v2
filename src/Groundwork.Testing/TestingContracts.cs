@@ -400,7 +400,9 @@ public enum SchemaChangeKind
     CreateStorageUnit,
     AddColumn,
     CreateIndex,
-    AddDerivedColumn
+    AddDerivedColumn,
+    RebuildIndex,
+    UpdateAggregationProfile
 }
 
 public sealed record SchemaChange(SchemaChangeKind Kind, string Identity);
@@ -444,6 +446,9 @@ public interface IStorageSession
     StoredEntry? Read(StorageKey key);
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
+
+    /// <summary>Executes one named, closed aggregation profile with its declared budgets.</summary>
+    AggregationResult Aggregate(AggregationQuery query);
 
     /// <summary>
     /// Inserts a row. A ProviderSequence key must be omitted and is returned through

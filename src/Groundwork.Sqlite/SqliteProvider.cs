@@ -202,6 +202,21 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
                     return leftNumber.CompareTo(rightNumber);
                 return string.CompareOrdinal(left, right);
             });
+            connection.CreateAggregate<string?, DecimalSum, string?>(
+                "groundwork_decimal_sum",
+                new DecimalSum(0m, false),
+                static (state, value) => value is null
+                    ? state
+                    : new DecimalSum(
+                        checked(state.Value + decimal.Parse(
+                            value,
+                            System.Globalization.NumberStyles.Number,
+                            System.Globalization.CultureInfo.InvariantCulture)),
+                        true),
+                static state => state.HasValue
+                    ? state.Value.ToString("G29", System.Globalization.CultureInfo.InvariantCulture)
+                    : null,
+                isDeterministic: true);
             using (var pragma = connection.CreateCommand())
             {
                 pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
@@ -224,4 +239,6 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             throw;
         }
     }
+
+    private readonly record struct DecimalSum(decimal Value, bool HasValue);
 }
