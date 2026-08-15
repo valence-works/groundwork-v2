@@ -99,6 +99,91 @@ public sealed class DocumentsContractTests
     }
 
     [Fact]
+    public void Explicit_default_json_options_preserve_pascal_case_paths_and_values()
+    {
+        var unit = DocumentUnit.For<Invoice>("invoice", "pascal_options")
+            .JsonOptions(new JsonSerializerOptions())
+            .Id(invoice => invoice.Id)
+            .Project(invoice => invoice.Customer.Name)
+            .Build();
+
+        var row = unit.ToRowValues(new Invoice(
+            Guid.Parse("f4f6b4f9-4ee8-4a2c-9f17-1ee5dcb6db72"),
+            new Customer("Ada", null),
+            12.50m,
+            []));
+
+        Assert.Equal("Customer.Name", Assert.Single(unit.Bindings).Path);
+        Assert.Equal("Ada", row[Assert.Single(unit.Bindings).Column]);
+        Assert.Contains("\"Customer\":{\"Name\":\"Ada\"", (string)row["document"]!);
+    }
+
+    [Fact]
+    public void Selected_fields_require_the_effective_serializer_field_policy()
+    {
+        var rejected = Assert.Throws<DocumentDeclarationException>(() =>
+            DocumentUnit.For<FieldDocument>("field", "field_rejected")
+                .Id(document => document.Id)
+                .Project(document => document.Name)
+                .Build());
+        Assert.Contains(rejected.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-009");
+
+        var options = new JsonSerializerOptions { IncludeFields = true };
+        var unit = DocumentUnit.For<FieldDocument>("field", "field_included")
+            .JsonOptions(options)
+            .Id(document => document.Id)
+            .Project(document => document.Name)
+            .Build();
+
+        var row = unit.ToRowValues(new FieldDocument { Id = Guid.NewGuid(), Name = "Ada" });
+
+        Assert.Equal("Name", Assert.Single(unit.Bindings).Path);
+        Assert.Equal("Ada", row[Assert.Single(unit.Bindings).Column]);
+    }
+
+    [Fact]
+    public void Json_include_fields_are_serializable_without_global_field_inclusion()
+    {
+        var unit = DocumentUnit.For<IncludedFieldDocument>("field", "field_attribute")
+            .JsonOptions(new JsonSerializerOptions())
+            .Id(document => document.Id)
+            .Project(document => document.Name)
+            .Build();
+
+        var row = unit.ToRowValues(new IncludedFieldDocument { Id = Guid.NewGuid(), Name = "Ada" });
+
+        Assert.Equal("Name", Assert.Single(unit.Bindings).Path);
+        Assert.Equal("Ada", row[Assert.Single(unit.Bindings).Column]);
+    }
+
+    [Fact]
+    public void Ignored_identity_and_projection_members_fail_with_actionable_diagnostics()
+    {
+        var ignoredId = Assert.Throws<DocumentDeclarationException>(() =>
+            DocumentUnit.For<IgnoredIdDocument>("ignored", "ignored_id")
+                .Id(document => document.Id)
+                .Build());
+        Assert.Contains(ignoredId.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-009");
+
+        var ignoredProjection = Assert.Throws<DocumentDeclarationException>(() =>
+            DocumentUnit.For<IgnoredProjectionDocument>("ignored", "ignored_projection")
+                .Id(document => document.Id)
+                .Project(document => document.Name)
+                .Build());
+        Assert.Contains(ignoredProjection.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-009");
+
+        var explicitlyIncluded = DocumentUnit.For<ExplicitlyIncludedDocument>("ignored", "ignored_never")
+            .Id(document => document.Id)
+            .Project(document => document.Name)
+            .Build();
+        Assert.Equal("included", explicitlyIncluded.ToRowValues(new ExplicitlyIncludedDocument
+        {
+            Id = Guid.NewGuid(),
+            Name = "included"
+        })[Assert.Single(explicitlyIncluded.Bindings).Column]);
+    }
+
+    [Fact]
     public void Generic_and_property_enum_converters_match_projection_encoding()
     {
         var genericOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
@@ -421,6 +506,30 @@ public sealed class DocumentsContractTests
     private sealed record Invoice(Guid Id, Customer Customer, decimal Total, IReadOnlyList<string> Tags);
     private sealed record Customer(string Name, string? Phone);
     private sealed record EnumDocument(Guid Id, OrderStatus Status);
+    private sealed class FieldDocument
+    {
+        public Guid Id;
+        public string Name = string.Empty;
+    }
+    private sealed class IncludedFieldDocument
+    {
+        [JsonInclude] public Guid Id;
+        [JsonInclude] public string Name = string.Empty;
+    }
+    private sealed class IgnoredIdDocument
+    {
+        [JsonIgnore] public Guid Id { get; init; }
+    }
+    private sealed class IgnoredProjectionDocument
+    {
+        public Guid Id { get; init; }
+        [JsonIgnore] public string Name { get; init; } = string.Empty;
+    }
+    private sealed class ExplicitlyIncludedDocument
+    {
+        public Guid Id { get; init; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.Never)] public string Name { get; init; } = string.Empty;
+    }
     private sealed record StringIdDocument(string Id, string Value);
     private sealed record BinaryIdDocument(byte[] Id, string Value);
     private sealed record AttributedEnumDocument(

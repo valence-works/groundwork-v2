@@ -41,10 +41,15 @@ the provider row key.
 The JSON document is a compact object. Object properties are ordered by their
 ordinal serialized names recursively; array order and scalar representation
 are preserved. `JsonPropertyName` takes precedence, followed by the configured
-`JsonSerializerOptions.PropertyNamingPolicy`, followed by the lower-camel
-default. Consequently, projection paths are based on the serialized contract,
-not CLR member spelling. Configure options before or after `Project()`; names
-and portable projection types resolve at `Build()`.
+`JsonSerializerOptions.PropertyNamingPolicy`. When options are omitted,
+Documents uses the web-style lower-camel default; when options are supplied,
+their contract is honored exactly, so `new JsonSerializerOptions()` preserves
+CLR names such as `Customer.Name`. Consequently, projection paths are based on
+the serialized contract, not CLR member spelling. Configure options before or
+after `Project()`; names and portable projection types resolve at `Build()`.
+Selected fields must be enabled by `IncludeFields` or `[JsonInclude]`. Ignored
+or otherwise unserializable selected members are refused with
+`GW-DOC-DECL-009`.
 
 Schema policies use a caller-owned `DocumentSchemaVersionFormat` and contiguous
 upcaster steps. Malformed, too-old, future, unknown-kind, invalid-content, and
@@ -53,4 +58,5 @@ failure code and context. A declaration refuses ambiguous mappings with
 actionable diagnostics: `GW-DOC-DECL-001` (missing ID), `002` (duplicate JSON
 path), `003` (column collision), `004` (duplicate index), `005` (index without
 a projection), `006` (index over JSON), `007` (unsupported unsigned enum), and
-`008` (an enum converter whose output is not a supported scalar).
+`008` (an enum converter whose output is not a supported scalar), and `009`
+(a selected ID or projection member that is not serialized).

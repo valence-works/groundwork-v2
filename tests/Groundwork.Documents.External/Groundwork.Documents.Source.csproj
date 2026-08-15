@@ -1,6 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>
     <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
     <TargetFramework>net10.0</TargetFramework>
@@ -11,9 +10,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../src/Groundwork.Documents/AssemblyInfo.cs" Link="AssemblyInfo.cs" />
-    <Compile Include="../../src/Groundwork.Documents/DocumentUnit.cs" Link="DocumentUnit.cs" />
-    <Compile Include="../../src/Groundwork.Documents/Serialization/*.cs" LinkBase="Serialization" />
+    <Compile Include="Source/AssemblyInfo.cs" Link="AssemblyInfo.cs" />
+    <Compile Include="Source/DocumentUnit.cs" Link="DocumentUnit.cs" />
+    <Compile Include="Source/Serialization/*.cs" LinkBase="Serialization" />
     <PackageReference Include="Groundwork.Kernel" Version="1.0.0" />
     <PackageReference Include="Groundwork.Query.Model" Version="1.0.0" />
     <PackageReference Include="Groundwork.Query.Linq" Version="1.0.0" />

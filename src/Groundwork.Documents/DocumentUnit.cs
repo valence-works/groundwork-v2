@@ -187,6 +187,11 @@ public sealed class DocumentUnitBuilder<T>
 
         var idColumn = idMember is null ? null : LowerFirst(idMember.Name);
         var bindings = new List<ColumnBinding>();
+        if (idMember is not null)
+            ValidateSerializableMember(idMember, "id", diagnostics);
+        foreach (var projection in projections)
+            foreach (var member in projection.Members)
+                ValidateSerializableMember(member, $"projections.{projection.Column}", diagnostics);
         var resolvedProjections = projections.Select(projection => new ResolvedProjection(
             string.Join('.', projection.Members.Select(JsonName)),
             projection.Column,
@@ -434,7 +439,32 @@ public sealed class DocumentUnitBuilder<T>
     private string JsonName(MemberInfo member) =>
         member.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name ??
         jsonOptions?.PropertyNamingPolicy?.ConvertName(member.Name) ??
-        LowerFirst(member.Name);
+        (jsonOptions is null ? LowerFirst(member.Name) : member.Name);
+
+    private void ValidateSerializableMember(MemberInfo member, string path, ICollection<DocumentDiagnostic> diagnostics)
+    {
+        if (member.GetCustomAttribute<JsonIgnoreAttribute>() is { Condition: JsonIgnoreCondition.Always })
+        {
+            diagnostics.Add(new(
+                "GW-DOC-DECL-009",
+                $"Selected member '{member.Name}' is marked with JsonIgnore and will not be present in the serialized document.",
+                path));
+            return;
+        }
+
+        var explicitlyIncluded = member.GetCustomAttribute<JsonIncludeAttribute>() is not null;
+        var serializable = member switch
+        {
+            PropertyInfo property => (property.GetMethod?.IsPublic == true) || explicitlyIncluded,
+            FieldInfo field => (field.IsPublic && jsonOptions?.IncludeFields == true) || explicitlyIncluded,
+            _ => false
+        };
+        if (!serializable)
+            diagnostics.Add(new(
+                "GW-DOC-DECL-009",
+                $"Selected member '{member.Name}' is not serialized by the effective JsonSerializerOptions. Make it a public property, enable IncludeFields, or add JsonInclude.",
+                path));
+    }
 
     private static string RequireText(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value)
