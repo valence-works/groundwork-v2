@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  architecture-boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore Groundwork.slnx
+      - run: dotnet test tests/Groundwork.Architecture.Tests/Groundwork.Architecture.Tests.csproj --no-restore --configuration Release
+
   build-and-test:
     runs-on: ubuntu-latest
     steps:
