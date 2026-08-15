@@ -110,7 +110,7 @@ public sealed class KernelBoundaryTests
     {
         foreach (var type in assembly.GetExportedTypes().OrderBy(type => type.FullName, StringComparer.Ordinal))
         {
-            yield return type.FullName ?? type.Name;
+            yield return Describe(type);
 
             foreach (var member in type.GetMembers(
                          BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
@@ -123,10 +123,13 @@ public sealed class KernelBoundaryTests
 
     private static string Describe(MemberInfo member) => member switch
     {
+        Type type =>
+            $"{type.FullName ?? type.Name}{Inheritance(type)}{GenericConstraints(type.GetGenericArguments())}",
         ConstructorInfo constructor =>
             $"{constructor.DeclaringType?.FullName}.ctor({Parameters(constructor)})",
         MethodInfo method =>
-            $"{TypeName(method.ReturnType)} {method.DeclaringType?.FullName}.{method.Name}({Parameters(method)})",
+            $"{TypeName(method.ReturnType)} {method.DeclaringType?.FullName}.{method.Name}({Parameters(method)})" +
+            GenericConstraints(method.GetGenericArguments()),
         PropertyInfo property =>
             $"{TypeName(property.PropertyType)} {property.DeclaringType?.FullName}.{property.Name}",
         FieldInfo field =>
@@ -138,6 +141,27 @@ public sealed class KernelBoundaryTests
 
     private static string Parameters(MethodBase method) => string.Join(", ",
         method.GetParameters().Select(parameter => $"{TypeName(parameter.ParameterType)} {parameter.Name}"));
+
+    private static string Inheritance(Type type)
+    {
+        var inheritedTypes = type.GetInterfaces()
+            .Concat(type.BaseType is null || type.BaseType.FullName == typeof(object).FullName
+                ? []
+                : [type.BaseType])
+            .Select(TypeName)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        return inheritedTypes.Length == 0 ? string.Empty : " : " + string.Join(", ", inheritedTypes);
+    }
+
+    private static string GenericConstraints(IEnumerable<Type> genericArguments)
+    {
+        var constraints = genericArguments
+            .Where(argument => argument.IsGenericParameter)
+            .SelectMany(argument => argument.GetGenericParameterConstraints()
+                .Select(constraint => $" where {argument.Name} : {TypeName(constraint)}"));
+        return string.Concat(constraints);
+    }
 
     private static string TypeName(Type? type) => type?.ToString() ?? "<null>";
 
