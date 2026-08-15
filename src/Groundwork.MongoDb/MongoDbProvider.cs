@@ -362,6 +362,17 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         var report = InspectAdmission(state, applied, access);
         if (!report.IsProcessReady)
         {
+            var algorithmDrift = report.ColumnDrift
+                .Where(refusal => refusal.Path.EndsWith(".searchKeyAlgorithm", StringComparison.Ordinal))
+                .ToArray();
+            if (algorithmDrift.Length != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Storage unit '{applied.Declaration.Name}' is not admitted because its persisted folded search-key algorithm differs from the declaration. " +
+                    $"Rebuild the derived search-key column before opening a session. " +
+                    $"[{string.Join("; ", algorithmDrift.Select(refusal => refusal.Code + " at " + refusal.Path + ": " + refusal.Message))}]");
+            }
+
             var name = CollectionName(applied, access);
             var commands = string.Join("; ", applied.Declaration.Columns.Select(column =>
                 $"db.getCollection('{Escape(name)}').updateMany(" +
@@ -1307,12 +1318,20 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoWriteOptions? options)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
-        var document = MongoDocumentMapper.EncodeDocument(
-            Unit,
-            values.Values,
-            identity,
-            existing: null,
-            column => NextSequence(column, options?.Observer));
+        var missingRequired = Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.Supplied &&
+            !column.IsNullable &&
+            column.Default is null &&
+            !values.Values.ContainsKey(column.Name));
+        var canInsert = missingRequired is null;
+        var document = canInsert
+            ? MongoDocumentMapper.EncodeDocument(
+                Unit,
+                values.Values,
+                identity,
+                existing: null,
+                column => NextSequence(column, options?.Observer))
+            : null;
         var set = new BsonDocument();
         foreach (var column in Unit.Columns)
         {
@@ -1321,11 +1340,22 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 column.Name == "createdAt" ||
                 column.Generation == ColumnGeneration.ProviderSequence)
                 continue;
-            set[column.Name] = document[column.Name];
+            set[column.Name] = document?[column.Name] ??
+                MongoValueCodec.Encode(values.Values[column.Name], column);
+        }
+
+        // A partial upsert that cannot form a valid insert is still a valid update. Keep
+        // it non-upserting and make a key-only update observable without touching source
+        // or provider-owned search-key values.
+        if (!canInsert && set.ElementCount == 0)
+        {
+            var key = Unit.Key.Columns[0];
+            var definition = Unit.Columns.Single(column => column.Name == key);
+            set[key] = MongoValueCodec.Encode(values.Values[key], definition);
         }
 
         var setOnInsert = new BsonDocument();
-        foreach (var element in document)
+        foreach (var element in document ?? [])
         {
             if (element.Name != "_id" && !set.Contains(element.Name))
                 setOnInsert[element.Name] = element.Value;
@@ -1340,19 +1370,21 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
         options?.Observer?.Observe(new WritePathEvent(
             "mongodb.exact-batch-upsert",
-            "MongoDB.FindOneAndUpdate(upsert:true; return=before)",
+            $"MongoDB.FindOneAndUpdate(upsert:{canInsert.ToString().ToLowerInvariant()}; return=before)",
             IsProbe: false));
         try
         {
             var filter = new BsonDocument("_id", identity);
             var findOptions = new FindOneAndUpdateOptions<BsonDocument>
             {
-                IsUpsert = true,
+                IsUpsert = canInsert,
                 ReturnDocument = ReturnDocument.Before
             };
             var before = transactionSession is null
                 ? collection.FindOneAndUpdate(filter, update, findOptions)
                 : collection.FindOneAndUpdate(transactionSession, filter, update, findOptions);
+            if (before is null && missingRequired is not null)
+                throw new InvalidOperationException($"Column '{missingRequired.Name}' is required.");
             var version = Unit.Concurrency == ConcurrencyDeclaration.Optimistic
                 ? before is null
                     ? 1L

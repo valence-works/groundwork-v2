@@ -24,7 +24,7 @@ public sealed class MongoQueryRenderer
             throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
         }
         var order = EffectiveOrder(request, options);
-        var baseFilter = RenderPredicate(request.Where, options.InValueLimit, request.Table.Value);
+        var baseFilter = RenderPredicate(request.Where, options, request.Table.Value);
         var filter = baseFilter;
         var matchNone = request.Where is Predicate.AlwaysFalse;
         IReadOnlyList<QueryConstant>? cursor = null;
@@ -100,7 +100,7 @@ public sealed class MongoQueryRenderer
     private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
         options.GetEffectiveOrder(request);
 
-    private BsonDocument RenderPredicate(Predicate predicate, int inValueLimit, string table)
+    private BsonDocument RenderPredicate(Predicate predicate, QueryRenderOptions options, string table)
     {
         switch (predicate)
         {
@@ -111,17 +111,17 @@ public sealed class MongoQueryRenderer
             case Predicate.Equal equal:
                 return new BsonDocument(equal.Column.Name, ToBson(equal.Value));
             case Predicate.In membership:
-                if (membership.Values.Distinct().Count() > inValueLimit)
+                if (membership.Values.Distinct().Count() > options.InValueLimit)
                     throw new QueryRenderException(
                         "GW-QUERY-015",
                         $"Query on '{table}' has an In predicate on '{membership.Column.Name}' with " +
-                        $"{membership.Values.Distinct().Count()} distinct values, exceeding the configured maximum of {inValueLimit}.");
+                        $"{membership.Values.Distinct().Count()} distinct values, exceeding the configured maximum of {options.InValueLimit}.");
                 return membership.Values.Length == 0
                     ? MatchNone()
                     : new BsonDocument(membership.Column.Name, new BsonDocument("$in", new BsonArray(membership.Values.Select(ToBson))));
             case Predicate.Range range:
             {
-                if (range.Column.Type == QueryType.String)
+                if (range.Column.Type == QueryType.String && !IsPhysicalSearchKeyRange(range, options))
                     return RenderStringRange(range);
                 var operators = new BsonDocument();
                 if (range.Lower is not null)
@@ -182,21 +182,26 @@ public sealed class MongoQueryRenderer
                         Regex.Escape(substring.Needle) + (substring.Anchor == Anchor.EndsWith ? "$" : string.Empty),
                         string.Empty));
             case Predicate.Not not:
-                return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, inValueLimit, table) });
+                return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, options, table) });
             case Predicate.And and:
                 return and.Terms.Length == 0
                     ? new BsonDocument()
-                    : new BsonDocument("$and", new BsonArray(and.Terms.Select(term => RenderPredicate(term, inValueLimit, table))));
+                    : new BsonDocument("$and", new BsonArray(and.Terms.Select(term => RenderPredicate(term, options, table))));
             case Predicate.Or or:
                 return or.Terms.Length == 0
                     ? MatchNone()
-                    : new BsonDocument("$or", new BsonArray(or.Terms.Select(term => RenderPredicate(term, inValueLimit, table))));
+                    : new BsonDocument("$or", new BsonArray(or.Terms.Select(term => RenderPredicate(term, options, table))));
             case Predicate.StartsWith:
                 throw new QueryRenderException("GW-QUERY-030", "This normalized predicate requires a provider-independent persisted projection and cannot be rendered directly.");
             default:
                 throw new QueryRenderException("GW-QUERY-030", "The predicate node is outside the closed native query surface.");
         }
     }
+
+    private static bool IsPhysicalSearchKeyRange(Predicate.Range range, QueryRenderOptions options) =>
+        options.SearchKeyColumns.Values.Any(mapping =>
+            mapping.PhysicalColumn != mapping.SourceColumn &&
+            string.Equals(mapping.PhysicalColumn, range.Column.Name, StringComparison.Ordinal));
 
     private BsonDocument RenderContinuation(IReadOnlyList<OrderTerm> order, IReadOnlyList<QueryConstant> cursor)
     {

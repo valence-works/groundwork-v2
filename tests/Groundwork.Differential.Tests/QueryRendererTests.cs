@@ -186,6 +186,36 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Mongo_folded_search_key_ranges_remain_native_index_bounds()
+    {
+        var folded = new ColumnRef(
+            Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var hidden = SearchKeyProjection.ColumnName("name");
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new(
+                    "name",
+                    hidden,
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    700)
+            }
+        };
+
+        var command = new MongoQueryRenderer().Render(
+            Request(new Predicate.StartsWith(folded, "I"), [], Paging.None, ResultShape.Rows.Instance),
+            options);
+
+        var bounds = Assert.IsType<BsonDocument>(command.Filter[hidden]);
+        Assert.Equal("|000049", bounds["$gte"].AsString);
+        Assert.Equal("|00004A", bounds["$lt"].AsString);
+        Assert.DoesNotContain("$expr", command.Filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("$function", command.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Mongo_partial_match_none_requires_exact_index_column_types()
     {
         var request = Request(new Predicate.In(Id, ImmutableArray<QueryConstant>.Empty), [], Paging.None, ResultShape.Rows.Instance);
