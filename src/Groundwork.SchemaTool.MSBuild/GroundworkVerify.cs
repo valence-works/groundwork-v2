@@ -21,7 +21,7 @@ public sealed class GroundworkVerify : Microsoft.Build.Utilities.Task
                 Log.LogError(null, error.Code, null, SchemaFile, 0, 0, 0, 0, $"{error.Message} ({error.Path})");
             return result.Succeeded;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException or ArgumentException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or FormatException or ArgumentException)
         {
             Log.LogError(null, "GW-SCHEMA-TOOL-001", null, SchemaFile, 0, 0, 0, 0, exception.Message);
             return false;

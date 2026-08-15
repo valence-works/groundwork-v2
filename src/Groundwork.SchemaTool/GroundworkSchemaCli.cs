@@ -29,7 +29,8 @@ public interface ISchemaToolProviderSession : IDisposable
 public sealed record SchemaToolProviderOptions(
     string Provider,
     string? Connection,
-    string? Database);
+    string? Database,
+    CancellationToken CancellationToken);
 
 public interface ISchemaToolProviderSessionFactory
 {
@@ -77,7 +78,7 @@ public static class GroundworkSchemaCli
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken = default) =>
-        RunAsync(arguments, output, error, provider => DiscoverProvider(arguments, provider), cancellationToken);
+        RunAsync(arguments, output, error, provider => DiscoverProvider(arguments, provider, cancellationToken), cancellationToken);
 
     public static async Task<int> RunAsync(
         IReadOnlyList<string> arguments,
@@ -115,6 +116,7 @@ public static class GroundworkSchemaCli
             if (arguments.Count == 0 || arguments[0] is not ("plan" or "validate" or "status" or "apply"))
                 throw new SchemaToolInvocationException("GW-CLI-001", "Command options are invalid. Run '--help'.");
             var command = arguments[0];
+            ValidateInvocation(arguments, command, 1);
             var schemaPath = RequiredValue(arguments, "--schema");
             var providerName = RequiredValue(arguments, "--provider");
             var schemaJson = await File.ReadAllTextAsync(schemaPath, cancellationToken);
@@ -184,10 +186,22 @@ public static class GroundworkSchemaCli
 
                 var preflight = targets.Select(target =>
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var inspection = provider.Inspector.InspectHistory(target);
                     var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UnixEpoch);
                     return (Target: target, Inspection: inspection, Plan: plan, Authorization: Authorize(target, plan));
                 }).ToArray();
+                if (preflight.Any(item => !item.Inspection.IsAppliedSchemaValid || !item.Plan.IsApplicable))
+                {
+                    targetReports.AddRange(preflight.Select(item => FromPlan(
+                        item.Target,
+                        item.Plan,
+                        item.Inspection)));
+                    await WriteAsync(output, json, new SchemaToolReport(
+                        command, "blocked", null,
+                        provider.Provider.Name, provider.Provider.Version, targetReports, []));
+                    return SchemaToolExitCodes.ValidationFailed;
+                }
                 if (preflight.Any(item => !item.Authorization.IsAuthorized))
                 {
                     targetReports.AddRange(preflight.Select(item => FromPlan(
@@ -203,6 +217,7 @@ public static class GroundworkSchemaCli
 
                 foreach (var target in targets)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var result = PhysicalSchemaApplication.Apply(
                         target,
                         provider.Executor,
@@ -223,6 +238,7 @@ public static class GroundworkSchemaCli
             var invalid = false;
             foreach (var target in targets)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var inspection = provider.Inspector.InspectHistory(target);
                 var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UnixEpoch);
                 pending |= plan.Operations.Length != 0;
@@ -249,7 +265,7 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, "GW-CLI-009", "The operation was cancelled.");
             return SchemaToolExitCodes.Cancelled;
         }
-        catch (Exception exception) when (exception is FormatException or ArgumentException)
+        catch (Exception exception) when (exception is JsonException or FormatException or ArgumentException)
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
             return SchemaToolExitCodes.ValidationFailed;
@@ -267,6 +283,7 @@ public static class GroundworkSchemaCli
         bool json,
         CancellationToken cancellationToken)
     {
+        ValidateInvocation(arguments, "schema emit", 2);
         var input = RequiredValue(arguments, "--input");
         var destination = RequiredValue(arguments, "--file");
         var schema = GroundworkSchemaCanonical.Read(await File.ReadAllTextAsync(input, cancellationToken));
@@ -435,9 +452,62 @@ public static class GroundworkSchemaCli
                 yield return arguments[index + 1];
     }
 
+    private static void ValidateInvocation(
+        IReadOnlyList<string> arguments,
+        string command,
+        int optionStart)
+    {
+        var flags = command switch
+        {
+            "validate" => new HashSet<string>(["--offline"], StringComparer.Ordinal),
+            "apply" => new HashSet<string>(["--safe"], StringComparer.Ordinal),
+            _ => new HashSet<string>(StringComparer.Ordinal)
+        };
+        var values = command switch
+        {
+            "schema emit" => new HashSet<string>(["--input", "--file", "--output"], StringComparer.Ordinal),
+            "apply" => new HashSet<string>([
+                "--schema", "--provider", "--connection", "--database", "--provider-assembly",
+                "--coverage", "--output", "--expected-plan", "--allow-destructive", "--allow-semantic",
+                "--authorize-destructive", "--authorize-semantic"
+            ], StringComparer.Ordinal),
+            _ => new HashSet<string>([
+                "--schema", "--provider", "--connection", "--database", "--provider-assembly",
+                "--coverage", "--output"
+            ], StringComparer.Ordinal)
+        };
+        var repeatable = new HashSet<string>([
+            "--provider-assembly", "--expected-plan", "--allow-destructive", "--allow-semantic",
+            "--authorize-destructive", "--authorize-semantic"
+        ], StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = optionStart; index < arguments.Count; index++)
+        {
+            var option = arguments[index];
+            if (flags.Contains(option))
+            {
+                if (!seen.Add(option))
+                    throw InvalidOptions();
+                continue;
+            }
+            if (!values.Contains(option) || index + 1 >= arguments.Count ||
+                arguments[index + 1].StartsWith("--", StringComparison.Ordinal) ||
+                (!repeatable.Contains(option) && !seen.Add(option)))
+                throw InvalidOptions();
+            if (option == "--output" && arguments[index + 1] is not ("json" or "human"))
+                throw InvalidOptions();
+            index++;
+        }
+    }
+
+    private static SchemaToolInvocationException InvalidOptions() => new(
+        "GW-CLI-001",
+        "Command options are invalid. Run '--help'.");
+
     private static ISchemaToolProviderSession? DiscoverProvider(
         IReadOnlyList<string> arguments,
-        string provider)
+        string provider,
+        CancellationToken cancellationToken)
     {
         var assemblies = AppDomain.CurrentDomain.GetAssemblies().ToList();
         foreach (var path in Values(arguments, "--provider-assembly"))
@@ -456,7 +526,8 @@ public static class GroundworkSchemaCli
         return factory?.Open(new SchemaToolProviderOptions(
             provider,
             Value(arguments, "--connection"),
-            Value(arguments, "--database")));
+            Value(arguments, "--database"),
+            cancellationToken));
     }
 
     private static IEnumerable<Type> LoadableTypes(Assembly assembly)

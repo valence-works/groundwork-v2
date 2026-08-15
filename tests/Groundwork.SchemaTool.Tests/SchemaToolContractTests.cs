@@ -41,6 +41,45 @@ public sealed class SchemaToolContractTests
         Assert.Equal(SchemaToolExitCodes.ValidationFailed,
             await RunAsync(["validate", "--schema", nonPortable, "--provider", "fake", "--offline", "--output", "json"]));
         Assert.Contains("GW-PORT-002", output.ToString(), StringComparison.Ordinal);
+
+        malformed = Temp("malformed.json", "{");
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["validate", "--schema", malformed, "--provider", "fake", "--offline", "--output", "json"]));
+        Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Unknown_or_invalid_options_are_rejected_without_echoing_values()
+    {
+        const string secret = "do-not-echo-this";
+
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation,
+            await RunAsync(["validate", "--schema", secret, "--provider", "fake", "--offline", "--output", "json", "--unknown", secret]));
+        Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation,
+            await RunAsync(["validate", "--schema", secret, "--provider", "fake", "--offline", "--output", "xml"]));
+        Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cancellation_has_a_stable_exit_and_never_mutates()
+    {
+        var schema = Temp("cancel-schema.json", ValidSchema);
+        using var session = new FakeSession();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var exit = await GroundworkSchemaCli.RunAsync(
+            ["apply", "--schema", schema, "--provider", "fake", "--safe", "--output", "json"],
+            output,
+            error,
+            _ => session,
+            cancellation.Token);
+
+        Assert.Equal(SchemaToolExitCodes.Cancelled, exit);
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+        Assert.Contains("GW-CLI-009", output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -129,6 +168,38 @@ public sealed class SchemaToolContractTests
                 "--expected-plan", onlyFirstPlan
             ], _ => session));
         Assert.Empty(session.ExecutorImpl.AppliedOperations);
+    }
+
+    [Fact]
+    public async Task Catalog_drift_blocks_apply_before_any_mutation()
+    {
+        var schema = Temp("drift-schema.json", ValidSchema);
+        using var session = new FakeSession();
+        session.ExecutorImpl.IsAppliedSchemaValid = false;
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync([
+                "apply", "--schema", schema, "--provider", "fake", "--safe", "--output", "json"
+            ], _ => session));
+
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+        using var report = JsonDocument.Parse(output.ToString());
+        Assert.Equal("blocked", report.RootElement.GetProperty("outcome").GetString());
+    }
+
+    [Fact]
+    public async Task Provider_failures_are_stable_and_do_not_echo_secrets()
+    {
+        var schema = Temp("failure-schema.json", ValidSchema);
+        const string secret = "provider-secret-do-not-echo";
+
+        Assert.Equal(SchemaToolExitCodes.ExecutionFailed,
+            await RunAsync([
+                "plan", "--schema", schema, "--provider", "fake", "--output", "json"
+            ], _ => throw new InvalidOperationException(secret)));
+
+        Assert.Contains("GW-CLI-010", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -225,12 +296,13 @@ public sealed class SchemaToolContractTests
     {
         private PhysicalSchemaAppliedState? applied;
         public List<string> AppliedOperations { get; } = [];
+        public bool IsAppliedSchemaValid { get; set; } = true;
 
         public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target) => new FakeLock(target);
         public PhysicalSchemaHistoryState ReadHistory(PhysicalSchemaTargetIdentity target, IPhysicalSchemaApplicationLock applicationLock) =>
             applied is null ? PhysicalSchemaHistoryState.Empty : PhysicalSchemaHistoryState.FromApplied(applied);
         public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target) =>
-            new(ReadHistory(target.Identity, new FakeLock(target.Identity)), true);
+            new(ReadHistory(target.Identity, new FakeLock(target.Identity)), IsAppliedSchemaValid);
         public PhysicalSchemaOperationAcknowledgement ApplyOperation(PhysicalSchemaTargetIdentity target, PhysicalSchemaOperation operation, IPhysicalSchemaApplicationLock applicationLock)
         {
             AppliedOperations.Add(operation.Identity);
