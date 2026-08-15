@@ -107,6 +107,9 @@ public sealed record WriteOptions
 {
     public long? ExpectedVersion { get; init; }
 
+    /// <summary>Optional observer used by write-path proofs to count provider commands.</summary>
+    public IWritePathObserver? Observer { get; init; }
+
     public static WriteOptions Unconditional { get; } = new();
 
     public static WriteOptions ForVersion(long expectedVersion) =>
@@ -124,12 +127,96 @@ public enum WriteOutcomeStatus
     ConcurrencyConflict
 }
 
-public sealed record WriteOutcome(WriteOutcomeStatus Status, long? Version = null)
+/// <summary>
+/// Result of a storage write. <see cref="Status"/> is returned immediately; for a
+/// conservative conditional-upsert conflict, <see cref="Detail"/> performs at most
+/// one cached disambiguating read.
+/// </summary>
+public sealed record WriteOutcome
 {
+    private readonly Lazy<WriteOutcomeDetail> detail;
+
+    public WriteOutcome(WriteOutcomeStatus status, long? version = null, string? uniqueIndexName = null)
+    {
+        Status = status;
+        Version = version;
+        detail = new(() => new WriteOutcomeDetail(status, version, uniqueIndexName));
+    }
+
+    private WriteOutcome(
+        WriteOutcomeStatus status,
+        long? version,
+        Func<WriteOutcomeDetail> resolveDetail)
+    {
+        Status = status;
+        Version = version;
+        detail = new(resolveDetail ?? throw new ArgumentNullException(nameof(resolveDetail)));
+    }
+
+    /// <summary>
+    /// Creates an outcome whose immediate status is conservative. The optional disambiguating
+    /// probe is run once, only when <see cref="Detail"/> is inspected.
+    /// </summary>
+    public static WriteOutcome Deferred(
+        WriteOutcomeStatus provisionalStatus,
+        long? version,
+        Func<WriteOutcomeDetail> resolveDetail) =>
+        new(provisionalStatus, version, resolveDetail);
+
+    /// <summary>Immediate/provisional status of the provider-native write.</summary>
+    public WriteOutcomeStatus Status { get; }
+
+    public long? Version { get; }
+
+    /// <summary>
+    /// Resolves failure detail lazily and caches the result. Successful outcomes already
+    /// have complete detail and do not issue a read.
+    /// </summary>
+    public WriteOutcomeDetail Detail => detail.Value;
+
+    public string? UniqueIndexName => Detail.UniqueIndexName;
+
     public bool Succeeded => Status is WriteOutcomeStatus.Inserted or
         WriteOutcomeStatus.Updated or
         WriteOutcomeStatus.Upserted or
         WriteOutcomeStatus.Deleted;
+}
+
+/// <summary>Resolved write result detail, including lazy failure disambiguation.</summary>
+public sealed record WriteOutcomeDetail(
+    WriteOutcomeStatus Status,
+    long? Version = null,
+    string? UniqueIndexName = null,
+    string? Message = null);
+
+/// <summary>Thread-safe command observer used by provider-neutral write-path proofs.</summary>
+public sealed class WritePathObserver : IWritePathObserver
+{
+    private readonly object gate = new();
+    private readonly List<WritePathEvent> commands = [];
+
+    public int RoundTrips
+    {
+        get
+        {
+            lock (gate) return commands.Count;
+        }
+    }
+
+    public IReadOnlyList<WritePathEvent> Commands
+    {
+        get
+        {
+            lock (gate) return Array.AsReadOnly(commands.ToArray());
+        }
+    }
+
+    public void Observe(WritePathEvent command)
+    {
+        if (string.IsNullOrWhiteSpace(command.Operation))
+            throw new ArgumentException("An observed operation must have a name.", nameof(command));
+        lock (gate) commands.Add(command);
+    }
 }
 
 public sealed class StoredEntry

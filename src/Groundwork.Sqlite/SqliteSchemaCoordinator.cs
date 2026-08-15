@@ -10,6 +10,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
 {
     internal const string ScopeColumn = "__groundwork_scope";
     internal const string VersionColumn = "__groundwork_version";
+    internal const string ActionColumn = "__groundwork_action";
     private readonly SqliteProviderConnection owner;
     private readonly RelationalSchemaExecutor executor;
     private readonly SqliteDialect dialect = new();
@@ -66,8 +67,8 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         var columns = source.Columns.ToList();
         var key = source.Key.Columns.ToList();
         var indexes = source.Indexes.ToList();
-        if (columns.Any(column => column.Name is ScopeColumn or VersionColumn))
-            throw new ArgumentException($"'{ScopeColumn}' and '{VersionColumn}' are reserved SQLite columns.", nameof(source));
+        if (columns.Any(column => column.Name is ScopeColumn or VersionColumn or ActionColumn))
+            throw new ArgumentException($"'{ScopeColumn}', '{VersionColumn}', and '{ActionColumn}' are reserved SQLite columns.", nameof(source));
         if (source.Scope == ScopePolicy.Scoped)
         {
             columns.Add(new ColumnDefinition { Name = ScopeColumn, Type = PortableType.String, IsNullable = false, Default = new PortableDefault(string.Empty) });
@@ -83,6 +84,8 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         }
         if (source.Concurrency == ConcurrencyDeclaration.Optimistic)
             columns.Add(new ColumnDefinition { Name = VersionColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(1L) });
+        else
+            columns.Add(new ColumnDefinition { Name = ActionColumn, Type = PortableType.String, MaxLength = 1, IsNullable = false, Default = new PortableDefault("I") });
         return new StorageUnit
         {
             Id = source.Id,

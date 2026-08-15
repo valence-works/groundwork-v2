@@ -850,7 +850,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         Mutate(values, options, MutationKind.Upsert);
 
     public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+        ConditionalUpsertCore(values, options);
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
@@ -897,7 +897,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             values.Values,
             identity,
             existing,
-            column => NextSequence(column),
+            column => NextSequence(column, options?.Observer),
             preserveCreatedAt: exactOutcome);
         if (nextVersion is not null)
             document[MongoDocumentMapper.VersionField] = nextVersion.Value;
@@ -958,6 +958,122 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         return new MongoWriteOutcome(status, nextVersion);
     }
 
+    private MongoWriteOutcome ConditionalUpsertCore(
+        MongoStorageValues values,
+        MongoWriteOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        ThrowIfDisposed();
+
+        // A provider sequence is allocated by a separate FindOneAndUpdate command.
+        // ConditionalUpsertOne is deliberately a one-command primitive, so accepting
+        // this declaration here would silently violate its round-trip contract (and
+        // would require a transaction for correctness).  Keep the refusal before the
+        // transaction wrapper so the rejected operation emits no Mongo command.
+        var sequence = Unit.Columns.FirstOrDefault(column =>
+            column.Generation == ColumnGeneration.ProviderSequence);
+        if (sequence is not null)
+        {
+            throw new NotSupportedException(
+                $"MongoDB conditional upsert cannot use ProviderSequence column '{sequence.Name}': sequence allocation requires a separate MongoDB command and transaction. Use Insert/Upsert or remove ProviderSequence for this one-command operation.");
+        }
+
+        return ExecuteWithTransactionIfNeeded(transactional =>
+            transactional.ConditionalUpsertOne(values, options));
+    }
+
+    private MongoWriteOutcome ConditionalUpsertOne(
+        MongoStorageValues values,
+        MongoWriteOptions? options)
+    {
+        var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
+        var document = MongoDocumentMapper.EncodeDocument(
+            Unit,
+            values.Values,
+            identity,
+            existing: null,
+            column => NextSequence(column, options?.Observer));
+        var filter = new BsonDocument("_id", identity);
+        var optimistic = Unit.Concurrency == ConcurrencyDeclaration.Optimistic;
+        if (optimistic)
+        {
+            filter[MongoDocumentMapper.VersionField] = options?.ExpectedVersion is { } expected
+                ? new BsonInt64(expected)
+                : new BsonDocument("$exists", false);
+        }
+
+        var set = new BsonDocument();
+        foreach (var column in Unit.Columns)
+        {
+            if (!values.Values.ContainsKey(column.Name) ||
+                Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) ||
+                column.Name == "createdAt" ||
+                column.Generation == ColumnGeneration.ProviderSequence)
+                continue;
+            set[column.Name] = document[column.Name];
+        }
+
+        var setOnInsert = new BsonDocument();
+        foreach (var element in document)
+        {
+            if (element.Name != "_id" && !set.Contains(element.Name))
+                setOnInsert[element.Name] = element.Value;
+        }
+        var update = new BsonDocument();
+        if (set.ElementCount != 0)
+            update["$set"] = set;
+        if (optimistic)
+            update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
+        if (setOnInsert.ElementCount != 0)
+            update["$setOnInsert"] = setOnInsert;
+
+        // Observer text is diagnostic metadata, not a command recorder. Never include
+        // identity, filter, or document values because they may contain PII/secrets.
+        var commandDescription =
+            "MongoDB.UpdateOne(upsert:true; filter=identity+version; update=$set/$inc/$setOnInsert)";
+        options?.Observer?.Observe(new WritePathEvent("mongodb.conditional-upsert", commandDescription, IsProbe: false));
+        try
+        {
+            var result = transactionSession is null
+                ? collection.UpdateOne(filter, update, new UpdateOptions { IsUpsert = true })
+                : collection.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = true });
+            return result.UpsertedId is not null
+                ? new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, optimistic ? 1 : null)
+                : new MongoWriteOutcome(
+                    MongoWriteOutcomeStatus.Updated,
+                    optimistic && options?.ExpectedVersion is { } expectedVersion
+                        ? checked(expectedVersion + 1)
+                        : null);
+        }
+        catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+        {
+            var indexName = ExtractIndexName(exception.WriteError?.Message);
+            return new MongoWriteOutcome(
+                optimistic && IsIdentityIndex(indexName)
+                    ? MongoWriteOutcomeStatus.ConcurrencyConflict
+                    : MongoWriteOutcomeStatus.UniqueViolation,
+                null,
+                indexName);
+        }
+    }
+
+    private static bool IsIdentityIndex(string? indexName) =>
+        string.Equals(indexName, "_id_", StringComparison.Ordinal) ||
+        string.Equals(indexName, "_id", StringComparison.Ordinal);
+
+    private static string? ExtractIndexName(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return null;
+        var marker = " index: ";
+        var start = message.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+            return null;
+        start += marker.Length;
+        var end = message.IndexOf(' ', start);
+        return (end < 0 ? message[start..] : message[start..end]).Trim('"', '\'', '{', '}');
+    }
+
     private MongoWriteOutcome DeleteCore(MongoStorageKey key, MongoWriteOptions? options)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
@@ -1014,8 +1130,17 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             ? checked((current ?? 0) + 1)
             : null;
 
-    private long NextSequence(ColumnDefinition column) =>
-        state.Sequences.FindOneAndUpdate(
+    private long NextSequence(ColumnDefinition column, IWritePathObserver? observer = null)
+    {
+        // Keep sequence allocation visible to the same diagnostic seam as the write.
+        // ConditionalUpsert rejects this path before it can occur, preserving its
+        // one-command contract; ordinary generated writes still report the extra
+        // provider command instead of hiding it from accounting.
+        observer?.Observe(new WritePathEvent(
+            "mongodb.provider-sequence",
+            "MongoDB.FindOneAndUpdate(sequence)",
+            IsProbe: false));
+        return state.Sequences.FindOneAndUpdate(
             transactionSession,
             new BsonDocument("_id", Unit.Id.Value + ":" + column.Name),
             Builders<BsonDocument>.Update.Inc("value", 1),
@@ -1024,6 +1149,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
                 IsUpsert = true,
                 ReturnDocument = ReturnDocument.After
             })!["value"].ToInt64();
+    }
 
     private void PersistVersion(BsonValue identity, long? version)
     {

@@ -95,6 +95,8 @@ public sealed record MongoWriteOptions
 {
     public long? ExpectedVersion { get; init; }
 
+    public IWritePathObserver? Observer { get; init; }
+
     public static MongoWriteOptions Unconditional { get; } = new();
 
     public static MongoWriteOptions ForVersion(long expectedVersion) =>
@@ -112,7 +114,10 @@ public enum MongoWriteOutcomeStatus
     ConcurrencyConflict
 }
 
-public sealed record MongoWriteOutcome(MongoWriteOutcomeStatus Status, long? Version = null)
+public sealed record MongoWriteOutcome(
+    MongoWriteOutcomeStatus Status,
+    long? Version = null,
+    string? UniqueIndexName = null)
 {
     public bool Succeeded => Status is MongoWriteOutcomeStatus.Inserted or
         MongoWriteOutcomeStatus.Updated or
@@ -250,6 +255,11 @@ public interface IMongoStorageSession
 
     MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
+    /// <summary>
+    /// Executes the provider-native conditional upsert as one MongoDB update command.
+    /// A <see cref="ColumnGeneration.ProviderSequence"/> column is refused because
+    /// allocating that value requires a separate sequence command and transaction.
+    /// </summary>
     MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
     MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null);

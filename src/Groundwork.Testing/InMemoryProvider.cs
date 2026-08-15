@@ -692,8 +692,11 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
         Mutate(values, options, MutationKind.Upsert);
 
-    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
+    {
+        options?.Observer?.Observe(new WritePathEvent("in-memory.conditional-upsert", null, IsProbe: false));
+        return Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+    }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {

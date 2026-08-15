@@ -230,26 +230,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 ? value
                 : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
             StringComparer.Ordinal));
-        if (transaction is not null)
-            return ExecuteConditionalBatch(values, options, key);
-
-        using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable);
-        activeTransaction = writeTransaction;
-        try
-        {
-            var result = ExecuteConditionalBatch(values, options, key);
-            writeTransaction.Commit();
-            return result;
-        }
-        catch
-        {
-            writeTransaction.Rollback();
-            throw;
-        }
-        finally
-        {
-            activeTransaction = null;
-        }
+        return ExecuteConditionalBatch(values, options, key);
     }
 
     private WriteOutcome ExecuteConditionalBatch(
@@ -302,7 +283,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         var outputVersion = VersionColumnDefinition is null
             ? "CONVERT(bigint, NULL)"
             : $"inserted.{Quote(VersionColumnDefinition.Name)}";
-        var sql = $"DECLARE @result TABLE ([operation] nvarchar(6) NOT NULL, [version] bigint NULL); " +
+        var operation = $"DECLARE @result TABLE ([operation] nvarchar(6) NOT NULL, [version] bigint NULL); " +
             $"UPDATE target WITH (UPDLOCK, SERIALIZABLE) SET {string.Join(", ", updates)} " +
             $"OUTPUT N'UPDATE', {outputVersion} INTO @result ([operation], [version]) " +
             $"FROM {Quote(Unit.Name)} AS target WHERE {where} AND ({updateCondition}); " +
@@ -311,8 +292,18 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             $"OUTPUT N'INSERT', {(VersionColumnDefinition is null ? "CONVERT(bigint, NULL)" : "CONVERT(bigint, 1)")} " +
             $"INTO @result ([operation], [version]) VALUES ({string.Join(", ", insertColumns.Select(column => "@" + column.Name))}); END; " +
             "SELECT [operation], [version] FROM @result;";
+        // A range lock must span the UPDATE and conditional INSERT, but opening and
+        // committing a SqlTransaction from the client would add two network round
+        // trips. When the caller did not supply a transaction, keep the transaction
+        // boundary inside this one submitted batch. XACT_ABORT plus the catch block
+        // guarantees that a failed insert does not strand an open transaction.
+        var sql = transaction is not null
+            ? operation
+            : "SET XACT_ABORT ON; BEGIN TRANSACTION; BEGIN TRY " + operation +
+              " COMMIT TRANSACTION; END TRY BEGIN CATCH IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; THROW; END CATCH;";
         using var command = Command(sql);
         AddParameters(command, parameters);
+        options?.Observer?.Observe(new WritePathEvent("sqlserver.conditional-upsert", sql, IsProbe: false));
         try
         {
             using var reader = command.ExecuteReader();
@@ -327,22 +318,51 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 return new WriteOutcome(status, version);
             }
         }
-        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out var indexName))
         {
-            var existing = ReadCore(key);
-            return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+            return IsPrimaryKeyViolation(indexName)
+                ? DeferredConflict(key, options?.Observer)
+                : new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName));
         }
 
-        var current = ReadCore(key);
-        return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, current?.Version);
+        return DeferredConflict(key, options?.Observer);
     }
 
-    private StoredEntry? ReadCore(StorageKey key)
+    private bool IsPrimaryKeyViolation(string indexName) =>
+        indexName.Contains("__groundwork_pk_", StringComparison.OrdinalIgnoreCase) ||
+        indexName.Contains("PRIMARY KEY", StringComparison.OrdinalIgnoreCase);
+
+    private string? LogicalIndexName(string? physicalName)
+    {
+        if (string.IsNullOrWhiteSpace(physicalName))
+            return physicalName;
+
+        return Unit.Indexes.FirstOrDefault(index =>
+            string.Equals(
+                SqlServerDialect.PhysicalIndexName(Unit.Name, index.Name),
+                physicalName,
+                StringComparison.OrdinalIgnoreCase))?.Name ?? physicalName;
+    }
+
+    private WriteOutcome DeferredConflict(StorageKey key, IWritePathObserver? observer) =>
+        WriteOutcome.Deferred(
+            WriteOutcomeStatus.ConcurrencyConflict,
+            null,
+            () =>
+            {
+                var existing = ReadCore(key, observer);
+                return existing is null
+                    ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
+                    : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            });
+
+    private StoredEntry? ReadCore(StorageKey key, IWritePathObserver? observer = null)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
+        observer?.Observe(new WritePathEvent("sqlserver.write-probe", command.CommandText, IsProbe: true));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);

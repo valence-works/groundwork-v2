@@ -82,17 +82,39 @@ internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorage
         ToTesting(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        ToTesting(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)));
+        ToTesting(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) =>
         ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
 
     private static MongoWriteOptions? ToNative(WriteOptions? options) => options is null
         ? null
-        : new MongoWriteOptions { ExpectedVersion = options.ExpectedVersion };
+        : new MongoWriteOptions { ExpectedVersion = options.ExpectedVersion, Observer = options.Observer };
 
     private static WriteOutcome ToTesting(MongoWriteOutcome result) =>
-        new((WriteOutcomeStatus)result.Status, result.Version);
+        new((WriteOutcomeStatus)result.Status, result.Version, result.UniqueIndexName);
+
+    private WriteOutcome ToTesting(MongoWriteOutcome result, StorageValues values, WriteOptions? options)
+    {
+        if (result.Status != MongoWriteOutcomeStatus.ConcurrencyConflict)
+            return ToTesting(result);
+
+        return WriteOutcome.Deferred(
+            WriteOutcomeStatus.ConcurrencyConflict,
+            result.Version,
+            () =>
+            {
+                options?.Observer?.Observe(new WritePathEvent(
+                    "mongodb.write-probe",
+                    "MongoDB.FindOne(identity)",
+                    IsProbe: true));
+                var key = new MongoStorageKey(values.Values);
+                var existing = inner.Read(key);
+                return existing is null
+                    ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
+                    : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            });
+    }
 
     private static StoredEntry? ToTesting(MongoStoredEntry? entry) => entry is null
         ? null
