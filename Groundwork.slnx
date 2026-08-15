@@ -39,6 +39,9 @@
   <Folder Name="/src/Groundwork.Substrate.Relational/">
     <Project Path="src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Sqlite/">
+    <Project Path="src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Analyzers/">
     <Project Path="src/Groundwork.Analyzers/Groundwork.Analyzers.csproj" />
   </Folder>
@@ -75,6 +78,9 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Substrate.Relational.Tests/">
     <Project Path="tests/Groundwork.Substrate.Relational.Tests/Groundwork.Substrate.Relational.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Sqlite.Tests/">
+    <Project Path="tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Analyzers.Tests/">
     <Project Path="tests/Groundwork.Analyzers.Tests/Groundwork.Analyzers.Tests.csproj" />

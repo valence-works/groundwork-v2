@@ -1,0 +1,304 @@
+using System.Globalization;
+using System.Data;
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using Groundwork.Kernel;
+using Groundwork.Testing;
+
+namespace Groundwork.Sqlite;
+
+internal sealed class SqliteStorageSession : IStorageSession
+{
+    private readonly SqliteProviderConnection owner;
+    private readonly SqliteConnection connection;
+    private readonly SqliteTransaction? transaction;
+    private SqliteTransaction? activeTransaction;
+    private bool closed;
+
+    internal SqliteStorageSession(
+        SqliteProviderConnection owner,
+        StorageUnit unit,
+        StorageAccess access,
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        this.owner = owner;
+        Unit = unit;
+        Access = access;
+        this.connection = connection;
+        this.transaction = transaction;
+    }
+
+    public StorageUnit Unit { get; }
+    public StorageAccess Access { get; }
+
+    public StoredEntry? Read(StorageKey key) => Execute(() =>
+    {
+        var (where, parameters) = KeyPredicate(key.Values);
+        var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
+        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
+        AddParameters(command, parameters);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+        for (var i = 0; i < UserColumns.Count; i++)
+            values[UserColumns[i].Name] = FromSqlite(reader.GetValue(i), UserColumns[i]);
+        var version = VersionColumnDefinition is null ? (long?)null : Convert.ToInt64(reader.GetValue(UserColumns.Count), CultureInfo.InvariantCulture);
+        return new StoredEntry(new StorageValues(values), version);
+    });
+
+    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Insert);
+    public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);
+    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
+
+    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
+    {
+        var existing = ReadCore(key);
+        ValidateExpected(options, existing, Mutation.Delete);
+        if (existing is null) return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        var (where, parameters) = KeyPredicate(key.Values);
+        if (VersionColumnDefinition is not null)
+        {
+            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+            parameters["@expected"] = options!.ExpectedVersion!.Value;
+        }
+        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+        AddParameters(command, parameters);
+        command.ExecuteNonQuery();
+        return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
+    });
+
+    internal void Close() => closed = true;
+
+    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        ValidateValues(values.Values, mutation == Mutation.Insert);
+        var key = new StorageKey(LogicalKeyColumns.ToDictionary(
+            column => column, column => values.Values.TryGetValue(column, out var value) ? value : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
+            StringComparer.Ordinal));
+        var existing = ReadCore(key);
+        if (mutation == Mutation.Insert && existing is not null)
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
+        if (mutation == Mutation.Update && existing is null)
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        ValidateExpected(options, existing, mutation);
+
+        var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
+        var columns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (Unit.Scope == ScopePolicy.Scoped)
+            columns.Add(ScopeColumnDefinition!);
+
+        if (mutation == Mutation.Upsert)
+            return Upsert(values, existing, columns);
+        var sets = supplied.Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
+            .Select(column => $"{Quote(column.Name)}=@{column.Name}").ToArray();
+        var parameters = BuildParameters(values.Values, supplied);
+        if (mutation == Mutation.Insert)
+        {
+            if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = 1L;
+            if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = Access.Scope!.Value;
+            using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
+            AddParameters(insert, parameters);
+            try { insert.ExecuteNonQuery(); return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? (long?)null : 1); }
+            catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
+        }
+
+        var (where, keyParameters) = KeyPredicate(key.Values);
+        foreach (var pair in keyParameters) parameters[pair.Key] = pair.Value;
+        if (VersionColumnDefinition is not null)
+        {
+            sets = sets.Append($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1").ToArray();
+            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+            parameters["@expected"] = options!.ExpectedVersion!.Value;
+        }
+        if (sets.Length == 0) return new WriteOutcome(WriteOutcomeStatus.Updated, existing!.Version);
+        using var update = Command($"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};");
+        AddParameters(update, parameters);
+        var affected = update.ExecuteNonQuery();
+        if (affected == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+        return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
+    });
+
+    private WriteOutcome Upsert(StorageValues values, StoredEntry? existing, IReadOnlyList<ColumnDefinition> columns)
+    {
+        var updateColumns = columns.Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) && column.Name != SqliteSchemaCoordinator.ScopeColumn).ToArray();
+        if (VersionColumnDefinition is not null && updateColumns.All(column => column.Name != VersionColumnDefinition.Name))
+            updateColumns = updateColumns.Append(VersionColumnDefinition).ToArray();
+        var keyNames = Unit.Key.Columns;
+        var sql = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}) ON CONFLICT ({string.Join(", ", keyNames.Select(Quote))}) DO UPDATE SET " +
+            string.Join(", ", updateColumns.Select(column => column.Name == SqliteSchemaCoordinator.VersionColumn
+                ? $"{Quote(column.Name)}={Quote(column.Name)}+1" : $"{Quote(column.Name)}=excluded.{Quote(column.Name)}")) + ";";
+        var parameters = BuildParameters(values.Values, columns.Where(column => values.Values.ContainsKey(column.Name)).ToArray());
+        if (VersionColumnDefinition is not null && !parameters.ContainsKey("@__groundwork_version")) parameters["@__groundwork_version"] = 1L;
+        if (ScopeColumnDefinition is not null && !parameters.ContainsKey("@__groundwork_scope")) parameters["@__groundwork_scope"] = Access.Scope!.Value;
+        using var command = Command(sql);
+        AddParameters(command, parameters);
+        try { command.ExecuteNonQuery(); return new WriteOutcome(WriteOutcomeStatus.Upserted, VersionColumnDefinition is null ? null : existing is null ? 1 : existing.Version + 1); }
+        catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version); }
+    }
+
+    private StoredEntry? ReadCore(StorageKey key)
+    {
+        var (where, parameters) = KeyPredicate(key.Values);
+        var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
+        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
+        AddParameters(command, parameters);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+        for (var i = 0; i < UserColumns.Count; i++) values[UserColumns[i].Name] = FromSqlite(reader.GetValue(i), UserColumns[i]);
+        return new StoredEntry(new StorageValues(values), VersionColumnDefinition is null ? null : Convert.ToInt64(reader.GetValue(UserColumns.Count), CultureInfo.InvariantCulture));
+    }
+
+    private void ValidateValues(IReadOnlyDictionary<string, object?> values, bool requireAllNonNullable)
+    {
+        var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
+        var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
+        if (unknown is not null) throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
+        if (requireAllNonNullable)
+            foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
+                if (!values.TryGetValue(column.Name, out var value) || value is null)
+                    throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
+    }
+
+    private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
+    {
+        if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
+        if (VersionColumnDefinition is null) return;
+        if (mutation == Mutation.Insert)
+        {
+            if (existing is null && options?.ExpectedVersion is not null)
+                throw new ConcurrencyConflictException();
+            return;
+        }
+        if (mutation == Mutation.Upsert)
+        {
+            if (existing is null ? options?.ExpectedVersion is not null : options?.ExpectedVersion != existing.Version)
+                throw new ConcurrencyConflictException(existing?.Version);
+            return;
+        }
+        if (existing is null || options?.ExpectedVersion != existing.Version)
+            throw new ConcurrencyConflictException(existing?.Version);
+    }
+
+    private (string Predicate, Dictionary<string, object?> Parameters) KeyPredicate(IReadOnlyDictionary<string, object?> values)
+    {
+        var clauses = new List<string>();
+        var parameters = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var column in LogicalKeyColumns)
+        {
+            if (!values.TryGetValue(column, out var value)) throw new ArgumentException($"Key column '{column}' is required.", nameof(values));
+            var parameter = "@key_" + column;
+            clauses.Add($"{Quote(column)}={parameter}");
+            parameters[parameter] = ToSqlite(value, Column(column));
+        }
+        if (ScopeColumnDefinition is not null)
+        {
+            clauses.Add($"{Quote(ScopeColumnDefinition.Name)}=@__groundwork_scope");
+            parameters["@__groundwork_scope"] = Access.Scope!.Value;
+        }
+        return (string.Join(" AND ", clauses), parameters);
+    }
+
+    private Dictionary<string, object?> BuildParameters(IReadOnlyDictionary<string, object?> values, IEnumerable<ColumnDefinition> columns) =>
+        columns.Where(column => values.ContainsKey(column.Name)).ToDictionary(column => "@" + column.Name, column => ToSqlite(values[column.Name], column), StringComparer.Ordinal);
+
+    private SqliteCommand Command(string sql)
+    {
+        ThrowIfClosed();
+        var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Transaction = activeTransaction ?? transaction;
+        return command;
+    }
+
+    private static void AddParameters(SqliteCommand command, IReadOnlyDictionary<string, object?> parameters)
+    {
+        foreach (var pair in parameters) command.Parameters.AddWithValue(pair.Key, pair.Value ?? DBNull.Value);
+    }
+
+    private T Execute<T>(Func<T> operation)
+    {
+        try
+        {
+            if (transaction is not null) return operation();
+            lock (owner.Gate) { owner.ThrowIfDisposed(); return operation(); }
+        }
+        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
+        {
+            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
+        }
+    }
+
+    private T ExecuteWrite<T>(Func<T> operation)
+    {
+        if (transaction is not null) return Translate(operation);
+        lock (owner.Gate)
+        {
+            owner.ThrowIfDisposed();
+            using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
+            activeTransaction = writeTransaction;
+            try
+            {
+                var result = Translate(operation);
+                writeTransaction.Commit();
+                return result;
+            }
+            catch
+            {
+                writeTransaction.Rollback();
+                throw;
+            }
+            finally
+            {
+                activeTransaction = null;
+            }
+        }
+    }
+
+    private static T Translate<T>(Func<T> operation)
+    {
+        try { return operation(); }
+        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
+        {
+            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
+        }
+    }
+
+    private ColumnDefinition Column(string name) => UserColumns.First(column => column.Name == name);
+    private IReadOnlyList<ColumnDefinition> UserColumns => Unit.Columns.Where(column => column.Name is not SqliteSchemaCoordinator.ScopeColumn and not SqliteSchemaCoordinator.VersionColumn).ToArray();
+    private IReadOnlyList<string> LogicalKeyColumns => Unit.Key.Columns.Where(column => column != SqliteSchemaCoordinator.ScopeColumn).ToArray();
+    private ColumnDefinition? ScopeColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.ScopeColumn);
+    private ColumnDefinition? VersionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.VersionColumn);
+    private static string Quote(string value) => SqliteProviderConnection.QuoteIdentifier(value);
+    private static object? ToSqlite(object? value, ColumnDefinition definition) => SqliteProviderConnection.ToSqliteValue(value, definition);
+
+    private static object? FromSqlite(object value, ColumnDefinition definition)
+    {
+        if (value is DBNull) return null;
+        return definition.Type switch
+        {
+            PortableType.Boolean => Convert.ToInt64(value, CultureInfo.InvariantCulture) != 0,
+            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
+            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
+            PortableType.Decimal => decimal.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture),
+            PortableType.Guid => Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)! ),
+            PortableType.DateTimeOffset => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            PortableType.Binary => ((byte[])value).ToArray(),
+            PortableType.Json => value is string json ? JsonDocument.Parse(json).RootElement.Clone() : value,
+            _ => value
+        };
+    }
+
+    private void ThrowIfClosed()
+    {
+        if (closed) throw new ObjectDisposedException(nameof(SqliteStorageSession));
+    }
+
+    private enum Mutation { Insert, Update, Upsert, Delete }
+    private sealed class ConcurrencyConflictException(long? version = null) : Exception { public long? Version { get; } = version; }
+}

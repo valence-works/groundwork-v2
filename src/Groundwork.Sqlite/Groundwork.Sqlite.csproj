@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>Groundwork.Sqlite</PackageId>
+    <Description>SQLite provider for Groundwork typed storage.</Description>
+    <PackageReadmeFile>sqlite-provider.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <!-- Override Microsoft.Data.Sqlite's vulnerable 2.1.11 native bundle. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+    <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../Groundwork.Testing/Groundwork.Testing.csproj" />
+    <ProjectReference Include="../Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../docs/sqlite-provider.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

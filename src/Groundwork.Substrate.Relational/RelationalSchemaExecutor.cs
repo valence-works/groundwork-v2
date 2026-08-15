@@ -95,7 +95,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         ArgumentNullException.ThrowIfNull(state);
         var lease = RequireLock(state.TargetIdentity, applicationLock);
         lease.Verify();
-        using var transaction = lease.Connection.BeginTransaction();
+        using var transaction = dialect.BeginTransaction(lease.Connection);
         try
         {
             dialect.AssertFence(lease.Connection, transaction, state.TargetIdentity, lease.Owner, lease.Fence);
@@ -131,7 +131,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             applied.Snapshot.Subject,
             applied.Provider,
             applied.Snapshot.ProviderDefinitions);
-        using var transaction = connection.BeginTransaction();
+        using var transaction = dialect.BeginTransaction(connection);
         try
         {
             ValidateTarget(connection, transaction, appliedTarget);
@@ -172,7 +172,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                     "BackfillColumn");
                 break;
             case FinalizeColumnOperation finalize:
-                Execute(connection, transaction, RelationalSql.FinalizeColumn(dialect, finalize.Subject.Name, finalize.Column));
+                dialect.FinalizeColumn(connection, transaction, finalize.Subject.Name, finalize.Column);
                 break;
             case CreatePhysicalIndexOperation createIndex:
                 Execute(connection, transaction, RelationalSql.CreateIndex(dialect, createIndex.Subject.Name, createIndex.Index));
@@ -218,7 +218,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         PhysicalSchemaTargetIdentity target,
         IReadOnlyList<PhysicalSchemaOperation> operations)
     {
-        using var transaction = lease.Connection.BeginTransaction();
+        using var transaction = dialect.BeginTransaction(lease.Connection);
         var acknowledgements = new List<PhysicalSchemaOperationAcknowledgement>(operations.Count);
         try
         {
@@ -226,7 +226,13 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             foreach (var operation in operations)
             {
                 dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
-                ExecuteOperation(lease.Connection, transaction, operation);
+                // The neutral planner records Add/Backfill/Finalize for every declaration so
+                // providers can acknowledge one stable ledger. Dialects that create all columns
+                // in their CREATE TABLE statement must not execute those duplicate operations.
+                if (!(dialect.CreateTableIncludesColumns &&
+                      operations.Any(item => item is CreatePrimaryStorageOperation) &&
+                      operation is AddColumnOperation or BackfillColumnOperation or FinalizeColumnOperation))
+                    ExecuteOperation(lease.Connection, transaction, operation);
                 acknowledgements.Add(new PhysicalSchemaOperationAcknowledgement(
                     operation.Identity,
                     operation.Fingerprint,
