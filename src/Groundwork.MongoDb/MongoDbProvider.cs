@@ -699,13 +699,17 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var executionSource = Access.Policy == ScopePolicy.Scoped
+            ? QueryRequestExecution.WithProviderPredicate(request, request.Where,
+                QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value))
+            : request;
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
             Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
         };
-        var executionRequest = QueryRequestExecution.ForPage(request, renderOptions);
-        var command = new MongoQueryRenderer().Render(executionRequest, renderOptions);
+        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
+        var command = new MongoQueryRenderer().Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName);
         List<BsonDocument> documents;
         long? facetTotalCount = null;
         if (command.Pipeline.Length != 0)
@@ -792,7 +796,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             }
         }
         return QueryResultMaterializer.Materialize(
-            request,
+            executionSource,
             renderOptions,
             rows,
             renderOptions.FindPinnedIndex()?.Name,

@@ -9,7 +9,7 @@ public sealed class MongoQueryRenderer
 {
     private const string MatchNoneField = "_groundwork_match_none";
 
-    public MongoQueryCommand Render(QueryRequest request, QueryRenderOptions? options = null)
+    public MongoQueryCommand Render(QueryRequest request, QueryRenderOptions? options = null, string? physicalCollectionName = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         options ??= QueryRenderOptions.Default;
@@ -80,7 +80,7 @@ public sealed class MongoQueryRenderer
             : new BsonDocument(request.Projection.Columns.ToDictionary(column => column.Name, _ => (BsonValue)1));
         var sort = new BsonDocument(order.Select(term =>
             new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1)));
-        var pipeline = RenderPipeline(request.Table.Value, baseFilter, cursor, request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount, options);
+        var pipeline = RenderPipeline(physicalCollectionName ?? request.Table.Value, baseFilter, cursor, request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount, options);
         return new MongoQueryCommand(
             filter,
             sort,

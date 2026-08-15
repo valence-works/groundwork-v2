@@ -24,10 +24,17 @@ public sealed class CorpusDifferentialTests
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
         var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
+        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
         var unit = ScopedUnit;
         using var sqlite = new SqliteProviderFactory().Create("Data Source=file:g2q4_scope_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
         using var pg = new PostgreSqlProviderFactory().Create(postgres);
         using var sql = new SqlServerProviderFactory().Create(sqlServer);
+        var table = new TableId(ScopedTableName);
+        var idColumn = new ColumnRef(table, "id", QueryType.Int64, false);
+        var valueColumn = new ColumnRef(table, "value", QueryType.String, false);
+        QueryRequest Request(Paging paging) => new(table, Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(idColumn, OrderDirection.Ascending, NullOrder.First)],
+            Projection.ColumnsOnly(valueColumn), paging, ResultShape.TotalCount.Instance);
         foreach (var connection in new IStorageProviderConnection[] { sqlite, pg, sql })
         {
             connection.Schema.Apply(unit);
@@ -38,13 +45,6 @@ public sealed class CorpusDifferentialTests
                 first.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = id, ["value"] = "a" + id }));
                 second.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = id, ["value"] = "b" + id }));
             }
-            var table = new TableId(ScopedTableName);
-            var idColumn = new ColumnRef(table, "id", QueryType.Int64, false);
-            var valueColumn = new ColumnRef(table, "value", QueryType.String, false);
-            QueryRequest Request(Paging paging) => new(table, Predicate.AlwaysTrue.Instance,
-                [new OrderTerm(idColumn, OrderDirection.Ascending, NullOrder.First)],
-                Projection.ColumnsOnly(valueColumn), paging, ResultShape.TotalCount.Instance);
-
             var firstPage = first.Query(Request(Paging.Keyset(1)));
             var secondPage = second.Query(Request(Paging.Keyset(1)));
             Assert.Equal(2L, firstPage.TotalCount);
@@ -54,6 +54,25 @@ public sealed class CorpusDifferentialTests
             Assert.NotNull(firstPage.NextContinuationToken);
             Assert.Throws<QueryRenderException>(() => second.Query(Request(Paging.Continuation(firstPage.NextContinuationToken!, 1))));
         }
+
+        using var mongoConnection = new MongoDbProviderFactory().Create(mongo);
+        mongoConnection.Schema.Apply(unit);
+        var mongoFirst = mongoConnection.OpenSession(unit, MongoStorageAccess.Scoped(new StorageScope("scope-a")));
+        var mongoSecond = mongoConnection.OpenSession(unit, MongoStorageAccess.Scoped(new StorageScope("scope-b")));
+        foreach (var id in new[] { 1L, 2L })
+        {
+            mongoFirst.Insert(new MongoStorageValues(new Dictionary<string, object?> { ["id"] = id, ["value"] = "a" + id }));
+            mongoSecond.Insert(new MongoStorageValues(new Dictionary<string, object?> { ["id"] = id, ["value"] = "b" + id }));
+        }
+        var mongoFirstPage = mongoFirst.Query(Request(Paging.Keyset(1)));
+        var mongoSecondPage = mongoSecond.Query(Request(Paging.Keyset(1)));
+        Assert.Equal(2L, mongoFirstPage.TotalCount);
+        Assert.Equal(2L, mongoSecondPage.TotalCount);
+        Assert.Equal("a1", mongoFirstPage.Rows.Single()["value"]);
+        Assert.Equal("b1", mongoSecondPage.Rows.Single()["value"]);
+        Assert.NotNull(mongoFirstPage.NextContinuationToken);
+        Assert.DoesNotContain("scope-a", mongoFirstPage.NextContinuationToken!, StringComparison.Ordinal);
+        Assert.Throws<QueryRenderException>(() => mongoSecond.Query(Request(Paging.Continuation(mongoFirstPage.NextContinuationToken!, 1))));
     }
 
     [SkippableFact]

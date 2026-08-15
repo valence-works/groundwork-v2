@@ -335,6 +335,10 @@ public sealed class QueryRendererTests
         Assert.Contains("__groundwork_total_count", totalPipeline, StringComparison.Ordinal);
         Assert.Contains("$unionWith", totalPipeline, StringComparison.Ordinal);
         Assert.DoesNotContain("$facet", totalPipeline, StringComparison.Ordinal);
+        var scopedTotal = new MongoQueryRenderer().Render(Request(
+            Predicate.AlwaysTrue.Instance, [], Paging.Keyset(5), ResultShape.TotalCount.Instance),
+            physicalCollectionName: "customers__scope__anonymous");
+        Assert.Contains("customers__scope__anonymous", string.Join("\n", scopedTotal.Pipeline.Select(stage => stage.ToString())), StringComparison.Ordinal);
     }
 
     [Fact]
