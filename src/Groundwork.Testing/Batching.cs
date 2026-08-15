@@ -552,6 +552,12 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
         return inner.Query(request, options);
     }
 
+    public AggregationResult Aggregate(AggregationQuery query)
+    {
+        context.FlushAll();
+        return inner.Aggregate(query);
+    }
+
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => inner.Update(values, options);

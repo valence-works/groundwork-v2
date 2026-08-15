@@ -88,6 +88,9 @@ internal sealed class MongoTestingSession(
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
         inner.Query(request, options);
 
+    public AggregationResult Aggregate(AggregationQuery query) =>
+        AggregationSessionExecutor.Execute(this, query);
+
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);

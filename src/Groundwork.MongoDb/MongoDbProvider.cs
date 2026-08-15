@@ -813,6 +813,9 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             sourceIncludesContinuation: true);
     }
 
+    public AggregationResult Aggregate(AggregationQuery query) =>
+        AggregationSessionExecutor.Execute(Unit, request => Query(request), query);
+
     private void AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options)
     {
         var logicalIndex = options.FindPinnedIndex()?.Name;
@@ -1795,7 +1798,8 @@ internal static class MongoDeclarationSnapshot
         Indexes = unit.Indexes.Select(index => index with
         {
             Columns = index.Columns.Select(column => column with { }).ToArray()
-        }).ToArray()
+        }).ToArray(),
+        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
     };
 
     private static object? CloneValue(object? value) => value switch

@@ -67,6 +67,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             sourceIncludesContinuation: true);
     });
 
+    public AggregationResult Aggregate(AggregationQuery query) =>
+        Execute(() => AggregationSessionExecutor.Execute(this, query));
+
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
         if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(query.SelectedIndex)) return;

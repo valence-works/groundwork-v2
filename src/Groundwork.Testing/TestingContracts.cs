@@ -410,6 +410,9 @@ public interface IStorageSession
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
 
+    /// <summary>Executes one named, closed aggregation profile with its declared budgets.</summary>
+    AggregationResult Aggregate(AggregationQuery query);
+
     WriteOutcome Insert(StorageValues values, WriteOptions? options = null);
 
     WriteOutcome Update(StorageValues values, WriteOptions? options = null);

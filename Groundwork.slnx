@@ -124,4 +124,7 @@
   <Folder Name="/tests/Groundwork.WritePath.Tests/">
     <Project Path="tests/Groundwork.WritePath.Tests/Groundwork.WritePath.Tests.csproj" />
   </Folder>
+  <Folder Name="/tests/Groundwork.StreamCapabilities.Tests/">
+    <Project Path="tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj" />
+  </Folder>
 </Solution>

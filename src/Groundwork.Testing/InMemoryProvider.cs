@@ -427,7 +427,8 @@ internal static class StorageDeclaration
         Indexes = unit.Indexes.Select(index => index with
         {
             Columns = index.Columns.ToArray()
-        }).ToArray()
+        }).ToArray(),
+        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
     };
 }
 
@@ -534,6 +535,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
                 sourceIncludesContinuation: !deferContinuation);
         }
     }
+
+    public AggregationResult Aggregate(AggregationQuery query) =>
+        AggregationSessionExecutor.Execute(this, query);
 
     private ColumnRef? QueryColumn(string name)
     {

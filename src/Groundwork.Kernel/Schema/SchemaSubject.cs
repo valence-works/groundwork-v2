@@ -48,6 +48,7 @@ public sealed class SchemaSubject
                 .. Key.Columns.Select(column => $"key:{column}"),
                 .. DerivedColumns.Select(CanonicalDerivedColumn),
                 .. Indexes.Select(CanonicalIndex),
+                .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile),
                 Evolution.IsDestructive ? "destructive" : "safe",
                 Evolution.SemanticMigrationId
             ]);
@@ -64,6 +65,8 @@ public sealed class SchemaSubject
     public ImmutableArray<DerivedColumnDefinition> DerivedColumns => definition.DerivedColumns.ToImmutableArray();
 
     public ImmutableArray<IndexDefinition> Indexes => definition.Indexes.ToImmutableArray();
+
+    public ImmutableArray<AggregationProfile> AggregationProfiles => definition.AggregationProfiles.ToImmutableArray();
 
     public ScopePolicy Scope => definition.Scope;
 
@@ -127,6 +130,8 @@ public sealed class SchemaSubject
         {
             throw new ArgumentException("Schema subject indexes must name declared columns.", nameof(unit));
         }
+
+        AggregationProfileValidator.ValidateUnit(unit);
     }
 
     private static StorageUnit Snapshot(StorageUnit source) => new()
@@ -149,6 +154,7 @@ public sealed class SchemaSubject
             MissingValues = index.MissingValues,
             SchemaVersion = index.SchemaVersion
         }).ToImmutableArray(),
+        AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
         Concurrency = source.Concurrency,
         Timestamps = source.Timestamps,
@@ -194,6 +200,28 @@ public sealed class SchemaSubject
             index.SchemaVersion.ToString(CultureInfo.InvariantCulture),
             .. index.Columns.Select(column => $"{column.Column}:{column.Direction}")
         ]);
+
+    private static AggregationProfile Snapshot(AggregationProfile profile) =>
+        AggregationProfileSnapshot.Capture(profile);
+
+    private static string CanonicalAggregationProfile(AggregationProfile profile) =>
+        string.Join("|", profile.Name,
+            string.Join(",", (profile.GroupByColumns ?? []).OrderBy(value => value, StringComparer.Ordinal)),
+            string.Join(",", (profile.Aggregates ?? []).Select(CanonicalAggregate).OrderBy(value => value, StringComparer.Ordinal)),
+            string.Join(",", (profile.AllowedPredicates ?? []).Select(allowance => allowance.Alias + ":" +
+                string.Join("+", allowance.SupportedPredicates.OrderBy(value => value).Select(value => value.ToString()))).OrderBy(value => value, StringComparer.Ordinal)),
+            profile.MaxGroups.ToString(CultureInfo.InvariantCulture),
+            profile.MaxInputRows.ToString(CultureInfo.InvariantCulture));
+
+    private static string CanonicalAggregate(Aggregate aggregate) => aggregate switch
+    {
+        Aggregate.Min min => $"min:{min.Alias}:{min.Column}",
+        Aggregate.Max max => $"max:{max.Alias}:{max.Column}",
+        Aggregate.Sum sum => $"sum:{sum.Alias}:{sum.Column}",
+        Aggregate.SetUnion set => $"set:{set.Alias}:{set.Column}:{set.MaxValues}",
+        Aggregate.FirstBy first => $"first:{first.Alias}:{first.Column}:{first.OrderColumn}:{first.Direction}",
+        _ => aggregate.ToString() ?? string.Empty
+    };
 }
 
 /// <summary>Provider-owned schema materialization metadata carried through the neutral plan.</summary>
