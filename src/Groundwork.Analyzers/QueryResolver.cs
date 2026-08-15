@@ -38,6 +38,22 @@ internal static class QueryResolver
     private static readonly ImmutableHashSet<string> TerminalNames =
         ImmutableHashSet.Create(StringComparer.Ordinal, "QueryAsync", "CountAsync", "FirstOrDefaultAsync", "ToListAsync");
 
+    public static bool IsCandidate(InvocationExpressionSyntax terminal)
+    {
+        if (terminal.Expression is not MemberAccessExpressionSyntax member)
+            return false;
+        if (GetInvocationChain(member.Expression).Any(IsTableInvocation))
+            return true;
+        if (member.Expression is not IdentifierNameSyntax local)
+            return false;
+        var method = terminal.FirstAncestorOrSelf<BaseMethodDeclarationSyntax>();
+        var initializer = method?.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .FirstOrDefault(item => item.Identifier.ValueText == local.Identifier.ValueText)
+            ?.Initializer?.Value;
+        return initializer is InvocationExpressionSyntax invocation &&
+               GetInvocationChain(invocation).Any(IsTableInvocation);
+    }
+
     public static QueryResolution Resolve(
         InvocationExpressionSyntax terminal,
         SemanticModel model,
@@ -311,6 +327,12 @@ internal static class QueryResolver
         tableType = null!;
         return false;
     }
+
+    private static bool IsTableInvocation(InvocationExpressionSyntax invocation) =>
+        invocation.Expression is MemberAccessExpressionSyntax
+        {
+            Name: GenericNameSyntax { Identifier.ValueText: "Table", TypeArgumentList.Arguments.Count: 1 }
+        };
 
     private static bool TryParseLambda(
         ExpressionSyntax expression,

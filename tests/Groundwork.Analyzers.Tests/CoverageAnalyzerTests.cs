@@ -106,12 +106,26 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
-    public async Task Unknown_query_root_is_advisory_error_900()
+    public async Task Unknown_operation_on_a_groundwork_query_is_advisory_error_900()
     {
-        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + "var result = GetQuery<Ticket>().QueryAsync();\n" + QueryInfrastructure);
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QueryInfrastructure.Replace(
+                "public Query<T> Take(int count) => this;",
+                "public Query<T> Take(int count) => this; public Query<T> Custom() => this;") +
+            " public static class UnknownOperation { public static void Run() { var result = db.Table<Ticket>().Custom().QueryAsync(); } }");
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_900"));
-        Assert.Contains("statically", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("closed query surface", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Unrelated_methods_with_the_same_terminal_name_are_ignored()
+    {
+        const string source = "public sealed class Client { public System.Threading.Tasks.Task QueryAsync() => System.Threading.Tasks.Task.CompletedTask; } public static class Use { public static void Run(Client client) { _ = client.QueryAsync(); } }";
+
+        var diagnostics = await Analyze(source);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
     }
 
     [Fact]
