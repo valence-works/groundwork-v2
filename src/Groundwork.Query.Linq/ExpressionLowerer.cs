@@ -106,10 +106,10 @@ public static class ExpressionLowerer
             root = null;
             rewritten = expression;
             var current = Unwrap(expression);
-            while (current is MemberExpression member && member.Member is FieldInfo field && field.DeclaringType?.Name.Contains("DisplayClass", StringComparison.Ordinal) == true)
+            while (current is MemberExpression member && member.Member is FieldInfo field && IsCompilerClosureField(field))
             {
                 current = Unwrap(member.Expression!);
-                if (member.Expression is ConstantExpression constant && constant.Type.Name.Contains("DisplayClass", StringComparison.Ordinal))
+                if (member.Expression is ConstantExpression constant && IsCompilerClosureType(constant.Type) && !field.IsStatic)
                 {
                     root = constant;
                     return true;
@@ -132,7 +132,7 @@ public static class ExpressionLowerer
             public ClosureRootFinder(Action<ConstantExpression> found) => this.found = found;
             protected override Expression VisitConstant(ConstantExpression node)
             {
-                if (node.Type.Name.Contains("DisplayClass", StringComparison.Ordinal)) found(node);
+                if (IsCompilerClosureType(node.Type)) found(node);
                 return node;
             }
         }
@@ -211,7 +211,7 @@ public static class ExpressionLowerer
                 var instance = member.Expression is null ? null : ReadClosed(member.Expression);
                 if (member.Expression is null && member.Member.DeclaringType == typeof(DateTimeOffset) && member.Member.Name == "UtcNow")
                     return DateTimeOffset.UtcNow;
-                if (member.Member is FieldInfo field && field.DeclaringType?.Name.Contains("DisplayClass", StringComparison.Ordinal) == true)
+                if (member.Member is FieldInfo field && IsCompilerClosureField(field) && !field.IsStatic)
                     return field.GetValue(instance);
                 throw new InvalidOperationException("Only compiler closure fields and approved BCL values are readable.");
             }
@@ -242,6 +242,12 @@ public static class ExpressionLowerer
                 throw new InvalidOperationException("The closed term contains an opaque method, property, or constructor.");
         }
     }
+
+    private static bool IsCompilerClosureType(Type? type) => type is not null &&
+        type.GetCustomAttributes(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false).Length != 0 &&
+        type.IsNestedPrivate && type.Name.Contains("DisplayClass", StringComparison.Ordinal);
+
+    private static bool IsCompilerClosureField(FieldInfo field) => !field.IsStatic && IsCompilerClosureType(field.DeclaringType);
 
     private static object? ReadBinary(BinaryExpression expression)
     {

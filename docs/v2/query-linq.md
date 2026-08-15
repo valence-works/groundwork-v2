@@ -23,10 +23,27 @@ together:
 | GW-LINQ-109 | Use `DateTimeOffset.UtcNow`. |
 | GW-LINQ-110 | The value has more scale/range than `decimal(10,2)`. |
 
-| Decision | Corpus forms |
+| Source decision | AST equivalent / fix |
 | --- | --- |
-| Accepted ASTs | And(ElementOf,Equal), And(ElementOf,Not(Equal)), And(ElementOf,Range), And(Equal,Equal), And(Equal,Equal,Equal), And(Equal,Equal,Not(Equal)), And(Equal,Equal,Range), And(Equal,In), And(Equal,Not(Equal)), And(Equal,Or(Equal,Equal)), And(Equal,Range), And(Equal,StartsWith), And(Equal,Substring), And(In,Not(Equal)), And(In,Range), And(Not(Equal),Not(Equal)), And(Not(Equal),Or(Equal,Equal)), And(Not(Equal),Range), And(Not(Equal),StartsWith), And(Not(Equal),Substring), And(Or(Equal,Equal),Range), And(Range,Range), And(Range,StartsWith), And(Range,Substring), ElementOf, Equal, In, Not(Equal), Or(Equal,Equal), Range, StartsWith, Substring |
-| Rejected diagnostics | GW-LINQ-101, GW-LINQ-102, GW-LINQ-103, GW-LINQ-104, GW-LINQ-105, GW-LINQ-106, GW-LINQ-107, GW-LINQ-108, GW-LINQ-109, GW-LINQ-110 |
+| Conjunction | `Predicate.And(terms)`, normalized by term |
+| Disjunction | `Predicate.Or(terms)`, normalized by term |
+| Element-set quantifier | `Predicate.ElementOf(set, values, Any|All)` |
+| Equality | `Predicate.Equal(column, constant)` |
+| Inequality | `Predicate.Not(Predicate.Equal(column, constant))` |
+| Membership | `Predicate.In(column, values)`, with the value count retained |
+| Prefix matching | `Predicate.StartsWith(column, prefix)` |
+| Range | `Predicate.Range(column, lower?, upper?)`, retaining bound inclusivity |
+| Substring matching | `Predicate.Substring(column, needle, Contains|EndsWith)` |
+| Computed/member expression | GW-LINQ-101: declare a computed column; expressions over columns are not portable |
+| Arithmetic expression | GW-LINQ-102: declare a computed column; expressions over columns are not portable |
+| Column-to-column comparison | GW-LINQ-103: add `.AcceptScan(...)` |
+| Cross-table expression | GW-LINQ-104: v2 has no joins; use a declared element set or two queries |
+| Grouped top-one | GW-LINQ-105: use `.LatestPer(...)` for grouped top-1 |
+| Unsupported element-set predicate | GW-LINQ-106: declare the element set |
+| Opaque helper | GW-LINQ-107: mark it `[GwQueryFragment]` |
+| Unpinned string comparison | GW-LINQ-108: use Ordinal/OrdinalIgnoreCase matching the column's folding |
+| Non-UTC clock | GW-LINQ-109: use `DateTimeOffset.UtcNow` |
+| Decimal precision/scale | GW-LINQ-110: the value has more scale/range than `decimal(10,2)` |
 
 Closed terms are read from constants and closure fields without compiling an expression per query
 call. Unsupported expression nodes are rejected rather than evaluated on the client.

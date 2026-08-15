@@ -92,9 +92,16 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Linq_analyzer_accepts_membership_and_equality_element_sets()
     {
-        const string source = "using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => ids.Contains(ticket.Id) && Enumerable.Contains(ids, ticket.Id) && ticket.Tags.Any(value => value == ticket.Id) && ticket.Tags.All(value => value == ticket.Id)); } }";
+        const string source = "using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table, int[] ids) { table.Where(ticket => ids.Contains(ticket.Id) && Enumerable.Contains(ids, ticket.Id) && ticket.Tags.Any(value => value == 7) && ticket.Tags.All(value => value == 7)); } }";
         var diagnostics = await AnalyzeLinq(source);
         Assert.DoesNotContain(diagnostics, item => item.Id is "GW_LINQ_107" or "GW_LINQ_108");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_rejects_element_set_predicates_that_capture_the_outer_row()
+    {
+        var diagnostics = await AnalyzeLinq("using System; using System.Linq; using System.Linq.Expressions; namespace Groundwork.Query.Linq { public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { public int[] Tags { get; set; } = Array.Empty<int>(); public int Id { get; set; } } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Tags.Any(value => value == ticket.Id)); } }");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_106");
     }
 
     [Fact]

@@ -115,7 +115,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 Report("GW-LINQ-104", node, "GW-LINQ-104: v2 has no joins; use a declared element set or two queries");
             else if (name == "GroupBy")
                 Report("GW-LINQ-105", node, "GW-LINQ-105: use `.LatestPer(...)` for grouped top-1");
-            else if (name is "Any" or "All" && node.ArgumentList.Arguments.Count > 0 && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && !IsEquality(nested.Body))
+            else if (name is "Any" or "All" && node.ArgumentList.Arguments.Count > 0 && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && (!IsEquality(nested.Body) || ReferencesOuterParameter(nested.Body)))
                 Report("GW-LINQ-106", node, "GW-LINQ-106: declare the element set");
             else if (name is "AddDays" or "AddHours" or "AddMinutes" or "AddSeconds" && symbol?.ContainingType?.ToDisplayString() == "System.DateTimeOffset")
             {
@@ -179,7 +179,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         private bool HasDistinctMemberOperands(ExpressionSyntax left, ExpressionSyntax right) => left is MemberAccessExpressionSyntax && right is MemberAccessExpressionSyntax && HasLambdaParameter(left) && HasLambdaParameter(right);
         private bool IsStringInvocation(InvocationExpressionSyntax node) => node.Expression is MemberAccessExpressionSyntax member && context.SemanticModel.GetTypeInfo(member.Expression).Type?.SpecialType == SpecialType.System_String;
         private static bool IsEquality(CSharpSyntaxNode node) => node is BinaryExpressionSyntax binary && binary.IsKind(SyntaxKind.EqualsExpression);
-        private static bool IsKnownQueryMethod(IMethodSymbol symbol, InvocationExpressionSyntax node)
+        private bool IsKnownQueryMethod(IMethodSymbol symbol, InvocationExpressionSyntax node)
         {
             if (symbol.ContainingType?.ToDisplayString() != "System.Linq.Enumerable") return false;
             if (symbol.Name == "Contains")
@@ -195,7 +195,28 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 ? node.ArgumentList.Arguments[0].Expression
                 : (node.Expression as MemberAccessExpressionSyntax)?.Expression;
             var lambda = node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression as LambdaExpressionSyntax;
-            return elementCollection is MemberAccessExpressionSyntax && lambda is not null && IsEquality(lambda.Body);
+            return elementCollection is MemberAccessExpressionSyntax && lambda is not null && IsEquality(lambda.Body) && !ReferencesOuterParameter(lambda.Body, node);
+        }
+        private bool ReferencesOuterParameter(SyntaxNode body, InvocationExpressionSyntax? invocation = null)
+        {
+            var outerNames = lambda switch
+            {
+                ParenthesizedLambdaExpressionSyntax parenthesized => parenthesized.ParameterList.Parameters.Select(parameter => parameter.Identifier.ValueText),
+                SimpleLambdaExpressionSyntax simple => new[] { simple.Parameter.Identifier.ValueText },
+                _ => Enumerable.Empty<string>()
+            };
+            var nestedNames = invocation?.ArgumentList.Arguments
+                .Select(argument => argument.Expression)
+                .OfType<LambdaExpressionSyntax>()
+                .SelectMany(nested => nested switch
+                {
+                    ParenthesizedLambdaExpressionSyntax parenthesized => parenthesized.ParameterList.Parameters.Select(parameter => parameter.Identifier.ValueText),
+                    SimpleLambdaExpressionSyntax simple => new[] { simple.Parameter.Identifier.ValueText },
+                    _ => Enumerable.Empty<string>()
+                }) ?? Enumerable.Empty<string>();
+            return body.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().Any(identifier =>
+                outerNames.Contains(identifier.Identifier.ValueText, StringComparer.Ordinal) &&
+                !nestedNames.Contains(identifier.Identifier.ValueText, StringComparer.Ordinal));
         }
         private void ReportStringComparison(InvocationExpressionSyntax node, string message)
         {
