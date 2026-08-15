@@ -222,6 +222,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        ValidateRetention(desired);
         desired.AppendIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
@@ -237,6 +238,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        ValidateRetention(desired);
         desired.AppendIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
@@ -296,6 +298,18 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         }
     }
 
+    private static void ValidateRetention(StorageUnit unit)
+    {
+        if (unit.Retention is null)
+            return;
+        var portability = PortabilityValidator.Validate(unit);
+        if (!portability.IsPortable)
+        {
+            var refusal = portability.Refusals[0];
+            throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
+        }
+    }
+
     private static IReadOnlyList<SchemaChange> BuildChanges(StorageUnit desired, StorageUnit? current)
     {
         if (current is not null && !string.Equals(current.Name, desired.Name, StringComparison.Ordinal))
@@ -315,6 +329,9 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         if (current is not null && current.SchemaVersion != desired.SchemaVersion)
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change schema version non-additively.");
+        if (current is not null && !SchemaIdentity.RetentionEquals(current.Retention, desired.Retention))
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change retention non-additively.");
         if (current is not null && !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change append idempotency window or ledger non-additively.");
@@ -453,6 +470,12 @@ internal static class SchemaIdentity
     internal static bool AggregationProfileEquals(AggregationProfile left, AggregationProfile right) =>
         string.Equals(AggregationProfile(left), AggregationProfile(right), StringComparison.Ordinal);
 
+    internal static bool RetentionEquals(RetentionDeclaration? left, RetentionDeclaration? right) =>
+        string.Equals(
+            RetentionCanonicalization.Canonicalize(left),
+            RetentionCanonicalization.Canonicalize(right),
+            StringComparison.Ordinal);
+
     private static string Column(ColumnDefinition column) => Encode(
         column.Name,
         column.Type,
@@ -515,11 +538,15 @@ internal static class StorageDeclaration
         {
             Columns = index.Columns.ToArray()
         }).ToArray(),
-        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
+        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
+        Retention = unit.Retention is null ? null : unit.Retention with
+        {
+            PartitionColumns = unit.Retention.PartitionColumns.ToArray()
+        }
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStorageSession
+internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStorageSession, IRetentionStorageSession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -841,43 +868,110 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         }
     }
 
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        options ??= new RetentionExecutionOptions();
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+
+        string[] victimKeys;
+        lock (database.Gate)
+        {
+            ThrowIfDisposed();
+            options.CancellationToken.ThrowIfCancellationRequested();
+            var current = CurrentState();
+            if (!current.Partitions.TryGetValue(partition, out var entries) || entries.Count == 0)
+                return new RetentionResult(0, 0);
+
+            // Snapshot the watermark under the short read lock. Deleting outside that lock
+            // prevents OnAppend from turning a retention scan into a write convoy.
+            var rows = entries.Values.Select(entry => entry.Values).ToArray();
+            victimKeys = RetentionRows.OrderVictims(Unit, declaration, rows)
+                .Select(row => InMemoryKey(Unit, row))
+                .ToArray();
+        }
+
+        var deleted = 0;
+        var batches = 0;
+        foreach (var batch in victimKeys.Chunk(options.MaxRowsPerBatch))
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            lock (database.Gate)
+            {
+                ThrowIfDisposed();
+                var current = CurrentState();
+                if (!current.Partitions.TryGetValue(partition, out var entries))
+                    continue;
+                foreach (var identity in batch)
+                {
+                    options.CancellationToken.ThrowIfCancellationRequested();
+                    if (entries.Remove(identity))
+                    {
+                        deleted++;
+                        current.Revision = checked(current.Revision + 1);
+                    }
+                }
+            }
+
+            batches++;
+            options.Observer?.Observe(new WritePathEvent("in-memory.retention", null, IsProbe: false));
+        }
+
+        return new RetentionResult(deleted, batches);
+    }
+
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        WriteOutcome outcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            var now = DateTimeOffset.UtcNow;
-            var ledger = liveState
-                ? database.IdempotencyLedger
-                : stagedLedger ?? throw new InvalidOperationException("The staged append ledger is unavailable.");
-            ReclaimLedger(ledger, Unit.Id, now, declaration.Window);
-            var ledgerKey = new IdempotencyLedgerKey(Unit.Id, partition, operationId.Nonce);
-            if (ledger.TryGetValue(ledgerKey, out var committedAt))
-            {
-                if (IdempotencyRules.IsWithinWindow(committedAt, now, declaration.Window))
-                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
-                ledger.Remove(ledgerKey);
-            }
-
-            var candidate = CurrentState().Clone();
-            foreach (var value in values)
-            {
-                WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
-                var outcome = Mutation.Apply(candidate, partition, value, WriteOptions.Unconditional, MutationKind.Insert);
-                if (!outcome.Succeeded)
-                    throw new InvalidOperationException($"Append row failed with outcome '{outcome.Status}'.");
-            }
-
-            state = candidate;
-            if (liveState)
-                database.Units[Unit.Id] = candidate;
-            else
-                stagedUnits![Unit.Id] = candidate;
-            ledger[ledgerKey] = now;
-            return new WriteOutcome(WriteOutcomeStatus.Inserted);
+            outcome = AppendCore(operationId, values, declaration);
         }
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return outcome;
+    }
+
+    private WriteOutcome AppendCore(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        AppendIdempotencyDeclaration declaration)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var ledger = liveState
+            ? database.IdempotencyLedger
+            : stagedLedger ?? throw new InvalidOperationException("The staged append ledger is unavailable.");
+        ReclaimLedger(ledger, Unit.Id, now, declaration.Window);
+        var ledgerKey = new IdempotencyLedgerKey(Unit.Id, partition, operationId.Nonce);
+        if (ledger.TryGetValue(ledgerKey, out var committedAt))
+        {
+            if (IdempotencyRules.IsWithinWindow(committedAt, now, declaration.Window))
+                return new WriteOutcome(WriteOutcomeStatus.Replayed);
+            ledger.Remove(ledgerKey);
+        }
+
+        var candidate = CurrentState().Clone();
+        foreach (var value in values)
+        {
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            var outcome = Mutation.Apply(candidate, partition, value, WriteOptions.Unconditional, MutationKind.Insert);
+            if (!outcome.Succeeded)
+                throw new InvalidOperationException($"Append row failed with outcome '{outcome.Status}'.");
+        }
+
+        state = candidate;
+        if (liveState)
+            database.Units[Unit.Id] = candidate;
+        else
+            stagedUnits![Unit.Id] = candidate;
+        ledger[ledgerKey] = now;
+        return new WriteOutcome(WriteOutcomeStatus.Inserted);
     }
 
     private static void ReclaimLedger(
@@ -906,12 +1000,36 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
+        WriteOutcome outcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
+            outcome = Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
         }
+
+        if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            kind is MutationKind.Insert or MutationKind.Upsert)
+            ApplyOnAppendRetention(options?.Observer);
+        return outcome;
     }
+
+    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    {
+        // Retention runs after the write lock is released. Providers with native post-commit
+        // retention follow the same shape, so concurrent appends do not queue behind a scan.
+        void Cleanup() => ApplyRetention(new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 512,
+            Observer = observer
+        });
+        if (liveState)
+            OnAppendRetentionCoordinator.Run(database, Unit, Access.Scope?.Value, Cleanup);
+        else
+            Cleanup();
+    }
+
+    private static string InMemoryKey(StorageUnit unit, IReadOnlyDictionary<string, object?> values) =>
+        string.Join("|", unit.Key.Columns.Select(column => ValueCanonicalizer.Canonical(values.GetValueOrDefault(column))));
 
     private InMemoryUnitState CurrentState() =>
         liveState ? database.Units[Unit.Id] : state;

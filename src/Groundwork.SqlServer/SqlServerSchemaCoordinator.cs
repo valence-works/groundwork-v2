@@ -167,6 +167,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
             AppendIdempotency = source.AppendIdempotency,
             Concurrency = source.Concurrency,
             Timestamps = source.Timestamps,
+            Retention = source.Retention,
             SchemaVersion = source.SchemaVersion
         };
     }

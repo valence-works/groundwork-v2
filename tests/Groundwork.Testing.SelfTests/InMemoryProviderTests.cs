@@ -295,6 +295,42 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Schema_apply_refuses_retention_partition_drift_that_contains_the_legacy_delimiter()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://retention-partition-drift");
+        var name = "retention-partition-drift";
+        var initial = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "a|b", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "a", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "b", Type = PortableType.String, MaxLength = 16, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 3,
+                OrderColumn = "ordering",
+                PartitionColumns = ["a|b"]
+            }
+        };
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var drifted = initial with
+        {
+            Retention = initial.Retention! with { PartitionColumns = ["a", "b"] }
+        };
+
+        var conflict = Assert.Throws<SchemaConflictException>(() => connection.Schema.Apply(drifted));
+        Assert.Contains("retention", conflict.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(connection.Schema.Diff(initial).IsEmpty);
+    }
+
+    [Fact]
     public void Schema_diff_identity_includes_scope_version_defaults_and_index_version()
     {
         var factory = new InMemoryProviderFactory();

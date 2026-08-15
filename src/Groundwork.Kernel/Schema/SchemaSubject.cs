@@ -44,6 +44,7 @@ public sealed class SchemaSubject
                 Scope.ToString(),
                 Concurrency.ToString(),
                 Timestamps.ToString(),
+                RetentionCanonicalization.Canonicalize(definition.Retention),
                 AppendIdempotency is null
                     ? "idempotency:none"
                     : $"idempotency:{AppendIdempotency.Window.Ticks}:{AppendIdempotency.LedgerName}",
@@ -76,6 +77,8 @@ public sealed class SchemaSubject
     public ConcurrencyDeclaration Concurrency => definition.Concurrency;
 
     public TimestampDeclaration Timestamps => definition.Timestamps;
+
+    public RetentionDeclaration? Retention => definition.Retention;
 
     public AppendIdempotencyDeclaration? AppendIdempotency => definition.AppendIdempotency;
 
@@ -186,6 +189,16 @@ public sealed class SchemaSubject
         }
 
         AggregationProfileValidator.ValidateUnit(unit);
+        // SchemaSubject validates only retention here. The full portability pass belongs to
+        // provider/build seams and would reject pre-existing declarations that remain valid in
+        // this schema model (for example, an unbounded string used only by a legacy index).
+        var portability = PortabilityValidator.ValidateRetention(unit);
+        if (!portability.IsPortable)
+        {
+            var refusal = portability.Refusals[0];
+            throw new ArgumentException(
+                $"{refusal.Code} at {refusal.Path}: {refusal.Message}", nameof(unit));
+        }
     }
 
     private static StorageUnit Snapshot(StorageUnit source) => new()
@@ -214,6 +227,13 @@ public sealed class SchemaSubject
         AppendIdempotency = source.AppendIdempotency is null ? null : source.AppendIdempotency with { },
         Concurrency = source.Concurrency,
         Timestamps = source.Timestamps,
+        Retention = source.Retention is null ? null : new RetentionDeclaration
+        {
+            KeepNewest = source.Retention.KeepNewest,
+            OrderColumn = source.Retention.OrderColumn,
+            PartitionColumns = source.Retention.PartitionColumns.ToImmutableArray(),
+            Trigger = source.Retention.Trigger
+        },
         SchemaVersion = source.SchemaVersion
     };
 
@@ -256,6 +276,7 @@ public sealed class SchemaSubject
 
     private static string CanonicalAggregationProfile(AggregationProfile profile) =>
         AggregationProfileCanonicalization.Canonicalize(profile);
+
 }
 
 /// <summary>Provider-owned schema materialization metadata carried through the neutral plan.</summary>

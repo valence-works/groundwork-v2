@@ -83,6 +83,35 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Optimistic(string tokenColumn = "version") =>
         OptimisticConcurrency(tokenColumn);
 
+    /// <summary>Attaches a count-based retention policy to this storage unit.</summary>
+    public StorageDeclarationBuilder Retention(RetentionDeclaration declaration)
+    {
+        state.SetRetention(declaration);
+        return this;
+    }
+
+    /// <summary>Convenience form for declaring retention without a temporary policy object.</summary>
+    public StorageDeclarationBuilder Retention(
+        int keepNewest,
+        string orderColumn,
+        RetentionTrigger trigger = RetentionTrigger.Explicit,
+        params string[] partitionColumns) =>
+        Retention(new RetentionDeclaration
+        {
+            KeepNewest = keepNewest,
+            OrderColumn = orderColumn,
+            Trigger = trigger,
+            PartitionColumns = partitionColumns ?? []
+        });
+
+    public StorageDeclarationBuilder Retention(
+        int keepNewest,
+        string orderColumn,
+        params string[] partitionColumns) =>
+        Retention(keepNewest, orderColumn, RetentionTrigger.Explicit, partitionColumns);
+
+    public StorageDeclarationBuilder Retain(RetentionDeclaration declaration) => Retention(declaration);
+
     public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns)
     {
         state.AddIndex(name, columns.Select(column => new IndexColumn(column)), unique: true);

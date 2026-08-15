@@ -612,6 +612,9 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 throw new MongoSchemaConflictException($"Storage unit '{desired.Id.Value}' cannot change its name.");
             if (!current.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
                 throw new MongoSchemaConflictException($"Storage unit '{desired.Name}' cannot change its key non-additively.");
+            if (!SchemaIdentity.RetentionEquals(current.Retention, desired.Retention))
+                throw new MongoSchemaConflictException(
+                    $"Storage unit '{desired.Name}' changed its retention declaration non-additively.");
             if (current.Scope != desired.Scope || current.Concurrency != desired.Concurrency ||
                 current.Timestamps != desired.Timestamps || current.SchemaVersion != desired.SchemaVersion ||
                 !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
@@ -786,6 +789,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         ArgumentNullException.ThrowIfNull(unit.Key.Columns);
         ArgumentNullException.ThrowIfNull(unit.DerivedColumns);
         ArgumentNullException.ThrowIfNull(unit.Indexes);
+        var portability = PortabilityValidator.Validate(unit);
+        if (!portability.IsPortable)
+        {
+            var refusal = portability.Refusals[0];
+            throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
+        }
         unit.AppendIdempotency?.Validate(unit);
         if (unit.Columns.Count == 0)
             throw new ArgumentException("A MongoDB storage unit must declare at least one column.", nameof(unit));
@@ -820,7 +829,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly MongoProviderState state;
     private readonly MongoAppliedUnit applied;
@@ -1096,8 +1105,20 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
     {
         ArgumentNullException.ThrowIfNull(writes);
         ThrowIfDisposed();
-        return ExecuteWithTransactionIfNeeded(transactional => transactional.ApplyBatchCore(writes, exactOutcomes));
+        var nativeOnAppend = IsNativeAppendBatch(writes);
+        var outcomes = ExecuteWithTransactionIfNeeded(transactional => transactional.ApplyBatchCore(writes, exactOutcomes));
+        if (nativeOnAppend && OnAppendRetentionCoordinator.TryGetObserver(outcomes, out var observer))
+            ApplyOnAppendRetention(observer);
+        return outcomes;
     }
+
+    private bool IsNativeAppendBatch(IReadOnlyList<RowWrite> writes) =>
+        Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+        writes.Count != 0 &&
+        Unit.Columns.All(column => column.Generation != ColumnGeneration.ProviderSequence) &&
+        writes.All(write => write.Mode == RowWriteMode.Upsert &&
+                            write.Options.Precondition.Kind == WritePreconditionKind.Unconditional &&
+                            write.Values is not null);
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
@@ -1244,6 +1265,114 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         return ExecuteWithTransactionIfNeeded(transactional => transactional.DeleteCore(key, options));
     }
 
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        options ??= new RetentionExecutionOptions();
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var deleted = 0;
+        var batches = 0;
+
+        // A capped collection is intentionally not used: caps apply to the whole collection,
+        // cannot keep N rows per partition, and reject document growth/index updates. Walk the
+        // sorted partition projection with a bounded cursor, then compute each partition's
+        // watermark through skip/limit and submit only that bounded id set to deleteMany.
+        // No stage accumulates every row identity for a partition in a server or client array.
+        if (declaration.PartitionColumns.Count == 0)
+        {
+            DrainPartition(new BsonDocument());
+            return new RetentionResult(deleted, batches);
+        }
+
+        var projection = new BsonDocument(declaration.PartitionColumns.Select(column =>
+            new BsonElement(column, 1)));
+        projection["_id"] = 0;
+        var partitionSort = new BsonDocument(declaration.PartitionColumns.Select(column =>
+            new BsonElement(column, 1)));
+        foreach (var key in Unit.Key.Columns)
+            partitionSort[key] = 1;
+        var partitions = Find(new BsonDocument())
+            .Project(projection)
+            .Sort(partitionSort);
+        partitions.Options.BatchSize = Math.Max(1, Math.Min(options.MaxRowsPerBatch, 512));
+        partitions.Options.AllowDiskUse = true;
+        using var cursor = partitions.ToCursor(options.CancellationToken);
+        BsonDocument? previous = null;
+        while (cursor.MoveNext(options.CancellationToken))
+        {
+            foreach (var document in cursor.Current)
+            {
+                options.CancellationToken.ThrowIfCancellationRequested();
+                var partition = new BsonDocument(declaration.PartitionColumns.Select(column =>
+                    new BsonElement(column, document.GetValue(column, BsonNull.Value))));
+                if (partition.Equals(previous))
+                    continue;
+                previous = partition;
+                DrainPartition(partition);
+            }
+        }
+        return new RetentionResult(deleted, batches);
+
+        void DrainPartition(BsonDocument partitionFilter)
+        {
+            while (true)
+            {
+                options.CancellationToken.ThrowIfCancellationRequested();
+                var victimsQuery = Find(partitionFilter)
+                    .Sort(RetentionSort(Unit, declaration, includePartitions: false))
+                    .Skip(declaration.KeepNewest)
+                    .Limit(options.MaxRowsPerBatch)
+                    .Project(new BsonDocument("_id", 1));
+                victimsQuery.Options.BatchSize = options.MaxRowsPerBatch;
+                victimsQuery.Options.AllowDiskUse = true;
+                options.Observer?.Observe(new WritePathEvent(
+                    "mongodb.retention-watermark-find",
+                    $"MongoDB.Find(sort:order-desc+key-asc; skip:{declaration.KeepNewest}; limit:{options.MaxRowsPerBatch}; projection:_id)",
+                    IsProbe: false));
+                var victims = victimsQuery.ToList(options.CancellationToken);
+                if (victims.Count == 0)
+                    return;
+
+                var ids = new BsonArray(victims.Select(document => document["_id"]));
+                var filter = new BsonDocument("_id", new BsonDocument("$in", ids));
+                var result = transactionSession is null
+                    ? collection.DeleteMany(filter, options.CancellationToken)
+                    : collection.DeleteMany(transactionSession, filter, cancellationToken: options.CancellationToken);
+                var affected = checked((int)result.DeletedCount);
+                options.Observer?.Observe(new WritePathEvent(
+                    "mongodb.retention-delete-many",
+                    $"MongoDB.DeleteMany(ids<=:{options.MaxRowsPerBatch})",
+                    IsProbe: false));
+                deleted += affected;
+                batches++;
+                if (affected == 0 || victims.Count < options.MaxRowsPerBatch)
+                    return;
+            }
+        }
+
+        IFindFluent<BsonDocument, BsonDocument> Find(BsonDocument filter) => transactionSession is null
+            ? collection.Find(filter)
+            : collection.Find(transactionSession, filter);
+    }
+
+    private static BsonDocument RetentionSort(
+        StorageUnit unit,
+        RetentionDeclaration declaration,
+        bool includePartitions = true)
+    {
+        var sort = new BsonDocument();
+        if (includePartitions)
+            foreach (var partition in declaration.PartitionColumns)
+                sort[partition] = 1;
+        sort[declaration.OrderColumn] = -1;
+        foreach (var key in unit.Key.Columns.Where(key =>
+                     !string.Equals(key, declaration.OrderColumn, StringComparison.Ordinal)))
+            sort[key] = 1;
+        return sort;
+    }
+
     public MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
     {
         ThrowIfDisposed();
@@ -1263,11 +1392,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
             values.Select(value => new StorageValues(value.Values)).ToArray());
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        MongoWriteOutcome outcome;
         for (var attempt = 0; ; attempt++)
         {
             try
             {
-                return ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration));
+                outcome = ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration));
+                break;
             }
             catch (MongoLedgerConflictException) when (attempt == 0)
             {
@@ -1286,6 +1417,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
                 }
             }
         }
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcome.Status is MongoWriteOutcomeStatus.Inserted or MongoWriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return outcome;
     }
 
     private MongoWriteOutcome AppendCore(
@@ -1429,8 +1564,25 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
     {
         ArgumentNullException.ThrowIfNull(values);
         ThrowIfDisposed();
-        return ExecuteWithTransactionIfNeeded(transactional =>
+        var outcome = ExecuteWithTransactionIfNeeded(transactional =>
             transactional.MutateCore(values, options, kind, exactOutcome));
+        if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            kind is MutationKind.Insert or MutationKind.Upsert)
+        {
+            // Cleanup starts only after the sequence/write transaction commits, so a coalesced
+            // dirty signal always represents a row visible to the active retention owner.
+            ApplyOnAppendRetention(options?.Observer);
+        }
+        return outcome;
+    }
+
+    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    {
+        void Cleanup() => ApplyRetention(new RetentionExecutionOptions { Observer = observer });
+        if (transactionSession is null)
+            OnAppendRetentionCoordinator.Run(state, Unit, Access.Scope?.Value, Cleanup);
+        else
+            Cleanup();
     }
 
     private MongoWriteOutcome MutateCore(
@@ -1668,8 +1820,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
                 $"MongoDB conditional upsert cannot use ProviderSequence column '{sequence.Name}': sequence allocation requires a separate MongoDB command and transaction. Use Insert/Upsert or remove ProviderSequence for this one-command operation.");
         }
 
-        return ExecuteWithTransactionIfNeeded(transactional =>
+        var outcome = ExecuteWithTransactionIfNeeded(transactional =>
             transactional.ConditionalUpsertOne(values, options));
+        if (outcome.Status == MongoWriteOutcomeStatus.Inserted &&
+            Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
+            ApplyOnAppendRetention(options?.Observer);
+        return outcome;
     }
 
     private MongoWriteOutcome ConditionalUpsertOne(
@@ -2310,6 +2466,7 @@ internal static class SchemaIdentity
         unit.Scope,
         unit.Concurrency,
         unit.Timestamps,
+        RetentionCanonicalization.Canonicalize(unit.Retention),
         unit.SchemaVersion,
         unit.AppendIdempotency is null
             ? "idempotency:none"
@@ -2325,6 +2482,12 @@ internal static class SchemaIdentity
 
     internal static bool IndexEquals(IndexDefinition left, IndexDefinition right) =>
         string.Equals(Index(left), Index(right), StringComparison.Ordinal);
+
+    internal static bool RetentionEquals(RetentionDeclaration? left, RetentionDeclaration? right) =>
+        string.Equals(
+            RetentionCanonicalization.Canonicalize(left),
+            RetentionCanonicalization.Canonicalize(right),
+            StringComparison.Ordinal);
 
     internal static bool IdempotencyEquals(
         AppendIdempotencyDeclaration? left,
@@ -2347,6 +2510,7 @@ internal static class SchemaIdentity
 
     private static string AggregationProfile(AggregationProfile profile) =>
         AggregationProfileCanonicalization.Canonicalize(profile);
+
 }
 
 internal static class MongoDeclarationSnapshot
@@ -2363,7 +2527,11 @@ internal static class MongoDeclarationSnapshot
         {
             Columns = index.Columns.Select(column => column with { }).ToArray()
         }).ToArray(),
-        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
+        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
+        Retention = unit.Retention is null ? null : unit.Retention with
+        {
+            PartitionColumns = unit.Retention.PartitionColumns.ToArray()
+        }
     };
 
     private static object? CloneValue(object? value) => value switch

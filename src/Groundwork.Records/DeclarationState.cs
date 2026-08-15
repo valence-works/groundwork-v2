@@ -11,6 +11,7 @@ internal sealed class DeclarationState
     private readonly string name;
     private KeyDefinition? key;
     private ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.None;
+    private RetentionDeclaration? retention;
 
     public DeclarationState(string id, string name)
     {
@@ -64,6 +65,9 @@ internal sealed class DeclarationState
         concurrency = ConcurrencyDeclaration.Optimistic(tokenColumn);
     }
 
+    public void SetRetention(RetentionDeclaration declaration) =>
+        retention = declaration ?? throw new ArgumentNullException(nameof(declaration));
+
     public void AddIndex(string name, IEnumerable<IndexColumn> indexColumns, bool unique)
     {
         var indexName = RequireText(name, nameof(name));
@@ -94,7 +98,8 @@ internal sealed class DeclarationState
                 Columns = Array.AsReadOnly((key?.Columns ?? Array.Empty<string>()).ToArray())
             },
             Concurrency = concurrency,
-            Indexes = Array.AsReadOnly(indexes.ToArray())
+            Indexes = Array.AsReadOnly(indexes.ToArray()),
+            Retention = retention
         };
 
         var declarationDiagnostics = ValidateReferences(unit, key is null).ToList();
@@ -109,7 +114,13 @@ internal sealed class DeclarationState
                 $"The concurrency declaration is invalid: {exception.Message}",
                 "concurrency"));
         }
-        var result = BuilderPortabilityValidation.Validate(unit, context);
+        var validationContext = context is null || context.Retention is not null || retention is null
+            ? context
+            : new PortabilityValidationContext(
+                context.TargetIdentities,
+                retention,
+                context.PriorAppliedMongoCompositeKeyOrder);
+        var result = BuilderPortabilityValidation.Validate(unit, validationContext);
         var diagnostics = declarationDiagnostics
             .Concat(result.Refusals.Select(refusal =>
                 new GroundworkDiagnostic(refusal.Code, refusal.Message, refusal.Path)))
