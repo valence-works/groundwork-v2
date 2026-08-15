@@ -131,6 +131,44 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Build_refuses_typed_regular_and_unique_indexes_over_json_before_the_index_is_used()
+    {
+        var regular = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<JsonCustomer>("bad_json_index")
+                .Key(row => row.Id)
+                .Index("by-payload", row => row.Payload)
+                .Build());
+        var unique = Assert.Throws<StorageDeclarationException>(() =>
+            RecordTable.For<JsonCustomer>("bad_unique_json_index")
+                .Key(row => row.Id)
+                .UniqueIndex("by-payload", row => row.Payload)
+                .Build());
+
+        Assert.All(new[] { regular, unique }, error => Assert.Contains(
+            error.Diagnostics,
+            diagnostic => diagnostic.Code == "GW-DECL-INDEX-003" &&
+                diagnostic.Path == "indexes.by-payload.columns[0]" &&
+                diagnostic.Message.Contains("JSON", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Unindexed_json_members_remain_valid_and_mappable()
+    {
+        var table = RecordTable.For<JsonCustomer>("json_records")
+            .Key(row => row.Id)
+            .Build();
+        var payload = new Dictionary<string, object?> { ["name"] = "Ada" };
+        var value = new JsonCustomer(Guid.NewGuid(), payload);
+
+        var mapped = table.ToRowValues(value);
+        var materialized = table.FromRowValues(mapped);
+
+        Assert.Equal(value.Id, materialized.Id);
+        var materializedPayload = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(materialized.Payload);
+        Assert.Equal("Ada", materializedPayload["name"]);
+    }
+
+    [Fact]
     public void Typed_partial_projections_materialize_anonymous_and_same_type_shapes_without_omitted_columns()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://projections-" + Guid.NewGuid().ToString("N"));
@@ -269,6 +307,7 @@ public sealed class RecordTableTests
 
     public sealed record VersionedCustomer(Guid Id, string Name, long Version);
     public sealed record InvalidVersionCustomer(Guid Id, string Name, string Version);
+    public sealed record JsonCustomer(Guid Id, object Payload);
 
     private sealed class CapturingRecordStore : IRecordStore
     {

@@ -185,6 +185,17 @@ internal sealed class DeclarationState
                         $"Index '{index.Name}' column '{column}' is listed more than once.",
                         $"indexes.{index.Name}.columns"));
                 }
+
+                var declaration = unit.Columns.FirstOrDefault(candidate =>
+                    candidate is not null && string.Equals(candidate.Name, column, StringComparison.Ordinal));
+                if (declaration?.Type == PortableType.Json)
+                {
+                    diagnostics.Add(new(
+                        "GW-DECL-INDEX-003",
+                        $"Index '{index.Name}' column '{column}' is JSON and cannot be represented as a portable query index key. " +
+                        "Leave the JSON column unindexed or index a declared scalar projection instead.",
+                        $"indexes.{index.Name}.columns[{columnIndex}]"));
+                }
             }
         }
 
