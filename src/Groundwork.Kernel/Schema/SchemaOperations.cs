@@ -36,7 +36,7 @@ public abstract class PhysicalSchemaOperation
         CanonicalPayload = SchemaFingerprint.Canonicalize(
             [kind.ToString(), subjectId?.Value, subjectIdentity, SlotIdentity, .. semanticParts]);
         Fingerprint = SchemaFingerprint.CreateCanonical(CanonicalPayload);
-        Identity = $"{ToKebabCase(kind.ToString())}:{subjectId?.Value ?? "subject"}:{subjectIdentity}:{Fingerprint[..16]}";
+        Identity = CreateIdentity(kind, subjectId, subjectIdentity, Fingerprint);
     }
 
     public PhysicalSchemaOperationKind Kind { get; }
@@ -66,6 +66,13 @@ public abstract class PhysicalSchemaOperation
         params string?[] discriminators) =>
         $"{ToKebabCase(kind.ToString())}:{SchemaFingerprint.Create(
             [kind.ToString(), subjectId?.Value, subjectIdentity, .. discriminators])}";
+
+    internal static string CreateIdentity(
+        PhysicalSchemaOperationKind kind,
+        StorageUnitId? subjectId,
+        string subjectIdentity,
+        string fingerprint) =>
+        $"{ToKebabCase(kind.ToString())}:{subjectId?.Value ?? "subject"}:{subjectIdentity}:{fingerprint[..16]}";
 
     private static string ToKebabCase(string value)
     {
@@ -123,7 +130,7 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         column.Scale?.ToString(CultureInfo.InvariantCulture),
         column.Collation?.ToString(),
         column.Generation.ToString(),
-        Convert.ToString(column.Default?.Value, CultureInfo.InvariantCulture)
+        column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
     ]);
 
     internal static ColumnDefinition Snapshot(ColumnDefinition column) => new()
@@ -135,16 +142,10 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         Precision = column.Precision,
         Scale = column.Scale,
         Collation = column.Collation,
-        Default = column.Default is null ? null : new PortableDefault(CloneValue(column.Default.Value)),
+        Default = column.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(column.Default.Value, column.Type)),
         Generation = column.Generation
     };
 
-    private static object? CloneValue(object? value) => value switch
-    {
-        byte[] bytes => bytes.ToArray(),
-        Array array => array.Clone(),
-        _ => value
-    };
 }
 
 public sealed class BackfillColumnOperation : PhysicalSchemaOperation
@@ -312,10 +313,51 @@ internal static class PhysicalSchemaOperationIntegrity
     public static void Validate(PhysicalSchemaAppliedOperation operation)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        var expected = SchemaFingerprint.CreateCanonical(operation.CanonicalPayload);
-        if (!string.Equals(expected, operation.Fingerprint, StringComparison.Ordinal))
-            throw new InvalidOperationException($"Applied operation '{operation.Identity}' has an invalid fingerprint.");
+        if (!SchemaFingerprint.TryParseCanonical(operation.CanonicalPayload, out var parts) ||
+            parts.Length < 4 ||
+            parts[0] != operation.Kind.ToString() ||
+            parts[1] != operation.SubjectId?.Value ||
+            parts[2] != operation.SubjectIdentity ||
+            parts[3] != operation.SlotIdentity)
+        {
+            throw Inconsistent(operation.Identity);
+        }
+
+        var expectedSlot = operation.Kind switch
+        {
+            PhysicalSchemaOperationKind.ApplyProviderDefinition when parts.Length >= 6 =>
+                PhysicalSchemaOperation.CreateSlotIdentity(
+                    operation.Kind,
+                    operation.SubjectId,
+                    operation.SubjectIdentity,
+                    parts[4],
+                    parts[5]),
+            PhysicalSchemaOperationKind.RebuildPhysicalIndex =>
+                PhysicalSchemaOperation.CreateSlotIdentity(
+                    PhysicalSchemaOperationKind.CreatePhysicalIndex,
+                    operation.SubjectId,
+                    operation.SubjectIdentity),
+            _ => PhysicalSchemaOperation.CreateSlotIdentity(
+                operation.Kind,
+                operation.SubjectId,
+                operation.SubjectIdentity)
+        };
+        var expectedFingerprint = SchemaFingerprint.CreateCanonical(operation.CanonicalPayload);
+        var expectedIdentity = PhysicalSchemaOperation.CreateIdentity(
+            operation.Kind,
+            operation.SubjectId,
+            operation.SubjectIdentity,
+            expectedFingerprint);
+        if (expectedSlot != operation.SlotIdentity ||
+            expectedFingerprint != operation.Fingerprint ||
+            expectedIdentity != operation.Identity)
+        {
+            throw Inconsistent(operation.Identity);
+        }
     }
+
+    private static InvalidOperationException Inconsistent(string identity) =>
+        new($"Applied schema operation '{identity}' is internally inconsistent.");
 }
 
 public sealed class PhysicalSchemaFingerprintConflictException(

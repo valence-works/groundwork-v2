@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using System.Text.Json;
 using Xunit;
 
 namespace Groundwork.Kernel.Tests;
@@ -88,6 +89,28 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Required_column_without_a_backfill_source_is_refused_for_existing_rows()
+    {
+        var initial = CreateTarget(CreateUnit(includePriority: false));
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(initial, executor, PlannedAt.AddMinutes(1));
+        var unsafeUnit = CreateUnit(includePriority: true) with
+        {
+            Columns = CreateUnit(includePriority: true).Columns
+                .Select(column => column.Name == "priority" ? column with { Default = null } : column)
+                .ToArray()
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(unsafeUnit),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.False(plan.IsApplicable);
+        Assert.Contains(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-005");
+    }
+
+    [Fact]
     public void Changing_an_applied_column_is_refused_as_non_additive()
     {
         var initial = CreateTarget(CreateUnit(includePriority: false));
@@ -147,6 +170,38 @@ public sealed class K5SchemaEvolutionTests
         Assert.True(plan.IsApplicable);
         Assert.Single(plan.Operations.OfType<CreatePhysicalIndexOperation>());
         Assert.Empty(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+    }
+
+    [Fact]
+    public void Applied_index_widening_replans_as_idempotent_after_rebuild()
+    {
+        var initial = CreateTarget(CreateNullableIndexUnit(MissingValueBehavior.Excluded));
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(initial, executor, PlannedAt.AddMinutes(1));
+
+        var widened = CreateTarget(CreateNullableIndexUnit(MissingValueBehavior.Included));
+        var applied = PhysicalSchemaApplication.Apply(widened, executor, PlannedAt.AddMinutes(2));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.Contains(applied.AppliedState!.Snapshot.SemanticOperations,
+            operation => operation.Kind == PhysicalSchemaOperationKind.RebuildPhysicalIndex);
+        var restart = PhysicalSchemaDiffPlanner.Plan(
+            widened,
+            PhysicalSchemaHistoryState.FromApplied(applied.AppliedState),
+            PlannedAt.AddMinutes(3));
+        Assert.Empty(restart.Operations);
+
+        var additive = CreateTarget(widened.Subject.Definition with
+        {
+            Columns = [.. widened.Subject.Columns, new ColumnDefinition { Name = "later", Type = PortableType.String }]
+        });
+        var additiveResult = PhysicalSchemaApplication.Apply(additive, executor, PlannedAt.AddMinutes(4));
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, additiveResult.Outcome);
+        Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
+                additive,
+                PhysicalSchemaHistoryState.FromApplied(additiveResult.AppliedState!),
+                PlannedAt.AddMinutes(5))
+            .Operations);
     }
 
     [Fact]
@@ -250,6 +305,119 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Subject_snapshots_nested_defaults_and_fingerprints_their_content()
+    {
+        var binary = new byte[] { 1, 2 };
+        var json = new Dictionary<string, object?>
+        {
+            ["items"] = new List<object?> { 1, new Dictionary<string, object?> { ["active"] = true } }
+        };
+        var first = new SchemaSubject(CreateDefaultsUnit(binary, json));
+        var different = new SchemaSubject(CreateDefaultsUnit(new byte[] { 1, 3 }, json));
+
+        binary[0] = 9;
+        ((List<object?>)json["items"]!)[0] = 99;
+
+        Assert.Equal(new byte[] { 1, 2 }, first.Columns[1].Default!.Value);
+        var storedJson = Assert.IsType<Dictionary<string, object?>>(first.Columns[2].Default!.Value);
+        Assert.Equal(1, Assert.IsType<List<object?>>(storedJson["items"])[0]);
+        Assert.NotEqual(first.Fingerprint, different.Fingerprint);
+    }
+
+    [Fact]
+    public void Applied_state_serialization_preserves_typed_defaults()
+    {
+        var target = CreateTarget(CreateDefaultsUnit(
+            new byte[] { 1, 2 },
+            new Dictionary<string, object?> { ["answer"] = 42 }));
+        var executor = new FakeExecutor();
+        var applied = PhysicalSchemaApplication.Apply(target, executor, PlannedAt.AddMinutes(1)).AppliedState!;
+
+        var restored = PhysicalSchemaAppliedStateSerializer.Deserialize(
+            PhysicalSchemaAppliedStateSerializer.Serialize(applied));
+
+        Assert.Equal(new byte[] { 1, 2 }, restored.Snapshot.Subject.Columns[1].Default!.Value);
+        var restoredJson = Assert.IsType<Dictionary<string, object?>>(restored.Snapshot.Subject.Columns[2].Default!.Value);
+        Assert.Equal(42, restoredJson["answer"]);
+        Assert.Equal(applied.TargetFingerprint, restored.TargetFingerprint);
+    }
+
+    [Fact]
+    public void Json_default_numeric_format_is_stable_across_serialization()
+    {
+        var target = CreateTarget(CreateDefaultsUnit(
+            new byte[] { 1 },
+            new Dictionary<string, object?> { ["value"] = 42.0d }));
+        var executor = new FakeExecutor();
+        var applied = PhysicalSchemaApplication.Apply(target, executor, PlannedAt.AddMinutes(1)).AppliedState!;
+
+        var restored = PhysicalSchemaAppliedStateSerializer.Deserialize(
+            PhysicalSchemaAppliedStateSerializer.Serialize(applied));
+
+        Assert.Equal(applied.TargetFingerprint, restored.TargetFingerprint);
+        Assert.Equal(applied.Snapshot.Subject.Fingerprint, restored.Snapshot.Subject.Fingerprint);
+    }
+
+    [Fact]
+    public void Json_element_defaults_are_snapshotted_without_retaining_the_document()
+    {
+        using var document = JsonDocument.Parse("{\"b\":2,\"a\":[true,null]}");
+        var subject = new SchemaSubject(new StorageUnit
+        {
+            Id = new StorageUnitId("json-element"),
+            Name = "JsonElement",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(document.RootElement) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        });
+
+        document.Dispose();
+        Assert.IsType<Dictionary<string, object?>>(subject.Columns[1].Default!.Value);
+        Assert.Equal("JsonElement", subject.Name);
+    }
+
+    [Fact]
+    public void Applied_history_rejects_an_identity_that_does_not_match_its_payload()
+    {
+        var target = CreateTarget(CreateUnit(includePriority: false));
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, PhysicalSchemaHistoryState.Empty, PlannedAt);
+        var operation = plan.Snapshot.SemanticOperations[0];
+        var corrupted = operation with { Identity = "forged" };
+
+        Assert.Throws<InvalidOperationException>(() =>
+            new PhysicalSchemaAppliedSnapshot(target.Subject, [corrupted], []));
+    }
+
+    [Fact]
+    public void Applied_history_rejects_an_extra_ledger_operation()
+    {
+        var target = CreateTarget(CreateUnit(includePriority: false));
+        var executor = new FakeExecutor();
+        var applied = PhysicalSchemaApplication.Apply(target, executor, PlannedAt.AddMinutes(1)).AppliedState!;
+        var rogue = new AddColumnOperation(target.Subject,
+            new ColumnDefinition { Name = "rogue", Type = PortableType.String });
+        var forgedLedger = applied.AppliedOperations.Append(new PhysicalSchemaAppliedOperation(
+            rogue.Identity,
+            rogue.Fingerprint,
+            rogue.Kind,
+            rogue.SubjectId,
+            rogue.SubjectIdentity,
+            rogue.SlotIdentity,
+            PlannedAt,
+            rogue.CanonicalPayload));
+
+        Assert.Throws<InvalidOperationException>(() => new PhysicalSchemaAppliedState(
+            target,
+            applied.PlannedAt,
+            applied.AppliedAt,
+            applied.Snapshot,
+            forgedLedger));
+    }
+
+    [Fact]
     public void Applied_state_serialization_round_trips_the_subject_and_ledger()
     {
         var definition = new ProviderPhysicalSchemaDefinition(
@@ -292,13 +460,35 @@ public sealed class K5SchemaEvolutionTests
             new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
             new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 100 },
             ..(includePriority
-                ? new[] { new ColumnDefinition { Name = "priority", Type = PortableType.Int32, IsNullable = false } }
+                ? new[]
+                {
+                    new ColumnDefinition
+                    {
+                        Name = "priority",
+                        Type = PortableType.Int32,
+                        IsNullable = false,
+                        Default = new PortableDefault(0)
+                    }
+                }
                 : Array.Empty<ColumnDefinition>())
         ],
         Key = new KeyDefinition { Columns = ["id"] },
         Indexes = includePriority
             ? [new IndexDefinition { Name = "by-priority", Columns = [new IndexColumn("priority")] }]
             : []
+    };
+
+    private static StorageUnit CreateDefaultsUnit(byte[] binary, Dictionary<string, object?> json) => new()
+    {
+        Id = new StorageUnitId("defaults"),
+        Name = "Defaults",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+            new() { Name = "binary", Type = PortableType.Binary, MaxLength = 10, Default = new PortableDefault(binary) },
+            new() { Name = "json", Type = PortableType.Json, Default = new PortableDefault(json) }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
     };
 
     private static StorageUnit CreateNullableIndexUnit(MissingValueBehavior missingValues) => new()

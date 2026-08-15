@@ -74,6 +74,8 @@ public sealed class PhysicalSchemaAppliedState
         foreach (var operation in AppliedOperations)
             PhysicalSchemaOperationIntegrity.Validate(operation);
 
+        ValidateOperationLedger(target);
+
         var expected = SchemaFingerprint.Create(
         [
             Snapshot.Subject.Fingerprint,
@@ -85,6 +87,65 @@ public sealed class PhysicalSchemaAppliedState
         if (!string.Equals(expected, TargetFingerprint, StringComparison.Ordinal))
             throw new InvalidOperationException("Applied schema target fingerprint does not match its snapshot.");
     }
+
+    private void ValidateOperationLedger(PhysicalSchemaTarget target)
+    {
+        var expected = Snapshot.SemanticOperations
+            .Select(operation => operation.Identity)
+            .Concat([
+                new ValidatePhysicalSchemaOperation(target).Identity,
+                new PublishAppliedStateOperation(target).Identity
+            ])
+            .ToArray();
+        var actual = AppliedOperations.Select(operation => operation.Identity).ToArray();
+        if (actual.Length != actual.Distinct(StringComparer.Ordinal).Count() ||
+            !actual.OrderBy(identity => identity, StringComparer.Ordinal)
+                .SequenceEqual(expected.OrderBy(identity => identity, StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException("Applied schema operation ledger does not match its semantic snapshot.");
+        }
+
+        foreach (var operation in Snapshot.SemanticOperations)
+            EnsureLedgerMatches(operation, AppliedOperations.Single(item => item.Identity == operation.Identity));
+
+        EnsureLedgerMatches(
+            new ValidatePhysicalSchemaOperation(target),
+            AppliedOperations.Single(item => item.Kind == PhysicalSchemaOperationKind.ValidatePhysicalSchema));
+        EnsureLedgerMatches(
+            new PublishAppliedStateOperation(target),
+            AppliedOperations.Single(item => item.Kind == PhysicalSchemaOperationKind.PublishAppliedState));
+    }
+
+    private static void EnsureLedgerMatches(
+        PhysicalSchemaAppliedOperation expected,
+        PhysicalSchemaAppliedOperation actual)
+    {
+        if (actual.Fingerprint != expected.Fingerprint ||
+            actual.Kind != expected.Kind ||
+            actual.SubjectId != expected.SubjectId ||
+            actual.SubjectIdentity != expected.SubjectIdentity ||
+            actual.SlotIdentity != expected.SlotIdentity ||
+            actual.CanonicalPayload != expected.CanonicalPayload)
+        {
+            throw new InvalidOperationException(
+                $"Applied schema operation '{actual.Identity}' does not match its planned operation.");
+        }
+    }
+
+    private static void EnsureLedgerMatches(
+        PhysicalSchemaOperation expected,
+        PhysicalSchemaAppliedOperation actual) =>
+        EnsureLedgerMatches(
+            new PhysicalSchemaAppliedOperation(
+                expected.Identity,
+                expected.Fingerprint,
+                expected.Kind,
+                expected.SubjectId,
+                expected.SubjectIdentity,
+                expected.SlotIdentity,
+                actual.AppliedAt,
+                expected.CanonicalPayload),
+            actual);
 
     public PhysicalSchemaTargetIdentity TargetIdentity { get; }
 

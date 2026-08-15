@@ -146,15 +146,8 @@ public sealed class SchemaSubject
         Precision = source.Precision,
         Scale = source.Scale,
         Collation = source.Collation,
-        Default = source.Default is null ? null : new PortableDefault(SnapshotValue(source.Default.Value)),
+        Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
         Generation = source.Generation
-    };
-
-    private static object? SnapshotValue(object? value) => value switch
-    {
-        byte[] bytes => bytes.ToArray(),
-        Array array => array.Clone(),
-        _ => value
     };
 
     private static string CanonicalColumn(ColumnDefinition column) =>
@@ -168,7 +161,7 @@ public sealed class SchemaSubject
             column.Scale?.ToString(CultureInfo.InvariantCulture),
             column.Collation?.ToString(),
             column.Generation.ToString(),
-            Convert.ToString(column.Default?.Value, CultureInfo.InvariantCulture)
+            column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
         ]);
 
     private static string CanonicalDerivedColumn(DerivedColumnDefinition column) =>
@@ -340,6 +333,6 @@ public static class SchemaFingerprint
         }
 
         parts = parsed.ToImmutableArray();
-        return true;
+        return string.Equals(Canonicalize(parts), canonical, StringComparison.Ordinal);
     }
 }
