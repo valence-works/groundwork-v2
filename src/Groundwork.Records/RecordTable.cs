@@ -1,6 +1,8 @@
 using System.Linq.Expressions;
 using System.Reflection;
 using Groundwork.Kernel;
+using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
+using DeclarationState = Groundwork.Kernel.StorageDeclarationState;
 
 namespace Groundwork.Records;
 
@@ -69,8 +71,17 @@ public sealed class RecordTableBuilder<T>
         return this;
     }
 
-    public RecordTable<T> Build(PortabilityValidationContext? context = null) =>
-        new(state.Build(context));
+    public RecordTable<T> Build(PortabilityValidationContext? context = null)
+    {
+        try
+        {
+            return new(state.Build(context));
+        }
+        catch (DeclarationBuildException exception)
+        {
+            throw DiagnosticsCompatibility.ToRecords(exception);
+        }
+    }
 
     private void AddInferredColumns()
     {

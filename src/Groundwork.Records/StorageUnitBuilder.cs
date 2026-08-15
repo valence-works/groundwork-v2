@@ -3,256 +3,118 @@ using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 namespace Groundwork.Records;
 
-/// <summary>Entry point for the compact fluent declaration surface.</summary>
+/// <summary>
+/// Compatibility entry point for the original records package. The declaration implementation
+/// belongs to Groundwork.Kernel; this type only forwards the legacy namespace.
+/// </summary>
 public static class StorageUnit
 {
     public static StorageDeclarationBuilder Declare(string id, string name) =>
-        new(new DeclarationState(id, name));
+        new(KernelStorageUnit.Declare(id, name));
 }
 
-/// <summary>Mutable authoring state whose Build result is an immutable declaration snapshot.</summary>
+/// <summary>Compatibility wrapper around the kernel-owned neutral declaration builder.</summary>
 public sealed class StorageDeclarationBuilder
 {
-    private readonly DeclarationState state;
+    private readonly Groundwork.Kernel.StorageDeclarationBuilder inner;
 
-    internal StorageDeclarationBuilder(DeclarationState state) => this.state = state;
+    internal StorageDeclarationBuilder(Groundwork.Kernel.StorageDeclarationBuilder inner) => this.inner = inner;
 
-    public StorageDeclarationBuilder String(
-        string name,
-        int maxLength,
-        Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.String, configure, builder => builder.MaxLength(maxLength));
+    public StorageDeclarationBuilder String(string name, int maxLength, Action<ColumnBuilder>? configure = null) =>
+        Wrap(inner.String(name, maxLength, configure));
 
     public StorageDeclarationBuilder String(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.String, configure);
+        Wrap(inner.String(name, configure));
 
     public StorageDeclarationBuilder Int32(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Int32, configure);
+        Wrap(inner.Int32(name, configure));
 
     public StorageDeclarationBuilder Int64(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Int64, configure);
+        Wrap(inner.Int64(name, configure));
 
-    public StorageDeclarationBuilder Decimal(
-        string name,
-        int precision,
-        int scale,
-        Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Decimal, configure, builder => builder.Precision(precision, scale));
+    public StorageDeclarationBuilder Decimal(string name, int precision, int scale, Action<ColumnBuilder>? configure = null) =>
+        Wrap(inner.Decimal(name, precision, scale, configure));
 
     public StorageDeclarationBuilder Decimal(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Decimal, configure);
+        Wrap(inner.Decimal(name, configure));
 
     public StorageDeclarationBuilder Boolean(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Boolean, configure);
+        Wrap(inner.Boolean(name, configure));
 
     public StorageDeclarationBuilder Timestamp(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.DateTimeOffset, configure);
+        Wrap(inner.Timestamp(name, configure));
 
     public StorageDeclarationBuilder DateTimeOffset(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.DateTimeOffset, configure);
+        Wrap(inner.DateTimeOffset(name, configure));
 
     public StorageDeclarationBuilder Guid(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Guid, configure);
+        Wrap(inner.Guid(name, configure));
 
-    public StorageDeclarationBuilder Binary(
-        string name,
-        int maxLength,
-        Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Binary, configure, builder => builder.MaxLength(maxLength));
+    public StorageDeclarationBuilder Binary(string name, int maxLength, Action<ColumnBuilder>? configure = null) =>
+        Wrap(inner.Binary(name, maxLength, configure));
 
     public StorageDeclarationBuilder Binary(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Binary, configure);
+        Wrap(inner.Binary(name, configure));
 
     public StorageDeclarationBuilder Json(string name, Action<ColumnBuilder>? configure = null) =>
-        AddColumn(name, PortableType.Json, configure);
+        Wrap(inner.Json(name, configure));
 
-    public StorageDeclarationBuilder Key(params string[] columns)
-    {
-        state.SetKey(columns);
-        return this;
-    }
+    public StorageDeclarationBuilder Column(string name, PortableType type, Action<ColumnBuilder>? configure = null) =>
+        Wrap(inner.Column(name, type, configure));
+
+    public StorageDeclarationBuilder Key(params string[] columns) => Wrap(inner.Key(columns));
 
     /// <summary>Opts the unit into a system-owned Int64 optimistic-concurrency token.</summary>
-    public StorageDeclarationBuilder OptimisticConcurrency(string tokenColumn = "version")
-    {
-        state.SetOptimisticConcurrency(tokenColumn);
-        return this;
-    }
+    public StorageDeclarationBuilder OptimisticConcurrency(string tokenColumn = "version") =>
+        Wrap(inner.OptimisticConcurrency(tokenColumn));
 
     /// <summary>Alias for <see cref="OptimisticConcurrency"/>.</summary>
     public StorageDeclarationBuilder Optimistic(string tokenColumn = "version") =>
-        OptimisticConcurrency(tokenColumn);
+        Wrap(inner.Optimistic(tokenColumn));
 
-    /// <summary>Attaches a count-based retention policy to this storage unit.</summary>
-    public StorageDeclarationBuilder Retention(RetentionDeclaration declaration)
-    {
-        state.SetRetention(declaration);
-        return this;
-    }
+    public StorageDeclarationBuilder Retention(RetentionDeclaration declaration) => Wrap(inner.Retention(declaration));
 
-    /// <summary>Convenience form for declaring retention without a temporary policy object.</summary>
-    public StorageDeclarationBuilder Retention(
-        int keepNewest,
-        string orderColumn,
-        RetentionTrigger trigger = RetentionTrigger.Explicit,
-        params string[] partitionColumns) =>
-        Retention(new RetentionDeclaration
-        {
-            KeepNewest = keepNewest,
-            OrderColumn = orderColumn,
-            Trigger = trigger,
-            PartitionColumns = partitionColumns ?? []
-        });
+    public StorageDeclarationBuilder Retention(int keepNewest, string orderBy, RetentionTrigger trigger = RetentionTrigger.Explicit, params string[] partitionColumns) =>
+        Wrap(inner.Retention(keepNewest, orderBy, trigger, partitionColumns));
 
-    public StorageDeclarationBuilder Retention(
-        int keepNewest,
-        string orderColumn,
-        params string[] partitionColumns) =>
-        Retention(keepNewest, orderColumn, RetentionTrigger.Explicit, partitionColumns);
+    /// <summary>Compatibility form for declarations that omit an explicit trigger.</summary>
+    public StorageDeclarationBuilder Retention(int keepNewest, string orderBy, params string[] partitionColumns) =>
+        Wrap(inner.Retention(keepNewest, orderBy, partitionColumns));
 
-    public StorageDeclarationBuilder Retain(RetentionDeclaration declaration) => Retention(declaration);
+    public StorageDeclarationBuilder KeepNewest(int keepNewest, string orderBy, RetentionTrigger trigger = RetentionTrigger.Explicit, params string[] partitionColumns) =>
+        Wrap(inner.KeepNewest(keepNewest, orderBy, trigger, partitionColumns));
 
-    public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns)
-    {
-        state.AddIndex(name, columns.Select(column => new IndexColumn(column)), unique: true);
-        return this;
-    }
+    public StorageDeclarationBuilder Retain(RetentionDeclaration declaration) => Wrap(inner.Retain(declaration));
 
-    public StorageDeclarationBuilder UniqueIndex(string name, Action<IndexBuilder> configure)
-    {
-        return AddIndex(name, configure, unique: true);
-    }
+    public StorageDeclarationBuilder Scoped() => Wrap(inner.Scoped());
 
-    public StorageDeclarationBuilder Index(string name, params string[] columns)
-    {
-        state.AddIndex(name, columns.Select(column => new IndexColumn(column)), unique: false);
-        return this;
-    }
+    public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns) => Wrap(inner.UniqueIndex(name, columns));
+
+    public StorageDeclarationBuilder UniqueIndex(string name, Action<IndexBuilder> configure) =>
+        Wrap(inner.UniqueIndex(name, configure));
+
+    public StorageDeclarationBuilder Index(string name, params string[] columns) => Wrap(inner.Index(name, columns));
 
     public StorageDeclarationBuilder Index(string name, Action<IndexBuilder> configure) =>
-        AddIndex(name, configure, unique: false);
+        Wrap(inner.Index(name, configure));
 
-    public KernelStorageUnit Build(PortabilityValidationContext? context = null) => state.Build(context);
+    public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = "__groundwork_operations") =>
+        Wrap(inner.AppendIdempotency(window, ledgerName));
 
-    private StorageDeclarationBuilder AddColumn(
-        string name,
-        PortableType type,
-        Action<ColumnBuilder>? configure,
-        Action<ColumnBuilder>? initial = null)
+    public StorageDeclarationBuilder Aggregate(string name, Action<AggregationBuilder> configure) =>
+        Wrap(inner.Aggregate(name, configure));
+
+    public KernelStorageUnit Build(PortabilityValidationContext? context = null)
     {
-        var builder = new ColumnBuilder();
-        initial?.Invoke(builder);
-        configure?.Invoke(builder);
-        state.AddColumn(builder.Build(name, type));
-        return this;
+        try
+        {
+            return inner.Build(context);
+        }
+        catch (DeclarationBuildException exception)
+        {
+            throw DiagnosticsCompatibility.ToRecords(exception);
+        }
     }
 
-    private StorageDeclarationBuilder AddIndex(string name, Action<IndexBuilder> configure, bool unique)
-    {
-        if (configure is null)
-            throw new ArgumentNullException(nameof(configure));
-        var builder = new IndexBuilder();
-        configure(builder);
-        state.AddIndex(name, builder.Columns, unique);
-        return this;
-    }
-}
-
-/// <summary>Column policy options shared by both authoring surfaces.</summary>
-public sealed class ColumnBuilder
-{
-    private bool? isNullable;
-    private int? maxLength;
-    private int? precision;
-    private int? scale;
-    private PortableCollation? collation;
-    private object? defaultValue;
-    private bool hasDefault;
-    private ColumnGeneration generation = ColumnGeneration.Supplied;
-
-    public ColumnBuilder Required()
-    {
-        isNullable = false;
-        return this;
-    }
-
-    public ColumnBuilder Nullable()
-    {
-        isNullable = true;
-        return this;
-    }
-
-    public ColumnBuilder MaxLength(int value)
-    {
-        maxLength = value;
-        return this;
-    }
-
-    public ColumnBuilder Precision(int value, int scaleValue)
-    {
-        precision = value;
-        scale = scaleValue;
-        return this;
-    }
-
-    public ColumnBuilder Collation(PortableCollation value)
-    {
-        collation = value;
-        return this;
-    }
-
-    public ColumnBuilder Default(object? value)
-    {
-        defaultValue = value;
-        hasDefault = true;
-        return this;
-    }
-
-    public ColumnBuilder ProviderSequence()
-    {
-        generation = ColumnGeneration.ProviderSequence;
-        return this;
-    }
-
-    internal ColumnBuilder InferNullable(bool value)
-    {
-        isNullable ??= value;
-        return this;
-    }
-
-    internal ColumnDefinition Build(string name, PortableType type) => new()
-    {
-        Name = RequireName(name),
-        Type = type,
-        IsNullable = isNullable ?? true,
-        MaxLength = maxLength,
-        Precision = precision,
-        Scale = scale,
-        Collation = collation,
-        Default = hasDefault ? new PortableDefault(DefaultValueSnapshot.Create(defaultValue, type)) : null,
-        Generation = generation
-    };
-
-    private static string RequireName(string value) =>
-        string.IsNullOrWhiteSpace(value) ? throw new ArgumentException("A non-empty column name is required.", nameof(value)) : value;
-}
-
-/// <summary>Sort and missing-value options for an index declaration.</summary>
-public sealed class IndexBuilder
-{
-    private readonly List<IndexColumn> columns = [];
-
-    internal IReadOnlyList<IndexColumn> Columns => columns;
-
-    public IndexBuilder Ascending(string column)
-    {
-        columns.Add(new IndexColumn(column, SortDirection.Ascending));
-        return this;
-    }
-
-    public IndexBuilder Descending(string column)
-    {
-        columns.Add(new IndexColumn(column, SortDirection.Descending));
-        return this;
-    }
+    private StorageDeclarationBuilder Wrap(Groundwork.Kernel.StorageDeclarationBuilder builder) => this;
 }

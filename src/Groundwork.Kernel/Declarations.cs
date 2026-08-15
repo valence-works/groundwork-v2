@@ -187,6 +187,10 @@ public sealed record DerivedColumnDefinition
 
 public sealed record StorageUnit
 {
+    /// <summary>Starts a provider-neutral fluent declaration.</summary>
+    public static StorageDeclarationBuilder Declare(string id, string name) =>
+        new(new StorageDeclarationState(id, name));
+
     public required StorageUnitId Id { get; init; }
     public required string Name { get; init; }
     public required IReadOnlyList<ColumnDefinition> Columns { get; init; }
