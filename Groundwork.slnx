@@ -27,6 +27,9 @@
   <Folder Name="/src/Groundwork.Query.Planning/">
     <Project Path="src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Substrate.Relational/">
+    <Project Path="src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
+  </Folder>
   <Folder Name="/tests/" />
   <Folder Name="/tests/Groundwork.Testing.SelfTests/">
     <Project Path="tests/Groundwork.Testing.SelfTests/Groundwork.Testing.SelfTests.csproj" />
@@ -54,5 +57,8 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Query.Planning.Tests/">
     <Project Path="tests/Groundwork.Query.Planning.Tests/Groundwork.Query.Planning.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Substrate.Relational.Tests/">
+    <Project Path="tests/Groundwork.Substrate.Relational.Tests/Groundwork.Substrate.Relational.Tests.csproj" />
   </Folder>
 </Solution>
