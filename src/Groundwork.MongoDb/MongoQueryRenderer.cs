@@ -80,7 +80,7 @@ public sealed class MongoQueryRenderer
             : new BsonDocument(request.Projection.Columns.ToDictionary(column => column.Name, _ => (BsonValue)1));
         var sort = new BsonDocument(order.Select(term =>
             new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1)));
-        var pipeline = RenderPipeline(baseFilter, cursor, request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount, options);
+        var pipeline = RenderPipeline(request.Table.Value, baseFilter, cursor, request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount, options);
         return new MongoQueryCommand(
             filter,
             sort,
@@ -310,6 +310,7 @@ public sealed class MongoQueryRenderer
     };
 
     private IReadOnlyList<BsonDocument> RenderPipeline(
+        string collectionName,
         BsonDocument baseFilter,
         IReadOnlyList<QueryConstant>? cursor,
         LatestPerKey? latest,
@@ -424,10 +425,14 @@ public sealed class MongoQueryRenderer
                 prefix.AddRange(data);
                 return prefix;
             }
-            prefix.Add(new BsonDocument("$facet", new BsonDocument
+            var countPipeline = prefix.Select(stage => stage.DeepClone()).ToList();
+            countPipeline.Add(new BsonDocument("$count", "__groundwork_total_count"));
+            countPipeline.Add(new BsonDocument("$set", new BsonDocument("__groundwork_count_only", 1)));
+            prefix.AddRange(data);
+            prefix.Add(new BsonDocument("$unionWith", new BsonDocument
             {
-                { "metadata", new BsonArray { new BsonDocument("$count", "__groundwork_total_count") } },
-                { "data", new BsonArray(data) }
+                { "coll", collectionName },
+                { "pipeline", new BsonArray(countPipeline) }
             }));
             return prefix;
         }

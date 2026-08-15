@@ -66,8 +66,8 @@ public static class QueryResultMaterializer
         if (source is null) throw new ArgumentNullException(nameof(source));
 
         var totalCount = request.Result.IncludesTotalCount
-            ? source.FirstOrDefault() is { } first &&
-              first.TryGetValue("__groundwork_total_count", out var count) && count is not null
+            ? source.FirstOrDefault(row => row.TryGetValue("__groundwork_total_count", out var count) && count is not null) is { } counted &&
+              counted.TryGetValue("__groundwork_total_count", out var count) && count is not null
                 ? Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture)
                 : 0L
             : (long?)null;

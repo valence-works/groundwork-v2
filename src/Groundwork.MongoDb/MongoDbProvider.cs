@@ -710,10 +710,28 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         long? facetTotalCount = null;
         if (command.Pipeline.Length != 0)
         {
-            var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
-            documents = (transactionSession is null
-                ? collection.Aggregate(pipeline, new AggregateOptions { Hint = command.Hint })
-                : collection.Aggregate(transactionSession, pipeline, new AggregateOptions { Hint = command.Hint })).ToList();
+            var unionIndex = command.Pipeline
+                .Select((stage, index) => (stage, index))
+                .FirstOrDefault(item => item.stage.Contains("$unionWith")).index;
+            if (transactionSession is not null && unionIndex != 0)
+            {
+                // MongoDB forbids $unionWith inside a transaction. Execute the data and
+                // count branches separately on the same session, preserving the transaction
+                // snapshot while retaining streaming results outside transactions.
+                var dataPipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline.Take(unionIndex).ToArray());
+                var union = command.Pipeline[unionIndex]["$unionWith"].AsBsonDocument;
+                var countPipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(
+                    union["pipeline"].AsBsonArray.Select(value => value.AsBsonDocument).ToArray());
+                documents = collection.Aggregate(transactionSession, dataPipeline, new AggregateOptions { Hint = command.Hint }).ToList();
+                documents.AddRange(collection.Aggregate(transactionSession, countPipeline, new AggregateOptions { Hint = command.Hint }).ToList());
+            }
+            else
+            {
+                var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
+                documents = (transactionSession is null
+                    ? collection.Aggregate(pipeline, new AggregateOptions { Hint = command.Hint })
+                    : collection.Aggregate(transactionSession, pipeline, new AggregateOptions { Hint = command.Hint })).ToList();
+            }
             if (command.IncludesTotalCount && documents.Count == 1 && documents[0].Contains("metadata") && documents[0].Contains("data"))
             {
                 var envelope = documents[0];

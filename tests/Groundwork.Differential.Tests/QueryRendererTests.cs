@@ -327,6 +327,8 @@ public sealed class QueryRendererTests
         var totalPipeline = string.Join("\n", total.Pipeline.Select(stage => stage.ToString()));
         Assert.DoesNotContain("__groundwork_total_count", rowsPipeline, StringComparison.Ordinal);
         Assert.Contains("__groundwork_total_count", totalPipeline, StringComparison.Ordinal);
+        Assert.Contains("$unionWith", totalPipeline, StringComparison.Ordinal);
+        Assert.DoesNotContain("$facet", totalPipeline, StringComparison.Ordinal);
     }
 
     [Fact]
