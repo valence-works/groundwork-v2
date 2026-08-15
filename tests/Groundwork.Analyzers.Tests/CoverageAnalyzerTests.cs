@@ -18,10 +18,11 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Linq_analyzer_reports_bare_startswith_at_the_subexpression()
     {
-        var diagnostics = await AnalyzeLinq("using System; public sealed class Ticket { public string Name { get; set; } = \"\"; } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.Name.StartsWith(\"x\"); }");
+        const string source = "using System; public sealed class Ticket { public string Name { get; set; } = \"\"; } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.Name.StartsWith(\"x\"); }";
+        var diagnostics = await AnalyzeLinq(source);
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_LINQ_108"));
         Assert.Contains("StringComparison.Ordinal", diagnostic.GetMessage(), StringComparison.Ordinal);
-        Assert.True(diagnostic.Location.SourceSpan.Length < diagnostic.Location.SourceSpan.End - diagnostic.Location.SourceSpan.Start + 100);
+        Assert.True(diagnostic.Location.SourceSpan.Length < source.Length / 2);
     }
 
     [Fact]

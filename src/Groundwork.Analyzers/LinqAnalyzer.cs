@@ -74,7 +74,8 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 Report("GW-LINQ-101", node, "GW-LINQ-101: declare a computed column; expressions over columns are not portable");
             if (symbol is IPropertySymbol instant && instant.ContainingType?.ToDisplayString() == "System.DateTime" && instant.Name is "Now" or "Today")
                 Report("GW-LINQ-109", node, "GW-LINQ-109: use `DateTimeOffset.UtcNow`");
-            if (node.Expression is MemberAccessExpressionSyntax nested && nested.Name.Identifier.ValueText is not ("Value" or "Date" or "Year") && HasLambdaParameter(nested))
+            if (node.Name.Identifier.ValueText is not ("Value" or "Date" or "Year") &&
+                node.Expression is MemberAccessExpressionSyntax nested && HasLambdaParameter(nested))
                 Report("GW-LINQ-104", node, "GW-LINQ-104: v2 has no joins; use a declared element set or two queries");
             base.VisitMemberAccessExpression(node);
         }
