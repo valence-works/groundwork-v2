@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>Groundwork.Query.Linq</RootNamespace>
+    <AssemblyName>Groundwork.Query.Linq</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+  </ItemGroup>
+</Project>

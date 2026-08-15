@@ -27,6 +27,12 @@
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Query.Linq/">
+    <Project Path="src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Query.Linq.Sqlite/">
+    <Project Path="src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Schema/">
     <Project Path="src/Groundwork.Schema/Groundwork.Schema.csproj" />
   </Folder>
@@ -81,6 +87,12 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Query.Model.Tests/">
     <Project Path="tests/Groundwork.Query.Model.Tests/Groundwork.Query.Model.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Linq.Tests/">
+    <Project Path="tests/Groundwork.Query.Linq.Tests/Groundwork.Query.Linq.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Linq.Fragments/">
+    <Project Path="tests/Groundwork.Query.Linq.Fragments/Groundwork.Query.Linq.Fragments.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Schema.Generator.Tests/">
     <Project Path="tests/Groundwork.Schema.Generator.Tests/Groundwork.Schema.Generator.Tests.csproj" />
