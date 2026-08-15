@@ -41,9 +41,15 @@ public static class IdempotencyRules
     {
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(values);
+        var generatedKeyColumns = unit.Columns
+            .Where(column => column.Generation == ColumnGeneration.ProviderSequence)
+            .Select(column => column.Name)
+            .ToHashSet(StringComparer.Ordinal);
         var identities = new HashSet<string>(StringComparer.Ordinal);
         foreach (var value in values)
         {
+            if (unit.Key.Columns.Any(column => generatedKeyColumns.Contains(column) && !value.Values.ContainsKey(column)))
+                continue;
             var identity = RowWrite.IdentityForAvailableKeys(unit, value.Values);
             if (!identities.Add(identity))
                 throw new ArgumentException("An append batch cannot contain duplicate storage keys.", nameof(values));

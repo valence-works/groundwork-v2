@@ -125,6 +125,62 @@ public sealed class IdempotencyProofTests
         }
     }
 
+    [Fact]
+    public void InMemory_append_allows_multiple_provider_sequence_rows()
+    {
+        using var connection = new InMemoryProviderFactory().Create("idempotency-generated-inmemory-" + Guid.NewGuid().ToString("N"));
+        AssertGeneratedAppend(connection, "inmemory");
+    }
+
+    [Fact]
+    public void SQLite_append_allows_multiple_provider_sequence_rows()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-idempotency-generated-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
+            AssertGeneratedAppend(connection, "sqlite");
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [SkippableFact]
+    public void PostgreSQL_append_allows_multiple_provider_sequence_rows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run the PostgreSQL generated-key append proof.");
+        using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
+        AssertGeneratedAppend(connection, "postgresql");
+    }
+
+    [SkippableFact]
+    public void SQLServer_append_allows_multiple_provider_sequence_rows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server generated-key append proof.");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        AssertGeneratedAppend(connection, "sqlserver");
+    }
+
+    [SkippableFact]
+    public void MongoDB_append_allows_multiple_provider_sequence_rows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB generated-key append proof.");
+        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        try
+        {
+            AssertGeneratedAppend(connection, "mongodb");
+        }
+        catch (InvalidOperationException exception) when (IsStandaloneMongoCapabilityRefusal(exception))
+        {
+            Skip.If(true, "MongoDB idempotency requires a transaction-capable deployment.");
+        }
+    }
+
     [SkippableFact]
     public void PostgreSQL_duplicate_append_keys_are_refused_and_leave_no_payload_or_ledger()
     {
@@ -153,7 +209,7 @@ public sealed class IdempotencyProofTests
         {
             AssertDuplicateAppendRejected(connection, "mongodb");
         }
-        catch (InvalidOperationException exception) when (exception.Message.Contains("transaction", StringComparison.OrdinalIgnoreCase))
+        catch (InvalidOperationException exception) when (IsStandaloneMongoCapabilityRefusal(exception))
         {
             Skip.If(true, "MongoDB idempotency requires a transaction-capable deployment.");
         }
@@ -259,40 +315,65 @@ public sealed class IdempotencyProofTests
         {
             AssertReplaySemantics(connection, "mongodb");
         }
-        catch (InvalidOperationException exception) when (exception.Message.Contains("transaction", StringComparison.OrdinalIgnoreCase))
+        catch (InvalidOperationException exception) when (IsStandaloneMongoCapabilityRefusal(exception))
         {
             Skip.If(true, "MongoDB idempotency requires a transaction-capable deployment.");
         }
     }
 
-    [Theory]
-    [InlineData("inmemory")]
-    [InlineData("sqlite")]
-    public void Replay_expiry_is_based_on_provider_commit_time_and_failed_batches_do_not_leave_a_ledger_row(string provider)
+    [Fact]
+    public void InMemory_replay_expiry_uses_commit_time_and_failed_batches_roll_back()
     {
-        string? path = null;
-        using var connection = provider == "inmemory"
-            ? new InMemoryProviderFactory().Create("idempotency-expiry-" + Guid.NewGuid().ToString("N"))
-            : CreateSqlite(out path);
+        using var connection = new InMemoryProviderFactory().Create("idempotency-expiry-inmemory-" + Guid.NewGuid().ToString("N"));
+        AssertExpiryAndRollback(connection, "inmemory");
+    }
+
+    [Fact]
+    public void SQLite_replay_expiry_uses_commit_time_and_failed_batches_roll_back()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-idempotency-expiry-" + Guid.NewGuid().ToString("N") + ".db");
         try
         {
-            var unit = Unit("idempotency-expiry-" + provider + "-" + Guid.NewGuid().ToString("N"), TimeSpan.FromMilliseconds(5));
-            Assert.True(connection.Schema.Apply(unit).Applied);
-            var session = connection.OpenSession(unit, StorageAccess.Global);
-            var operation = new OperationId(DateTimeOffset.UnixEpoch, "expired-operation");
-            Assert.Throws<ArgumentException>(() => session.Append(operation, [Values("duplicate"), new StorageValues(new Dictionary<string, object?> { ["id"] = "invalid" })]));
-            Assert.Equal(WriteOutcomeStatus.Inserted, session.Append(operation, [Values("accepted")] ).Status);
-
-            Thread.Sleep(20);
-            Assert.Equal(WriteOutcomeStatus.Inserted, session.Append(operation, [Values("after-window")]).Status);
-            Assert.NotNull(session.Read(Key("after-window")));
+            using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
+            AssertExpiryAndRollback(connection, "sqlite");
         }
         finally
         {
-            if (provider == "sqlite")
-            {
-                try { File.Delete(path!); } catch { }
-            }
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [SkippableFact]
+    public void PostgreSQL_replay_expiry_uses_commit_time_and_failed_batches_roll_back()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run the PostgreSQL expiry proof.");
+        using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
+        AssertExpiryAndRollback(connection, "postgresql");
+    }
+
+    [SkippableFact]
+    public void SQLServer_replay_expiry_uses_commit_time_and_failed_batches_roll_back()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server expiry proof.");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        AssertExpiryAndRollback(connection, "sqlserver");
+    }
+
+    [SkippableFact]
+    public void MongoDB_replay_expiry_uses_commit_time_and_failed_batches_roll_back()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB expiry proof.");
+        using var connection = new MongoDbTestingFactory().Create(connectionString!);
+        try
+        {
+            AssertExpiryAndRollback(connection, "mongodb");
+        }
+        catch (InvalidOperationException exception) when (IsStandaloneMongoCapabilityRefusal(exception))
+        {
+            Skip.If(true, "MongoDB idempotency requires a transaction-capable deployment.");
         }
     }
 
@@ -311,12 +392,6 @@ public sealed class IdempotencyProofTests
         Assert.Null(session.Read(Key("two")));
     }
 
-    private static IStorageProviderConnection CreateSqlite(out string path)
-    {
-        path = Path.Combine(Path.GetTempPath(), "groundwork-idempotency-expiry-" + Guid.NewGuid().ToString("N") + ".db");
-        return new SqliteProviderFactory().Create($"Data Source={path}");
-    }
-
     private static void AssertScopedAppend(IStorageProviderConnection connection, string provider)
     {
         var unit = Unit("s2scope-" + provider + "-" + Guid.NewGuid().ToString("N"), scope: ScopePolicy.Scoped);
@@ -327,6 +402,26 @@ public sealed class IdempotencyProofTests
         Assert.NotNull(session.Read(Key("scoped-row")));
     }
 
+    private static void AssertGeneratedAppend(IStorageProviderConnection connection, string provider)
+    {
+        var unit = GeneratedUnit("s2generated-" + provider + "-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var operation = new OperationId(DateTimeOffset.UnixEpoch, "generated-operation");
+
+        var outcome = session.Append(operation, [
+            new StorageValues(new Dictionary<string, object?> { ["payload"] = "first" }),
+            new StorageValues(new Dictionary<string, object?> { ["payload"] = "second" })
+        ]);
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Status);
+        Assert.Equal("first", session.Read(new StorageKey(new Dictionary<string, object?> { ["sequence"] = 1L }))!.Values.Values["payload"]);
+        Assert.Equal("second", session.Read(new StorageKey(new Dictionary<string, object?> { ["sequence"] = 2L }))!.Values.Values["payload"]);
+    }
+
+    private static bool IsStandaloneMongoCapabilityRefusal(InvalidOperationException exception) =>
+        exception.Message.Contains("standalone MongoDB cannot provide", StringComparison.Ordinal);
+
     private static void AssertDuplicateAppendRejected(IStorageProviderConnection connection, string provider)
     {
         var unit = Unit("s2dup-" + provider + "-" + Guid.NewGuid().ToString("N"));
@@ -336,6 +431,29 @@ public sealed class IdempotencyProofTests
         Assert.Throws<ArgumentException>(() => session.Append(operation, [Values("same"), Values("same")]));
         Assert.Null(session.Read(Key("same")));
         Assert.Equal(WriteOutcomeStatus.Inserted, session.Append(operation, [Values("accepted")]).Status);
+    }
+
+    private static void AssertExpiryAndRollback(IStorageProviderConnection connection, string provider)
+    {
+        var unit = Unit("idempotency-expiry-" + provider + "-" + Guid.NewGuid().ToString("N"), TimeSpan.FromMilliseconds(5));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var operation = new OperationId(DateTimeOffset.UnixEpoch, "expired-operation");
+
+        var failure = Record.Exception(() => session.Append(operation, [
+            Values("duplicate"),
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "invalid" })
+        ]));
+        Assert.NotNull(failure);
+        if (provider == "mongodb")
+            Assert.Contains("required", failure!.Message, StringComparison.OrdinalIgnoreCase);
+        else
+            Assert.IsType<ArgumentException>(failure);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Append(operation, [Values("accepted")]).Status);
+
+        Thread.Sleep(50);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Append(operation, [Values("after-window")]).Status);
+        Assert.NotNull(session.Read(Key("after-window")));
     }
 
     private static StorageUnit Unit(
@@ -358,6 +476,19 @@ public sealed class IdempotencyProofTests
             Window = window ?? TimeSpan.FromMinutes(10),
             LedgerName = ledgerName ?? "__groundwork_operations"
         }
+    };
+
+    private static StorageUnit GeneratedUnit(string name) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "payload", Type = PortableType.String, MaxLength = 450, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["sequence"] },
+        AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
     };
 
     private static StorageValues Values(string id) => new(new Dictionary<string, object?>

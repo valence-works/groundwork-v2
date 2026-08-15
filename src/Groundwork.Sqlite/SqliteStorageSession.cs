@@ -219,10 +219,19 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var writes = values
             .Select(value => RowWrite.Insert(logicalUnit, value))
             .ToArray();
-        var outcomes = ApplyBatchCore(writes);
+        var outcomes = SequenceColumnDefinition is not null
+            ? writes.Select(InsertAppendSequence).ToArray()
+            : ApplyBatchCore(writes);
         if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
             throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
         return new WriteOutcome(WriteOutcomeStatus.Inserted);
+    }
+
+    private RowWriteOutcome InsertAppendSequence(RowWrite write)
+    {
+        var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
+        ValidateValues(values.Values, requireAllNonNullable: true);
+        return new RowWriteOutcome(write, InsertCore(values.Values, WriteOutcomeStatus.Inserted));
     }
 
     private void EnsureLedgerTable(string table)
