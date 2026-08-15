@@ -302,3 +302,54 @@ jobs:
         env:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
         run: dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj --no-restore --configuration Release
+
+  stream-capabilities-retention:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine3.22
+        env:
+          POSTGRES_PASSWORD: groundwork
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Groundwork!2026
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Groundwork!2026' -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Initialize MongoDB replica set for native retention
+        run: |
+          docker run --detach --name groundwork-s3-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet s3rs --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec groundwork-s3-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"s3rs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec groundwork-s3-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+      - run: dotnet restore tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+      - name: Run four-provider retention proof
+        env:
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s3ci?replicaSet=s3rs&directConnection=true
+        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Retention

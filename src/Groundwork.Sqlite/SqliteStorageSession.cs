@@ -10,7 +10,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
+internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -178,6 +178,52 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
         });
     }
+
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) => ExecuteWrite(() =>
+    {
+        options ??= new RetentionExecutionOptions();
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keyColumns = Unit.Key.Columns;
+        var partition = declaration.PartitionColumns.Count == 0
+            ? string.Empty
+            : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+        var scope = Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn)
+            ? $" WHERE {Quote(SqliteSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+            : string.Empty;
+        var keys = string.Join(", ", keyColumns.Select(Quote));
+        var ordering = string.Join(", ", [
+            $"{Quote(declaration.OrderColumn)} DESC",
+            .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+        var equality = string.Join(" AND ", keyColumns.Select(column =>
+            $"target.{Quote(column)}=victim.{Quote(column)}"));
+        var deleted = 0;
+        var batches = 0;
+        while (true)
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            using var command = Command($"WITH ranked AS (" +
+                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
+                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
+                $"DELETE FROM {Quote(Unit.Name)} AS target WHERE EXISTS (SELECT 1 FROM victims AS victim WHERE {equality});");
+            command.Parameters.AddWithValue("@keep", declaration.KeepNewest);
+            command.Parameters.AddWithValue("@limit", options.MaxRowsPerBatch);
+            if (Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
+                command.Parameters.AddWithValue("@__groundwork_scope", Access.Scope!.Value);
+            var affected = command.ExecuteNonQuery();
+            options.Observer?.Observe(new WritePathEvent("sqlite.retention-delete", command.CommandText, IsProbe: false));
+            if (affected == 0)
+                break;
+            deleted += affected;
+            batches++;
+            if (affected < options.MaxRowsPerBatch)
+                break;
+        }
+        return new RetentionResult(deleted, batches);
+    });
 
     internal void Close() => closed = true;
 
@@ -416,6 +462,19 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     };
 
     private WriteOutcome Mutate(
+        StorageValues values,
+        WriteOptions? options,
+        Mutation mutation,
+        bool exactOutcome = false)
+    {
+        var outcome = MutateCore(values, options, mutation, exactOutcome);
+        if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            mutation is Mutation.Insert or Mutation.Upsert)
+            ApplyRetention(new RetentionExecutionOptions { Observer = options?.Observer });
+        return outcome;
+    }
+
+    private WriteOutcome MutateCore(
         StorageValues values,
         WriteOptions? options,
         Mutation mutation,

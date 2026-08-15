@@ -190,5 +190,6 @@ public sealed record StorageUnit
     public ScopePolicy Scope { get; init; } = ScopePolicy.Global;
     public ConcurrencyDeclaration Concurrency { get; init; } = ConcurrencyDeclaration.None;
     public TimestampDeclaration Timestamps { get; init; } = TimestampDeclaration.None;
+    public RetentionDeclaration? Retention { get; init; }
     public int SchemaVersion { get; init; } = 1;
 }

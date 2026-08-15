@@ -16,8 +16,40 @@ public sealed class PortabilityValidationResult
     public bool IsPortable => Refusals.Count == 0;
 }
 
-/// <summary>The optional retention shape needed by the K2 validation seam.</summary>
-public sealed record RetentionDeclaration(string OrderColumn);
+/// <summary>The count-based retention policy attached to a storage unit.</summary>
+public enum RetentionTrigger
+{
+    Explicit,
+    OnAppend
+}
+
+/// <summary>
+/// Declares how many newest rows are retained, optionally independently for each partition.
+/// The order column is deliberately a logical column name; providers bind it only after the
+/// declaration has passed the provider-neutral portability validator.
+/// </summary>
+public sealed record RetentionDeclaration
+{
+    /// <summary>Compatibility constructor for the original K2 validation-only shape.</summary>
+    [System.Diagnostics.CodeAnalysis.SetsRequiredMembers]
+    public RetentionDeclaration(string orderColumn)
+    {
+        KeepNewest = 1;
+        OrderColumn = orderColumn;
+    }
+
+    public RetentionDeclaration()
+    {
+    }
+
+    public required int KeepNewest { get; init; }
+
+    public required string OrderColumn { get; init; }
+
+    public IReadOnlyList<string> PartitionColumns { get; init; } = [];
+
+    public RetentionTrigger Trigger { get; init; } = RetentionTrigger.Explicit;
+}
 
 /// <summary>
 /// Provider-neutral information supplied by later builder, manifest, and schema-target slices.
@@ -81,9 +113,26 @@ public static class PortabilityValidator
         ValidateIndexBudget(indexes, byName, diagnostics);
         ValidateGeneration(unit, columns, diagnostics);
         ValidateCollation(columns, diagnostics);
-        ValidateRetention(context.Retention, byName, diagnostics);
+        ValidateRetention(unit.Retention ?? context.Retention, byName, diagnostics);
         ValidateMongoKeyOrder(unit, context, diagnostics);
 
+        return new(diagnostics);
+    }
+
+    internal static PortabilityValidationResult ValidateRetention(StorageUnit? unit)
+    {
+        if (unit is null)
+            return new([new(
+                "GW-PORT-000",
+                "A storage unit is required for portability validation.",
+                "storageUnit")]);
+
+        var byName = (unit.Columns ?? [])
+            .Where(column => column is not null && column.Name is not null)
+            .GroupBy(column => column.Name, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var diagnostics = new List<PortabilityRefusal>();
+        ValidateRetention(unit.Retention, byName, diagnostics);
         return new(diagnostics);
     }
 
@@ -342,11 +391,16 @@ public static class PortabilityValidator
             return;
 
         var name = retention.OrderColumn ?? string.Empty;
-        if (!byName.TryGetValue(name, out var column) || column.IsNullable || !IsRetentionOrderable(column.Type))
+        var invalidKeepNewest = retention.KeepNewest <= 0;
+        var invalidTrigger = !Enum.IsDefined(retention.Trigger);
+        var invalidPartition = (retention.PartitionColumns ?? []).Any(partition =>
+            string.IsNullOrWhiteSpace(partition) || !byName.ContainsKey(partition));
+        if (invalidKeepNewest || invalidTrigger || invalidPartition ||
+            !byName.TryGetValue(name, out var column) || column.IsNullable || !IsRetentionOrderable(column.Type))
         {
             diagnostics.Add(new(
                 "GW-PORT-007",
-                $"Retention order column '{name}' must be declared, non-nullable, and orderable.",
+                $"Retention requires a positive KeepNewest value, a declared non-nullable orderable order column '{name}', and declared partition columns.",
                 $"retention.{name}"));
         }
     }

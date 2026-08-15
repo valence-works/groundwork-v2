@@ -769,6 +769,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         ArgumentNullException.ThrowIfNull(unit.Key.Columns);
         ArgumentNullException.ThrowIfNull(unit.DerivedColumns);
         ArgumentNullException.ThrowIfNull(unit.Indexes);
+        var portability = PortabilityValidator.Validate(unit);
+        if (!portability.IsPortable)
+        {
+            var refusal = portability.Refusals[0];
+            throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
+        }
         if (unit.Columns.Count == 0)
             throw new ArgumentException("A MongoDB storage unit must declare at least one column.", nameof(unit));
         if (unit.Key.Columns.Count == 0)
@@ -802,7 +808,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly MongoProviderState state;
     private readonly MongoAppliedUnit applied;
@@ -1223,6 +1229,73 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         return ExecuteWithTransactionIfNeeded(transactional => transactional.DeleteCore(key, options));
     }
 
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        options ??= new RetentionExecutionOptions();
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var deleted = 0;
+        var batches = 0;
+
+        // A capped collection is intentionally not used: caps apply to the whole collection,
+        // cannot keep N rows per partition, and reject document growth/index updates. A
+        // computed rank plus bounded deleteMany preserves ordinary collection semantics.
+        while (true)
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            var pipeline = new[]
+            {
+                new BsonDocument("$setWindowFields", new BsonDocument
+                {
+                    { "partitionBy", RetentionPartitionExpression(declaration) },
+                    { "sortBy", RetentionSort(declaration) },
+                    { "output", new BsonDocument("__groundwork_retention_rank", new BsonDocument("$documentNumber", new BsonDocument())) }
+                }),
+                new BsonDocument("$match", new BsonDocument("__groundwork_retention_rank", new BsonDocument("$gt", declaration.KeepNewest))),
+                new BsonDocument("$limit", options.MaxRowsPerBatch),
+                new BsonDocument("$project", new BsonDocument("_id", 1))
+            };
+            var definition = PipelineDefinition<BsonDocument, BsonDocument>.Create(pipeline);
+            var victims = transactionSession is null
+                ? collection.Aggregate(definition).ToList()
+                : collection.Aggregate(transactionSession, definition).ToList();
+            if (victims.Count == 0)
+                break;
+
+            var ids = new BsonArray(victims.Select(document => document["_id"]));
+            var filter = new BsonDocument("_id", new BsonDocument("$in", ids));
+            var result = transactionSession is null
+                ? collection.DeleteMany(filter)
+                : collection.DeleteMany(transactionSession, filter);
+            var affected = checked((int)result.DeletedCount);
+            options.Observer?.Observe(new WritePathEvent("mongodb.retention-delete-many", filter.ToJson(), IsProbe: false));
+            deleted += affected;
+            batches++;
+            if (affected == 0 || victims.Count < options.MaxRowsPerBatch)
+                break;
+        }
+
+        return new RetentionResult(deleted, batches);
+    }
+
+    private static BsonValue RetentionPartitionExpression(RetentionDeclaration declaration)
+    {
+        if (declaration.PartitionColumns.Count == 0)
+            return BsonNull.Value;
+        if (declaration.PartitionColumns.Count == 1)
+            return "$" + declaration.PartitionColumns[0];
+        return new BsonDocument(declaration.PartitionColumns.Select(column =>
+            new BsonElement(column, "$" + column)));
+    }
+
+    private static BsonDocument RetentionSort(RetentionDeclaration declaration)
+        // MongoDB's $documentNumber requires exactly one sort key. The declaration's order
+        // column is required to be a deterministic provider-sequence in the stream contract;
+        // non-unique order columns remain valid but may choose any equal-valued survivor.
+        => new(declaration.OrderColumn, -1);
+
     private static WriteOptions? ToTestingOptions(MongoWriteOptions? options) => options is null
         ? null
         : new WriteOptions { Precondition = options.Precondition, Observer = options.Observer };
@@ -1238,7 +1311,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         ArgumentNullException.ThrowIfNull(values);
         ThrowIfDisposed();
         return ExecuteWithTransactionIfNeeded(transactional =>
-            transactional.MutateCore(values, options, kind, exactOutcome));
+        {
+            var outcome = transactional.MutateCore(values, options, kind, exactOutcome);
+            if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+                kind is MutationKind.Insert or MutationKind.Upsert)
+            {
+                transactional.ApplyRetention(new RetentionExecutionOptions { Observer = options?.Observer });
+            }
+            return outcome;
+        });
     }
 
     private MongoWriteOutcome MutateCore(
@@ -2098,6 +2179,7 @@ internal static class SchemaIdentity
         unit.Scope,
         unit.Concurrency,
         unit.Timestamps,
+        unit.Retention is null ? "retention:none" : string.Join("|", unit.Retention.KeepNewest, unit.Retention.OrderColumn, unit.Retention.Trigger, string.Join(",", unit.Retention.PartitionColumns)),
         unit.SchemaVersion,
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
@@ -2142,7 +2224,11 @@ internal static class MongoDeclarationSnapshot
         {
             Columns = index.Columns.Select(column => column with { }).ToArray()
         }).ToArray(),
-        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
+        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
+        Retention = unit.Retention is null ? null : unit.Retention with
+        {
+            PartitionColumns = unit.Retention.PartitionColumns.ToArray()
+        }
     };
 
     private static object? CloneValue(object? value) => value switch

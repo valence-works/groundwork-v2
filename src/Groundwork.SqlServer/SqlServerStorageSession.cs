@@ -11,7 +11,7 @@ using Groundwork.Testing;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -202,6 +202,55 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
         });
     }
+
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) => ExecuteWrite(() =>
+    {
+        options ??= new RetentionExecutionOptions();
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keyColumns = Unit.Key.Columns;
+        var partition = declaration.PartitionColumns.Count == 0
+            ? string.Empty
+            : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+        var scope = Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn)
+            ? $" WHERE {Quote(SqlServerSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+            : string.Empty;
+        var keys = string.Join(", ", keyColumns.Select(Quote));
+        var ordering = string.Join(", ", [
+            $"{Quote(declaration.OrderColumn)} DESC",
+            .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+        var equality = string.Join(" AND ", keyColumns.Select(column =>
+            $"target.{Quote(column)}=victim.{Quote(column)}"));
+        var deleted = 0;
+        var batches = 0;
+        while (true)
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            using var command = Command($"WITH ranked AS (" +
+                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
+                $"SELECT TOP (@limit) {keys} FROM ranked WHERE __groundwork_retention_rank > @keep) " +
+                $"DELETE target FROM {Quote(Unit.Name)} AS target INNER JOIN victims AS victim ON {equality};");
+            SqlServerProviderConnection.AddParameter(command, "@keep", declaration.KeepNewest,
+                new ColumnDefinition { Name = "keep", Type = PortableType.Int32, IsNullable = false });
+            SqlServerProviderConnection.AddParameter(command, "@limit", options.MaxRowsPerBatch,
+                new ColumnDefinition { Name = "limit", Type = PortableType.Int32, IsNullable = false });
+            if (Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn))
+                SqlServerProviderConnection.AddParameter(command, "@__groundwork_scope", Access.Scope!.Value,
+                    new ColumnDefinition { Name = SqlServerSchemaCoordinator.ScopeColumn, Type = PortableType.String, MaxLength = 128, IsNullable = false });
+            var affected = command.ExecuteNonQuery();
+            options.Observer?.Observe(new WritePathEvent("sqlserver.retention-delete", command.CommandText, IsProbe: false));
+            if (affected == 0)
+                break;
+            deleted += affected;
+            batches++;
+            if (affected < options.MaxRowsPerBatch)
+                break;
+        }
+        return new RetentionResult(deleted, batches);
+    });
 
     internal void Close() => closed = true;
 
@@ -487,7 +536,16 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         _ => null
     };
 
-    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
+    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation)
+    {
+        var outcome = MutateCore(values, options, mutation);
+        if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            mutation is Mutation.Insert or Mutation.Upsert)
+            ApplyRetention(new RetentionExecutionOptions { Observer = options?.Observer });
+        return outcome;
+    }
+
+    private WriteOutcome MutateCore(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));

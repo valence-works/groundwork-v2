@@ -218,6 +218,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        ValidateRetention(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
@@ -232,6 +233,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
+        ValidateRetention(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
@@ -290,6 +292,18 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         }
     }
 
+    private static void ValidateRetention(StorageUnit unit)
+    {
+        if (unit.Retention is null)
+            return;
+        var portability = PortabilityValidator.Validate(unit);
+        if (!portability.IsPortable)
+        {
+            var refusal = portability.Refusals[0];
+            throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
+        }
+    }
+
     private static IReadOnlyList<SchemaChange> BuildChanges(StorageUnit desired, StorageUnit? current)
     {
         if (current is not null && !string.Equals(current.Name, desired.Name, StringComparison.Ordinal))
@@ -309,6 +323,9 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         if (current is not null && current.SchemaVersion != desired.SchemaVersion)
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change schema version non-additively.");
+        if (current is not null && !SchemaIdentity.RetentionEquals(current.Retention, desired.Retention))
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change retention non-additively.");
 
         if (current is null)
         {
@@ -438,6 +455,9 @@ internal static class SchemaIdentity
     internal static bool AggregationProfileEquals(AggregationProfile left, AggregationProfile right) =>
         string.Equals(AggregationProfile(left), AggregationProfile(right), StringComparison.Ordinal);
 
+    internal static bool RetentionEquals(RetentionDeclaration? left, RetentionDeclaration? right) =>
+        EncodeRetention(left) == EncodeRetention(right);
+
     private static string Column(ColumnDefinition column) => Encode(
         column.Name,
         column.Type,
@@ -460,6 +480,11 @@ internal static class SchemaIdentity
 
     private static string AggregationProfile(AggregationProfile profile) =>
         AggregationProfileCanonicalization.Canonicalize(profile);
+
+    private static string EncodeRetention(RetentionDeclaration? retention) => retention is null
+        ? "retention:none"
+        : Encode(retention.KeepNewest, retention.OrderColumn, retention.Trigger,
+            string.Join("|", retention.PartitionColumns));
 
     private static string Encode(params object?[] parts) => string.Join(";", parts.Select(part =>
     {
@@ -500,11 +525,15 @@ internal static class StorageDeclaration
         {
             Columns = index.Columns.ToArray()
         }).ToArray(),
-        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
+        AggregationProfiles = unit.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
+        Retention = unit.Retention is null ? null : unit.Retention with
+        {
+            PartitionColumns = unit.Retention.PartitionColumns.ToArray()
+        }
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStorageSession
+internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStorageSession, IRetentionStorageSession
 {
     private readonly InMemoryDatabase database;
     private readonly InMemoryUnitState state;
@@ -820,6 +849,60 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         }
     }
 
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        options ??= new RetentionExecutionOptions();
+        if (options.MaxRowsPerBatch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        var declaration = Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+
+        string[] victimKeys;
+        lock (database.Gate)
+        {
+            ThrowIfDisposed();
+            options.CancellationToken.ThrowIfCancellationRequested();
+            var current = CurrentState();
+            if (!current.Partitions.TryGetValue(partition, out var entries) || entries.Count == 0)
+                return new RetentionResult(0, 0);
+
+            // Snapshot the watermark under the short read lock. Deleting outside that lock
+            // prevents OnAppend from turning a retention scan into a write convoy.
+            var rows = entries.Values.Select(entry => entry.Values).ToArray();
+            victimKeys = RetentionRows.OrderVictims(Unit, declaration, rows)
+                .Select(row => InMemoryKey(Unit, row))
+                .ToArray();
+        }
+
+        var deleted = 0;
+        var batches = 0;
+        foreach (var batch in victimKeys.Chunk(options.MaxRowsPerBatch))
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            lock (database.Gate)
+            {
+                ThrowIfDisposed();
+                var current = CurrentState();
+                if (!current.Partitions.TryGetValue(partition, out var entries))
+                    continue;
+                foreach (var identity in batch)
+                {
+                    options.CancellationToken.ThrowIfCancellationRequested();
+                    if (entries.Remove(identity))
+                    {
+                        deleted++;
+                        current.Revision = checked(current.Revision + 1);
+                    }
+                }
+            }
+
+            batches++;
+            options.Observer?.Observe(new WritePathEvent("in-memory.retention", null, IsProbe: false));
+        }
+
+        return new RetentionResult(deleted, batches);
+    }
+
     internal void Close() => disposed = true;
 
     private WriteOutcome Mutate(
@@ -831,12 +914,23 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
+        WriteOutcome outcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
+            outcome = Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
         }
+
+        // Retention runs after the write lock is released. Providers with native post-commit
+        // retention follow the same shape, so concurrent appends do not queue behind a scan.
+        if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            kind is MutationKind.Insert or MutationKind.Upsert)
+            ApplyRetention(new RetentionExecutionOptions { MaxRowsPerBatch = 512 });
+        return outcome;
     }
+
+    private static string InMemoryKey(StorageUnit unit, IReadOnlyDictionary<string, object?> values) =>
+        string.Join("|", unit.Key.Columns.Select(column => ValueCanonicalizer.Canonical(values.GetValueOrDefault(column))));
 
     private InMemoryUnitState CurrentState() =>
         liveState ? database.Units[Unit.Id] : state;

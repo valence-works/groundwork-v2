@@ -587,7 +587,7 @@ internal sealed class BatchContext
 }
 
 /// <summary>Testing-layer wrapper that makes staged-key reads flush before delegating.</summary>
-internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
+internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly IStorageSession inner;
     private readonly BatchContext context;
@@ -632,6 +632,14 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
 
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        context.FlushAll();
+        return inner is IRetentionStorageSession native
+            ? native.ApplyRetention(options)
+            : RetentionSessionExtensions.ApplyRetention(inner, options);
+    }
+
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
         inner is IConcurrencyStorageSession concurrency
             ? concurrency.ConditionalUpsert(values, options)
@@ -642,10 +650,9 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
-        if (inner is IBatchedStorageSession batched)
-            return batched.ApplyBatch(writes, exactOutcomes);
-
-        return writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+        var outcomes = inner is IBatchedStorageSession batched
+            ? batched.ApplyBatch(writes, exactOutcomes)
+            : writes.Select(write => new RowWriteOutcome(write, write.Mode switch
         {
             RowWriteMode.Insert => inner.Insert(write.Values!, write.Options),
             RowWriteMode.Update => inner.Update(write.Values!, write.Options),
@@ -659,5 +666,10 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
             RowWriteMode.Delete => inner.Delete(write.Key!, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcomes.Any(outcome => outcome.Outcome.Succeeded &&
+                outcome.Write.Mode is RowWriteMode.Insert or RowWriteMode.Upsert))
+            RetentionSessionExtensions.ApplyRetention(this);
+        return outcomes;
     }
 }
