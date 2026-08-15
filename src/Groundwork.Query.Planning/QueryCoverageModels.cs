@@ -24,6 +24,8 @@ public sealed record CoverageIndexColumn
     {
         if (string.IsNullOrWhiteSpace(column))
             throw new ArgumentException("An index column name cannot be blank.", nameof(column));
+        if (!Enum.IsDefined(typeof(OrderDirection), direction))
+            throw new ArgumentOutOfRangeException(nameof(direction), direction, null);
 
         Column = column;
         Direction = direction;
@@ -48,6 +50,10 @@ public sealed record CoverageIndex
         Columns = (columns ?? throw new ArgumentNullException(nameof(columns))).ToImmutableArray();
         if (Columns.Length == 0)
             throw new ArgumentException("An index must declare at least one column.", nameof(columns));
+        if (Columns.Select(column => column.Column).Distinct(StringComparer.Ordinal).Count() != Columns.Length)
+            throw new ArgumentException("An index cannot declare the same column more than once.", nameof(columns));
+        if (!Enum.IsDefined(typeof(IndexMissingValueBehavior), missingValues))
+            throw new ArgumentOutOfRangeException(nameof(missingValues), missingValues, null);
         MissingValues = missingValues;
     }
 
@@ -66,8 +72,8 @@ public sealed record CoverageIndex
 
     public string Declaration =>
         "[GwIndex(\"" + Escape(Name) + "\", " +
-        string.Join(", ", Columns.Select(column =>
-            "\"" + Escape(column.Column) + " " + DirectionName(column.Direction) + "\"")) + ")]";
+        "\"" + Escape(string.Join(", ", Columns.Select(column =>
+            column.Column + " " + DirectionName(column.Direction)))) + "\")]";
 
     private static string Escape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
@@ -75,9 +81,9 @@ public sealed record CoverageIndex
 }
 
 /// <summary>A single provider-neutral planning diagnostic.</summary>
-public sealed record CoverageDiagnostic
+public sealed record CoverageRefusal
 {
-    internal CoverageDiagnostic(string code, string message, CoverageIndex? nearestIndex, CoverageIndex suggestedIndex)
+    internal CoverageRefusal(string code, string message, CoverageIndex? nearestIndex, CoverageIndex suggestedIndex)
     {
         Code = code;
         Message = message;
@@ -98,19 +104,19 @@ public sealed class QueryCoverageResult
     internal QueryCoverageResult(
         CoverageDecision decision,
         CoverageIndex? index,
-        IEnumerable<CoverageDiagnostic> diagnostics,
+        IEnumerable<CoverageRefusal> refusals,
         string reason)
     {
         Decision = decision;
         Index = index;
-        Diagnostics = (diagnostics ?? throw new ArgumentNullException(nameof(diagnostics))).ToImmutableArray();
+        Refusals = (refusals ?? throw new ArgumentNullException(nameof(refusals))).ToImmutableArray();
         Reason = reason;
     }
 
     public CoverageDecision Decision { get; }
     public bool IsCovered => Decision == CoverageDecision.Covered;
     public CoverageIndex? Index { get; }
-    public ImmutableArray<CoverageDiagnostic> Diagnostics { get; }
+    public ImmutableArray<CoverageRefusal> Refusals { get; }
     public string Reason { get; }
-    public CoverageDiagnostic? Diagnostic => Diagnostics.Length == 0 ? null : Diagnostics[0];
+    public CoverageRefusal? Refusal => Refusals.Length == 0 ? null : Refusals[0];
 }

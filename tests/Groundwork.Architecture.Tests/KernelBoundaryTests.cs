@@ -73,7 +73,8 @@ public sealed class KernelBoundaryTests
         using var universe = AssemblyUniverse.Load();
         var violations = universe.Assemblies
             .Where(assembly => IsKernelAssembly(assembly.GetName().Name) ||
-                               IsSubstrateAssembly(assembly.GetName().Name))
+                               IsSubstrateAssembly(assembly.GetName().Name) ||
+                               string.Equals(assembly.GetName().Name, "Groundwork.Query.Planning", StringComparison.Ordinal))
             .SelectMany(PublicSignatures)
             .SelectMany(signature => ForbiddenContractVocabulary
                 .Where(token => signature.Contains(token, StringComparison.OrdinalIgnoreCase))

@@ -21,13 +21,15 @@ public static class QueryCoverageChecker
             throw new ArgumentException("Index candidates cannot contain null references.", nameof(indexes));
 
         var constraints = ConstraintSet.Create(request.Where);
+        if (request.Where is Predicate.AlwaysFalse)
+        {
+            return new QueryCoverageResult(
+                CoverageDecision.Covered,
+                null,
+                Array.Empty<CoverageRefusal>(),
+                "The normalized predicate is always false and requires no provider read.");
+        }
         var suggested = SuggestIndex(request, constraints);
-        var nearest = candidates
-            .Select(index => new { Index = index, Score = Score(index, request, constraints) })
-            .OrderByDescending(candidate => candidate.Score)
-            .ThenBy(candidate => candidate.Index.Name, StringComparer.Ordinal)
-            .Select(candidate => candidate.Index)
-            .FirstOrDefault();
 
         var refusals = new List<Refusal>();
         if (constraints.HasCrossColumnDisjunction)
@@ -39,31 +41,37 @@ public static class QueryCoverageChecker
         if (!constraints.HasBound && request.Order.Length == 0)
             refusals.Add(new Refusal("GW-COVER-005", "An unfiltered query has no index bound."));
 
-        var matching = candidates
-            .Where(index => !refusals.Any())
-            .Select(index => new { Index = index, Failure = CheckIndex(request, constraints, index) })
+        var evaluated = candidates
+            .Select(index => new
+            {
+                Index = index,
+                Score = Score(index, request, constraints),
+                Failure = refusals.Any() ? null : CheckIndex(request, constraints, index)
+            })
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.Failure?.Priority ?? int.MaxValue)
+            .ThenBy(candidate => candidate.Index.Name, StringComparer.Ordinal)
             .ToArray();
-        var winner = matching.FirstOrDefault(candidate => candidate.Failure is null);
+        var winner = refusals.Any() ? null : evaluated.FirstOrDefault(candidate => candidate.Failure is null);
         if (winner is not null)
         {
             return new QueryCoverageResult(
                 CoverageDecision.Covered,
                 winner.Index,
-                Array.Empty<CoverageDiagnostic>(),
+                Array.Empty<CoverageRefusal>(),
                 "The query has a portable equality/range bound or a bounded fully-covered order.");
         }
 
-        var failure = refusals.FirstOrDefault() ?? matching
-            .Select(candidate => candidate.Failure)
-            .Where(candidate => candidate is not null)
-            .OrderBy(candidate => candidate!.Priority)
-            .FirstOrDefault() ?? new Refusal("GW-COVER-006", "No candidate index covers the query shape.");
-        var diagnostic = new CoverageDiagnostic(
+        var nearestFailure = evaluated.FirstOrDefault(candidate => candidate.Failure is not null);
+        var nearest = nearestFailure?.Index ?? evaluated.FirstOrDefault()?.Index;
+        var failure = refusals.FirstOrDefault() ?? nearestFailure?.Failure ??
+            new Refusal("GW-COVER-006", "No candidate index covers the query shape.");
+        var refusal = new CoverageRefusal(
             failure.Code,
             BuildMessage(request, failure.Message, nearest, suggested),
             nearest,
             suggested);
-        return new QueryCoverageResult(CoverageDecision.Refuse, null, [diagnostic], failure.Message);
+        return new QueryCoverageResult(CoverageDecision.Refuse, null, [refusal], failure.Message);
     }
 
     private static string BuildMessage(
@@ -233,13 +241,11 @@ public static class QueryCoverageChecker
     {
         var columns = new List<CoverageIndexColumn>();
         foreach (var constraint in constraints.Constraints.Where(constraint => constraint.Kind == ConstraintKind.Equality))
-            columns.Add(new CoverageIndexColumn(constraint.Column));
+            AddSuggestedColumn(columns, constraint.Column, request.Order);
         foreach (var constraint in constraints.Constraints.Where(constraint => constraint.Kind == ConstraintKind.Range))
-            if (!columns.Any(column => string.Equals(column.Column, constraint.Column, StringComparison.Ordinal)))
-                columns.Add(new CoverageIndexColumn(constraint.Column));
+            AddSuggestedColumn(columns, constraint.Column, request.Order);
         foreach (var column in constraints.ReferencedColumns)
-            if (!columns.Any(existing => string.Equals(existing.Column, column, StringComparison.Ordinal)))
-                columns.Add(new CoverageIndexColumn(column));
+            AddSuggestedColumn(columns, column, request.Order);
         foreach (var order in request.Order)
         {
             if (!columns.Any(column => string.Equals(column.Column, order.Column.Name, StringComparison.Ordinal)))
@@ -248,6 +254,19 @@ public static class QueryCoverageChecker
         if (columns.Count == 0)
             columns.Add(new CoverageIndexColumn("<query-bound>"));
         return new CoverageIndex("ix_" + request.Table.Value.Replace(' ', '_'), columns);
+    }
+
+    private static void AddSuggestedColumn(
+        ICollection<CoverageIndexColumn> columns,
+        string column,
+        ImmutableArray<OrderTerm> order)
+    {
+        if (columns.Any(existing => string.Equals(existing.Column, column, StringComparison.Ordinal)))
+            return;
+        var orderIndex = order.FindIndex(term => string.Equals(term.Column.Name, column, StringComparison.Ordinal));
+        columns.Add(new CoverageIndexColumn(
+            column,
+            orderIndex < 0 ? OrderDirection.Ascending : order[orderIndex].Direction));
     }
 
     private static int Score(CoverageIndex index, QueryRequest request, ConstraintSet constraints)

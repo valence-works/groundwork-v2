@@ -25,9 +25,9 @@ public sealed class CoverageCheckerTests
             Paging.None,
             Index("ix_status_created", new CoverageIndexColumn("status"), new CoverageIndexColumn("created_at", OrderDirection.Descending)));
 
-        Assert.True(result.IsCovered, result.Diagnostic?.Message);
+        Assert.True(result.IsCovered, result.Refusal?.Message);
         Assert.Equal("ix_status_created", result.Index!.Name);
-        Assert.Empty(result.Diagnostics);
+        Assert.Empty(result.Refusals);
     }
 
     [Fact]
@@ -40,8 +40,8 @@ public sealed class CoverageCheckerTests
             Index("ix_created_status", "created_at", "status"));
 
         Assert.False(result.IsCovered);
-        Assert.Equal("GW-COVER-006", result.Diagnostic!.Code);
-        Assert.Contains("compound index prefix", result.Diagnostic.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+        Assert.Contains("compound index prefix", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -60,7 +60,7 @@ public sealed class CoverageCheckerTests
             Paging.Continuation("cursor"),
             Index("ix_tenant_status_created_id", "tenant", "status", "created_at", "id"));
 
-        Assert.True(result.IsCovered, result.Diagnostic?.Message);
+        Assert.True(result.IsCovered, result.Refusal?.Message);
     }
 
     [Fact]
@@ -72,7 +72,7 @@ public sealed class CoverageCheckerTests
             Paging.None,
             Index("ix_status", "status"));
 
-        Assert.True(result.IsCovered, result.Diagnostic?.Message);
+        Assert.True(result.IsCovered, result.Refusal?.Message);
     }
 
     [Fact]
@@ -87,7 +87,7 @@ public sealed class CoverageCheckerTests
             Index("ix_tenant_created", "tenant", "created_at"));
 
         Assert.False(result.IsCovered);
-        Assert.Equal("GW-COVER-006", result.Diagnostic!.Code);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
     }
 
     [Fact]
@@ -99,7 +99,7 @@ public sealed class CoverageCheckerTests
         var result = Check(predicate, [], Paging.None, Index("ix_tenant_status", "tenant", "status"));
 
         Assert.False(result.IsCovered);
-        Assert.Equal("GW-COVER-006", result.Diagnostic!.Code);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public sealed class CoverageCheckerTests
             Index("ix_status_created", "status", "created_at"));
 
         Assert.False(result.IsCovered);
-        Assert.Contains("single-value equality", result.Diagnostic!.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("single-value equality", result.Refusal!.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -134,7 +134,19 @@ public sealed class CoverageCheckerTests
 
         Assert.True(covered.IsCovered);
         Assert.False(unbounded.IsCovered);
-        Assert.Equal("GW-COVER-005", unbounded.Diagnostic!.Code);
+        Assert.Equal("GW-COVER-005", unbounded.Refusal!.Code);
+    }
+
+    [Fact]
+    public void An_always_false_predicate_needs_no_index_or_provider_read()
+    {
+        var result = QueryCoverageChecker.Check(
+            new QueryRequest(Table, Predicate.AlwaysFalse.Instance, [], Projection.All, Paging.None, ResultShape.Rows.Instance),
+            []);
+
+        Assert.True(result.IsCovered);
+        Assert.Null(result.Index);
+        Assert.Empty(result.Refusals);
     }
 
     [Fact]
@@ -154,7 +166,7 @@ public sealed class CoverageCheckerTests
             ResultShape.TotalCount.Instance);
 
         Assert.False(unbounded.IsCovered);
-        Assert.Contains("unbounded Count", unbounded.Diagnostic!.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("unbounded Count", unbounded.Refusal!.Message, StringComparison.OrdinalIgnoreCase);
         Assert.True(bounded.IsCovered);
     }
 
@@ -178,7 +190,7 @@ public sealed class CoverageCheckerTests
 
         Assert.True(sameColumn.IsCovered);
         Assert.False(crossColumn.IsCovered);
-        Assert.Equal("GW-COVER-016", crossColumn.Diagnostic!.Code);
+        Assert.Equal("GW-COVER-016", crossColumn.Refusal!.Code);
     }
 
     [Fact]
@@ -201,7 +213,7 @@ public sealed class CoverageCheckerTests
             new CoverageIndex("ix_status_sparse", new[] { new CoverageIndexColumn("status") }, IndexMissingValueBehavior.Excluded));
 
         Assert.False(nullValue.IsCovered);
-        Assert.Equal("GW-COVER-009", nullValue.Diagnostic!.Code);
+        Assert.Equal("GW-COVER-009", nullValue.Refusal!.Code);
         Assert.True(nonNullValue.IsCovered);
         Assert.False(ordered.IsCovered);
     }
@@ -218,10 +230,33 @@ public sealed class CoverageCheckerTests
             Index("ix_tickets_status_created", "status", new CoverageIndexColumn("created_at", OrderDirection.Descending)));
 
         Assert.False(result.IsCovered);
-        Assert.Equal("ix_tickets_status_created", result.Diagnostic!.NearestIndex!.Name);
-        Assert.Contains("ix_tickets_status_created", result.Diagnostic.Message, StringComparison.Ordinal);
-        Assert.Contains("assignee", result.Diagnostic.SuggestedDeclaration, StringComparison.Ordinal);
-        Assert.Contains("GwIndex", result.Diagnostic.SuggestedDeclaration, StringComparison.Ordinal);
+        Assert.Equal("ix_tickets_status_created", result.Refusal!.NearestIndex!.Name);
+        Assert.Contains("ix_tickets_status_created", result.Refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("assignee", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
+        Assert.Contains("GwIndex", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Suggested_declaration_uses_one_parseable_spec_and_preserves_order_direction()
+    {
+        var result = Check(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [new OrderTerm(Created, OrderDirection.Descending, NullOrder.Last)],
+            Paging.None,
+            Index("ix_wrong", "assignee"));
+
+        Assert.Equal(
+            "[GwIndex(\"ix_tickets\", \"status ASC, created_at DESC\")]",
+            result.Refusal!.SuggestedDeclaration);
+    }
+
+    [Fact]
+    public void Index_contract_rejects_duplicate_columns_and_unknown_enum_values()
+    {
+        Assert.Throws<ArgumentException>(() => Index("duplicate", "status", "status"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CoverageIndexColumn("status", (OrderDirection)999));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new CoverageIndex("invalid", [new CoverageIndexColumn("status")], (IndexMissingValueBehavior)999));
     }
 
     [Fact]
@@ -234,7 +269,7 @@ public sealed class CoverageCheckerTests
 
         Assert.Single(index.Columns);
         Assert.True(result.IsCovered);
-        Assert.Throws<NotSupportedException>(() => ((IList<CoverageDiagnostic>)result.Diagnostics).Clear());
+        Assert.Throws<NotSupportedException>(() => ((IList<CoverageRefusal>)result.Refusals).Clear());
     }
 
     [Fact]
