@@ -12,6 +12,145 @@ namespace Groundwork.Sqlite.Tests;
 public sealed class SqliteProviderTests
 {
     [Fact]
+    public void Native_aggregation_preserves_separator_values_and_independent_FirstBy_orders()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit(
+            "aggregation-adversarial",
+            [
+                new Aggregate.SetUnion("labels", "label", 8),
+                new Aggregate.FirstBy("firstAscending", "label", "ascendingOrder"),
+                new Aggregate.FirstBy("firstDescending", "label", "descendingOrder", SortDirection.Descending)
+            ]);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        InsertAggregationRow(session, "1", "g", 0, 0m, "a\u001fb", 1, 1);
+        InsertAggregationRow(session, "2", "g", 0, 0m, "plain", 2, 3);
+        InsertAggregationRow(session, "3", "g", 0, 0m, "last", 3, 2);
+
+        var row = Assert.Single(session.Aggregate(new AggregationQuery("summary")).Rows);
+
+        Assert.Equal(new[] { "a\u001fb", "last", "plain" }, Assert.IsType<string[]>(row["labels"]));
+        Assert.Equal("a\u001fb", row["firstAscending"]);
+        Assert.Equal("plain", row["firstDescending"]);
+    }
+
+    [Fact]
+    public void Native_aggregation_sums_decimal_text_exactly_and_widens_Int32()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit(
+            "aggregation-sums",
+            [new Aggregate.Sum("integerTotal", "integerAmount"), new Aggregate.Sum("decimalTotal", "decimalAmount")]);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        InsertAggregationRow(session, "1", "g", 2_000_000_000, 12_345_678_901_234_567_890.1234m, "a", 1, 1);
+        InsertAggregationRow(session, "2", "g", 2_000_000_000, 0.0001m, "b", 2, 2);
+
+        var row = Assert.Single(session.Aggregate(new AggregationQuery("summary")).Rows);
+
+        Assert.Equal(4_000_000_000L, Assert.IsType<long>(row["integerTotal"]));
+        Assert.Equal(12_345_678_901_234_567_890.1235m, Assert.IsType<decimal>(row["decimalTotal"]));
+    }
+
+    [Fact]
+    public void Native_decimal_sum_reports_the_portable_overflow_refusal()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var template = AggregationUnit("aggregation-sum-overflow", [new Aggregate.Sum("decimalTotal", "decimalAmount")]);
+        var unit = template with
+        {
+            Columns = template.Columns.Select(column => column.Name == "decimalAmount"
+                ? column with { Precision = 29, Scale = 0 }
+                : column).ToArray()
+        };
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        InsertAggregationRow(session, "1", "g", 0, decimal.MaxValue, "a", 1, 1);
+        InsertAggregationRow(session, "2", "g", 0, decimal.MaxValue, "b", 2, 2);
+
+        var exception = Assert.Throws<AggregationBudgetExceededException>(() =>
+            session.Aggregate(new AggregationQuery("summary")));
+
+        Assert.Equal("GW-AGG-SUM-001", exception.Code);
+    }
+
+    [Fact]
+    public void Native_SetUnion_uses_ordinal_identity_even_for_NOCASE_storage()
+    {
+        using var store = TemporaryStore.Create();
+        var unit = AggregationUnit("aggregation-ordinal-set", [new Aggregate.SetUnion("labels", "label", 2)]) with
+        {
+            Columns = AggregationUnit("unused", []).Columns.Select(column => column.Name == "label"
+                ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
+                : column).ToArray()
+        };
+        using (var native = new SqliteConnection(store.ConnectionString))
+        {
+            native.Open();
+            using var command = native.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE aggregation_ordinal_set (
+                    id TEXT COLLATE BINARY NOT NULL PRIMARY KEY,
+                    "group" TEXT COLLATE BINARY NOT NULL,
+                    integerAmount INTEGER NOT NULL,
+                    decimalAmount TEXT NOT NULL,
+                    label TEXT COLLATE NOCASE NULL,
+                    ascendingOrder INTEGER NOT NULL,
+                    descendingOrder INTEGER NOT NULL,
+                    __groundwork_action TEXT NOT NULL DEFAULT 'I');
+                """;
+            command.ExecuteNonQuery();
+        }
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        InsertAggregationRow(session, "1", "g", 0, 0m, "A", 1, 1);
+        InsertAggregationRow(session, "2", "g", 0, 0m, "a", 2, 2);
+
+        var row = Assert.Single(session.Aggregate(new AggregationQuery("summary")).Rows);
+
+        Assert.Equal(new[] { "A", "a" }, Assert.IsType<string[]>(row["labels"]));
+    }
+
+    [Theory]
+    [InlineData("input", "GW-AGG-BOUND-004")]
+    [InlineData("groups", "GW-AGG-BOUND-005")]
+    [InlineData("values", "GW-AGG-BOUND-007")]
+    public void Native_aggregation_refuses_each_budget_without_truncating(
+        string budget,
+        string expectedCode)
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var template = AggregationUnit(
+            "aggregation-budget-" + budget,
+            [new Aggregate.SetUnion("labels", "label", budget == "values" ? 1 : 8)]);
+        var unit = template with
+        {
+            AggregationProfiles =
+            [
+                template.AggregationProfiles.Single() with
+                {
+                    MaxInputRows = budget == "input" ? 1 : 8,
+                    MaxGroups = budget == "groups" ? 1 : 8
+                }
+            ]
+        };
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        InsertAggregationRow(session, "1", "a", 0, 0m, "x", 1, 1);
+        InsertAggregationRow(session, "2", budget == "groups" ? "b" : "a", 0, 0m, "y", 2, 2);
+
+        var exception = Assert.Throws<AggregationBudgetExceededException>(() =>
+            session.Aggregate(new AggregationQuery("summary")));
+
+        Assert.Equal(expectedCode, exception.Code);
+    }
+
+    [Fact]
     public void Declared_aggregation_profile_executes_as_a_bounded_native_reduction()
     {
         using var store = TemporaryStore.Create();
@@ -74,6 +213,54 @@ public sealed class SqliteProviderTests
         var c = Assert.Single(result.Rows, item => Equals(item["group"], "c"));
         Assert.Null(c["total"]);
     }
+
+    private static StorageUnit AggregationUnit(string identity, IReadOnlyList<Aggregate> aggregates) => new()
+    {
+        Id = new StorageUnitId(identity),
+        Name = identity.Replace('-', '_'),
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, IsNullable = false },
+            new() { Name = "group", Type = PortableType.String, IsNullable = false },
+            new() { Name = "integerAmount", Type = PortableType.Int32, IsNullable = false },
+            new() { Name = "decimalAmount", Type = PortableType.Decimal, Precision = 28, Scale = 4, IsNullable = false },
+            new() { Name = "label", Type = PortableType.String },
+            new() { Name = "ascendingOrder", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "descendingOrder", Type = PortableType.Int64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        AggregationProfiles =
+        [
+            new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = aggregates,
+                MaxGroups = 8,
+                MaxInputRows = 16
+            }
+        ]
+    };
+
+    private static void InsertAggregationRow(
+        IStorageSession session,
+        string id,
+        string group,
+        int integerAmount,
+        decimal decimalAmount,
+        string? label,
+        long ascendingOrder,
+        long descendingOrder) =>
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = id,
+            ["group"] = group,
+            ["integerAmount"] = integerAmount,
+            ["decimalAmount"] = decimalAmount,
+            ["label"] = label,
+            ["ascendingOrder"] = ascendingOrder,
+            ["descendingOrder"] = descendingOrder
+        })).Status);
 
     private sealed class LinqTicket
     {

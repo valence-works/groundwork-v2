@@ -78,6 +78,74 @@ public sealed class AggregationProfileTests
         Assert.Equal("GW-AGG-BOUND-004", exception.Code);
     }
 
+    [Fact]
+    public void Executor_uses_structural_group_keys_when_values_contain_the_internal_separator()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-structural-groups"),
+            Name = "aggregation_structural_groups",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "left", Type = PortableType.String, IsNullable = false },
+                new() { Name = "right", Type = PortableType.String, IsNullable = false },
+                new() { Name = "amount", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["left", "right"],
+            Aggregates = [new Aggregate.Sum("total", "amount")]
+        };
+        var rows = new IReadOnlyDictionary<string, object?>[]
+        {
+            new Dictionary<string, object?> { ["id"] = "1", ["left"] = "a", ["right"] = "b\u001fs:c", ["amount"] = 1L },
+            new Dictionary<string, object?> { ["id"] = "2", ["left"] = "a\u001fs:b", ["right"] = "c", ["amount"] = 2L }
+        };
+
+        var result = AggregationExecutor.Execute(unit, profile, rows);
+
+        Assert.Equal(2, result.Rows.Count);
+        Assert.Contains(result.Rows, row => Equals(row["right"], "b\u001fs:c") && Equals(row["total"], 1L));
+        Assert.Contains(result.Rows, row => Equals(row["left"], "a\u001fs:b") && Equals(row["total"], 2L));
+    }
+
+    [Fact]
+    public void FirstBy_breaks_equal_order_values_by_the_declared_key()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-first-tie"),
+            Name = "aggregation_first_tie",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false },
+                new() { Name = "label", Type = PortableType.String },
+                new() { Name = "order", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.FirstBy("first", "label", "order")]
+        };
+        var rows = new IReadOnlyDictionary<string, object?>[]
+        {
+            new Dictionary<string, object?> { ["id"] = "b", ["group"] = "g", ["label"] = "wrong", ["order"] = 1L },
+            new Dictionary<string, object?> { ["id"] = "a", ["group"] = "g", ["label"] = "right", ["order"] = 1L }
+        };
+
+        var row = Assert.Single(AggregationExecutor.Execute(unit, profile, rows).Rows);
+
+        Assert.Equal("right", row["first"]);
+    }
+
     private static StorageUnit Unit(params ColumnDefinition[] columns) => new()
     {
         Id = new StorageUnitId("aggregation-tests"),

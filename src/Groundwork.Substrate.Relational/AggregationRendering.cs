@@ -23,12 +23,12 @@ public sealed class RelationalAggregationCommand
 /// </summary>
 public static class RelationalAggregationRenderer
 {
-    private const string InputCount = "__groundwork_aggregation_input_count";
-    private const string GroupCount = "__groundwork_aggregation_group_count";
+    public const string InputCount = "__groundwork_aggregation_input_count";
+    public const string GroupCount = "__groundwork_aggregation_group_count";
 
     public static string SetCountAlias(string alias) => "__groundwork_aggregation_set_count_" + alias;
 
-    public static string SumCountAlias(string alias) => "__groundwork_aggregation_sum_count_" + alias;
+    public static string FirstRankAlias(string alias) => "__groundwork_aggregation_first_rank_" + alias;
 
     public static RelationalAggregationCommand Render(
         RelationalDialect dialect,
@@ -64,19 +64,13 @@ public static class RelationalAggregationRenderer
             Aggregate.FirstBy first => [first.Column, first.OrderColumn],
             _ => Array.Empty<string>()
         }).Concat(unit.Key.Columns).Distinct(StringComparer.Ordinal).Select(quote).ToArray();
-        var hasFirstBy = profile.Aggregates.Any(aggregate => aggregate is Aggregate.FirstBy);
         var source = string.Join(", ", groups.Concat(sourceColumns).Distinct(StringComparer.Ordinal));
-        var input = $"SELECT {source}, COUNT(*) OVER() AS {quote(InputCount)} FROM {quote(unit.Name)}";
-        var ctes = hasFirstBy
-            ? $"__groundwork_aggregation_source AS ({input}), __groundwork_aggregation_input AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY {string.Join(", ", groups)} ORDER BY {FirstOrder(profile, quote, unit)}) AS {quote("__groundwork_aggregation_first_rank")} FROM __groundwork_aggregation_source)"
-            : $"__groundwork_aggregation_input AS ({input})";
+        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: true);
 
         var selections = new List<string>(groups);
-        selections.AddRange(profile.Aggregates.Select(aggregate => RenderAggregate(dialect, quote, aggregate)));
+        selections.AddRange(profile.Aggregates.Select(aggregate => RenderAggregate(dialect, quote, unit, aggregate)));
         selections.AddRange(profile.Aggregates.OfType<Aggregate.SetUnion>().Select(set =>
-            $"COUNT(DISTINCT {quote(set.Column)}) AS {quote(SetCountAlias(set.Alias))}"));
-        selections.AddRange(profile.Aggregates.OfType<Aggregate.Sum>().Select(sum =>
-            $"SUM(CASE WHEN {quote(sum.Column)} IS NOT NULL THEN 1 ELSE 0 END) AS {quote(SumCountAlias(sum.Alias))}"));
+            $"{RenderSetCount(dialect, quote(set.Column))} AS {quote(SetCountAlias(set.Alias))}"));
         selections.Add($"MAX({quote(InputCount)}) AS {quote(InputCount)}");
         selections.Add($"COUNT(*) OVER() AS {quote(GroupCount)}");
         var grouped = $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)}";
@@ -90,25 +84,83 @@ public static class RelationalAggregationRenderer
                 query.OrderDirection);
         else
             sql += " ORDER BY " + string.Join(", ", groups.Select(column => RenderOrderTerm(dialect, column, SortDirection.Ascending)));
-        if (query.Take is int take)
-            sql += dialect.ProviderName.Contains("SQL Server", StringComparison.OrdinalIgnoreCase)
-                ? $" OFFSET 0 ROWS FETCH NEXT {take.ToString(CultureInfo.InvariantCulture)} ROWS ONLY"
-                : $" LIMIT {take.ToString(CultureInfo.InvariantCulture)}";
+        var outputLimit = query.Take is int take ? take : (long)profile.MaxGroups + 1L;
+        sql += IsSqlServer(dialect)
+            ? $" OFFSET 0 ROWS FETCH NEXT {outputLimit.ToString(CultureInfo.InvariantCulture)} ROWS ONLY"
+            : $" LIMIT {outputLimit.ToString(CultureInfo.InvariantCulture)}";
         return new RelationalAggregationCommand(sql + ";", profile);
     }
 
-    private static string FirstOrder(AggregationProfile profile, Func<string, string> quote, StorageUnit unit)
+    /// <summary>
+    /// Renders a bounded cardinality probe. The executor runs this before any aggregate that
+    /// materializes values, so an over-budget set or group is refused without producing a partial
+    /// result or an arbitrarily large set payload.
+    /// </summary>
+    public static RelationalAggregationCommand RenderBudgetProbe(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile)
     {
-        var first = profile.Aggregates.OfType<Aggregate.FirstBy>().First();
+        ArgumentNullException.ThrowIfNull(dialect);
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(profile);
+        AggregationProfileValidator.Validate(unit, profile);
+        var quote = dialect.QuoteIdentifier;
+        var groups = profile.GroupByColumns.Select(quote).ToArray();
+        var setColumns = profile.Aggregates.OfType<Aggregate.SetUnion>()
+            .Select(set => quote(set.Column));
+        var source = string.Join(", ", groups.Concat(setColumns).Distinct(StringComparer.Ordinal));
+        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: false);
+        var selections = new List<string>(groups)
+        {
+            $"MAX({quote(InputCount)}) AS {quote(InputCount)}"
+        };
+        selections.AddRange(profile.Aggregates.OfType<Aggregate.SetUnion>().Select(set =>
+            $"{RenderSetCount(dialect, quote(set.Column))} AS {quote(SetCountAlias(set.Alias))}"));
+        var groupProbe = ((long)profile.MaxGroups + 1L).ToString(CultureInfo.InvariantCulture);
+        var select = IsSqlServer(dialect)
+            ? $"SELECT TOP ({groupProbe}) {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)}"
+            : $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)} LIMIT {groupProbe}";
+        return new RelationalAggregationCommand($"WITH {ctes} {select};", profile);
+    }
+
+    private static string RenderBoundedInputCtes(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        string source,
+        IReadOnlyList<string> groups,
+        bool includeFirstRanks)
+    {
+        var quote = dialect.QuoteIdentifier;
+        var probeRows = ((long)profile.MaxInputRows + 1L).ToString(CultureInfo.InvariantCulture);
+        var boundedSource = IsSqlServer(dialect)
+            ? $"SELECT TOP ({probeRows}) {source} FROM {quote(unit.Name)}"
+            : $"SELECT {source} FROM {quote(unit.Name)} LIMIT {probeRows}";
+        var windowColumns = new List<string> { "*", $"COUNT(*) OVER() AS {quote(InputCount)}" };
+        if (includeFirstRanks)
+            windowColumns.AddRange(profile.Aggregates.OfType<Aggregate.FirstBy>().Select(first =>
+                $"ROW_NUMBER() OVER (PARTITION BY {string.Join(", ", groups)} ORDER BY {FirstOrder(first, quote, unit)}) AS {quote(FirstRankAlias(first.Alias))}"));
+        return $"__groundwork_aggregation_source AS ({boundedSource}), " +
+            $"__groundwork_aggregation_input AS (SELECT {string.Join(", ", windowColumns)} FROM __groundwork_aggregation_source)";
+    }
+
+    private static string FirstOrder(Aggregate.FirstBy first, Func<string, string> quote, StorageUnit unit)
+    {
         var direction = first.Direction == SortDirection.Descending ? "DESC" : "ASC";
-        return quote(first.OrderColumn) + " " + direction + ", " + string.Join(", ", unit.Key.Columns.Select(column => quote(column) + " ASC"));
+        var tieBreaks = unit.Key.Columns
+            .Where(column => !string.Equals(column, first.OrderColumn, StringComparison.Ordinal))
+            .Select(column => quote(column) + " ASC")
+            .ToArray();
+        return quote(first.OrderColumn) + " " + direction +
+            (tieBreaks.Length == 0 ? string.Empty : ", " + string.Join(", ", tieBreaks));
     }
 
     private static string RenderOrderTerm(RelationalDialect dialect, string expression, SortDirection direction)
     {
         var descending = direction == SortDirection.Descending;
         var order = descending ? "DESC" : "ASC";
-        if (dialect.ProviderName.Contains("SQL Server", StringComparison.OrdinalIgnoreCase))
+        if (IsSqlServer(dialect))
         {
             var nullRank = descending ? 1 : 0;
             var nonNullRank = descending ? 0 : 1;
@@ -117,15 +169,19 @@ public static class RelationalAggregationRenderer
         return $"{expression} {order} NULLS {(descending ? "LAST" : "FIRST")}";
     }
 
-    private static string RenderAggregate(RelationalDialect dialect, Func<string, string> quote, Aggregate aggregate)
+    private static string RenderAggregate(
+        RelationalDialect dialect,
+        Func<string, string> quote,
+        StorageUnit unit,
+        Aggregate aggregate)
     {
         var expression = aggregate switch
         {
             Aggregate.Min min => $"MIN({quote(min.Column)})",
             Aggregate.Max max => $"MAX({quote(max.Column)})",
-            Aggregate.Sum sum => $"CASE WHEN SUM(CASE WHEN {quote(sum.Column)} IS NOT NULL THEN 1 ELSE 0 END) = 0 THEN NULL ELSE SUM({quote(sum.Column)}) END",
+            Aggregate.Sum sum => RenderSum(dialect, quote, unit, sum),
             Aggregate.SetUnion set => RenderSetUnion(dialect, quote, set),
-            Aggregate.FirstBy first => $"MAX(CASE WHEN {quote("__groundwork_aggregation_first_rank")} = 1 THEN {quote(first.Column)} END)",
+            Aggregate.FirstBy first => $"MAX(CASE WHEN {quote(FirstRankAlias(first.Alias))} = 1 THEN {quote(first.Column)} END)",
             _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
         };
         return expression + " AS " + quote(aggregate.Alias);
@@ -134,15 +190,44 @@ public static class RelationalAggregationRenderer
     private static string RenderSetUnion(RelationalDialect dialect, Func<string, string> quote, Aggregate.SetUnion set)
     {
         var column = quote(set.Column);
-        var delimiter = dialect.ProviderName.Contains("PostgreSQL", StringComparison.OrdinalIgnoreCase)
-            ? "E'\\x1F'"
-            : dialect.ProviderName.Contains("SQL Server", StringComparison.OrdinalIgnoreCase) ? "NCHAR(31)" : "char(31)";
-        return dialect.ProviderName.Contains("PostgreSQL", StringComparison.OrdinalIgnoreCase)
-            ? $"STRING_AGG(DISTINCT {column}, {delimiter})"
-            : dialect.ProviderName.Contains("SQL Server", StringComparison.OrdinalIgnoreCase)
-                ? $"STRING_AGG({column}, {delimiter})"
-            : $"GROUP_CONCAT({column}, {delimiter})";
+        if (IsPostgreSql(dialect))
+            return $"ARRAY_AGG(DISTINCT {column} COLLATE \"C\" ORDER BY {column} COLLATE \"C\") FILTER (WHERE {column} IS NOT NULL)";
+        if (IsSqlServer(dialect))
+            return $"CASE WHEN COUNT({column}) = 0 THEN N'[]' ELSE CONCAT(N'[\"', STRING_AGG(STRING_ESCAPE(CAST({column} AS nvarchar(max)), 'json'), N'\",\"'), N'\"]') END";
+        return $"COALESCE(json_group_array(DISTINCT {column} COLLATE BINARY) FILTER (WHERE {column} IS NOT NULL), '[]')";
     }
+
+    private static string RenderSetCount(RelationalDialect dialect, string column) => IsPostgreSql(dialect)
+        ? $"COUNT(DISTINCT {column} COLLATE \"C\")"
+        : IsSqlServer(dialect)
+            ? $"COUNT(DISTINCT {column} COLLATE Latin1_General_100_BIN2)"
+            : $"COUNT(DISTINCT {column} COLLATE BINARY)";
+
+    private static string RenderSum(
+        RelationalDialect dialect,
+        Func<string, string> quote,
+        StorageUnit unit,
+        Aggregate.Sum sum)
+    {
+        var column = quote(sum.Column);
+        var type = unit.Columns.Single(item => item.Name == sum.Column).Type;
+        var expression = IsSqlServer(dialect) && type == PortableType.Int32
+            ? $"SUM(CAST({column} AS bigint))"
+            : IsSqlite(dialect) && type == PortableType.Decimal
+                ? $"groundwork_decimal_sum({column})"
+                : $"SUM({column})";
+        return $"CASE WHEN COUNT({column}) = 0 THEN NULL ELSE {expression} END";
+    }
+
+    private static bool IsSqlServer(RelationalDialect dialect) =>
+        dialect.ProviderName.Replace(" ", string.Empty, StringComparison.Ordinal)
+            .Contains("SQLServer", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPostgreSql(RelationalDialect dialect) =>
+        dialect.ProviderName.Contains("PostgreSQL", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSqlite(RelationalDialect dialect) =>
+        dialect.ProviderName.Contains("SQLite", StringComparison.OrdinalIgnoreCase);
 
     private static string RenderPredicate(AggregationPredicate predicate, Func<string, string> quote) => predicate switch
     {

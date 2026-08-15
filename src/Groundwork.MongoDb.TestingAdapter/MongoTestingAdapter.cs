@@ -89,7 +89,7 @@ internal sealed class MongoTestingSession(
         inner.Query(request, options);
 
     public AggregationResult Aggregate(AggregationQuery query) =>
-        AggregationSessionExecutor.Execute(this, query);
+        inner.Aggregate(query);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {

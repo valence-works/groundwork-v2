@@ -819,10 +819,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         ThrowIfDisposed();
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         AggregationProfileValidator.Validate(Unit, profile);
-        var conflictingFirstByOrder = profile.Aggregates.OfType<Aggregate.FirstBy>()
-            .GroupBy(aggregate => aggregate.OrderColumn, StringComparer.Ordinal)
-            .Any(group => group.Select(aggregate => aggregate.Direction).Distinct().Count() > 1);
-        if (Access.Policy != ScopePolicy.Global || query.PostPredicate is not null || conflictingFirstByOrder)
+        if (Access.Policy != ScopePolicy.Global || query.PostPredicate is not null)
             return AggregationSessionExecutor.Execute(Unit, request => Query(request), query);
         return ExecuteNativeAggregation(profile, query);
     }

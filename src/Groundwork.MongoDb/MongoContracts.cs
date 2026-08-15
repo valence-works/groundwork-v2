@@ -258,6 +258,9 @@ public interface IMongoStorageSession
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
 
+    /// <summary>Executes one named, declared aggregation profile through the native provider.</summary>
+    AggregationResult Aggregate(AggregationQuery query);
+
     MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null);
 
     MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null);

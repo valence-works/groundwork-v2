@@ -391,10 +391,11 @@ public static class AggregationExecutor
                 throw new AggregationBudgetExceededException("GW-AGG-BOUND-004", $"Aggregation profile '{profile.Name}' refused more than MaxInputRows={profile.MaxInputRows}; input was not truncated.");
         }
 
-        var groups = new Dictionary<string, Group>(StringComparer.Ordinal);
+        var groups = new Dictionary<GroupKey, Group>();
         foreach (var row in input)
         {
-            var key = string.Join("\u001f", profile.GroupByColumns.Select(column => Canonical(row.TryGetValue(column, out var value) ? value : null)));
+            var key = new GroupKey(profile.GroupByColumns.Select(column =>
+                row.TryGetValue(column, out var value) ? value : null));
             if (!groups.TryGetValue(key, out var group))
             {
                 if (groups.Count == profile.MaxGroups)
@@ -416,9 +417,7 @@ public static class AggregationExecutor
         }
         else
         {
-            output.Sort((left, right) => string.CompareOrdinal(
-                string.Join("\u001f", profile.GroupByColumns.Select(column => Canonical(left[column]))),
-                string.Join("\u001f", profile.GroupByColumns.Select(column => Canonical(right[column])))));
+            output.Sort((left, right) => CompareGroupRows(left, right, profile.GroupByColumns));
         }
 
         if (query.Take is <= 0)
@@ -444,7 +443,7 @@ public static class AggregationExecutor
                 Aggregate.Max max => ReduceMax(rows, max.Column),
                 Aggregate.Sum sum => ReduceSum(rows, unit.Columns.Single(column => column.Name == sum.Column)),
                 Aggregate.SetUnion set => ReduceSetUnion(rows, set.Column, set.MaxValues, set.Alias),
-                Aggregate.FirstBy first => ReduceFirstBy(rows, first),
+                Aggregate.FirstBy first => ReduceFirstBy(rows, first, unit.Key.Columns),
                 _ => throw new InvalidOperationException("Unknown aggregate declaration.")
             };
             values[aggregate.Alias] = result;
@@ -500,18 +499,38 @@ public static class AggregationExecutor
         return values.OrderBy(value => value, StringComparer.Ordinal).ToArray();
     }
 
-    private static object? ReduceFirstBy(IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, Aggregate.FirstBy first)
+    private static object? ReduceFirstBy(
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
+        Aggregate.FirstBy first,
+        IReadOnlyList<string> keyColumns)
     {
         IReadOnlyDictionary<string, object?>? selected = null;
         foreach (var row in rows)
         {
-            if (selected is null || Compare(
+            var order = selected is null ? -1 : Compare(
                 row.TryGetValue(first.OrderColumn, out var currentOrder) ? currentOrder : null,
                 selected.TryGetValue(first.OrderColumn, out var selectedOrder) ? selectedOrder : null,
-                first.Direction) < 0)
+                first.Direction);
+            if (selected is null || order < 0 || order == 0 && CompareKeys(row, selected, keyColumns) < 0)
                 selected = row;
         }
         return selected is not null && selected.TryGetValue(first.Column, out var value) ? value : null;
+    }
+
+    private static int CompareKeys(
+        IReadOnlyDictionary<string, object?> left,
+        IReadOnlyDictionary<string, object?> right,
+        IReadOnlyList<string> columns)
+    {
+        foreach (var column in columns)
+        {
+            var comparison = Compare(
+                left.TryGetValue(column, out var leftValue) ? leftValue : null,
+                right.TryGetValue(column, out var rightValue) ? rightValue : null,
+                SortDirection.Ascending);
+            if (comparison != 0) return comparison;
+        }
+        return 0;
     }
 
     private static void ValidateQuery(AggregationProfile profile, AggregationQuery query, List<AggregationRow> output)
@@ -690,6 +709,19 @@ public static class AggregationExecutor
 
     private static bool IsNumeric(object value) => value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;
 
+    private static int CompareGroupRows(
+        AggregationRow left,
+        AggregationRow right,
+        IReadOnlyList<string> columns)
+    {
+        foreach (var column in columns)
+        {
+            var comparison = Compare(left[column], right[column], SortDirection.Ascending);
+            if (comparison != 0) return comparison;
+        }
+        return 0;
+    }
+
     private static int CompareBytes(byte[] left, byte[] right)
     {
         for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
@@ -700,5 +732,39 @@ public static class AggregationExecutor
     private sealed class Group
     {
         public List<IReadOnlyDictionary<string, object?>> Rows { get; } = [];
+    }
+
+    private sealed class GroupKey : IEquatable<GroupKey>
+    {
+        private readonly object?[] values;
+
+        public GroupKey(IEnumerable<object?> values) => this.values = values.Select(Snapshot).ToArray();
+
+        public bool Equals(GroupKey? other) => other is not null &&
+            values.Length == other.values.Length &&
+            values.Zip(other.values).All(pair => EqualsPortable(pair.First, pair.Second));
+
+        public override bool Equals(object? obj) => obj is GroupKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            var hash = new HashCode();
+            foreach (var value in values)
+            {
+                if (value is byte[] bytes)
+                {
+                    foreach (var item in bytes) hash.Add(item);
+                }
+                else if (value is DateTimeOffset instant)
+                    hash.Add(instant.UtcTicks);
+                else if (value is string text)
+                    hash.Add(text, StringComparer.Ordinal);
+                else
+                    hash.Add(value);
+            }
+            return hash.ToHashCode();
+        }
+
+        private static object? Snapshot(object? value) => value is byte[] bytes ? bytes.ToArray() : value;
     }
 }
