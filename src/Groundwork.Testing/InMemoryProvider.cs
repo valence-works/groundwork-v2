@@ -416,7 +416,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession
+internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStorageSession
 {
     private readonly InMemoryDatabase database;
     private readonly InMemoryUnitState state;
@@ -461,6 +461,9 @@ internal sealed class InMemoryStorageSession : IStorageSession
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
         Mutate(values, options, MutationKind.Upsert);
 
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
+        Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(key);
@@ -473,13 +476,17 @@ internal sealed class InMemoryStorageSession : IStorageSession
 
     internal void Close() => disposed = true;
 
-    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, MutationKind kind)
+    private WriteOutcome Mutate(
+        StorageValues values,
+        WriteOptions? options,
+        MutationKind kind,
+        bool exactOutcome = false)
     {
         ArgumentNullException.ThrowIfNull(values);
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Apply(CurrentState(), partition, values, options, kind);
+            return Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome);
         }
     }
 
@@ -601,7 +608,8 @@ internal static class Mutation
         string partition,
         StorageValues values,
         WriteOptions? options,
-        MutationKind kind)
+        MutationKind kind,
+        bool exactOutcome = false)
     {
         ValidateValues(state.Unit, values.Values);
         var identity = Key(state.Unit, values.Values);
@@ -637,9 +645,22 @@ internal static class Mutation
         {
             MutationKind.Insert => WriteOutcomeStatus.Inserted,
             MutationKind.Update => WriteOutcomeStatus.Updated,
+            MutationKind.Upsert when exactOutcome && existing is null => WriteOutcomeStatus.Inserted,
+            MutationKind.Upsert when exactOutcome => WriteOutcomeStatus.Updated,
             _ => WriteOutcomeStatus.Upserted
         };
-        entries[identity] = new InMemoryEntry(values.Values, version);
+        var storedValues = values.Values;
+        if (exactOutcome && existing is not null &&
+            existing.Values.TryGetValue("createdAt", out var existingCreatedAt))
+        {
+            var preserved = values.Values.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value,
+                StringComparer.Ordinal);
+            preserved["createdAt"] = existingCreatedAt;
+            storedValues = new StorageValues(preserved).Values;
+        }
+        entries[identity] = new InMemoryEntry(storedValues, version);
         state.Revision = checked(state.Revision + 1);
         return new WriteOutcome(status, version);
     }

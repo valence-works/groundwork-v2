@@ -696,7 +696,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         ThrowIfDisposed();
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
         var document = FindOne(identity);
-        return document is null ? null : MongoDocumentMapper.DecodeEntry(Unit, document, Version(identity));
+        return document is null ? null : MongoDocumentMapper.DecodeEntry(Unit, document, Version(identity, document));
     }
 
     public MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null) =>
@@ -708,6 +708,9 @@ internal sealed class MongoStorageSession : IMongoStorageSession
     public MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
         Mutate(values, options, MutationKind.Upsert);
 
+    public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
+        Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(key);
@@ -717,19 +720,28 @@ internal sealed class MongoStorageSession : IMongoStorageSession
 
     internal void Close() => disposed = true;
 
-    private MongoWriteOutcome Mutate(MongoStorageValues values, MongoWriteOptions? options, MutationKind kind)
+    private MongoWriteOutcome Mutate(
+        MongoStorageValues values,
+        MongoWriteOptions? options,
+        MutationKind kind,
+        bool exactOutcome = false)
     {
         ArgumentNullException.ThrowIfNull(values);
         ThrowIfDisposed();
-        return ExecuteWithTransactionIfNeeded(transactional => transactional.MutateCore(values, options, kind));
+        return ExecuteWithTransactionIfNeeded(transactional =>
+            transactional.MutateCore(values, options, kind, exactOutcome));
     }
 
-    private MongoWriteOutcome MutateCore(MongoStorageValues values, MongoWriteOptions? options, MutationKind kind)
+    private MongoWriteOutcome MutateCore(
+        MongoStorageValues values,
+        MongoWriteOptions? options,
+        MutationKind kind,
+        bool exactOutcome = false)
     {
         var keyValues = values.Values;
         var identity = MongoDocumentMapper.EncodeKey(Unit, keyValues);
         var existing = FindOne(identity);
-        var existingVersion = Version(identity);
+        var existingVersion = Version(identity, existing);
 
         if (kind == MutationKind.Insert && existing is not null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, existingVersion);
@@ -738,36 +750,71 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         if (!ConcurrencyAllows(existing, existingVersion, options, kind))
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion);
 
+        var nextVersion = NextVersion(existingVersion);
         var document = MongoDocumentMapper.EncodeDocument(
             Unit,
             values.Values,
             identity,
             existing,
-            column => NextSequence(column));
+            column => NextSequence(column),
+            preserveCreatedAt: exactOutcome);
+        if (nextVersion is not null)
+            document[MongoDocumentMapper.VersionField] = nextVersion.Value;
+        var inserted = kind == MutationKind.Insert;
         try
         {
-            var filter = new BsonDocument("_id", identity);
+            var filter = ConcurrencyFilter(identity, existingVersion);
             if (kind == MutationKind.Insert)
                 InsertOne(document);
             else if (kind == MutationKind.Update)
-                ReplaceOne(filter, document, isUpsert: false);
+            {
+                var result = ReplaceOne(filter, document, isUpsert: false);
+                if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic && result.MatchedCount == 0)
+                    return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
+            }
             else
-                ReplaceOne(filter, document, isUpsert: true);
+            {
+                if (exactOutcome && Unit.Concurrency == ConcurrencyDeclaration.Optimistic && existing is null)
+                {
+                    // Use insert rather than an upsert when the caller observed no row. An
+                    // upsert can match a row inserted after that observation and would then
+                    // misclassify the update and reset its version token.
+                    InsertOne(document);
+                    inserted = true;
+                }
+                else
+                {
+                    var result = ReplaceOne(filter, document,
+                        isUpsert: Unit.Concurrency != ConcurrencyDeclaration.Optimistic || existing is null);
+                    inserted = result.UpsertedId is not null;
+                    if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic && result.MatchedCount == 0)
+                        return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
+                }
+            }
         }
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
-            return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, existingVersion);
+            return new MongoWriteOutcome(
+                exactOutcome && Unit.Concurrency == ConcurrencyDeclaration.Optimistic
+                    ? MongoWriteOutcomeStatus.ConcurrencyConflict
+                    : MongoWriteOutcomeStatus.UniqueViolation,
+                existingVersion);
         }
 
-        var version = NextVersion(existingVersion);
-        PersistVersion(identity, version);
+        PersistVersion(identity, nextVersion);
         var status = kind switch
         {
             MutationKind.Insert => MongoWriteOutcomeStatus.Inserted,
             MutationKind.Update => MongoWriteOutcomeStatus.Updated,
             _ => MongoWriteOutcomeStatus.Upserted
         };
-        return new MongoWriteOutcome(status, version);
+        if (exactOutcome && kind == MutationKind.Upsert)
+        {
+            status = inserted
+                ? MongoWriteOutcomeStatus.Inserted
+                : MongoWriteOutcomeStatus.Updated;
+        }
+        return new MongoWriteOutcome(status, nextVersion);
     }
 
     private MongoWriteOutcome DeleteCore(MongoStorageKey key, MongoWriteOptions? options)
@@ -804,6 +851,23 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         return expected is not null && expected == currentVersion;
     }
 
+    private BsonDocument ConcurrencyFilter(BsonValue identity, long? currentVersion)
+    {
+        var filter = new BsonDocument("_id", identity);
+        if (Unit.Concurrency != ConcurrencyDeclaration.Optimistic || currentVersion is null)
+            return filter;
+
+        // Older P1 documents kept the version in metadata only. Accept that shape once,
+        // while every successful replacement writes the atomic per-document token.
+        filter["$or"] = new BsonArray
+        {
+            new BsonDocument(MongoDocumentMapper.VersionField, currentVersion.Value),
+            new BsonDocument(MongoDocumentMapper.VersionField,
+                new BsonDocument("$exists", false))
+        };
+        return filter;
+    }
+
     private long? NextVersion(long? current) =>
         Unit.Concurrency == ConcurrencyDeclaration.Optimistic
             ? checked((current ?? 0) + 1)
@@ -832,10 +896,12 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             state.Metadata.ReplaceOne(transactionSession, filter, document, new ReplaceOptions { IsUpsert = true });
     }
 
-    private long? Version(BsonValue identity)
+    private long? Version(BsonValue identity, BsonDocument? document = null)
     {
         if (Unit.Concurrency != ConcurrencyDeclaration.Optimistic)
             return null;
+        if (document is not null && document.TryGetValue(MongoDocumentMapper.VersionField, out var version))
+            return version.ToInt64();
         var filter = new BsonDocument("_id", MetadataId(identity));
         var metadata = transactionSession is null
             ? state.Metadata.Find(filter).FirstOrDefault()
@@ -868,13 +934,12 @@ internal sealed class MongoStorageSession : IMongoStorageSession
             collection.InsertOne(transactionSession, document);
     }
 
-    private void ReplaceOne(BsonDocument filter, BsonDocument document, bool isUpsert)
+    private ReplaceOneResult ReplaceOne(BsonDocument filter, BsonDocument document, bool isUpsert)
     {
         var options = new ReplaceOptions { IsUpsert = isUpsert };
         if (transactionSession is null)
-            collection.ReplaceOne(filter, document, options);
-        else
-            collection.ReplaceOne(transactionSession, filter, document, options);
+            return collection.ReplaceOne(filter, document, options);
+        return collection.ReplaceOne(transactionSession, filter, document, options);
     }
 
     private void DeleteOne(BsonDocument filter)
@@ -1020,6 +1085,8 @@ internal enum MutationKind
 
 internal static class MongoDocumentMapper
 {
+    internal const string VersionField = "__groundwork_version";
+
     internal static BsonValue EncodeKey(StorageUnit unit, IReadOnlyDictionary<string, object?> values)
     {
         var key = new BsonDocument();
@@ -1038,7 +1105,8 @@ internal static class MongoDocumentMapper
         IReadOnlyDictionary<string, object?> values,
         BsonValue identity,
         BsonDocument? existing,
-        Func<ColumnDefinition, long> nextSequence)
+        Func<ColumnDefinition, long> nextSequence,
+        bool preserveCreatedAt = false)
     {
         var known = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
@@ -1066,7 +1134,10 @@ internal static class MongoDocumentMapper
             else
             {
                 document.Add(column.Name,
-                    !isPresent && existing is not null && existing.TryGetValue(column.Name, out var previous)
+                    preserveCreatedAt && existing is not null && column.Name == "createdAt" &&
+                    existing.TryGetValue(column.Name, out var priorCreatedAt)
+                        ? priorCreatedAt
+                    : !isPresent && existing is not null && existing.TryGetValue(column.Name, out var previous)
                         ? previous
                         : MongoValueCodec.Encode(value, column, isPresent));
             }
