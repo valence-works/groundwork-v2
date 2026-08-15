@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <ProjectReference Include="../../src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Linq.Fragments/Groundwork.Query.Linq.Fragments.csproj" />
+  </ItemGroup>
+</Project>
