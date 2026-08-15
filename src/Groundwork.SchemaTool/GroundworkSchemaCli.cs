@@ -159,31 +159,54 @@ public static class GroundworkSchemaCli
                     .Concat(Values(arguments, "--authorize-destructive")).ToHashSet(StringComparer.Ordinal);
                 var semantic = Values(arguments, "--allow-semantic")
                     .Concat(Values(arguments, "--authorize-semantic")).ToHashSet(StringComparer.Ordinal);
+                PhysicalSchemaPlanAuthorization Authorize(
+                    PhysicalSchemaTarget target,
+                    PhysicalSchemaDiffPlan plan)
+                {
+                    var fingerprint = PlanFingerprint(target, plan);
+                    var exact = expectedPlans.Contains(fingerprint);
+                    var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+                    if (!protection.IsSafe && !exact)
+                    {
+                        return PhysicalSchemaPlanAuthorization.Deny([
+                            new SchemaRefusal(
+                                "GW-CLI-011",
+                                "Destructive and semantic authorization requires the exact current plan fingerprint.",
+                                "authorization.plan")
+                        ]);
+                    }
+                    return SchemaToolAuthorization.Evaluate(
+                        plan,
+                        safe || exact,
+                        exact ? destructive : null,
+                        exact ? semantic : null);
+                }
+
+                var preflight = targets.Select(target =>
+                {
+                    var inspection = provider.Inspector.InspectHistory(target);
+                    var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UnixEpoch);
+                    return (Target: target, Inspection: inspection, Plan: plan, Authorization: Authorize(target, plan));
+                }).ToArray();
+                if (preflight.Any(item => !item.Authorization.IsAuthorized))
+                {
+                    targetReports.AddRange(preflight.Select(item => FromPlan(
+                        item.Target,
+                        item.Plan,
+                        item.Inspection,
+                        item.Authorization.Refusals)));
+                    await WriteAsync(output, json, new SchemaToolReport(
+                        command, "authorization-required", null,
+                        provider.Provider.Name, provider.Provider.Version, targetReports, []));
+                    return SchemaToolExitCodes.AuthorizationRequired;
+                }
+
                 foreach (var target in targets)
                 {
                     var result = PhysicalSchemaApplication.Apply(
                         target,
                         provider.Executor,
-                        planAuthorization: plan =>
-                        {
-                            var fingerprint = PlanFingerprint(target, plan);
-                            var exact = expectedPlans.Contains(fingerprint);
-                            var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
-                            if (!protection.IsSafe && !exact)
-                            {
-                                return PhysicalSchemaPlanAuthorization.Deny([
-                                    new SchemaRefusal(
-                                        "GW-CLI-011",
-                                        "Destructive and semantic authorization requires the exact current plan fingerprint.",
-                                        "authorization.plan")
-                                ]);
-                            }
-                            return SchemaToolAuthorization.Evaluate(
-                                plan,
-                                safe || exact,
-                                exact ? destructive : null,
-                                exact ? semantic : null);
-                        });
+                        planAuthorization: plan => Authorize(target, plan));
                     targetReports.Add(FromApplication(target, result));
                 }
                 var authorizationRequired = targetReports.Any(target => target.Outcome == "authorization-required");
@@ -263,15 +286,21 @@ public static class GroundworkSchemaCli
     private static SchemaToolTargetReport FromPlan(
         PhysicalSchemaTarget target,
         PhysicalSchemaDiffPlan plan,
-        PhysicalSchemaInspectionResult inspection) => new(
+        PhysicalSchemaInspectionResult inspection,
+        IEnumerable<SchemaRefusal>? authorizationRefusals = null) => new(
         target.Subject.Id.Value,
         target.Fingerprint,
-        !inspection.IsAppliedSchemaValid || !plan.IsApplicable ? "blocked" : plan.Operations.Length == 0 ? "ready" : "pending",
+        authorizationRefusals?.Any() == true
+            ? "authorization-required"
+            : !inspection.IsAppliedSchemaValid || !plan.IsApplicable
+                ? "blocked"
+                : plan.Operations.Length == 0 ? "ready" : "pending",
         PlanFingerprint(target, plan),
         inspection.History.AppliedState?.TargetFingerprint,
         plan.Operations.Select(SchemaToolOperationReport.FromPending).ToArray(),
         inspection.History.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
-        plan.Refusals.Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
+        plan.Refusals.Concat(authorizationRefusals ?? [])
+            .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
         false);
 
     private static SchemaToolTargetReport FromApplication(

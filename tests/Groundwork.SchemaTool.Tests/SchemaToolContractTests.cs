@@ -108,6 +108,30 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task Multi_target_authorization_is_preflighted_before_any_mutation()
+    {
+        var secondTable = ValidSchema.Replace("tickets", "users", StringComparison.Ordinal);
+        using var second = JsonDocument.Parse(secondTable);
+        using var first = JsonDocument.Parse(ValidSchema);
+        var combined = "{\"tables\":[" + first.RootElement.GetProperty("tables")[0].GetRawText() + "," +
+                       second.RootElement.GetProperty("tables")[0].GetRawText() + "]}";
+        var schema = Temp("multi-schema.json", combined);
+        using var session = new FakeSession();
+
+        Assert.Equal(SchemaToolExitCodes.PendingChanges,
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+        using var report = JsonDocument.Parse(output.ToString());
+        var onlyFirstPlan = report.RootElement.GetProperty("targets")[0].GetProperty("planFingerprint").GetString()!;
+
+        Assert.Equal(SchemaToolExitCodes.AuthorizationRequired,
+            await RunAsync([
+                "apply", "--schema", schema, "--provider", "fake",
+                "--expected-plan", onlyFirstPlan
+            ], _ => session));
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+    }
+
+    [Fact]
     public void Destructive_operations_require_the_exact_identity()
     {
         var target = SchemaCompilation.CompileTargets(
