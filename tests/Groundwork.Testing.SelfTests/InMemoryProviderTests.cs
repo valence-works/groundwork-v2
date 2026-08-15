@@ -48,6 +48,57 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Required_folded_partial_updates_preserve_values_through_direct_and_batched_paths()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("q9-required-folded-partial"),
+            Name = "q9_required_folded_partial",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition
+                {
+                    Name = "status",
+                    Type = PortableType.String,
+                    IsNullable = false,
+                    MaxLength = 32,
+                    Collation = PortableCollation.OrdinalIgnoreCase
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://q9-required-folded-partial");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" }));
+
+        Assert.Equal(WriteOutcomeStatus.Updated, session.Update(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })).Status);
+        using (var batch = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        {
+            batch.Stage(RowWrite.Update(unit,
+                new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })));
+            Assert.Equal(1, batch.Commit().Succeeded);
+        }
+
+        var stored = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }));
+        Assert.Equal("Open", stored!.Values.Values["status"]);
+        Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored.Values.Values.Keys);
+        var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, false, 32,
+            stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var result = session.Query(new QueryRequest(new TableId(unit.Name),
+            new Predicate.StartsWith(status, "op"), [], Projection.All, Paging.None));
+        Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+
+        var missingRequired = Assert.Throws<ArgumentException>(() => session.Upsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = 2 })));
+        Assert.Contains("status", missingRequired.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
+    }
+
+    [Fact]
     public void Adding_folding_backfills_existing_rows_and_retargets_the_existing_index()
     {
         var initial = new StorageUnit

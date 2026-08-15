@@ -969,7 +969,7 @@ internal static class Mutation
         bool exactOutcome = false,
         bool preserveCreatedAt = false)
     {
-        ValidateValues(state.Unit, values.Values);
+        ValidateValues(state.Unit, values.Values, requireAllNonNullable: kind == MutationKind.Insert);
         var identity = Key(state.Unit, values.Values);
         var entries = GetEntries(state, partition);
         entries.TryGetValue(identity, out var existing);
@@ -997,6 +997,8 @@ internal static class Mutation
                 merged[pair.Key] = pair.Value;
             storedValues = merged;
         }
+
+        ValidateValues(state.Unit, storedValues, requireAllNonNullable: true);
 
         if (!UniqueIndexesAllow(state.Unit, entries, identity, storedValues))
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version);
@@ -1116,7 +1118,10 @@ internal static class Mutation
         return string.Join("|", parts);
     }
 
-    private static void ValidateValues(StorageUnit unit, IReadOnlyDictionary<string, object?> values)
+    private static void ValidateValues(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> values,
+        bool requireAllNonNullable)
     {
         var known = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         var unknown = values.Keys.Where(key => !known.Contains(key)).OrderBy(key => key, StringComparer.Ordinal).FirstOrDefault();
@@ -1128,7 +1133,8 @@ internal static class Mutation
                      !(unit.Concurrency.IsOptimistic &&
                        string.Equals(unit.Concurrency.TokenColumn, column.Name, StringComparison.Ordinal))))
         {
-            if (!values.TryGetValue(column.Name, out var value) || value is null)
+            if ((values.TryGetValue(column.Name, out var value) && value is null) ||
+                (requireAllNonNullable && !values.ContainsKey(column.Name)))
                 throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
         }
     }

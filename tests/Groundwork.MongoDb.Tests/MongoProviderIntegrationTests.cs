@@ -290,18 +290,7 @@ public sealed class MongoProviderIntegrationTests
     public void Folded_partial_updates_preserve_keys_through_aggregate_exact_and_fallback_batches()
     {
         using var connection = OpenConnection();
-        var unit = new StorageUnit
-        {
-            Id = new StorageUnitId("q9-mongo-batch-folded-" + Guid.NewGuid().ToString("N")),
-            Name = "Q9MongoBatchFolded_" + Guid.NewGuid().ToString("N"),
-            Columns =
-            [
-                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
-                new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false, Collation = PortableCollation.OrdinalIgnoreCase }
-            ],
-            Key = new KeyDefinition { Columns = ["id"] },
-            Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
-        };
+        var unit = RequiredFoldedUnit("q9-mongo-batch-folded");
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
@@ -337,6 +326,69 @@ public sealed class MongoProviderIntegrationTests
         var result = session.Query(new QueryRequest(new TableId(unit.Name),
             new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None));
         Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
+    }
+
+    [SkippableFact]
+    public void Folded_partial_conditional_upserts_preserve_existing_values_and_explicit_preconditions()
+    {
+        using var connection = OpenConnection();
+        var unit = RequiredFoldedUnit(
+            "q9-mongo-conditional-folded",
+            concurrency: ConcurrencyDeclaration.Optimistic());
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.Equal(1, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Version);
+
+        var updated = session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+            MongoWriteOptions.IfVersion(1));
+
+        Assert.Equal(MongoWriteOutcomeStatus.Updated, updated.Status);
+        Assert.Equal(2, updated.Version);
+        Assert.Equal("Open", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = 1 }))!.Values.Values["status"]);
+        var fallback = Assert.IsAssignableFrom<IBatchedStorageSession>(session).ApplyBatch(
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+                WriteOptions.IfVersion(2))]);
+        Assert.Equal(WriteOutcomeStatus.Updated, Assert.Single(fallback).Outcome.Status);
+        Assert.Equal(3, fallback[0].Outcome.Version);
+        Assert.Equal("Open", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = 1 }))!.Values.Values["status"]);
+        Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict, session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
+            MongoWriteOptions.IfVersion(1)).Status);
+        Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict, session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 2 }),
+            MongoWriteOptions.IfVersion(1)).Status);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
+
+        var missingRequired = Assert.Throws<InvalidOperationException>(() => session.ConditionalUpsert(
+            new MongoStorageValues(new Dictionary<string, object?> { ["id"] = 3 })));
+        Assert.Contains("status", missingRequired.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 3 })));
+    }
+
+    [SkippableFact]
+    public void Folded_aggregate_batch_does_not_report_an_unmatched_incomplete_upsert_as_success()
+    {
+        using var connection = OpenConnection();
+        var unit = RequiredFoldedUnit("q9-mongo-aggregate-folded", uniqueStatus: true);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.Equal(MongoWriteOutcomeStatus.Inserted, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Status);
+
+        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+        var missingRequired = Assert.Throws<InvalidOperationException>(() => batch.ApplyBatch(
+        [
+            RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 2 })),
+            RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 3, ["status"] = "OPEN" }))
+        ]));
+
+        Assert.Contains("status", missingRequired.Message, StringComparison.Ordinal);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 2 })));
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 3 })));
     }
 
     [SkippableFact]
@@ -500,6 +552,35 @@ public sealed class MongoProviderIntegrationTests
     });
 
     private static MongoStorageKey Key(string id) => new(new Dictionary<string, object?> { ["id"] = id });
+
+    private static StorageUnit RequiredFoldedUnit(
+        string idPrefix,
+        bool uniqueStatus = false,
+        ConcurrencyDeclaration? concurrency = null)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        return new StorageUnit
+        {
+            Id = new StorageUnitId(idPrefix + "-" + suffix),
+            Name = "Q9MongoRequiredFolded_" + suffix,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false, Collation = PortableCollation.OrdinalIgnoreCase }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = uniqueStatus ? "unique-status" : "by-status",
+                    Columns = [new IndexColumn("status")],
+                    IsUnique = uniqueStatus
+                }
+            ],
+            Concurrency = concurrency ?? ConcurrencyDeclaration.None
+        };
+    }
 
     private static IMongoProviderConnection OpenConnection()
     {

@@ -1125,22 +1125,38 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             var result = transactionSession is null
                 ? collection.BulkWrite(models, new BulkWriteOptions { IsOrdered = false })
                 : collection.BulkWrite(transactionSession, models, new BulkWriteOptions { IsOrdered = false });
-            if (result.IsAcknowledged && result.MatchedCount + result.Upserts.Count != writes.Count)
-            {
-                var missing = incompleteWrites.First(column => column is not null)!;
-                throw new InvalidOperationException($"Column '{missing.Name}' is required.");
-            }
+            ThrowIfIncompleteUpsertWasNotApplied(result, incompleteWrites, []);
             return writes.Select(write => new RowWriteOutcome(write,
                 new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
         }
         catch (MongoBulkWriteException<BsonDocument> exception)
         {
             var failures = exception.WriteErrors.ToDictionary(error => error.Index, error => error);
+            ThrowIfIncompleteUpsertWasNotApplied(exception.Result, incompleteWrites, failures.Keys);
             return writes.Select((write, index) =>
                 new RowWriteOutcome(write, failures.TryGetValue(index, out var error)
                     ? new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, ExtractIndexName(error.Message))
                     : new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
         }
+    }
+
+    private static void ThrowIfIncompleteUpsertWasNotApplied(
+        BulkWriteResult<BsonDocument> result,
+        IReadOnlyList<ColumnDefinition?> incompleteWrites,
+        IEnumerable<int> failedIndexes)
+    {
+        if (!result.IsAcknowledged)
+            return;
+        var failures = failedIndexes.ToHashSet();
+        var expectedApplied = incompleteWrites.Count - failures.Count;
+        if (result.MatchedCount + result.Upserts.Count == expectedApplied)
+            return;
+        var missing = incompleteWrites
+            .Where((column, index) => column is not null && !failures.Contains(index))
+            .FirstOrDefault();
+        if (missing is not null)
+            throw new InvalidOperationException($"Column '{missing.Name}' is required.");
+        throw new InvalidOperationException("MongoDB did not apply every acknowledged aggregate batch write.");
     }
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
@@ -1393,12 +1409,16 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoWriteOptions? options)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
-        var document = MongoDocumentMapper.EncodeDocument(
-            Unit,
-            values.Values,
-            identity,
-            existing: null,
-            column => NextSequence(column, options?.Observer));
+        var missingRequired = MissingRequiredColumn(values.Values);
+        var canInsert = missingRequired is null;
+        var document = canInsert
+            ? MongoDocumentMapper.EncodeDocument(
+                Unit,
+                values.Values,
+                identity,
+                existing: null,
+                column => NextSequence(column, options?.Observer))
+            : null;
         var filter = new BsonDocument("_id", identity);
         var optimistic = Unit.Concurrency.IsOptimistic;
         if (optimistic && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
@@ -1420,11 +1440,14 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 column.Name == "createdAt" ||
                 column.Generation == ColumnGeneration.ProviderSequence)
                 continue;
-            set[column.Name] = document[column.Name];
+            set[column.Name] = document?[column.Name] ??
+                MongoValueCodec.Encode(values.Values[column.Name], column);
         }
+        if (!canInsert && set.ElementCount == 0)
+            AddKeyOnlyNoOp(set, values.Values);
 
         var setOnInsert = new BsonDocument();
-        foreach (var element in document)
+        foreach (var element in document ?? [])
         {
             if (element.Name != "_id" && !set.Contains(element.Name))
                 setOnInsert[element.Name] = element.Value;
@@ -1437,23 +1460,31 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         if (setOnInsert.ElementCount != 0)
             update["$setOnInsert"] = setOnInsert;
 
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
+        var isUpsert = canInsert && precondition.Kind != WritePreconditionKind.IfVersion;
         // Observer text is diagnostic metadata, not a command recorder. Never include
         // identity, filter, or document values because they may contain PII/secrets.
         var commandDescription =
-            "MongoDB.UpdateOne(upsert:true; filter=identity+version; update=$set/$inc/$setOnInsert)";
+            $"MongoDB.UpdateOne(upsert:{isUpsert.ToString().ToLowerInvariant()}; filter=identity+version; update=$set/$inc/$setOnInsert)";
         options?.Observer?.Observe(new WritePathEvent("mongodb.conditional-upsert", commandDescription, IsProbe: false));
         try
         {
             var result = transactionSession is null
-                ? collection.UpdateOne(filter, update, new UpdateOptions { IsUpsert = true })
-                : collection.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = true });
-            return result.UpsertedId is not null
-                ? new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, optimistic ? 1 : null)
-                : new MongoWriteOutcome(
+                ? collection.UpdateOne(filter, update, new UpdateOptions { IsUpsert = isUpsert })
+                : collection.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = isUpsert });
+            if (result.UpsertedId is not null)
+                return new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, optimistic ? 1 : null);
+            if (result.MatchedCount != 0)
+            {
+                return new MongoWriteOutcome(
                     MongoWriteOutcomeStatus.Updated,
-                    optimistic && options?.Precondition.Version is { } expectedVersion
+                    optimistic && precondition.Version is { } expectedVersion
                         ? checked(expectedVersion + 1)
                         : null);
+            }
+            if (precondition.Kind is WritePreconditionKind.IfVersion or WritePreconditionKind.CreateOnly)
+                return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict);
+            throw new InvalidOperationException($"Column '{missingRequired!.Name}' is required.");
         }
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
@@ -1552,6 +1583,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     private ColumnDefinition? MissingRequiredColumn(IReadOnlyDictionary<string, object?> values) =>
         Unit.Columns.FirstOrDefault(column =>
             column.Generation == ColumnGeneration.Supplied &&
+            !SearchKeyProjection.IsProviderOwnedColumn(column.Name) &&
             !column.IsNullable &&
             column.Default is null &&
             !values.ContainsKey(column.Name));
