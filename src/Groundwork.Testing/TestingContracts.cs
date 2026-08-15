@@ -401,6 +401,7 @@ public enum SchemaChangeKind
     AddColumn,
     CreateIndex,
     AddDerivedColumn,
+    RebuildIndex,
     UpdateAggregationProfile
 }
 

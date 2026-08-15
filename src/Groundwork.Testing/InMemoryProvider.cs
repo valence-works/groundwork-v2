@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 
 namespace Groundwork.Testing;
@@ -457,24 +458,8 @@ internal static class SchemaIdentity
         index.SchemaVersion,
         string.Join("", index.Columns.Select(column => Encode(column.Column, column.Direction))));
 
-    private static string AggregationProfile(AggregationProfile profile) => Encode(
-        profile.Name,
-        string.Join(",", profile.GroupByColumns.OrderBy(column => column, StringComparer.Ordinal)),
-        string.Join(",", profile.Aggregates.Select(Aggregate).OrderBy(value => value, StringComparer.Ordinal)),
-        string.Join(",", profile.AllowedPredicates.OrderBy(allowance => allowance.Alias, StringComparer.Ordinal)
-            .Select(allowance => allowance.Alias + ":" + string.Join("+", allowance.SupportedPredicates.OrderBy(value => value)))),
-        profile.MaxGroups,
-        profile.MaxInputRows);
-
-    private static string Aggregate(Aggregate aggregate) => aggregate switch
-    {
-        Aggregate.Min min => $"min:{min.Alias}:{min.Column}",
-        Aggregate.Max max => $"max:{max.Alias}:{max.Column}",
-        Aggregate.Sum sum => $"sum:{sum.Alias}:{sum.Column}",
-        Aggregate.SetUnion set => $"setUnion:{set.Alias}:{set.Column}:{set.MaxValues}",
-        Aggregate.FirstBy first => $"firstBy:{first.Alias}:{first.Column}:{first.OrderColumn}:{first.Direction}",
-        _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
-    };
+    private static string AggregationProfile(AggregationProfile profile) =>
+        AggregationProfileCanonicalization.Canonicalize(profile);
 
     private static string Encode(params object?[] parts) => string.Join(";", parts.Select(part =>
     {

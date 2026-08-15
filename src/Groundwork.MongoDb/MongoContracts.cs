@@ -215,7 +215,8 @@ public enum MongoSchemaChangeKind
     AddColumn,
     CreateIndex,
     AddDerivedColumn,
-    RebuildIndex
+    RebuildIndex,
+    UpdateAggregationProfile
 }
 
 public sealed record MongoSchemaChange(MongoSchemaChangeKind Kind, string Identity);

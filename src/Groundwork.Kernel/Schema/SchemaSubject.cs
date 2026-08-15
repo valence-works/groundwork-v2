@@ -200,23 +200,7 @@ public sealed class SchemaSubject
         AggregationProfileSnapshot.Capture(profile);
 
     private static string CanonicalAggregationProfile(AggregationProfile profile) =>
-        string.Join("|", profile.Name,
-            string.Join(",", (profile.GroupByColumns ?? []).OrderBy(value => value, StringComparer.Ordinal)),
-            string.Join(",", (profile.Aggregates ?? []).Select(CanonicalAggregate).OrderBy(value => value, StringComparer.Ordinal)),
-            string.Join(",", (profile.AllowedPredicates ?? []).Select(allowance => allowance.Alias + ":" +
-                string.Join("+", allowance.SupportedPredicates.OrderBy(value => value).Select(value => value.ToString()))).OrderBy(value => value, StringComparer.Ordinal)),
-            profile.MaxGroups.ToString(CultureInfo.InvariantCulture),
-            profile.MaxInputRows.ToString(CultureInfo.InvariantCulture));
-
-    private static string CanonicalAggregate(Aggregate aggregate) => aggregate switch
-    {
-        Aggregate.Min min => $"min:{min.Alias}:{min.Column}",
-        Aggregate.Max max => $"max:{max.Alias}:{max.Column}",
-        Aggregate.Sum sum => $"sum:{sum.Alias}:{sum.Column}",
-        Aggregate.SetUnion set => $"set:{set.Alias}:{set.Column}:{set.MaxValues}",
-        Aggregate.FirstBy first => $"first:{first.Alias}:{first.Column}:{first.OrderColumn}:{first.Direction}",
-        _ => aggregate.ToString() ?? string.Empty
-    };
+        AggregationProfileCanonicalization.Canonicalize(profile);
 }
 
 /// <summary>Provider-owned schema materialization metadata carried through the neutral plan.</summary>

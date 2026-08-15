@@ -651,6 +651,25 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             if (!desired.Indexes.Any(index => index.Name == previous.Name))
                 throw new MongoSchemaConflictException($"Index '{previous.Name}' was removed non-additively.");
 
+        var previousProfiles = current.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        foreach (var profile in desiredProfiles.Values)
+        {
+            if (!previousProfiles.TryGetValue(profile.Name, out var previous) ||
+                !string.Equals(
+                    AggregationProfileCanonicalization.Canonicalize(previous),
+                    AggregationProfileCanonicalization.Canonicalize(profile),
+                    StringComparison.Ordinal))
+            {
+                changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.UpdateAggregationProfile, profile.Name));
+            }
+        }
+        foreach (var previous in previousProfiles.Values)
+        {
+            if (!desiredProfiles.ContainsKey(previous.Name))
+                changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.UpdateAggregationProfile, previous.Name));
+        }
+
         return changes;
     }
 
@@ -2084,7 +2103,7 @@ internal static class SchemaIdentity
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
         string.Join("|", unit.Indexes.Select(Index)),
-        string.Join("|", unit.AggregationProfiles.Select(AggregationProfile)));
+        SchemaFingerprint.Canonicalize(unit.AggregationProfiles.Select(AggregationProfile)));
 
     internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
         string.Equals(Column(left), Column(right), StringComparison.Ordinal);
@@ -2105,25 +2124,8 @@ internal static class SchemaIdentity
         index.Name, index.IsUnique, index.MissingValues, index.SchemaVersion,
         string.Join(",", index.Columns.Select(column => column.Column + ":" + column.Direction)));
 
-    private static string AggregationProfile(AggregationProfile profile) => string.Join("|",
-        profile.Name,
-        string.Join(",", profile.GroupByColumns.OrderBy(column => column, StringComparer.Ordinal)),
-        string.Join(",", profile.Aggregates.Select(Aggregate).OrderBy(value => value, StringComparer.Ordinal)),
-        string.Join(",", profile.AllowedPredicates.OrderBy(allowance => allowance.Alias, StringComparer.Ordinal)
-            .Select(allowance => allowance.Alias + ":" +
-                string.Join("+", allowance.SupportedPredicates.OrderBy(value => value)))),
-        profile.MaxGroups,
-        profile.MaxInputRows);
-
-    private static string Aggregate(Groundwork.Kernel.Aggregate aggregate) => aggregate switch
-    {
-        Groundwork.Kernel.Aggregate.Min min => $"min:{min.Alias}:{min.Column}",
-        Groundwork.Kernel.Aggregate.Max max => $"max:{max.Alias}:{max.Column}",
-        Groundwork.Kernel.Aggregate.Sum sum => $"sum:{sum.Alias}:{sum.Column}",
-        Groundwork.Kernel.Aggregate.SetUnion set => $"setUnion:{set.Alias}:{set.Column}:{set.MaxValues}",
-        Groundwork.Kernel.Aggregate.FirstBy first => $"firstBy:{first.Alias}:{first.Column}:{first.OrderColumn}:{first.Direction}",
-        _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
-    };
+    private static string AggregationProfile(AggregationProfile profile) =>
+        AggregationProfileCanonicalization.Canonicalize(profile);
 }
 
 internal static class MongoDeclarationSnapshot

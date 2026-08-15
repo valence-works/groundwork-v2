@@ -148,6 +148,103 @@ public sealed class MongoProviderIntegrationTests
         };
     }
 
+    [Fact]
+    public void Aggregation_fingerprint_is_injective_for_delimited_identifiers()
+    {
+        var baseUnit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-canonical-collision"),
+            Name = "mongo_aggregation_canonical_collision",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "a:b", Type = PortableType.String },
+                new() { Name = "c", Type = PortableType.String },
+                new() { Name = "a", Type = PortableType.String },
+                new() { Name = "b:c", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var first = baseUnit with
+        {
+            AggregationProfiles = [new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Min("a:b", "c")]
+            }]
+        };
+        var second = baseUnit with
+        {
+            AggregationProfiles = [new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Min("a", "b:c")]
+            }]
+        };
+
+        Assert.NotEqual(SchemaIdentity.Fingerprint(first), SchemaIdentity.Fingerprint(second));
+    }
+
+    [SkippableFact]
+    public void Profile_only_reducer_alias_and_budget_changes_are_reported_and_applied()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-profile-drift-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_aggregation_profile_drift_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "amount", Type = PortableType.Int64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles = [new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Min("minimum", "amount")],
+                MaxGroups = 10,
+                MaxInputRows = 100
+            }]
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var aliasChanged = unit with
+        {
+            AggregationProfiles = [unit.AggregationProfiles[0] with
+            {
+                Aggregates = [new Aggregate.Min("total", "amount")]
+            }]
+        };
+        var reducerChanged = aliasChanged with
+        {
+            AggregationProfiles = [aliasChanged.AggregationProfiles[0] with
+            {
+                Aggregates = [new Aggregate.Max("total", "amount")]
+            }]
+        };
+        var budgetChanged = reducerChanged with
+        {
+            AggregationProfiles = [reducerChanged.AggregationProfiles[0] with { MaxGroups = 11 }]
+        };
+
+        foreach (var changed in new[] { aliasChanged, reducerChanged, budgetChanged })
+        {
+            var diff = connection.Schema.Diff(changed);
+            Assert.Contains(diff.Changes, change =>
+                change.Kind == MongoSchemaChangeKind.UpdateAggregationProfile && change.Identity == "summary");
+            Assert.True(connection.Schema.Apply(changed).Applied);
+        }
+
+        Assert.False(connection.Schema.Apply(budgetChanged).Applied);
+    }
+
     [SkippableFact]
     public void Provider_passes_the_shipped_conformance_suite()
     {
