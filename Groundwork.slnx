@@ -9,6 +9,12 @@
   <Folder Name="/src/Groundwork.Testing/">
     <Project Path="src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.SchemaTool/">
+    <Project Path="src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.SchemaTool.MSBuild/">
+    <Project Path="src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
@@ -42,6 +48,9 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Schema.Generator.Tests/">
     <Project Path="tests/Groundwork.Schema.Generator.Tests/Groundwork.Schema.Generator.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.SchemaTool.Tests/">
+    <Project Path="tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Query.Planning.Tests/">
     <Project Path="tests/Groundwork.Query.Planning.Tests/Groundwork.Query.Planning.Tests.csproj" />
