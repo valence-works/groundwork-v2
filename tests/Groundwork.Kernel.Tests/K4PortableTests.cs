@@ -1,5 +1,7 @@
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using Groundwork.Kernel;
 using Groundwork.Kernel.ExternalModule;
@@ -9,6 +11,8 @@ namespace Groundwork.Kernel.Tests;
 
 public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
 {
+    private static readonly Dictionary<int, int> GeneratedUnicodeMappings = CreateGeneratedUnicodeMappings();
+
     private static readonly MethodInfo Base62Encode = typeof(ShortIdentityGenerator).Assembly
         .GetType("Groundwork.Kernel.Base62")!
         .GetMethod("Encode", BindingFlags.Public | BindingFlags.Static)!;
@@ -534,6 +538,36 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
             PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId);
     }
 
+    [Fact]
+    public void Unicode_generated_table_is_sorted_complete_and_hash_stable()
+    {
+        var pairs = UnicodeOrdinalCasingData.SimpleUppercaseMappings;
+        Assert.Equal(UnicodeOrdinalCasingData.SimpleUppercaseMappingCount * 2, pairs.Length);
+
+        var bytes = new byte[pairs.Length * sizeof(int)];
+        var previous = -1;
+        for (var index = 0; index < pairs.Length; index += 2)
+        {
+            var source = pairs[index];
+            var mapped = pairs[index + 1];
+            Assert.True(source > previous);
+            Assert.True(Rune.IsValid(source));
+            Assert.True(Rune.IsValid(mapped));
+            BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(index * sizeof(int)), source);
+            BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan((index + 1) * sizeof(int)), mapped);
+            previous = source;
+        }
+
+        Assert.Equal(
+            "3206f759667cb9cc764ec243dfb3d322a39970184efab619e80163c36d86818f",
+            Convert.ToHexStringLower(SHA256.HashData(bytes)));
+        Assert.DoesNotContain(0x0131, pairs.ToArray());
+        Assert.DoesNotContain(0x017F, pairs.ToArray());
+        Assert.Contains(0xA7CF, pairs.ToArray());
+        Assert.Contains(0xA7D3, pairs.ToArray());
+        Assert.Contains(0xA7D5, pairs.ToArray());
+    }
+
     [Theory]
     [InlineData("API-Z9", "api-z9")]
     [InlineData("already lower", "already lower")]
@@ -584,7 +618,9 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         foreach (var left in values)
         foreach (var right in values)
         {
-            var expected = StringComparer.OrdinalIgnoreCase.Compare(left, right);
+            var expected = StringComparer.Ordinal.Compare(
+                CreateGeneratedUnicodeKey(left),
+                CreateGeneratedUnicodeKey(right));
             var actual = StringComparer.Ordinal.Compare(
                 PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(left),
                 PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(right));
@@ -595,42 +631,34 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     }
 
     [Fact]
-    public void Unicode_keys_exhaustively_guard_runtime_uppercase_mappings_and_order()
+    public void Unicode_keys_exhaustively_match_generated_uppercase_mappings_and_order()
     {
-        const int chunkSize = 65_536;
-        var nonIdentityMappings = new List<(Rune Source, Rune Upper)>();
-        for (var start = 0; start <= 0x10FFFF; start += chunkSize)
+        var pairs = UnicodeOrdinalCasingData.SimpleUppercaseMappings;
+        var values = new List<string>(UnicodeOrdinalCasingData.SimpleUppercaseMappingCount);
+        var expectedOrder = new List<(int Source, string Value)>(values.Capacity);
+        for (var index = 0; index < pairs.Length; index += 2)
         {
-            var source = new StringBuilder();
-            var expected = new StringBuilder();
-            var end = Math.Min(0x10FFFF, start + chunkSize - 1);
-            for (var scalar = start; scalar <= end; scalar++)
-            {
-                if (!Rune.IsValid(scalar))
-                    continue;
-                var rune = new Rune(scalar);
-                var upper = Rune.ToUpperInvariant(rune);
-                source.Append(rune);
-                expected.Append(StringComparer.OrdinalIgnoreCase.Equals(rune.ToString(), upper.ToString())
-                    ? upper
-                    : rune);
-                if (rune != upper)
-                    nonIdentityMappings.Add((rune, upper));
-            }
-
+            var source = new Rune(pairs[index]).ToString();
+            var mapped = new Rune(pairs[index + 1]).ToString();
+            values.Add(source);
+            expectedOrder.Add((pairs[index + 1], source));
+            Assert.Equal(CreateGeneratedUnicodeKey(source), PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(source));
+            Assert.Equal(CreateGeneratedUnicodeKey(mapped), PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(mapped));
             Assert.Equal(
-                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(expected.ToString()),
-                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(source.ToString()));
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(mapped),
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(source));
         }
 
-        foreach (var (source, upper) in nonIdentityMappings)
-        {
-            Assert.Equal(
-                Math.Sign(StringComparer.OrdinalIgnoreCase.Compare(source.ToString(), upper.ToString())),
-                Math.Sign(StringComparer.Ordinal.Compare(
-                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(source.ToString()),
-                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(upper.ToString()))));
-        }
+        var expected = expectedOrder
+            .OrderBy(pair => pair.Source)
+            .ThenBy(pair => pair.Value, StringComparer.Ordinal)
+            .Select(pair => pair.Value)
+            .ToArray();
+        var actual = values
+            .OrderBy(PortableStringComparison.CreateUnicodeOrdinalIgnoreCase, StringComparer.Ordinal)
+            .ThenBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(expected, actual);
 
         Assert.NotEqual(
             PortableStringComparison.CreateUnicodeOrdinalIgnoreCase("ſ"),
@@ -638,49 +666,37 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     }
 
     [Fact]
-    public void Unicode_keys_exhaustively_match_supplementary_case_equivalence_and_order()
+    public void Unicode_keys_exhaustively_match_generated_supplementary_case_equivalence_and_order()
     {
+        var pairs = UnicodeOrdinalCasingData.SimpleUppercaseMappings;
         var values = new List<string>();
-        var hashBuckets = new Dictionary<int, List<string>>();
-        var equivalencePairCount = 0;
-
-        for (var scalar = 0x10000; scalar <= 0x10FFFF; scalar++)
+        var expectedOrder = new List<(int Mapped, string Value)>();
+        for (var index = 0; index < pairs.Length; index += 2)
         {
-            var rune = new Rune(scalar);
-            if (Rune.GetUnicodeCategory(rune) is not (
-                    UnicodeCategory.UppercaseLetter or
-                    UnicodeCategory.LowercaseLetter or
-                    UnicodeCategory.TitlecaseLetter))
+            if (pairs[index] <= 0xFFFF)
                 continue;
 
-            var value = rune.ToString();
+            var value = new Rune(pairs[index]).ToString();
+            var mapped = new Rune(pairs[index + 1]).ToString();
             values.Add(value);
-            var hash = StringComparer.OrdinalIgnoreCase.GetHashCode(value);
-            if (!hashBuckets.TryGetValue(hash, out var candidates))
-                hashBuckets.Add(hash, candidates = []);
-
-            foreach (var candidate in candidates)
-            {
-                if (!StringComparer.OrdinalIgnoreCase.Equals(candidate, value))
-                    continue;
-                equivalencePairCount++;
-                Assert.Equal(
-                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(candidate),
-                    PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(value));
-            }
-            candidates.Add(value);
+            expectedOrder.Add((pairs[index + 1], value));
+            Assert.Equal(CreateGeneratedUnicodeKey(value), PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(value));
+            Assert.Equal(
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(mapped),
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(value));
         }
 
-        Assert.Equal(282, equivalencePairCount);
-        var expectedOrder = values
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(value => value, StringComparer.Ordinal)
+        Assert.Equal(282, values.Count);
+        var expected = expectedOrder
+            .OrderBy(pair => pair.Mapped)
+            .ThenBy(pair => pair.Value, StringComparer.Ordinal)
+            .Select(pair => pair.Value)
             .ToArray();
-        var actualOrder = values
+        var actual = values
             .OrderBy(PortableStringComparison.CreateUnicodeOrdinalIgnoreCase, StringComparer.Ordinal)
             .ThenBy(value => value, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(expectedOrder, actualOrder);
+        Assert.Equal(expected, actual);
     }
 
     [Theory]
@@ -757,4 +773,26 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     }
 
     private static string EncodeBase62(ulong value) => (string)Base62Encode.Invoke(null, [value])!;
+
+    private static Dictionary<int, int> CreateGeneratedUnicodeMappings()
+    {
+        var mappings = new Dictionary<int, int>(UnicodeOrdinalCasingData.SimpleUppercaseMappingCount);
+        var pairs = UnicodeOrdinalCasingData.SimpleUppercaseMappings;
+        for (var index = 0; index < pairs.Length; index += 2)
+            mappings.Add(pairs[index], pairs[index + 1]);
+        return mappings;
+    }
+
+    private static string CreateGeneratedUnicodeKey(string value)
+    {
+        var normalized = new StringBuilder(value.Length * 6);
+        Span<char> encoded = stackalloc char[6];
+        foreach (var rune in value.EnumerateRunes())
+        {
+            var mapped = GeneratedUnicodeMappings.GetValueOrDefault(rune.Value, rune.Value);
+            mapped.TryFormat(encoded, out _, "X6", CultureInfo.InvariantCulture);
+            normalized.Append(encoded);
+        }
+        return normalized.ToString();
+    }
 }

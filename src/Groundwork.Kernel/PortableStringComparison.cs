@@ -237,36 +237,21 @@ public static class PortableStringComparison
 
     private static UnicodeOrdinalIgnoreCaseState CreateUnicodeOrdinalIgnoreCaseState()
     {
-        var mappings = new Dictionary<int, int>();
-        for (var scalar = 0; scalar <= 0x10FFFF; scalar++)
+        var generatedMappings = UnicodeOrdinalCasingData.SimpleUppercaseMappings;
+        var mappings = new Dictionary<int, int>(UnicodeOrdinalCasingData.SimpleUppercaseMappingCount);
+        for (var index = 0; index < generatedMappings.Length; index += 2)
         {
-            if (!Rune.IsValid(scalar))
-                continue;
-            var sourceRune = new Rune(scalar);
-            var mapped = Rune.ToUpperInvariant(sourceRune).Value;
-            if (mapped == scalar)
-                continue;
-            if (!StringComparer.OrdinalIgnoreCase.Equals(sourceRune.ToString(), new Rune(mapped).ToString()))
-                continue;
-            mappings.Add(scalar, mapped);
-        }
-
-        var supplementaryMappings = UnicodeOrdinalCasingData.SupplementarySimpleUppercaseMappings;
-        for (var index = 0; index < supplementaryMappings.Length; index += 2)
-        {
-            var scalar = supplementaryMappings[index];
-            var mapped = supplementaryMappings[index + 1];
-            if (mappings.ContainsKey(scalar))
-                continue;
-            if (!StringComparer.OrdinalIgnoreCase.Equals(new Rune(scalar).ToString(), new Rune(mapped).ToString()))
-                continue;
+            var scalar = generatedMappings[index];
+            var mapped = generatedMappings[index + 1];
             mappings.Add(scalar, mapped);
         }
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Span<byte> pair = stackalloc byte[8];
-        foreach (var (scalar, mapped) in mappings.OrderBy(mapping => mapping.Key))
+        for (var index = 0; index < generatedMappings.Length; index += 2)
         {
+            var scalar = generatedMappings[index];
+            var mapped = generatedMappings[index + 1];
             System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(pair, scalar);
             System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(pair[4..], mapped);
             hash.AppendData(pair);
