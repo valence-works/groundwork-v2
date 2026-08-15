@@ -136,7 +136,7 @@ public sealed record MongoWriteOutcome
 
     public string? UniqueIndexName { get; }
 
-    public IReadOnlyDictionary<string, object?> GeneratedValues { get; init; } =
+    public IReadOnlyDictionary<string, object?> GeneratedValues { get; } =
         new ReadOnlyDictionary<string, object?>(new Dictionary<string, object?>(StringComparer.Ordinal));
 
     public T GeneratedValue<T>(string column)
