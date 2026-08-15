@@ -120,7 +120,10 @@ internal sealed class StorageSessionRecordStore : IRecordStore
         outcome.UniqueIndexName);
 }
 
-/// <summary>Typed staged writes for one Records declaration.</summary>
+/// <summary>
+/// Typed staged writes for one Records declaration. This wrapper owns the underlying provider unit
+/// of work and its sessions until commit, rollback, or disposal reaches a terminal state.
+/// </summary>
 public sealed class RecordTableStoreUnitOfWork<T> : IDisposable
 {
     private readonly RecordTable<T> table;

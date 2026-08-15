@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.Architecture.Tests;
@@ -108,6 +109,14 @@ public sealed class KernelBoundaryTests
             .Select(reference => reference.Path)
             .ToArray();
         Assert.Empty(testingReferences);
+    }
+
+    [Fact]
+    public void Store_public_lifetime_contract_keeps_resource_ownership_explicit()
+    {
+        Assert.True(typeof(IDisposable).IsAssignableFrom(typeof(IStorageProviderConnection)));
+        Assert.False(typeof(IDisposable).IsAssignableFrom(typeof(IStorageSession)));
+        Assert.True(typeof(IDisposable).IsAssignableFrom(typeof(IUnitOfWork)));
     }
 
     private static bool IsKernelSubstrateOrProvider(Assembly assembly)
