@@ -329,6 +329,14 @@ public interface IMongoUnitOfWork : IDisposable
     void Rollback();
 }
 
+/// <summary>Exposes terminal-state evidence to adapters that stage work above the native UOW.</summary>
+public interface IMongoUnitOfWorkState
+{
+    bool IsActive { get; }
+
+    void EnsureActive();
+}
+
 public interface IMongoProviderConnection : IDisposable
 {
     IMongoProviderCatalog Catalog { get; }

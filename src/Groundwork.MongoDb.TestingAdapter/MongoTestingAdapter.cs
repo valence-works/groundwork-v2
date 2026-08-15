@@ -229,6 +229,7 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
     {
         ArgumentNullException.ThrowIfNull(write);
         ThrowIfTerminal();
+        EnsureNativeActive();
         if (!sessions.ContainsKey(write.Unit.Id))
             _ = OpenSession(write.Unit);
         batch.Stage(write);
@@ -248,6 +249,7 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
     private IReadOnlyList<RowWriteOutcome> CompleteCommit()
     {
         ThrowIfTerminal();
+        EnsureNativeActive();
         try
         {
             batch.FlushAll();
@@ -278,15 +280,28 @@ internal sealed class MongoTestingUnitOfWork : IUnitOfWork
     public void Rollback()
     {
         ThrowIfTerminal();
+        if (inner is IMongoUnitOfWorkState state && !state.IsActive)
+        {
+            terminal = true;
+            return;
+        }
         try { inner.Rollback(); }
         finally { terminal = true; }
     }
 
     public void Dispose()
     {
-        if (!terminal)
+        if (!terminal && (inner is not IMongoUnitOfWorkState state || state.IsActive))
             Rollback();
+        else
+            terminal = true;
         inner.Dispose();
+    }
+
+    private void EnsureNativeActive()
+    {
+        if (inner is IMongoUnitOfWorkState state)
+            state.EnsureActive();
     }
 
     private void ThrowIfTerminal()

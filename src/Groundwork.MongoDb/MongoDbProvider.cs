@@ -804,6 +804,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     private readonly MongoAppliedUnit applied;
     private readonly IMongoCollection<BsonDocument> collection;
     private readonly IClientSessionHandle? transactionSession;
+    private readonly MongoUnitOfWork? unitOfWork;
     private bool disposed;
 
     internal MongoStorageSession(
@@ -811,12 +812,14 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoAppliedUnit applied,
         MongoStorageAccess access,
         IMongoCollection<BsonDocument> collection,
-        IClientSessionHandle? transactionSession)
+        IClientSessionHandle? transactionSession,
+        MongoUnitOfWork? unitOfWork = null)
     {
         this.state = state;
         this.applied = applied;
         this.collection = collection;
         this.transactionSession = transactionSession;
+        this.unitOfWork = unitOfWork;
         Access = access;
         Unit = MongoDeclarationSnapshot.Clone(applied.Declaration);
     }
@@ -1210,6 +1213,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
     public MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
     {
+        ThrowIfDisposed();
         var declaration = Unit.AppendIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{Unit.Name}' does not declare append idempotency.");
         declaration.Validate(Unit);
@@ -1243,6 +1247,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                 {
                     try { transactionSession.AbortTransaction(); }
                     catch (MongoException) { }
+                    unitOfWork?.Poison();
                     throw new MongoUnitOfWorkConflictException(
                         "A concurrent idempotency nonce conflict aborted the whole MongoDB unit of work; retry the complete unit of work.");
                 }
@@ -2070,7 +2075,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
     }
 }
 
-internal sealed class MongoUnitOfWork : IMongoUnitOfWork
+internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
 {
     private readonly MongoProviderState state;
     private readonly IReadOnlyDictionary<StorageUnitId, (MongoAppliedUnit Applied, IMongoCollection<BsonDocument> Collection)> units;
@@ -2101,7 +2106,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
         ThrowIfTerminal();
         if (!units.TryGetValue(unit.Id, out var applied))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
-        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session);
+        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session, this);
         sessions.Add(session);
         return session;
     }
@@ -2153,6 +2158,19 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork
     {
         if (terminal)
             throw new InvalidOperationException("The unit of work is already terminal.");
+    }
+
+    public bool IsActive => !terminal;
+
+    public void EnsureActive() => ThrowIfTerminal();
+
+    internal void Poison()
+    {
+        if (terminal)
+            return;
+        terminal = true;
+        CloseSessions();
+        session.Dispose();
     }
 }
 

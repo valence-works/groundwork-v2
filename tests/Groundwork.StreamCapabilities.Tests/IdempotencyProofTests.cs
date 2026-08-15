@@ -413,18 +413,22 @@ public sealed class IdempotencyProofTests
             .GetAwaiter().GetResult();
 
         Assert.Equal(1, results.Count(result => result.Outcome?.Status == WriteOutcomeStatus.Inserted));
-        Assert.Single(results.Where(result => result.Error is MongoUnitOfWorkConflictException));
+        var loser = Assert.Single(results.Where(result => result.Error is MongoUnitOfWorkConflictException));
+        Assert.NotNull(loser.AfterInsert);
+        Assert.NotNull(loser.AfterAppend);
+        Assert.NotNull(loser.AfterStage);
+        Assert.NotNull(loser.AfterCommit);
 
         var firstSession = firstConnection.OpenSession(unit, StorageAccess.Global);
         var secondSession = secondConnection.OpenSession(unit, StorageAccess.Global);
         var priorRows = new[] { "prior-first", "prior-second" }
             .Count(id => firstSession.Read(Key(id)) is not null || secondSession.Read(Key(id)) is not null);
         Assert.Equal(1, priorRows);
-        Assert.Equal(1, new[] { "race-first", "race-second" }
+        Assert.Equal(1, new[] { "race-first", "race-second", "after-insert", "after-append", "after-stage" }
             .Count(id => firstSession.Read(Key(id)) is not null || secondSession.Read(Key(id)) is not null));
     }
 
-    private static (WriteOutcome? Outcome, Exception? Error) AppendWithPriorWrite(
+    private static (WriteOutcome? Outcome, Exception? Error, Exception? AfterInsert, Exception? AfterAppend, Exception? AfterStage, Exception? AfterCommit) AppendWithPriorWrite(
         IStorageProviderConnection connection,
         StorageUnit unit,
         string priorKey,
@@ -439,12 +443,16 @@ public sealed class IdempotencyProofTests
             var outcome = session.Append(
                 new OperationId(DateTimeOffset.UnixEpoch, "race-operation"), [Values(priorKey == "prior-first" ? "race-first" : "race-second")]);
             work.Commit();
-            return (outcome, null);
+            return (outcome, null, null, null, null, null);
         }
         catch (Exception exception)
         {
-            work.Rollback();
-            return (null, exception);
+            var afterInsert = Record.Exception(() => session.Insert(Values("after-insert")));
+            var afterAppend = Record.Exception(() => session.Append(
+                new OperationId(DateTimeOffset.UnixEpoch, "after-conflict-operation"), [Values("after-append")]));
+            var afterStage = Record.Exception(() => work.Stage(RowWrite.Insert(unit, Values("after-stage"))));
+            var afterCommit = Record.Exception(work.Commit);
+            return (null, exception, afterInsert, afterAppend, afterStage, afterCommit);
         }
     }
 
