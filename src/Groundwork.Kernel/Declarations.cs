@@ -53,7 +53,9 @@ public enum ScopePolicy
 
 public enum ConcurrencyDeclaration
 {
-    None
+    None,
+    Optimistic,
+    AppendOnly
 }
 
 public enum TimestampDeclaration
