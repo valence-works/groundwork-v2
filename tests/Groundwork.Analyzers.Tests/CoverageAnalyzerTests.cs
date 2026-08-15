@@ -16,6 +16,38 @@ namespace Groundwork.Analyzers.Tests;
 public sealed class CoverageAnalyzerTests
 {
     [Fact]
+    public async Task Linq_analyzer_reports_bare_startswith_at_the_subexpression()
+    {
+        var diagnostics = await AnalyzeLinq("using System; public sealed class Ticket { public string Name { get; set; } = \"\"; } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.Name.StartsWith(\"x\"); }");
+        var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_LINQ_108"));
+        Assert.Contains("StringComparison.Ordinal", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.True(diagnostic.Location.SourceSpan.Length < diagnostic.Location.SourceSpan.End - diagnostic.Location.SourceSpan.Start + 100);
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_reports_column_arithmetic_and_column_comparison()
+    {
+        var diagnostics = await AnalyzeLinq("using System; public sealed class Ticket { public int A { get; set; } public int B { get; set; } } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.A + 1 > 2 && ticket.A == ticket.B; }");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_102");
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_103");
+    }
+
+    [Fact]
+    public async Task Linq_code_fix_inserts_the_explicit_ordinal_overload()
+    {
+        const string source = "using System; public sealed class Ticket { public string Name { get; set; } = \"\"; } public static class Use { public static Func<Ticket, bool> Run = ticket => ticket.Name.StartsWith(\"x\"); }";
+        var diagnostic = Assert.Single((await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_108"));
+        using var workspace = new AdhocWorkspace();
+        var project = workspace.AddProject("LinqCodeFix", LanguageNames.CSharp);
+        var document = project.AddDocument("Query.cs", SourceText.From(source));
+        var actions = new List<CodeAction>();
+        await new LinqCodeFixProvider().RegisterCodeFixesAsync(new CodeFixContext(document, diagnostic, (action, _) => actions.Add(action), CancellationToken.None));
+        var operation = Assert.Single(await Assert.Single(actions).GetOperationsAsync(CancellationToken.None));
+        var changed = Assert.IsType<ApplyChangesOperation>(operation).ChangedSolution.GetDocument(document.Id)!;
+        Assert.Contains("StringComparison.Ordinal", (await changed.GetTextAsync()).ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Uncovered_query_reports_the_q3_code_and_suggested_index()
     {
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) + QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).QueryAsync();"));
@@ -242,6 +274,22 @@ public sealed class CoverageAnalyzerTests
             new CompilationWithAnalyzersOptions(options, onAnalyzerException: null, concurrentAnalysis: false, logAnalyzerExecutionTime: true))
             .GetAnalyzerDiagnosticsAsync();
         return result;
+    }
+
+    private static async Task<ImmutableArray<Diagnostic>> AnalyzeLinq(string source)
+    {
+        var compilation = CSharpCompilation.Create(
+            "LinqInput",
+            [CSharpSyntaxTree.ParseText(SourceText.From(source, Encoding.UTF8))],
+            References(),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        return await compilation.WithAnalyzers(
+            [new LinqAnalyzer()],
+            new CompilationWithAnalyzersOptions(
+                new AnalyzerOptions(ImmutableArray<AdditionalText>.Empty),
+                onAnalyzerException: null,
+                concurrentAnalysis: false,
+                logAnalyzerExecutionTime: true)).GetAnalyzerDiagnosticsAsync();
     }
 
     private static IEnumerable<MetadataReference> References()

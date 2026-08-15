@@ -21,6 +21,16 @@ internal static class AnalyzerDiagnostics
             ["GW-COVER-903"] = Create("GW_COVER_903", "Accepted scan has expired", "{0}", DiagnosticSeverity.Error),
             ["GW-COVER-904"] = Create("GW_COVER_904", "Accepted scan is expiring", "{0}", DiagnosticSeverity.Warning),
             ["GW-COVER-905"] = Create("GW_COVER_905", "Accepted scan inventory", "{0}", DiagnosticSeverity.Info),
+            ["GW-LINQ-101"] = Create("GW_LINQ_101", "Column expression is not portable", "{0}"),
+            ["GW-LINQ-102"] = Create("GW_LINQ_102", "Column arithmetic is not portable", "{0}"),
+            ["GW-LINQ-103"] = Create("GW_LINQ_103", "Column comparison requires scan acceptance", "{0}"),
+            ["GW-LINQ-104"] = Create("GW_LINQ_104", "Joins are not portable", "{0}"),
+            ["GW-LINQ-105"] = Create("GW_LINQ_105", "GroupBy is not portable", "{0}"),
+            ["GW-LINQ-106"] = Create("GW_LINQ_106", "Nested collection predicate is not portable", "{0}"),
+            ["GW-LINQ-107"] = Create("GW_LINQ_107", "Opaque helper is not portable", "{0}"),
+            ["GW-LINQ-108"] = Create("GW_LINQ_108", "String comparison must be explicit", "{0}"),
+            ["GW-LINQ-109"] = Create("GW_LINQ_109", "Instant must be UTC", "{0}"),
+            ["GW-LINQ-110"] = Create("GW_LINQ_110", "Constant is outside the declared type", "{0}"),
         };
 
     public static DiagnosticDescriptor Unresolvable { get; } = new(
