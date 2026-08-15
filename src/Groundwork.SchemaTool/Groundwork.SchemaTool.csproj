@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>groundwork</ToolCommandName>
+    <PackageId>Groundwork.SchemaTool</PackageId>
+    <Description>Explicit deployment-time schema planning, validation, application, and emission for Groundwork.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
+    <ProjectReference Include="../Groundwork.Schema/Groundwork.Schema.csproj" />
+  </ItemGroup>
+</Project>

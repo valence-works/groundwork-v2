@@ -1,0 +1,11 @@
+<Project>
+  <UsingTask TaskName="Groundwork.SchemaTool.MSBuild.GroundworkVerify"
+             AssemblyFile="$(MSBuildThisFileDirectory)../tools/net10.0/Groundwork.SchemaTool.MSBuild.dll" />
+
+  <Target Name="GroundworkVerifySchema"
+          BeforeTargets="CoreCompile"
+          Condition="'$(GroundworkSchemaFile)' != ''">
+    <GroundworkVerify SchemaFile="$(GroundworkSchemaFile)"
+                      CoverageFile="$(GroundworkCoverageFile)" />
+  </Target>
+</Project>

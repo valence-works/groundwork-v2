@@ -212,8 +212,8 @@ public static class ConformanceSuite
             Columns =
             [
                 new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
-                new ColumnDefinition { Name = "value", Type = PortableType.String },
-                new ColumnDefinition { Name = "uniqueValue", Type = PortableType.String }
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 256 },
+                new ColumnDefinition { Name = "uniqueValue", Type = PortableType.String, MaxLength = 256 }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
             Scope = scope,
@@ -221,7 +221,13 @@ public static class ConformanceSuite
             Indexes =
             [
                 new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] },
-                new IndexDefinition { Name = "unique-value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }
+                new IndexDefinition
+                {
+                    Name = "unique-value",
+                    Columns = [new IndexColumn("uniqueValue")],
+                    IsUnique = true,
+                    MissingValues = MissingValueBehavior.Excluded
+                }
             ]
         };
     }
