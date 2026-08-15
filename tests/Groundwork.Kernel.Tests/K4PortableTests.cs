@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Text;
 using Groundwork.Kernel;
+using Groundwork.Kernel.ExternalModule;
 using Xunit;
 
 namespace Groundwork.Kernel.Tests;
@@ -37,6 +38,16 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
 
         Assert.True(registry.IsRegistered(gated.Id));
         Assert.Contains(gated.Id, policy.EvidenceGatedCapabilities);
+    }
+
+    [Fact]
+    public void External_module_assembly_can_register_a_capability()
+    {
+        var module = new ExternalCapabilityModule();
+        var registry = new GroundworkModuleCatalog().Add(module).BuildRegistry();
+
+        Assert.Equal("external.test", module.Name);
+        Assert.True(registry.IsRegistered(ExternalCapabilityModule.Capability));
     }
 
     [Fact]
@@ -195,11 +206,124 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     }
 
     [Fact]
+    public void Provider_capability_dimensions_snapshot_all_collection_inputs()
+    {
+        var valueKinds = new HashSet<IndexValueKind> { IndexValueKind.String };
+        var missingValues = new HashSet<MissingValueBehavior> { MissingValueBehavior.Excluded };
+        var queryOperations = new HashSet<PortableQueryOperation> { PortableQueryOperation.Equal };
+        var concurrencyModes = new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.None };
+        var requiredCapabilities = new List<CapabilityId> { WellKnownCapabilities.AtomicCommit };
+        var indexes = new IndexCapabilities(valueKinds, false, true, missingValues);
+        var unitRequirements = new StorageUnitCapabilityRequirements(
+            new StorageUnitId("orders"),
+            requiredCapabilities,
+            ConcurrencyDeclaration.None);
+        var replacementQueryOperations = new HashSet<PortableQueryOperation> { PortableQueryOperation.Contains };
+        var replacementConcurrencyModes = new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.Optimistic };
+        var report = new ProviderCapabilityReport(
+            new("test", "1"),
+            new HashSet<CapabilityId>(),
+            new HashSet<CapabilityId>(),
+            indexes,
+            queryOperations,
+            concurrencyModes,
+            Array.Empty<string>());
+        var reboundReport = report with
+        {
+            SupportedQueryOperations = replacementQueryOperations,
+            SupportedConcurrencyModes = replacementConcurrencyModes
+        };
+
+        valueKinds.Clear();
+        missingValues.Clear();
+        queryOperations.Clear();
+        concurrencyModes.Clear();
+        requiredCapabilities.Clear();
+        replacementQueryOperations.Clear();
+        replacementConcurrencyModes.Clear();
+
+        Assert.Contains(IndexValueKind.String, report.Indexes.SupportedValueKinds);
+        Assert.Contains(MissingValueBehavior.Excluded, report.Indexes.SupportedMissingValueBehaviors);
+        Assert.Contains(PortableQueryOperation.Equal, report.SupportedQueryOperations);
+        Assert.Contains(ConcurrencyDeclaration.None, report.SupportedConcurrencyModes);
+        Assert.Contains(PortableQueryOperation.Contains, reboundReport.SupportedQueryOperations);
+        Assert.Contains(ConcurrencyDeclaration.Optimistic, reboundReport.SupportedConcurrencyModes);
+        Assert.False(report.Indexes.SupportsUniqueIndexes);
+        Assert.Contains(WellKnownCapabilities.AtomicCommit, unitRequirements.RequiredCapabilities);
+
+        var valueKindView = Assert.IsAssignableFrom<ISet<IndexValueKind>>(report.Indexes.SupportedValueKinds);
+        Assert.Throws<NotSupportedException>(() => valueKindView.Add(IndexValueKind.Number));
+        var missingValueView = Assert.IsAssignableFrom<ISet<MissingValueBehavior>>(
+            report.Indexes.SupportedMissingValueBehaviors);
+        Assert.Throws<NotSupportedException>(() => missingValueView.Add(MissingValueBehavior.Included));
+        var queryOperationView = Assert.IsAssignableFrom<ISet<PortableQueryOperation>>(
+            report.SupportedQueryOperations);
+        Assert.Throws<NotSupportedException>(() => queryOperationView.Add(PortableQueryOperation.Contains));
+        var concurrencyView = Assert.IsAssignableFrom<ISet<ConcurrencyDeclaration>>(
+            report.SupportedConcurrencyModes);
+        Assert.Throws<NotSupportedException>(() => concurrencyView.Add(ConcurrencyDeclaration.Optimistic));
+        var requiredCapabilityView = Assert.IsAssignableFrom<IList<CapabilityId>>(
+            unitRequirements.RequiredCapabilities);
+        Assert.Throws<NotSupportedException>(() => requiredCapabilityView.Add(
+            new CapabilityId("sample.module.mutation")));
+        var allIndexKindsView = Assert.IsAssignableFrom<ISet<IndexValueKind>>(
+            IndexCapabilities.All.SupportedValueKinds);
+        Assert.Throws<NotSupportedException>(() => allIndexKindsView.Add(IndexValueKind.Number));
+    }
+
+    [Fact]
+    public void Structured_unit_validation_preserves_v1_capability_and_concurrency_diagnostics()
+    {
+        var gated = new CapabilityId("sample.module.gated");
+        var missing = new CapabilityId("sample.module.missing");
+        var unknown = new CapabilityId("sample.module.unknown");
+        var builder = CapabilityRegistry.CreateBuilder();
+        builder.Add(new CapabilityDescriptor(gated, "Gated", "Requires evidence.", EvidenceGatedByDefault: true));
+        builder.Add(new CapabilityDescriptor(missing, "Missing", "Not advertised."));
+        var validator = new ProviderCapabilityValidator(builder.Build());
+        var unit = new StorageUnitCapabilityRequirements(
+            new StorageUnitId("orders"),
+            [gated, missing, unknown],
+            ConcurrencyDeclaration.Optimistic);
+        var provider = new ProviderCapabilityReport(
+            new("test", "1"),
+            new HashSet<CapabilityId> { gated },
+            new HashSet<CapabilityId>(),
+            IndexCapabilities.All,
+            Enum.GetValues<PortableQueryOperation>().ToHashSet(),
+            new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.None },
+            ["Provider will materialize indexes lazily."]);
+
+        Assert.IsType<ProviderFit.Unsupported>(validator.Evaluate([unit], provider));
+        var result = validator.Validate([unit], provider);
+
+        Assert.False(result.IsCompatible);
+        Assert.Contains(result.Issues, issue => issue.Code == "GW-CAP-002");
+        Assert.Contains(result.Errors, issue => issue.Code == "GW-CAP-004");
+        Assert.Contains(result.Errors, issue => issue.Code == "GW-CAP-005");
+        Assert.Contains(result.Errors, issue => issue.Code == "GW-CAP-013");
+        Assert.Contains(result.Errors, issue => issue.Code == "GW-CAP-014");
+
+        var compatibleUnit = new StorageUnitCapabilityRequirements(
+            new StorageUnitId("orders"),
+            [gated, missing],
+            ConcurrencyDeclaration.Optimistic);
+        var compatibleProvider = provider with
+        {
+            SupportedCapabilities = new HashSet<CapabilityId> { gated, missing },
+            EvidencedCapabilities = new HashSet<CapabilityId> { gated, missing },
+            SupportedConcurrencyModes = new HashSet<ConcurrencyDeclaration> { ConcurrencyDeclaration.Optimistic }
+        };
+
+        Assert.True(validator.Validate([compatibleUnit], compatibleProvider).IsCompatible);
+    }
+
+    [Fact]
     public void Scope_rejects_reserved_missing_malformed_and_overlong_values()
     {
         foreach (var value in new[]
         {
-            "", " ", "tenant ", " __groundwork_internal", "__groundwork_global__", "tenant\0a", "tenant\uD800",
+            "", " ", "tenant ", " tenant-a", " __groundwork_internal", "__groundwork_global__", "tenant\0a", "tenant\uD800a", "tenant\uD800",
             "tenant\uDC00"
         })
             Assert.Throws<ArgumentException>(() => new StorageScope(value));
@@ -323,6 +447,18 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     }
 
     [Fact]
+    public void Short_ids_are_distinct_within_one_millisecond()
+    {
+        var ids = new HashSet<string>();
+        var generator = new ShortIdentityGenerator(new TestTimeProvider());
+
+        for (var index = 0; index < 1_000; index++)
+            ids.Add(generator.Generate());
+
+        Assert.True(ids.Count > 990);
+    }
+
+    [Fact]
     public void Uuid_v7_ids_sort_chronologically_and_are_unique_within_one_millisecond()
     {
         var time = new TestTimeProvider();
@@ -365,6 +501,17 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         Assert.NotEqual(workerOne.Generate(), workerTwo.Generate());
     }
 
+    [Fact]
+    public void Snowflake_rejects_times_before_the_epoch()
+    {
+        var time = new TestTimeProvider();
+        time.Advance(TimeSpan.FromDays(-365 * 7));
+
+        Assert.Throws<InvalidOperationException>(() => new SnowflakeIdentityGenerator(
+            time,
+            new SnowflakeIdentityGeneratorOptions { WorkerId = 1 }).Generate());
+    }
+
     [Theory]
     [InlineData(PortableStringComparisonPolicy.Ordinal, "A", "|0041")]
     [InlineData(PortableStringComparisonPolicy.AsciiIgnoreCase, "A", "|0061")]
@@ -402,6 +549,7 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     [InlineData("Å")]
     [InlineData("İ")]
     [InlineData("ß")]
+    [InlineData("é")]
     [InlineData("line\nbreak")]
     public void Ascii_ignore_case_rejects_non_portable_values(string value)
     {
@@ -420,6 +568,30 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
         Assert.Equal(
             PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(left),
             PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(right));
+    }
+
+    [Fact]
+    public void Unicode_keys_match_v1_fixed_case_fold_boundaries()
+    {
+        string[] values =
+        [
+            "i", "I", "İ", "ı", "ß", "ẞ", "ss", "Σ", "σ", "ς", "K", "K", "k",
+            "ﬀ", "FF", "é", "É", "e\u0301", "ſ", "\U00010D70", "\U00010D50",
+            "\U00016EBB", "\U00016EA0", "\uE000", "\U00010000",
+            "\U00010400", "\U00010428", "😀", "\0"
+        ];
+
+        foreach (var left in values)
+        foreach (var right in values)
+        {
+            var expected = StringComparer.OrdinalIgnoreCase.Compare(left, right);
+            var actual = StringComparer.Ordinal.Compare(
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(left),
+                PortableStringComparison.CreateUnicodeOrdinalIgnoreCase(right));
+            Assert.True(
+                Math.Sign(expected) == Math.Sign(actual),
+                $"Ordinal-ignore-case order differs for U+{string.Join(" U+", left.EnumerateRunes().Select(rune => rune.Value.ToString("X4")))} and U+{string.Join(" U+", right.EnumerateRunes().Select(rune => rune.Value.ToString("X4")))}: expected {expected}, actual {actual}.");
+        }
     }
 
     [Fact]
@@ -509,6 +681,22 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
             .ThenBy(value => value, StringComparer.Ordinal)
             .ToArray();
         Assert.Equal(expectedOrder, actualOrder);
+    }
+
+    [Theory]
+    [InlineData(PortableStringComparisonPolicy.Ordinal, "xÅ😀y", "Å😀")]
+    [InlineData(PortableStringComparisonPolicy.AsciiIgnoreCase, "xAPI-z", "api")]
+    [InlineData(PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase, "xÅ😀y", "å😀")]
+    public void Search_keys_preserve_comparison_unit_boundaries_for_portable_contains(
+        PortableStringComparisonPolicy policy,
+        string value,
+        string search)
+    {
+        var valueKey = PortableStringComparison.CreateSearchKey(value, policy);
+        var searchKey = PortableStringComparison.CreateSearchKey(search, policy);
+
+        Assert.Equal("groundwork-boundary-delimited-search-key-v1", PortableStringComparison.SearchKeyAlgorithmId);
+        Assert.Contains(searchKey, valueKey, StringComparison.Ordinal);
     }
 
     [Fact]

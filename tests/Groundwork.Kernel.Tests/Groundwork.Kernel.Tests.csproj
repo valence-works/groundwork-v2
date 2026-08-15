@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../Groundwork.Kernel.ExternalModule/Groundwork.Kernel.ExternalModule.csproj" />
   </ItemGroup>
 
 </Project>

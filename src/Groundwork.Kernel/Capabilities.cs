@@ -53,6 +53,113 @@ public sealed record CapabilityDescriptor(
     public override int GetHashCode() => Id.GetHashCode();
 }
 
+public enum IndexValueKind
+{
+    String,
+    Number,
+    Boolean,
+    DateTime,
+    Keyword
+}
+
+public enum PortableQueryOperation
+{
+    Equal,
+    NotEqual,
+    StartsWith,
+    Contains,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+    In,
+    NotContains,
+    CollectionContains,
+    CollectionContainsAll
+}
+
+public sealed record IndexCapabilities
+{
+    public IndexCapabilities(
+        IReadOnlySet<IndexValueKind> supportedValueKinds,
+        bool supportsUniqueIndexes,
+        bool supportsSortableIndexes,
+        IReadOnlySet<MissingValueBehavior> supportedMissingValueBehaviors)
+    {
+        SupportedValueKinds = Snapshot(supportedValueKinds);
+        SupportsUniqueIndexes = supportsUniqueIndexes;
+        SupportsSortableIndexes = supportsSortableIndexes;
+        SupportedMissingValueBehaviors = Snapshot(supportedMissingValueBehaviors);
+    }
+
+    public IReadOnlySet<IndexValueKind> SupportedValueKinds { get; }
+
+    public bool SupportsUniqueIndexes { get; }
+
+    public bool SupportsSortableIndexes { get; }
+
+    public IReadOnlySet<MissingValueBehavior> SupportedMissingValueBehaviors { get; }
+
+    public void Deconstruct(
+        out IReadOnlySet<IndexValueKind> supportedValueKinds,
+        out bool supportsUniqueIndexes,
+        out bool supportsSortableIndexes,
+        out IReadOnlySet<MissingValueBehavior> supportedMissingValueBehaviors)
+    {
+        supportedValueKinds = SupportedValueKinds;
+        supportsUniqueIndexes = SupportsUniqueIndexes;
+        supportsSortableIndexes = SupportsSortableIndexes;
+        supportedMissingValueBehaviors = SupportedMissingValueBehaviors;
+    }
+
+    public static IndexCapabilities All { get; } = new(
+        Enum.GetValues<IndexValueKind>().ToImmutableHashSet(),
+        supportsUniqueIndexes: true,
+        supportsSortableIndexes: true,
+        Enum.GetValues<MissingValueBehavior>().ToImmutableHashSet());
+
+    private static ImmutableHashSet<T> Snapshot<T>(IReadOnlySet<T> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        return values.ToImmutableHashSet();
+    }
+}
+
+public sealed record StorageUnitCapabilityRequirements
+{
+    public StorageUnitCapabilityRequirements(
+        StorageUnitId storageUnitId,
+        IEnumerable<CapabilityId> requiredCapabilities,
+        ConcurrencyDeclaration concurrency)
+    {
+        StorageUnitId = storageUnitId;
+        RequiredCapabilities = Snapshot(requiredCapabilities);
+        Concurrency = concurrency;
+    }
+
+    public StorageUnitId StorageUnitId { get; }
+
+    public IReadOnlyList<CapabilityId> RequiredCapabilities { get; }
+
+    public ConcurrencyDeclaration Concurrency { get; }
+
+    public void Deconstruct(
+        out StorageUnitId storageUnitId,
+        out IReadOnlyList<CapabilityId> requiredCapabilities,
+        out ConcurrencyDeclaration concurrency)
+    {
+        storageUnitId = StorageUnitId;
+        requiredCapabilities = RequiredCapabilities;
+        concurrency = Concurrency;
+    }
+
+    private static ImmutableArray<CapabilityId> Snapshot(IEnumerable<CapabilityId> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        return values.Distinct().ToImmutableArray();
+    }
+}
+
 public interface ICapabilityRegistry
 {
     bool IsRegistered(CapabilityId id);
@@ -235,15 +342,44 @@ public sealed record ProviderCapabilityReport
         ProviderIdentity provider,
         IReadOnlySet<CapabilityId> supportedCapabilities,
         IReadOnlySet<CapabilityId> evidencedCapabilities,
+        IndexCapabilities indexes,
+        IReadOnlySet<PortableQueryOperation> supportedQueryOperations,
+        IReadOnlySet<ConcurrencyDeclaration> supportedConcurrencyModes,
         IReadOnlyList<string> warnings)
     {
         Provider = provider ?? throw new ArgumentNullException(nameof(provider));
+        Indexes = indexes ?? throw new ArgumentNullException(nameof(indexes));
         SupportedCapabilities = Snapshot(supportedCapabilities);
         EvidencedCapabilities = Snapshot(evidencedCapabilities);
+        SupportedQueryOperations = Snapshot(supportedQueryOperations);
+        SupportedConcurrencyModes = Snapshot(supportedConcurrencyModes);
         Warnings = Snapshot(warnings);
     }
 
+    public ProviderCapabilityReport(
+        ProviderIdentity provider,
+        IReadOnlySet<CapabilityId> supportedCapabilities,
+        IReadOnlySet<CapabilityId> evidencedCapabilities,
+        IReadOnlyList<string> warnings)
+        : this(
+            provider,
+            supportedCapabilities,
+            evidencedCapabilities,
+            IndexCapabilities.All,
+            Enum.GetValues<PortableQueryOperation>().ToImmutableHashSet(),
+            Enum.GetValues<ConcurrencyDeclaration>().ToImmutableHashSet(),
+            warnings)
+    {
+    }
+
     public ProviderIdentity Provider { get; init; }
+
+    public IndexCapabilities Indexes
+    {
+        get => indexes;
+        init => indexes = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
     public IReadOnlySet<CapabilityId> SupportedCapabilities
     {
         get => supportedCapabilities;
@@ -256,14 +392,29 @@ public sealed record ProviderCapabilityReport
         init => evidencedCapabilities = Snapshot(value);
     }
 
+    public IReadOnlySet<PortableQueryOperation> SupportedQueryOperations
+    {
+        get => supportedQueryOperations;
+        init => supportedQueryOperations = Snapshot(value);
+    }
+
+    public IReadOnlySet<ConcurrencyDeclaration> SupportedConcurrencyModes
+    {
+        get => supportedConcurrencyModes;
+        init => supportedConcurrencyModes = Snapshot(value);
+    }
+
     public IReadOnlyList<string> Warnings
     {
         get => warnings;
         init => warnings = Snapshot(value);
     }
 
+    private IndexCapabilities indexes = null!;
     private IReadOnlySet<CapabilityId> supportedCapabilities = null!;
     private IReadOnlySet<CapabilityId> evidencedCapabilities = null!;
+    private IReadOnlySet<PortableQueryOperation> supportedQueryOperations = null!;
+    private IReadOnlySet<ConcurrencyDeclaration> supportedConcurrencyModes = null!;
     private IReadOnlyList<string> warnings = null!;
 
     public void Deconstruct(
@@ -278,6 +429,24 @@ public sealed record ProviderCapabilityReport
         warnings = Warnings;
     }
 
+    public void Deconstruct(
+        out ProviderIdentity provider,
+        out IReadOnlySet<CapabilityId> supportedCapabilities,
+        out IReadOnlySet<CapabilityId> evidencedCapabilities,
+        out IndexCapabilities indexes,
+        out IReadOnlySet<PortableQueryOperation> supportedQueryOperations,
+        out IReadOnlySet<ConcurrencyDeclaration> supportedConcurrencyModes,
+        out IReadOnlyList<string> warnings)
+    {
+        provider = Provider;
+        supportedCapabilities = SupportedCapabilities;
+        evidencedCapabilities = EvidencedCapabilities;
+        indexes = Indexes;
+        supportedQueryOperations = SupportedQueryOperations;
+        supportedConcurrencyModes = SupportedConcurrencyModes;
+        warnings = Warnings;
+    }
+
     public ProviderCapabilityReport WithCapabilities(params CapabilityId[] capabilities) =>
         this with
         {
@@ -285,7 +454,7 @@ public sealed record ProviderCapabilityReport
             EvidencedCapabilities = EvidencedCapabilities.Concat(capabilities).ToImmutableHashSet()
         };
 
-    private static ImmutableHashSet<CapabilityId> Snapshot(IEnumerable<CapabilityId> values)
+    private static ImmutableHashSet<T> Snapshot<T>(IEnumerable<T> values)
     {
         ArgumentNullException.ThrowIfNull(values);
         return values.ToImmutableHashSet();
@@ -356,6 +525,16 @@ public sealed class ProviderCapabilityValidator
             : new ProviderFit.RequiresEvidence(evaluation.NeedsEvidence);
     }
 
+    public ProviderFit Evaluate(
+        IEnumerable<StorageUnitCapabilityRequirements> requirements,
+        ProviderCapabilityReport capabilities,
+        WorkloadEvidencePolicy? policy = null)
+    {
+        var units = Snapshot(requirements);
+        var required = units.SelectMany(unit => unit.RequiredCapabilities).ToArray();
+        return Evaluate(required, capabilities, policy);
+    }
+
     public CapabilityCompatibilityResult Validate(
         IEnumerable<CapabilityId> requirements,
         ProviderCapabilityReport capabilities)
@@ -400,14 +579,75 @@ public sealed class ProviderCapabilityValidator
             : new CapabilityCompatibilityResult(diagnostics);
     }
 
+    public CapabilityCompatibilityResult Validate(
+        IEnumerable<StorageUnitCapabilityRequirements> requirements,
+        ProviderCapabilityReport capabilities)
+    {
+        var units = Snapshot(requirements);
+        ArgumentNullException.ThrowIfNull(capabilities);
+        var diagnostics = new List<CapabilityValidationIssue>();
+
+        foreach (var warning in capabilities.Warnings)
+            diagnostics.Add(CapabilityValidationIssue.Warning("GW-CAP-002", warning, "provider.warnings"));
+
+        var evidencePolicy = WorkloadEvidencePolicy.FromRegistry(registry);
+        foreach (var unit in units)
+        {
+            foreach (var requirement in unit.RequiredCapabilities.Where(requirement => !registry.IsRegistered(requirement)))
+            {
+                diagnostics.Add(CapabilityValidationIssue.Error(
+                    "GW-CAP-014",
+                    $"Storage unit '{unit.StorageUnitId.Value}' requires unregistered capability '{requirement}'. Register it via an IGroundworkModule before validating.",
+                    $"storageUnits.{unit.StorageUnitId.Value}.requirements"));
+            }
+
+            var evaluation = EvaluateRequirements(unit.RequiredCapabilities, capabilities, evidencePolicy);
+            if (evaluation.Missing.Length != 0)
+            {
+                diagnostics.Add(CapabilityValidationIssue.Error(
+                    "GW-CAP-004",
+                    $"Provider does not support storage requirements: {string.Join(", ", evaluation.Missing.Select(requirement => requirement.Value))}.",
+                    $"storageUnits.{unit.StorageUnitId.Value}.requirements"));
+            }
+
+            if (evaluation.NeedsEvidence.Length != 0)
+            {
+                diagnostics.Add(CapabilityValidationIssue.Error(
+                    "GW-CAP-013",
+                    $"Provider requires evidence before serving storage unit '{unit.StorageUnitId.Value}': {string.Join(" ", evaluation.NeedsEvidence)}",
+                    $"storageUnits.{unit.StorageUnitId.Value}.requirements"));
+            }
+
+            if (!capabilities.SupportedConcurrencyModes.Contains(unit.Concurrency))
+            {
+                diagnostics.Add(CapabilityValidationIssue.Error(
+                    "GW-CAP-005",
+                    $"Provider does not support concurrency mode '{unit.Concurrency}'.",
+                    $"storageUnits.{unit.StorageUnitId.Value}.concurrency"));
+            }
+        }
+
+        return diagnostics.Count == 0
+            ? CapabilityCompatibilityResult.Compatible
+            : new CapabilityCompatibilityResult(diagnostics);
+    }
+
     public CapabilityCompatibilityResult ValidateRuntimeFit(
         IEnumerable<CapabilityId> requirements,
+        ProviderCapabilityReport capabilities) => Validate(requirements, capabilities);
+
+    public CapabilityCompatibilityResult ValidateRuntimeFit(
+        IEnumerable<StorageUnitCapabilityRequirements> requirements,
         ProviderCapabilityReport capabilities) => Validate(requirements, capabilities);
 
     private static CapabilityId[] Snapshot(IEnumerable<CapabilityId> requirements) =>
         (requirements ?? throw new ArgumentNullException(nameof(requirements)))
             .Distinct()
             .ToArray();
+
+    private static StorageUnitCapabilityRequirements[] Snapshot(
+        IEnumerable<StorageUnitCapabilityRequirements> requirements) =>
+        (requirements ?? throw new ArgumentNullException(nameof(requirements))).ToArray();
 
     private static CapabilityEvaluation EvaluateRequirements(
         IReadOnlyList<CapabilityId> required,
