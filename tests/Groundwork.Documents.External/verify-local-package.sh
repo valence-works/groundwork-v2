@@ -10,8 +10,8 @@ trap 'rm -rf "$feed" "$package_cache" "$build_root"' EXIT
 
 pack_public_project() {
   local project="$1"
-  NUGET_PACKAGES="$package_cache" dotnet restore "$project" --force --force-evaluate --packages "$package_cache" --nologo -m:1 -v:q
-  NUGET_PACKAGES="$package_cache" dotnet pack "$project" -c Release -o "$feed" /p:Version=1.0.0 --no-restore --nologo -m:1 -v:q
+  dotnet restore "$project" --force --force-evaluate --nologo -m:1 -v:q
+  dotnet pack "$project" -c Release -o "$feed" /p:Version=1.0.0 --no-restore --nologo -m:1 -v:q
 }
 
 pack_public_project "$repo_root/src/Groundwork.Kernel/Groundwork.Kernel.csproj"
