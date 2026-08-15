@@ -118,6 +118,8 @@ public sealed record ConcurrencyDeclaration
             throw new ArgumentException(
                 $"Optimistic token column '{declaration.TokenColumn}' must be a non-null Int64 with default 0.", nameof(unit));
         }
+
+        AggregationProfileValidator.ValidateUnit(unit);
     }
 }
 
@@ -183,6 +185,8 @@ public sealed record StorageUnit
     public required KeyDefinition Key { get; init; }
     public IReadOnlyList<DerivedColumnDefinition> DerivedColumns { get; init; } = [];
     public IReadOnlyList<IndexDefinition> Indexes { get; init; } = [];
+    /// <summary>Named, closed aggregation shapes available to callers of this unit.</summary>
+    public IReadOnlyList<AggregationProfile> AggregationProfiles { get; init; } = [];
     public ScopePolicy Scope { get; init; } = ScopePolicy.Global;
     /// <summary>Optional durable idempotency contract for batch appends.</summary>
     public AppendIdempotencyDeclaration? AppendIdempotency { get; init; }

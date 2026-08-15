@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Data.Common;
+using System.Globalization;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 
@@ -18,6 +19,30 @@ public abstract class RelationalDialect
 
     /// <summary>Whether CreateTableSql materializes the complete column set in one statement.</summary>
     public virtual bool CreateTableIncludesColumns => false;
+
+    /// <summary>Renders the provider-native command for a declared grouped reduction.</summary>
+    public virtual RelationalAggregationCommand RenderAggregation(
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery? query = null) =>
+        RelationalAggregationRenderer.Render(this, unit, profile, query);
+
+    /// <summary>Renders exact membership for a JSON/array SetUnion output.</summary>
+    public virtual string RenderAggregationContains(string expression, string literal) =>
+        throw new NotSupportedException("A relational dialect must define exact SetUnion membership rendering.");
+
+    /// <summary>Renders a typed literal for a post-reduction aggregation predicate.</summary>
+    public virtual string RenderAggregationLiteral(object? value, PortableType type) => value switch
+    {
+        null => "NULL",
+        string text => "'" + text.Replace("'", "''", StringComparison.Ordinal) + "'",
+        bool boolean => boolean ? "1" : "0",
+        DateTimeOffset instant => "'" + instant.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) + "'",
+        Guid guid => "'" + guid.ToString("D") + "'",
+        byte[] bytes => "X'" + Convert.ToHexString(bytes) + "'",
+        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "NULL",
+        _ => throw new AggregationValidationException([new("GW-AGG-PRED-011", $"The predicate value is not compatible with {type}.", "postPredicate.values")])
+    };
 
     public abstract string QuoteIdentifier(string identifier);
 

@@ -12,6 +12,240 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
+    public void Schema_admission_refuses_invalid_aggregation_before_persistence()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-invalid-aggregation-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_invalid_aggregation_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "flag", Type = PortableType.Boolean }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "invalid",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Sum("total", "flag")]
+                }
+            ]
+        };
+
+        var exception = Assert.Throws<AggregationValidationException>(() => connection.Schema.Apply(unit));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-TYPE-001");
+    }
+
+    [Fact]
+    public void SetUnion_budget_probe_counts_distinct_values_without_materializing_addToSet()
+    {
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.SetUnion("labels", "label", 1)]
+        };
+
+        var stages = MongoStorageSession.RenderSetBudgetProbe(profile, (Aggregate.SetUnion)profile.Aggregates[0]);
+        var pipeline = string.Join("\n", stages.Select(stage => stage.ToJson()));
+
+        Assert.DoesNotContain("$addToSet", pipeline, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_aggregation_set_probe_count", pipeline, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_aggregation_set_probe_value", pipeline, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void Native_set_union_refuses_MaxValues_before_materializing_the_result()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-budget-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_aggregation_budget_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false },
+                new() { Name = "label", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.SetUnion("labels", "label", 1)]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one", ["group"] = "g", ["label"] = "one"
+        }));
+        session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "two", ["group"] = "g", ["label"] = "two"
+        }));
+
+        var exception = Assert.Throws<AggregationBudgetExceededException>(() =>
+            session.Aggregate(new AggregationQuery("summary")));
+
+        Assert.Equal("GW-AGG-BOUND-007", exception.Code);
+    }
+
+    [Fact]
+    public void Aggregation_fingerprint_sorts_allowance_entries_like_the_kernel()
+    {
+        var baseUnit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-fingerprint"),
+            Name = "mongo_aggregation_fingerprint",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "amount", Type = PortableType.Int64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var first = baseUnit with
+        {
+            AggregationProfiles = [FingerprintProfile(["total", "minimum"])]
+        };
+        var reordered = baseUnit with
+        {
+            AggregationProfiles = [FingerprintProfile(["minimum", "total"])]
+        };
+
+        Assert.Equal(SchemaIdentity.Fingerprint(first), SchemaIdentity.Fingerprint(reordered));
+
+        static AggregationProfile FingerprintProfile(IReadOnlyList<string> aliases) => new()
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates =
+            [
+                new Aggregate.Sum("total", "amount"),
+                new Aggregate.Min("minimum", "amount")
+            ],
+            AllowedPredicates = aliases.Select(alias => new AggregationPredicateAllowance
+            {
+                Alias = alias,
+                SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                {
+                    AggregationPredicateOperator.Equal
+                }
+            }).ToArray()
+        };
+    }
+
+    [Fact]
+    public void Aggregation_fingerprint_is_injective_for_delimited_identifiers()
+    {
+        var baseUnit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-canonical-collision"),
+            Name = "mongo_aggregation_canonical_collision",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "a:b", Type = PortableType.String },
+                new() { Name = "c", Type = PortableType.String },
+                new() { Name = "a", Type = PortableType.String },
+                new() { Name = "b:c", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var first = baseUnit with
+        {
+            AggregationProfiles = [new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Min("a:b", "c")]
+            }]
+        };
+        var second = baseUnit with
+        {
+            AggregationProfiles = [new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Min("a", "b:c")]
+            }]
+        };
+
+        Assert.NotEqual(SchemaIdentity.Fingerprint(first), SchemaIdentity.Fingerprint(second));
+    }
+
+    [SkippableFact]
+    public void Profile_only_reducer_alias_and_budget_changes_are_reported_and_applied()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-profile-drift-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_aggregation_profile_drift_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String },
+                new() { Name = "amount", Type = PortableType.Int64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles = [new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Min("minimum", "amount")],
+                MaxGroups = 10,
+                MaxInputRows = 100
+            }]
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var aliasChanged = unit with
+        {
+            AggregationProfiles = [unit.AggregationProfiles[0] with
+            {
+                Aggregates = [new Aggregate.Min("total", "amount")]
+            }]
+        };
+        var reducerChanged = aliasChanged with
+        {
+            AggregationProfiles = [aliasChanged.AggregationProfiles[0] with
+            {
+                Aggregates = [new Aggregate.Max("total", "amount")]
+            }]
+        };
+        var budgetChanged = reducerChanged with
+        {
+            AggregationProfiles = [reducerChanged.AggregationProfiles[0] with { MaxGroups = 11 }]
+        };
+
+        foreach (var changed in new[] { aliasChanged, reducerChanged, budgetChanged })
+        {
+            var diff = connection.Schema.Diff(changed);
+            Assert.Contains(diff.Changes, change =>
+                change.Kind == MongoSchemaChangeKind.UpdateAggregationProfile && change.Identity == "summary");
+            Assert.True(connection.Schema.Apply(changed).Applied);
+        }
+
+        Assert.False(connection.Schema.Apply(budgetChanged).Applied);
+    }
+
+    [SkippableFact]
     public void Provider_passes_the_shipped_conformance_suite()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");

@@ -51,6 +51,7 @@ public sealed class SchemaSubject
                 .. Key.Columns.Select(column => $"key:{column}"),
                 .. DerivedColumns.Select(CanonicalDerivedColumn),
                 .. Indexes.Select(CanonicalIndex),
+                .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile),
                 Evolution.IsDestructive ? "destructive" : "safe",
                 Evolution.SemanticMigrationId
             ]);
@@ -67,6 +68,8 @@ public sealed class SchemaSubject
     public ImmutableArray<DerivedColumnDefinition> DerivedColumns => definition.DerivedColumns.ToImmutableArray();
 
     public ImmutableArray<IndexDefinition> Indexes => definition.Indexes.ToImmutableArray();
+
+    public ImmutableArray<AggregationProfile> AggregationProfiles => definition.AggregationProfiles.ToImmutableArray();
 
     public ScopePolicy Scope => definition.Scope;
 
@@ -181,6 +184,8 @@ public sealed class SchemaSubject
         {
             throw new ArgumentException("Schema subject indexes must name declared columns.", nameof(unit));
         }
+
+        AggregationProfileValidator.ValidateUnit(unit);
     }
 
     private static StorageUnit Snapshot(StorageUnit source) => new()
@@ -204,6 +209,7 @@ public sealed class SchemaSubject
             MissingValues = index.MissingValues,
             SchemaVersion = index.SchemaVersion
         }).ToImmutableArray(),
+        AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
         AppendIdempotency = source.AppendIdempotency is null ? null : source.AppendIdempotency with { },
         Concurrency = source.Concurrency,
@@ -244,6 +250,12 @@ public sealed class SchemaSubject
         SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString(), column.AlgorithmId]);
 
     private static string CanonicalIndex(IndexDefinition index) => CanonicalIndexPayload.From(index).Canonical;
+
+    private static AggregationProfile Snapshot(AggregationProfile profile) =>
+        AggregationProfileSnapshot.Capture(profile);
+
+    private static string CanonicalAggregationProfile(AggregationProfile profile) =>
+        AggregationProfileCanonicalization.Canonicalize(profile);
 }
 
 /// <summary>Provider-owned schema materialization metadata carried through the neutral plan.</summary>

@@ -138,6 +138,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
             Key = new KeyDefinition { Columns = key },
             DerivedColumns = source.DerivedColumns,
             Indexes = indexes,
+            AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
             Scope = source.Scope,
             AppendIdempotency = source.AppendIdempotency,
             Concurrency = source.Concurrency,
