@@ -101,6 +101,49 @@ public sealed class PostgreSqlDialectTests
     public void Live_partial_unique_conflict_target_supports_conditional_upsert()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();
+
+        // The provider-facing declaration necessarily has a primary key, which could hide a
+        // broken partial-index inference clause. Prove the generated statement against a raw
+        // table that has only the partial unique index as its conflict arbiter.
+        var rawTable = "pg_partial_raw_" + Guid.NewGuid().ToString("N");
+        var rawIndex = rawTable + "__email";
+        using (var raw = new NpgsqlConnection(database.ConnectionString))
+        {
+            raw.Open();
+            try
+            {
+                using (var create = raw.CreateCommand())
+                {
+                    create.CommandText = $"CREATE TABLE \"{rawTable}\" (\"email\" text, \"value\" text);" +
+                        $" CREATE UNIQUE INDEX \"{rawIndex}\" ON \"{rawTable}\" (\"email\") WHERE \"email\" IS NOT NULL;";
+                    create.ExecuteNonQuery();
+                }
+
+                var shape = new RelationalWriteShape(
+                    rawTable,
+                    [new RelationalWriteColumn("email"), new RelationalWriteColumn("value")],
+                    ["email"],
+                    ["value"]);
+                using var upsert = raw.CreateCommand();
+                upsert.CommandText = dialect.ConditionalUpsertSql(shape, "\"email\" IS NOT NULL");
+                upsert.Parameters.AddWithValue("email", "raw@example.test");
+                upsert.Parameters.AddWithValue("value", "first");
+                Assert.Equal(1, upsert.ExecuteNonQuery());
+                upsert.Parameters["value"].Value = "second";
+                Assert.Equal(1, upsert.ExecuteNonQuery());
+
+                using var read = raw.CreateCommand();
+                read.CommandText = $"SELECT \"value\" FROM \"{rawTable}\" WHERE \"email\"='raw@example.test';";
+                Assert.Equal("second", read.ExecuteScalar());
+            }
+            finally
+            {
+                using var drop = raw.CreateCommand();
+                drop.CommandText = $"DROP TABLE IF EXISTS \"{rawTable}\";";
+                drop.ExecuteNonQuery();
+            }
+        }
+
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("pg-partial-upsert"),
