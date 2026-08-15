@@ -261,9 +261,15 @@ public sealed class KernelBoundaryTests
                     "Architecture assembly discovery found no Groundwork.Kernel assembly; refusing a vacuous pass.");
             }
 
-            var resolver = new PathAssemblyResolver(trustedPlatformAssemblies
+            var resolverAssemblyNames = new HashSet<string>(StringComparer.Ordinal);
+            var resolverPaths = trustedPlatformAssemblies
                 .Concat(outputAssemblies)
-                .Distinct(StringComparer.Ordinal));
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(path => path.Contains("/runtimes/", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(path => path, StringComparer.Ordinal)
+                .Where(path => TryClaimAssemblyName(path, resolverAssemblyNames, out _))
+                .ToArray();
+            var resolver = new PathAssemblyResolver(resolverPaths);
             var context = new MetadataLoadContext(resolver);
             var assemblies = groundworkAssemblies
                 .Select(context.LoadFromAssemblyPath)
@@ -294,6 +300,12 @@ public sealed class KernelBoundaryTests
         }
 
         public void Dispose() => context.Dispose();
+
+        private static bool TryClaimAssemblyName(string path, ISet<string> assemblyNames, out string? name)
+        {
+            name = AssemblyName.GetAssemblyName(path).FullName;
+            return assemblyNames.Add(name);
+        }
     }
 
     private sealed record AssemblyReference(string Name, string Path);

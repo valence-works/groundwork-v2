@@ -1,0 +1,143 @@
+using Groundwork.Kernel;
+using Groundwork.SqlServer;
+using Xunit;
+
+namespace Groundwork.SqlServer.Tests;
+
+public sealed class SqlServerKeyBudgetTests
+{
+    [Fact]
+    public void A_string_key_at_1700_bytes_is_admitted()
+    {
+        SqlServerIndexKeyBudgetValidator.Validate(Unit(
+            Column("value", PortableType.String, maxLength: 850),
+            Index("by-value", "value")));
+    }
+
+    [Fact]
+    public void A_string_key_over_1700_bytes_reports_arithmetic_and_column()
+    {
+        var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
+            SqlServerIndexKeyBudgetValidator.Validate(Unit(
+                Column("id", PortableType.Int32, nullable: false),
+                Column("email", PortableType.String, maxLength: 851),
+                Index("ux-email", "email"))));
+
+        Assert.Equal("ux-email", exception.IndexName);
+        Assert.Equal(1702, exception.RequiredBytes);
+        Assert.Contains("email=851*2", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("1702", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("1700", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_thirty_two_column_key_is_admitted_and_thirty_three_is_refused()
+    {
+        var columns = Enumerable.Range(0, 33)
+            .Select(index => Column("c" + index, PortableType.Int32, nullable: false))
+            .ToArray();
+
+        SqlServerIndexKeyBudgetValidator.Validate(Unit(columns, Index("by-all", columns.Select(column => column.Name).Take(32).ToArray())));
+
+        var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
+            SqlServerIndexKeyBudgetValidator.Validate(Unit(columns, Index("by-all", columns.Select(column => column.Name).ToArray()))));
+
+        Assert.Equal(33, exception.RequiredColumns);
+        Assert.Contains("33 key columns", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(9, 5)]
+    [InlineData(10, 9)]
+    [InlineData(19, 9)]
+    [InlineData(20, 13)]
+    [InlineData(28, 13)]
+    [InlineData(29, 17)]
+    [InlineData(38, 17)]
+    public void Decimal_key_width_uses_SQL_Server_storage_tiers(int precision, int expectedBytes)
+    {
+        var column = Column("amount", PortableType.Decimal, nullable: false, precision: precision, scale: 0);
+        var paddingLength = (1700 - expectedBytes) / 2;
+        SqlServerIndexKeyBudgetValidator.Validate(Unit(
+            column,
+            Column("padding", PortableType.String, nullable: false, maxLength: paddingLength),
+            Index("by-amount", "amount", "padding")));
+    }
+
+    [Theory]
+    [InlineData(0, 340, 1700)]
+    [InlineData(1, 242, 1694)]
+    public void Future_search_key_factors_are_measured_as_ASCII_bytes(
+        int policyValue,
+        int sourceLength,
+        int expectedBytes)
+    {
+        var policy = (SqlServerSearchKeyExpansionPolicy)policyValue;
+        var unit = Unit(Column("name", PortableType.String, nullable: false, maxLength: sourceLength), Index("by-name", "name"));
+
+        SqlServerIndexKeyBudgetValidator.Validate(unit, new Dictionary<string, SqlServerSearchKeyExpansionPolicy>
+        {
+            ["name"] = policy
+        });
+
+        Assert.Equal(expectedBytes, SqlServerIndexKeyBudgetValidator.EstimateSearchKeyBytes(sourceLength, policy));
+    }
+
+    [Theory]
+    [InlineData(0, 341)]
+    [InlineData(1, 243)]
+    public void Future_search_key_factors_refuse_at_the_first_over_budget_length(
+        int policyValue,
+        int sourceLength)
+    {
+        var policy = (SqlServerSearchKeyExpansionPolicy)policyValue;
+        var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
+            SqlServerIndexKeyBudgetValidator.Validate(
+                Unit(Column("id", PortableType.Int32, nullable: false), Column("name", PortableType.String, nullable: false, maxLength: sourceLength), Index("by-name", "name")),
+                new Dictionary<string, SqlServerSearchKeyExpansionPolicy> { ["name"] = policy }));
+
+        Assert.Contains("name=", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("1700", exception.Message, StringComparison.Ordinal);
+    }
+
+    private static StorageUnit Unit(params object[] values)
+    {
+        var columns = values.OfType<ColumnDefinition>().ToArray();
+        var index = values.OfType<IndexDefinition>().Single();
+        return Unit(columns, index);
+    }
+
+    private static StorageUnit Unit(ColumnDefinition column, params object[] values) =>
+        Unit(new[] { column }.Concat(values.OfType<ColumnDefinition>()).ToArray(), values.OfType<IndexDefinition>().Single());
+
+    private static StorageUnit Unit(ColumnDefinition[] columns, IndexDefinition index) => new()
+    {
+        Id = new StorageUnitId("sqlserver-budget"),
+        Name = "SqlServerBudget",
+        Columns = columns,
+        Key = new KeyDefinition { Columns = [columns[0].Name] },
+        Indexes = [index]
+    };
+
+    private static ColumnDefinition Column(
+        string name,
+        PortableType type,
+        bool nullable = true,
+        int? maxLength = null,
+        int? precision = null,
+        int? scale = null) => new()
+    {
+        Name = name,
+        Type = type,
+        IsNullable = nullable,
+        MaxLength = maxLength,
+        Precision = precision,
+        Scale = scale
+    };
+
+    private static IndexDefinition Index(string name, params string[] columns) => new()
+    {
+        Name = name,
+        Columns = columns.Select(column => new IndexColumn(column)).ToArray()
+    };
+}

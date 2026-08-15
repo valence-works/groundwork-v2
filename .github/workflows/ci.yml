@@ -39,6 +39,30 @@ jobs:
       - run: dotnet restore tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
       - run: dotnet test tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj --no-restore --configuration Release
 
+  sqlserver-conformance:
+    runs-on: ubuntu-latest
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Groundwork!2026
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Groundwork!2026' -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
+      - name: Run SQL Server conformance suite
+        env:
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+        run: dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj --no-restore --configuration Release
+
   provider-infrastructure:
     runs-on: ubuntu-latest
     services:
