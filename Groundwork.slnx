@@ -9,6 +9,9 @@
   <Folder Name="/src/Groundwork.Query.Model/">
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Query.Planning/">
+    <Project Path="src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
+  </Folder>
   <Folder Name="/tests/" />
   <Folder Name="/tests/Groundwork.Architecture.Tests/">
     <Project Path="tests/Groundwork.Architecture.Tests/Groundwork.Architecture.Tests.csproj" />
@@ -21,5 +24,8 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Query.Model.Tests/">
     <Project Path="tests/Groundwork.Query.Model.Tests/Groundwork.Query.Model.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Planning.Tests/">
+    <Project Path="tests/Groundwork.Query.Planning.Tests/Groundwork.Query.Planning.Tests.csproj" />
   </Folder>
 </Solution>

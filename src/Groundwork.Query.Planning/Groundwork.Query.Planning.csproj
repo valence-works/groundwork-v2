@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>Groundwork.Query.Planning</RootNamespace>
+    <AssemblyName>Groundwork.Query.Planning</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+    <PackageReference Include="System.Collections.Immutable" />
+  </ItemGroup>
+</Project>
