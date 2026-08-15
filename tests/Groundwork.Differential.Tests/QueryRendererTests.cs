@@ -62,6 +62,24 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Counted_columns_only_projection_does_not_reapply_predicate_to_the_base_cte()
+    {
+        var request = Request(
+            new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice")),
+            [new OrderTerm(Id, OrderDirection.Ascending, NullOrder.First)],
+            Paging.OffsetLimit(1, 2),
+            ResultShape.TotalCount.Instance,
+            projection: Projection.ColumnsOnly(Id));
+
+        var command = new SqliteQueryRenderer().Render(request);
+
+        Assert.Contains("WHERE", command.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("__groundwork_base WHERE ([name]", command.CommandText, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_count_only", command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(3, command.Parameters.Length);
+    }
+
+    [Fact]
     public void Empty_in_is_match_none_but_keeps_a_declared_sql_server_and_mongo_hint()
     {
         var request = Request(new Predicate.In(Id, ImmutableArray<QueryConstant>.Empty), [], Paging.None, ResultShape.Rows.Instance);
@@ -187,6 +205,26 @@ public sealed class QueryRendererTests
             [QueryConstant.Of(Name, "x")], SetQuantifier.All), [], Paging.None, ResultShape.Rows.Instance);
         Assert.Contains("json_type", new SqliteQueryRenderer().Render(elementRequest).CommandText, StringComparison.Ordinal);
         Assert.Contains("LEFT(LTRIM", new SqlServerQueryRenderer().Render(elementRequest).CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_latest_per_key_uses_portable_string_key_for_timestamp_ties()
+    {
+        var timestamp = new ColumnRef(Table, "createdAt", QueryType.DateTimeOffset, false);
+        var tie = new ColumnRef(Table, "tie", QueryType.String, false);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            new[] { new OrderTerm(Name, OrderDirection.Ascending, NullOrder.First) }.ToImmutableArray(),
+            Projection.ColumnsOnly(Name, tie, timestamp),
+            Paging.None,
+            result: ResultShape.Rows.Instance,
+            latestPerKey: new LatestPerKey(Name, timestamp));
+        var command = new MongoQueryRenderer().Render(request,
+            new QueryRenderOptions(tieBreakColumns: [tie]));
+        var pipeline = string.Join("\n", command.Pipeline.Select(stage => stage.ToString()));
+        Assert.Contains("_groundwork_latest_tie_key_0", pipeline, StringComparison.Ordinal);
+        Assert.Contains("charCodeAt", pipeline, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -345,6 +383,6 @@ public sealed class QueryRendererTests
         _ => throw new ArgumentOutOfRangeException(nameof(renderer))
     };
 
-    private static QueryRequest Request(Predicate predicate, IEnumerable<OrderTerm> order, Paging paging, ResultShape result) =>
-        new(Table, predicate, order.ToImmutableArray(), Projection.All, paging, result);
+    private static QueryRequest Request(Predicate predicate, IEnumerable<OrderTerm> order, Paging paging, ResultShape result, Projection? projection = null) =>
+        new(Table, predicate, order.ToImmutableArray(), projection ?? Projection.All, paging, result);
 }

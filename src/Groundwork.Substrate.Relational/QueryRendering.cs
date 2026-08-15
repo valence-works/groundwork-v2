@@ -156,9 +156,11 @@ public abstract class RelationalQueryRenderer
         var selection = request.Projection.AllColumns
             ? "*"
             : string.Join(", ", request.Projection.Columns.Select(column => dialect.QuoteIdentifier(column.Name)));
-        if (request.LatestPerKey is { } latest && !request.Projection.AllColumns)
+        if ((request.LatestPerKey is not null || request.Result.IncludesTotalCount) && !request.Projection.AllColumns)
         {
-            var required = new[] { latest.Key, latest.Timestamp }
+            var required = (request.LatestPerKey is { } latest
+                    ? new[] { latest.Key, latest.Timestamp }
+                    : Array.Empty<ColumnRef>())
                 .Concat(effectiveOrder.Select(term => term.Column))
                 .Where(column => !request.Projection.Columns.Any(selected => string.Equals(selected.Name, column.Name, StringComparison.Ordinal)))
                 .GroupBy(column => column.Name, StringComparer.Ordinal)
@@ -174,7 +176,10 @@ public abstract class RelationalQueryRenderer
         if (request.Result.IncludesTotalCount)
         {
             var latestSource = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
-            var pageWhere = request.LatestPerKey is null ? where : "__groundwork_latest_rank = 1";
+            // RenderLatestSource has already applied the caller predicate to the base CTE.
+            // Reapplying it here would require predicate-only columns in a columns-only
+            // projection and would duplicate its parameters.
+            var pageWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
             if (cursor is not null)
                 pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
             var page = "SELECT * FROM __groundwork_base WHERE " + pageWhere;
@@ -189,7 +194,9 @@ public abstract class RelationalQueryRenderer
             var aggregate = RenderCountAggregate();
             sql = latestSource + ", __groundwork_page AS (" + page + "), __groundwork_total AS (SELECT " + aggregate + " AS __groundwork_total_count FROM __groundwork_base" + countWhere + ") " +
                 "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
-                "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1;";
+                "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1 ORDER BY " +
+                dialect.QuoteIdentifier("__groundwork_count_only") + " ASC" +
+                (effectiveOrder.Count == 0 ? string.Empty : ", " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm))) + ";";
         }
         else
         {

@@ -309,10 +309,22 @@ public sealed class MongoQueryRenderer
                 { latest.Key.Name, 1 },
                 { latest.Timestamp.Name, -1 }
             };
+            var tieIndex = 0;
             foreach (var tieBreak in options.TieBreakColumns.Where(column =>
                          !string.Equals(column.Name, latest.Key.Name, StringComparison.Ordinal) &&
                          !string.Equals(column.Name, latest.Timestamp.Name, StringComparison.Ordinal)))
-                latestSort.Add(tieBreak.Name, 1);
+            {
+                var tieName = tieBreak.Type == QueryType.String
+                    ? "_groundwork_latest_tie_key_" + tieIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : tieBreak.Name;
+                if (tieBreak.Type == QueryType.String)
+                {
+                    prefix.Add(new BsonDocument("$set", new BsonDocument(tieName,
+                        RenderOrdinalKey("$" + tieBreak.Name))));
+                }
+                latestSort.Add(tieName, 1);
+                tieIndex++;
+            }
             prefix.Add(new BsonDocument("$sort", latestSort));
             prefix.Add(new BsonDocument("$group", new BsonDocument
             {
