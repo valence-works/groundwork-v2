@@ -65,7 +65,7 @@ public sealed class QueryRendererTests
     {
         var request = Request(new Predicate.In(Id, ImmutableArray<QueryConstant>.Empty), [], Paging.None, ResultShape.Rows.Instance);
         var options = new QueryRenderOptions([
-            new QueryIndexDeclaration("ix_customers_id", ["id"], QueryIndexPinning.Pinned, includesNulls: false)]);
+            new QueryIndexDeclaration("ix_customers_id", [new QueryIndexColumn("id", true, QueryType.Int64)], QueryIndexPinning.Pinned, includesNulls: false)]);
 
         var sql = new SqlServerQueryRenderer().Render(request, options);
         var mongo = new MongoQueryRenderer().Render(request, options);
@@ -73,9 +73,11 @@ public sealed class QueryRendererTests
         Assert.True(sql.IsMatchNone);
         Assert.True(sql.IndexHintApplied);
         Assert.Contains("INDEX([ix_customers_id])", sql.CommandText, StringComparison.Ordinal);
+        Assert.Contains("[id] IS NOT NULL", sql.CommandText, StringComparison.Ordinal);
         Assert.True(mongo.IsMatchNone);
         Assert.Equal("ix_customers_id", mongo.Hint);
-        Assert.True(mongo.Filter.Contains("_groundwork_match_none"));
+        Assert.Contains("_groundwork_match_none", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$type", mongo.Filter.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -94,6 +96,18 @@ public sealed class QueryRendererTests
 
         Assert.True(command.IndexHintApplied);
         Assert.Contains("INDEX([__groundwork_ix_customers_ix_customers_id])", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_partial_match_none_requires_exact_index_column_types()
+    {
+        var request = Request(new Predicate.In(Id, ImmutableArray<QueryConstant>.Empty), [], Paging.None, ResultShape.Rows.Instance);
+        var options = new QueryRenderOptions([
+            new QueryIndexDeclaration("ix_customers_id", ["id"], QueryIndexPinning.Pinned, includesNulls: false)]);
+
+        var failure = Assert.Throws<QueryRenderException>(() => new MongoQueryRenderer().Render(request, options));
+        Assert.Equal("GW-QUERY-009", failure.Code);
+        Assert.Contains("exact QueryIndexColumn types", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -209,8 +223,76 @@ public sealed class QueryRendererTests
         var sql = new SqlServerQueryRenderer().Render(contains);
         Assert.DoesNotContain("LOWER", sql.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("UPPER", sql.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DATALENGTH", sql.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEN(@", sql.CommandText, StringComparison.Ordinal);
         var mongo = new MongoQueryRenderer().Render(contains);
         Assert.DoesNotContain("i]", mongo.Filter.ToString(), StringComparison.Ordinal);
+
+        var emptyAll = Request(
+            new Predicate.ElementOf(new ElementSetRef("tags", QueryType.String), [], SetQuantifier.All),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var emptyAllSqlite = new SqliteQueryRenderer().Render(emptyAll);
+        var emptyAllPostgres = new PostgreSqlQueryRenderer().Render(emptyAll);
+        var emptyAllSqlServer = new SqlServerQueryRenderer().Render(emptyAll);
+        var emptyAllMongo = new MongoQueryRenderer().Render(emptyAll);
+        Assert.Contains("json_type", emptyAllSqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("jsonb_typeof", emptyAllPostgres.CommandText, StringComparison.Ordinal);
+        Assert.Contains("ISJSON", emptyAllSqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("array", emptyAllMongo.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Relational_not_nodes_use_total_complements_and_column_not_equal_rejects_nulls()
+    {
+        var notEqual = Request(
+            new Predicate.Not(new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice"))),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var notRange = Request(
+            new Predicate.Not(new Predicate.Range(Amount, Bound.Inclusive(QueryConstant.Of(Amount, 2)), null)),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var notContains = Request(
+            new Predicate.Not(new Predicate.Substring(Name, "ice", Anchor.Contains)),
+            [], Paging.None, ResultShape.Rows.Instance);
+        var otherAmount = new ColumnRef(Table, "otherAmount", QueryType.Int32, isNullable: true);
+        var columnNotEqual = Request(
+            new Predicate.ColumnCompare(Amount, CompareOp.NotEqual, otherAmount),
+            [], Paging.None, ResultShape.Rows.Instance);
+
+        foreach (var command in new[]
+        {
+            new SqliteQueryRenderer().Render(notEqual),
+            new PostgreSqlQueryRenderer().Render(notEqual),
+            new SqlServerQueryRenderer().Render(notEqual)
+        })
+            Assert.Contains("CASE WHEN", command.CommandText, StringComparison.Ordinal);
+
+        foreach (var renderer in new object[]
+        {
+            new SqliteQueryRenderer(),
+            new PostgreSqlQueryRenderer(),
+            new SqlServerQueryRenderer()
+        })
+        {
+            // Q2 deliberately refuses these negations; the renderer must preserve that
+            // refusal rather than emit a three-valued SQL predicate.
+            Assert.Equal("GW-SEM-NOT-001", Assert.Throws<QueryRenderException>(() => Render(renderer, notRange)).Code);
+            Assert.Equal("GW-SEM-NOT-001", Assert.Throws<QueryRenderException>(() => Render(renderer, notContains)).Code);
+        }
+
+        foreach (var command in new[]
+        {
+            new SqliteQueryRenderer().Render(columnNotEqual),
+            new PostgreSqlQueryRenderer().Render(columnNotEqual),
+            new SqlServerQueryRenderer().Render(columnNotEqual)
+        })
+        {
+            Assert.Contains("IS NOT NULL", command.CommandText, StringComparison.Ordinal);
+            Assert.DoesNotContain("IS NULL OR", command.CommandText, StringComparison.Ordinal);
+        }
+
+        var mongo = new MongoQueryRenderer().Render(columnNotEqual);
+        Assert.Contains("$and", mongo.Filter.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$ne", mongo.Filter.ToString(), StringComparison.Ordinal);
     }
 
     private static object Render(object renderer, QueryRequest request) => renderer switch

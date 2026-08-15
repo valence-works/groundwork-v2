@@ -14,9 +14,12 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
 
     protected override string ProviderName => "SQLite";
 
-    protected override string RenderColumn(ColumnRef column) => column.Type == QueryType.Decimal
-        ? "CAST(" + Dialect.QuoteIdentifier(column.Name) + " AS NUMERIC)"
-        : base.RenderColumn(column);
+    protected override string RenderColumn(ColumnRef column) => column.Type switch
+    {
+        QueryType.Decimal => Dialect.QuoteIdentifier(column.Name) + " COLLATE GROUNDWORK_DECIMAL_18_4",
+        QueryType.String => base.RenderColumn(column) + " COLLATE GROUNDWORK_UTF16_ORDINAL",
+        _ => base.RenderColumn(column)
+    };
 
     protected override object? AdaptParameter(QueryType type, object? value) => type switch
     {
@@ -42,7 +45,9 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
             throw new QueryRenderException("GW-SEM-TYPE-007", "An element set must declare its exact element type before rendering.");
         var expression = Dialect.QuoteIdentifier(elementOf.Set.Name);
         if (elementOf.Values.Length == 0)
-            return elementOf.Quantifier == SetQuantifier.Any ? "1 = 0" : "1 = 1";
+            return elementOf.Quantifier == SetQuantifier.Any
+                ? "1 = 0"
+                : "(json_valid(" + expression + ") = 1 AND json_type(" + expression + ") = 'array')";
         var clauses = new List<string>();
         foreach (var value in elementOf.Values)
         {

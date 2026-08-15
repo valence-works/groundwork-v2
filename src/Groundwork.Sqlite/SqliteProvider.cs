@@ -178,6 +178,14 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         try
         {
             connection.Open();
+            connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", static (left, right) => string.CompareOrdinal(left, right));
+            connection.CreateCollation("GROUNDWORK_DECIMAL_18_4", static (left, right) =>
+            {
+                if (decimal.TryParse(left, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var leftNumber) &&
+                    decimal.TryParse(right, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var rightNumber))
+                    return leftNumber.CompareTo(rightNumber);
+                return string.CompareOrdinal(left, right);
+            });
             using (var pragma = connection.CreateCommand())
             {
                 pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";

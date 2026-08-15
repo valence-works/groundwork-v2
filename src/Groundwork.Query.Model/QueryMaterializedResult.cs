@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.ObjectModel;
+using System.Globalization;
 
 namespace Groundwork.Query.Model;
 
@@ -54,7 +55,9 @@ public static class QueryResultMaterializer
         QueryRenderOptions options,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> source,
         string? selectedIndex = null,
-        bool indexHintApplied = false)
+        bool indexHintApplied = false,
+        bool sourceIncludesRequestedOffset = true,
+        bool sourceIncludesContinuation = true)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
@@ -66,8 +69,25 @@ public static class QueryResultMaterializer
                 ? Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture)
                 : 0L
             : (long?)null;
-        var hasMore = request.Paging.Limit is int limit && source.Count > limit;
-        var visible = hasMore ? source.Take(request.Paging.Limit!.Value).ToArray() : source.ToArray();
+        var effectiveSource = source;
+        if (!sourceIncludesContinuation && request.Paging.ContinuationToken is { } token)
+        {
+            IReadOnlyList<QueryConstant> cursor;
+            try
+            {
+                cursor = QueryContinuationToken.Decode(token, request, options);
+            }
+            catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
+            {
+                throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
+            }
+            var order = options.GetEffectiveOrder(request);
+            effectiveSource = source.Where(row => IsAfter(row, order, cursor)).ToArray();
+        }
+        var offset = sourceIncludesRequestedOffset ? 0 : request.Paging.Offset ?? 0;
+        var limit = request.Paging.Limit;
+        var hasMore = limit is int pageSize && effectiveSource.Count > checked(offset + pageSize);
+        var visible = effectiveSource.Skip(offset).Take(limit ?? int.MaxValue).ToArray();
         var effectiveOrder = options.GetEffectiveOrder(request);
         string? nextToken = null;
         if (hasMore && effectiveOrder.Length != 0 && visible.Length != 0)
@@ -90,13 +110,71 @@ public static class QueryResultMaterializer
         var rows = visible.Select(row =>
         {
             IEnumerable<KeyValuePair<string, object?>> fields = request.Projection.AllColumns
-                ? row.Where(pair => !pair.Key.StartsWith("_groundwork_null_rank_", StringComparison.Ordinal) && pair.Key != "__groundwork_total_count")
+                ? row.Where(pair => !IsInternalField(pair.Key))
                 : request.Projection.Columns
-                    .Where(column => row.ContainsKey(column.Name))
+                    .Where(column => !IsInternalField(column.Name) && row.ContainsKey(column.Name))
                     .Select(column => new KeyValuePair<string, object?>(column.Name, row[column.Name]));
             return (IReadOnlyDictionary<string, object?>)new ReadOnlyDictionary<string, object?>(fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
         }).ToArray();
         return new QueryMaterializedResult(rows, totalCount, nextToken, selectedIndex, indexHintApplied);
+    }
+
+    private static bool IsInternalField(string name) =>
+        name.StartsWith("__groundwork_", StringComparison.Ordinal) ||
+        name.StartsWith("_groundwork_", StringComparison.Ordinal);
+
+    private static bool IsAfter(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<OrderTerm> order,
+        IReadOnlyList<QueryConstant> cursor)
+    {
+        for (var index = 0; index < order.Count; index++)
+        {
+            var term = order[index];
+            row.TryGetValue(term.Column.Name, out var actual);
+            var boundary = cursor[index].Kind == QueryConstantKind.Null ? null : cursor[index].Value;
+            var comparison = CompareForOrder(actual, boundary, term);
+            if (comparison > 0) return true;
+            if (comparison < 0) return false;
+        }
+        return false;
+    }
+
+    private static int CompareForOrder(object? left, object? right, OrderTerm term)
+    {
+        if (left is null || right is null)
+            return left is null && right is null ? 0 : left is null
+                ? term.NullOrder == NullOrder.First ? -1 : 1
+                : term.NullOrder == NullOrder.First ? 1 : -1;
+        var comparison = left is string leftText && right is string rightText
+            ? string.CompareOrdinal(leftText, rightText)
+            : left is DateTimeOffset leftInstant && right is DateTimeOffset rightInstant
+                ? leftInstant.UtcTicks.CompareTo(rightInstant.UtcTicks)
+                : left is Guid leftGuid && right is Guid rightGuid
+                    ? CompareBytes(GuidBytes(leftGuid), GuidBytes(rightGuid))
+                    : left is byte[] leftBytes && right is byte[] rightBytes
+                        ? CompareBytes(leftBytes, rightBytes)
+                        : ((IComparable)left).CompareTo(right);
+        return term.Direction == OrderDirection.Descending ? -comparison : comparison;
+    }
+
+    private static byte[] GuidBytes(Guid value)
+    {
+        var text = value.ToString("N");
+        var bytes = new byte[16];
+        for (var index = 0; index < bytes.Length; index++)
+            bytes[index] = byte.Parse(text.Substring(index * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        return bytes;
+    }
+
+    private static int CompareBytes(byte[] left, byte[] right)
+    {
+        for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
+        {
+            var comparison = left[index].CompareTo(right[index]);
+            if (comparison != 0) return comparison;
+        }
+        return left.Length.CompareTo(right.Length);
     }
 }
 
@@ -121,14 +199,27 @@ public static class QueryRequestExecution
         }
 
         var paging = request.Paging;
-        if (request.Paging.Limit is int limit)
+        if (request.Result.IncludesTotalCount && request.Paging.ContinuationToken is not null)
+        {
+            paging = Paging.None;
+        }
+        else if (request.Paging.Limit is int limit)
         {
             var expandedLimit = checked(limit + 1);
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, expandedLimit)
                 : request.Paging.Offset is int offset
-                    ? Paging.OffsetLimit(offset, expandedLimit)
+                    ? request.Result.IncludesTotalCount
+                        ? Paging.OffsetLimit(0, checked(offset + expandedLimit))
+                        : Paging.OffsetLimit(offset, expandedLimit)
                     : Paging.Keyset(expandedLimit);
+        }
+        else if (request.Result.IncludesTotalCount && request.Paging.Offset is not null)
+        {
+            // A window count is computed before OFFSET, but a page beyond the last row would
+            // otherwise return no row carrying that count. Read from the beginning once and let
+            // the shared materializer apply the requested offset, preserving one native query.
+            paging = Paging.None;
         }
         return ReferenceEquals(projection, request.Projection) && ReferenceEquals(paging, request.Paging)
             ? request

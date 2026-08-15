@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.ObjectModel;
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -698,8 +699,9 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var renderOptions = suppliedOptions with
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
+            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
         };
         var executionRequest = QueryRequestExecution.ForPage(request, renderOptions);
@@ -741,11 +743,45 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         }).ToArray();
         return QueryResultMaterializer.Materialize(
             request,
-            suppliedOptions,
+            renderOptions,
             rows,
-            suppliedOptions.FindPinnedIndex()?.Name,
-            command.Hint is not null);
+            renderOptions.FindPinnedIndex()?.Name,
+            command.Hint is not null,
+            !request.Result.IncludesTotalCount,
+            !(request.Result.IncludesTotalCount && request.Paging.ContinuationToken is not null));
     }
+
+    private ColumnRef? QueryColumn(string name)
+    {
+        var column = Unit.Columns.Single(item => item.Name == name);
+        return column.Type switch
+        {
+            PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
+            PortableType.Int32 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int32, column.IsNullable),
+            PortableType.Int64 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int64, column.IsNullable),
+            PortableType.Decimal => new ColumnRef(new TableId(Unit.Name), name, QueryType.Decimal, column.IsNullable, null,
+                column.Precision is int precision ? checked((byte)precision) : null,
+                column.Scale is int scale ? checked((byte)scale) : null),
+            PortableType.String => new ColumnRef(new TableId(Unit.Name), name, QueryType.String, column.IsNullable, column.MaxLength),
+            PortableType.DateTimeOffset => new ColumnRef(new TableId(Unit.Name), name, QueryType.DateTimeOffset, column.IsNullable),
+            PortableType.Guid => new ColumnRef(new TableId(Unit.Name), name, QueryType.Guid, column.IsNullable),
+            PortableType.Binary => new ColumnRef(new TableId(Unit.Name), name, QueryType.Binary, column.IsNullable, column.MaxLength),
+            _ => null
+        };
+    }
+
+    private static QueryType? QueryTypeOf(PortableType type) => type switch
+    {
+        PortableType.Boolean => QueryType.Boolean,
+        PortableType.Int32 => QueryType.Int32,
+        PortableType.Int64 => QueryType.Int64,
+        PortableType.Decimal => QueryType.Decimal,
+        PortableType.String => QueryType.String,
+        PortableType.DateTimeOffset => QueryType.DateTimeOffset,
+        PortableType.Guid => QueryType.Guid,
+        PortableType.Binary => QueryType.Binary,
+        _ => null
+    };
 
     public MongoStoredEntry? Read(MongoStorageKey key)
     {

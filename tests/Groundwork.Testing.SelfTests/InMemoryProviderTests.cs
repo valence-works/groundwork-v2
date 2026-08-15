@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Groundwork.Testing;
 
 namespace Groundwork.Testing.SelfTests;
@@ -287,6 +288,61 @@ public sealed class InMemoryProviderTests
         Assert.Equal("before", loaded!.Values.Values["value"]);
         var writable = Assert.IsAssignableFrom<IDictionary<string, object?>>(loaded.Values.Values);
         Assert.Throws<NotSupportedException>(() => writable["value"] = "tampered");
+    }
+
+    [Fact]
+    public void In_memory_query_honors_order_paging_continuation_count_and_budget()
+    {
+        var factory = new InMemoryProviderFactory();
+        using var connection = factory.Create("memory://query-contract");
+        var unit = TestingFixture.GlobalUnit("query-contract");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(TestingFixture.Values("a", "b"));
+        session.Insert(TestingFixture.Values("b", "a"));
+        session.Insert(TestingFixture.Values("c", "c"));
+
+        var table = new TableId(unit.Name);
+        var id = new ColumnRef(table, "id", QueryType.String, isNullable: false);
+        var value = new ColumnRef(table, "value", QueryType.String, isNullable: true);
+        var options = new QueryRenderOptions(tieBreakColumns: [id]);
+        var firstRequest = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(value, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.OffsetLimit(1, 1));
+
+        var first = session.Query(firstRequest, options);
+        Assert.Equal("b", first.Rows.Single()["value"]);
+        Assert.NotNull(first.NextContinuationToken);
+
+        var next = session.Query(new QueryRequest(
+            table,
+            firstRequest.Where,
+            firstRequest.Order,
+            firstRequest.Projection,
+            Paging.Continuation(first.NextContinuationToken!, 1)), options);
+        Assert.Equal("c", next.Rows.Single()["value"]);
+
+        var counted = session.Query(new QueryRequest(
+            table,
+            firstRequest.Where,
+            firstRequest.Order,
+            firstRequest.Projection,
+            Paging.OffsetLimit(100, 1),
+            ResultShape.TotalCount.Instance), options);
+        Assert.Empty(counted.Rows);
+        Assert.Equal(3, counted.TotalCount);
+
+        var budgetRequest = new QueryRequest(
+            table,
+            new Predicate.In(value, [QueryConstant.Of(value, "a"), QueryConstant.Of(value, "b")]),
+            [],
+            Projection.All,
+            Paging.None);
+        var budgetFailure = Assert.Throws<QueryRenderException>(() => session.Query(budgetRequest, options with { InValueLimit = 1 }));
+        Assert.Equal("GW-QUERY-015", budgetFailure.Code);
     }
 
     private sealed class ExternalFactory : IStorageProviderFactory

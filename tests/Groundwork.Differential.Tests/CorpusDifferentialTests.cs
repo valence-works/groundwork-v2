@@ -14,6 +14,8 @@ namespace Groundwork.Differential.Tests;
 public sealed class CorpusDifferentialTests
 {
     private static readonly string RunTableName = "g2-edge-row-" + Guid.NewGuid().ToString("N");
+    private static readonly string SparseTableName = "g2-sparse-" + Guid.NewGuid().ToString("N");
+    private static readonly string SemanticEdgeTableName = "g2-semantic-edge-" + Guid.NewGuid().ToString("N");
 
     [SkippableFact]
     public void Pinned_40_row_300_shape_corpus_is_bit_identical_through_public_provider_sessions()
@@ -48,10 +50,11 @@ public sealed class CorpusDifferentialTests
             {
                 Assert.True(expectedValidation.IsPortable, $"{shape.Number}: {shape.Description}: {string.Join("; ", expectedValidation.Refusals.Select(refusal => refusal.Code))}");
                 Assert.All(observations, observation => Assert.True(observation.IsSuccess, $"{shape.Number}: {shape.Description}: {observation.Error}"));
-                var expected = observations[0].Result!;
+                var expected = Oracle(request, options);
+                Assert.Equal(expected, observations[0].Result);
                 Assert.All(observations.Skip(1), observation => Assert.True(
                     string.Equals(expected, observation.Result, StringComparison.Ordinal),
-                    $"{shape.Number}: {shape.Description}: {observation.Provider} differed from SQLite. Expected={expected} Actual={observation.Result}"));
+                    $"{shape.Number}: {shape.Description}: {observation.Provider} differed from the PortableQuerySemantics oracle. Expected={expected} Actual={observation.Result}"));
             }
             else
             {
@@ -146,6 +149,34 @@ public sealed class CorpusDifferentialTests
             Assert.Equal(40, allColumns.TotalCount);
             Assert.All(allColumns.Rows, row => Assert.DoesNotContain(
                 row.Keys, key => key.StartsWith("_groundwork_", StringComparison.Ordinal)));
+
+            var beyondEnd = provider.Query(new QueryRequest(
+                table,
+                request.Where,
+                request.Order,
+                request.Projection,
+                Paging.OffsetLimit(100, 5),
+                ResultShape.TotalCount.Instance), Options());
+            Assert.Empty(beyondEnd.Rows);
+            Assert.Equal(40, beyondEnd.TotalCount);
+
+            var firstCountedPage = provider.Query(new QueryRequest(
+                table,
+                request.Where,
+                request.Order,
+                request.Projection,
+                Paging.Keyset(5),
+                ResultShape.TotalCount.Instance), Options());
+            Assert.Equal(40, firstCountedPage.TotalCount);
+            Assert.NotNull(firstCountedPage.NextContinuationToken);
+            var laterCountedPage = provider.Query(new QueryRequest(
+                table,
+                request.Where,
+                request.Order,
+                request.Projection,
+                Paging.Continuation(firstCountedPage.NextContinuationToken!, 5),
+                ResultShape.TotalCount.Instance), Options());
+            Assert.Equal(40, laterCountedPage.TotalCount);
         }
 
         var hinted = sql.Query(request, Options());
@@ -168,6 +199,94 @@ public sealed class CorpusDifferentialTests
         Assert.Throws<FormatException>(() => QueryContinuationToken.Decode(token, request, other));
     }
 
+    [SkippableFact]
+    public void Empty_in_keeps_a_pinned_partial_index_usable_on_all_four_providers()
+    {
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
+        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        using var sqlite = OpenSqlite(SparseUnit, SparseRows);
+        using var pg = OpenPostgreSql(postgres, SparseUnit, SparseRows);
+        using var sql = OpenSqlServer(sqlServer, SparseUnit, SparseRows);
+        using var mongoSession = OpenMongo(mongo, SparseUnit, SparseRows);
+        var providers = new[] { sqlite, pg, sql, mongoSession };
+        var number = new ColumnRef(new TableId(SparseTableName), "numberValue", QueryType.Decimal, isNullable: true, decimalPrecision: 18, decimalScale: 4);
+        var request = new QueryRequest(
+            number.Table,
+            new Predicate.In(number, ImmutableArray<QueryConstant>.Empty),
+            [],
+            Projection.All,
+            Paging.None);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration("ix_sparse", [new QueryIndexColumn("numberValue", true, QueryType.Decimal)], QueryIndexPinning.Pinned, includesNulls: false)],
+            selectedIndex: "ix_sparse");
+
+        foreach (var provider in providers)
+        {
+            var result = provider.Query(request, options);
+            Assert.Empty(result.Rows);
+            Assert.Equal("ix_sparse", result.SelectedIndex);
+        }
+        Assert.True(sql.Query(request, options).IndexHintApplied);
+        Assert.True(mongoSession.Query(request, options).IndexHintApplied);
+    }
+
+    [SkippableFact]
+    public void Adversarial_scalar_ordering_matches_the_portable_oracle_on_all_four_providers()
+    {
+        var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
+        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
+        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        using var sqlite = OpenSqlite(SemanticEdgeUnit, SemanticEdgeRows);
+        using var pg = OpenPostgreSql(postgres, SemanticEdgeUnit, SemanticEdgeRows);
+        using var sql = OpenSqlServer(sqlServer, SemanticEdgeUnit, SemanticEdgeRows);
+        using var mongoSession = OpenMongo(mongo, SemanticEdgeUnit, SemanticEdgeRows);
+        var providers = new[] { sqlite, pg, sql, mongoSession };
+        var table = new TableId(SemanticEdgeTableName);
+        var cases = new[]
+        {
+            new ScalarOrderCase(
+                "decimal(18,4)",
+                new ColumnRef(table, "decimalValue", QueryType.Decimal, false, decimalPrecision: 18, decimalScale: 4),
+                [12345678901234.1235m, 12345678901234.1234m]),
+            new ScalarOrderCase(
+                "UTF-16 ordinal text",
+                new ColumnRef(table, "textValue", QueryType.String, false),
+                ["\U00010000", "\uE000"]),
+            new ScalarOrderCase(
+                "UTC ticks",
+                new ColumnRef(table, "instantValue", QueryType.DateTimeOffset, false),
+                [new DateTimeOffset(638000000000000002L, TimeSpan.Zero), new DateTimeOffset(638000000000000001L, TimeSpan.Zero)]),
+            new ScalarOrderCase(
+                "RFC4122 GUID bytes",
+                new ColumnRef(table, "guidValue", QueryType.Guid, false),
+                [Guid.Parse("01112200-4455-6677-8899-aabbccddeeff"), Guid.Parse("00112233-4455-6677-8899-aabbccddeeff")])
+        };
+
+        foreach (var scalar in cases)
+        {
+            var expected = SemanticEdgeRows
+                .Where(row => scalar.Values.Any(value => Equals(row[scalar.Column.Name], value)))
+                .OrderBy(row => row, new PortableRowComparer([new OrderTerm(scalar.Column, OrderDirection.Ascending, NullOrder.First)]))
+                .Select(row => (long)row["id"]!)
+                .ToArray();
+            Assert.Equal(2, expected.Length);
+            var request = new QueryRequest(
+                table,
+                new Predicate.In(scalar.Column, scalar.Values.Select(value => QueryConstant.Of(scalar.Column, value))),
+                [new OrderTerm(scalar.Column, OrderDirection.Ascending, NullOrder.First)],
+                Projection.ColumnsOnly(new ColumnRef(table, "id", QueryType.Int64, false), scalar.Column),
+                Paging.None);
+
+            foreach (var provider in providers)
+            {
+                var result = provider.Query(request, QueryRenderOptions.Default);
+                var actual = result.Rows.Select(row => (long)row["id"]!).ToArray();
+                Assert.True(expected.SequenceEqual(actual), $"{provider.Name}/{scalar.Name}: expected [{string.Join(",", expected)}], actual [{string.Join(",", actual)}]");
+            }
+        }
+    }
+
     private static Observation Observe(CorpusSession provider, QueryRequest request, QueryRenderOptions options)
     {
         try
@@ -183,6 +302,25 @@ public sealed class CorpusDifferentialTests
     private static string Canonical(QueryMaterializedResult result) =>
         string.Join("\n", result.Rows.Select(row => string.Join(";", row.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + "=" + Value(pair.Value)))));
 
+    private static string Oracle(QueryRequest request, QueryRenderOptions options)
+    {
+        var rows = Rows
+            .Where(row => PortableQuerySemantics.Evaluate(request.Where, row))
+            .OrderBy(row => row, new PortableRowComparer(options.GetEffectiveOrder(request)))
+            .ToArray();
+        if (request.Paging.Offset is int offset)
+            rows = rows.Skip(offset).ToArray();
+        if (request.Paging.Limit is int limit)
+            rows = rows.Take(limit).ToArray();
+
+        var shaped = rows.Select(row => request.Projection.AllColumns
+            ? row
+            : (IReadOnlyDictionary<string, object?>)request.Projection.Columns
+                .Where(column => row.ContainsKey(column.Name))
+                .ToDictionary(column => column.Name, column => row[column.Name], StringComparer.Ordinal)).ToArray();
+        return Canonical(new QueryMaterializedResult(shaped, null, null));
+    }
+
     private static string Value(object? value) => value switch
     {
         null => "null",
@@ -194,8 +332,70 @@ public sealed class CorpusDifferentialTests
         _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty
     };
 
+    private sealed class PortableRowComparer(IReadOnlyList<OrderTerm> order) : IComparer<IReadOnlyDictionary<string, object?>>
+    {
+        public int Compare(IReadOnlyDictionary<string, object?>? left, IReadOnlyDictionary<string, object?>? right)
+        {
+            if (ReferenceEquals(left, right)) return 0;
+            if (left is null) return -1;
+            if (right is null) return 1;
+            foreach (var term in order)
+            {
+                left.TryGetValue(term.Column.Name, out var leftValue);
+                right.TryGetValue(term.Column.Name, out var rightValue);
+                var comparison = leftValue is null || rightValue is null
+                    ? CompareNulls(leftValue, rightValue, term.NullOrder)
+                    : CompareValue(leftValue, rightValue);
+                if (comparison != 0)
+                    return leftValue is not null && rightValue is not null && term.Direction == OrderDirection.Descending
+                        ? -comparison
+                        : comparison;
+            }
+            return 0;
+        }
+
+        private static int CompareNulls(object? left, object? right, NullOrder nullOrder)
+        {
+            return left is null && right is null ? 0 : left is null
+                ? nullOrder == NullOrder.First ? -1 : 1
+                : nullOrder == NullOrder.First ? 1 : -1;
+        }
+
+        private static int CompareValue(object left, object right)
+        {
+            if (left is string leftText && right is string rightText)
+                return string.CompareOrdinal(leftText, rightText);
+            if (left is DateTimeOffset leftInstant && right is DateTimeOffset rightInstant)
+                return leftInstant.UtcTicks.CompareTo(rightInstant.UtcTicks);
+            if (left is Guid leftGuid && right is Guid rightGuid)
+                return CompareBytes(GuidBytes(leftGuid), GuidBytes(rightGuid));
+            if (left is byte[] leftBytes && right is byte[] rightBytes)
+                return CompareBytes(leftBytes, rightBytes);
+            return ((IComparable)left).CompareTo(right);
+        }
+
+        private static byte[] GuidBytes(Guid value)
+        {
+            var text = value.ToString("N");
+            var bytes = new byte[16];
+            for (var index = 0; index < bytes.Length; index++)
+                bytes[index] = byte.Parse(text.Substring(index * 2, 2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture);
+            return bytes;
+        }
+
+        private static int CompareBytes(byte[] left, byte[] right)
+        {
+            for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
+            {
+                var comparison = left[index].CompareTo(right[index]);
+                if (comparison != 0) return comparison;
+            }
+            return left.Length.CompareTo(right.Length);
+        }
+    }
+
     private static QueryRenderOptions Options() => new(
-        indexes: [new QueryIndexDeclaration("ix_number", ["numberValue"], QueryIndexPinning.Pinned)],
+        indexes: [new QueryIndexDeclaration("ix_number", [new QueryIndexColumn("numberValue", true, QueryType.Decimal)], QueryIndexPinning.Pinned)],
         selectedIndex: "ix_number",
         tieBreakColumns: [new ColumnRef(new TableId(RunTableName), "id", QueryType.Int64, isNullable: false)]);
 
@@ -217,6 +417,118 @@ public sealed class CorpusDifferentialTests
         Key = new KeyDefinition { Columns = ["id"] },
         Indexes = [new IndexDefinition { Name = "ix_number", Columns = [new IndexColumn("numberValue")] }]
     };
+
+    private static StorageUnit SparseUnit => new()
+    {
+        Id = new StorageUnitId(SparseTableName),
+        Name = SparseTableName,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "numberValue", Type = PortableType.Decimal, IsNullable = true, Precision = 18, Scale = 4 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes =
+        [
+            new IndexDefinition
+            {
+                Name = "ix_sparse",
+                Columns = [new IndexColumn("numberValue")],
+                MissingValues = MissingValueBehavior.Excluded
+            }
+        ]
+    };
+
+    private static StorageUnit SemanticEdgeUnit => new()
+    {
+        Id = new StorageUnitId(SemanticEdgeTableName),
+        Name = SemanticEdgeTableName,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+            new() { Name = "decimalValue", Type = PortableType.Decimal, IsNullable = true, Precision = 18, Scale = 4 },
+            new() { Name = "textValue", Type = PortableType.String, IsNullable = true, MaxLength = 64 },
+            new() { Name = "instantValue", Type = PortableType.DateTimeOffset, IsNullable = true },
+            new() { Name = "guidValue", Type = PortableType.Guid, IsNullable = true }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> SemanticEdgeRows =>
+    [
+        new Dictionary<string, object?>
+        {
+            ["id"] = 1L,
+            ["decimalValue"] = 12345678901234.1235m,
+            ["textValue"] = null,
+            ["instantValue"] = null,
+            ["guidValue"] = null
+        },
+        new Dictionary<string, object?>
+        {
+            ["id"] = 2L,
+            ["decimalValue"] = 12345678901234.1234m,
+            ["textValue"] = null,
+            ["instantValue"] = null,
+            ["guidValue"] = null
+        },
+        new Dictionary<string, object?>
+        {
+            ["id"] = 3L,
+            ["decimalValue"] = null,
+            ["textValue"] = "\U00010000",
+            ["instantValue"] = null,
+            ["guidValue"] = null
+        },
+        new Dictionary<string, object?>
+        {
+            ["id"] = 4L,
+            ["decimalValue"] = null,
+            ["textValue"] = "\uE000",
+            ["instantValue"] = null,
+            ["guidValue"] = null
+        },
+        new Dictionary<string, object?>
+        {
+            ["id"] = 5L,
+            ["decimalValue"] = null,
+            ["textValue"] = null,
+            ["instantValue"] = new DateTimeOffset(638000000000000002L, TimeSpan.Zero),
+            ["guidValue"] = null
+        },
+        new Dictionary<string, object?>
+        {
+            ["id"] = 6L,
+            ["decimalValue"] = null,
+            ["textValue"] = null,
+            ["instantValue"] = new DateTimeOffset(638000000000000001L, TimeSpan.Zero),
+            ["guidValue"] = null
+        },
+        new Dictionary<string, object?>
+        {
+            ["id"] = 7L,
+            ["decimalValue"] = null,
+            ["textValue"] = null,
+            ["instantValue"] = null,
+            ["guidValue"] = Guid.Parse("01112200-4455-6677-8899-aabbccddeeff")
+        },
+        new Dictionary<string, object?>
+        {
+            ["id"] = 8L,
+            ["decimalValue"] = null,
+            ["textValue"] = null,
+            ["instantValue"] = null,
+            ["guidValue"] = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff")
+        }
+    ];
+
+    private sealed record ScalarOrderCase(string Name, ColumnRef Column, IReadOnlyList<object> Values);
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> SparseRows =>
+    [
+        new Dictionary<string, object?> { ["id"] = 1L, ["numberValue"] = null },
+        new Dictionary<string, object?> { ["id"] = 2L, ["numberValue"] = 2.5m }
+    ];
 
     private static QueryRequest Retarget(QueryRequest request)
     {
@@ -288,12 +600,14 @@ public sealed class CorpusDifferentialTests
             ["binaryValue"] = index % 8 == 0 ? null : new byte[] { (byte)index, (byte)(255 - index), 0 }
         }).ToArray();
 
-    private static CorpusSession OpenSqlite()
+    private static CorpusSession OpenSqlite() => OpenSqlite(Unit, Rows);
+
+    private static CorpusSession OpenSqlite(StorageUnit unit, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
     {
         var connection = new SqliteProviderFactory().Create("Data Source=file:g2q4_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
-        connection.Schema.Apply(Unit);
-        var session = connection.OpenSession(Unit, StorageAccess.Global);
-        foreach (var row in Rows)
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var row in rows)
         {
             session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
             session.Insert(new StorageValues(row));
@@ -301,12 +615,14 @@ public sealed class CorpusDifferentialTests
         return new CorpusSession("SQLite", session.Query, connection.Dispose);
     }
 
-    private static CorpusSession OpenPostgreSql(string connectionString)
+    private static CorpusSession OpenPostgreSql(string connectionString) => OpenPostgreSql(connectionString, Unit, Rows);
+
+    private static CorpusSession OpenPostgreSql(string connectionString, StorageUnit unit, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
     {
         var connection = new PostgreSqlProviderFactory().Create(connectionString);
-        connection.Schema.Apply(Unit);
-        var session = connection.OpenSession(Unit, StorageAccess.Global);
-        foreach (var row in Rows)
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var row in rows)
         {
             session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
             session.Insert(new StorageValues(row));
@@ -314,12 +630,14 @@ public sealed class CorpusDifferentialTests
         return new CorpusSession("PostgreSQL", session.Query, connection.Dispose);
     }
 
-    private static CorpusSession OpenSqlServer(string connectionString)
+    private static CorpusSession OpenSqlServer(string connectionString) => OpenSqlServer(connectionString, Unit, Rows);
+
+    private static CorpusSession OpenSqlServer(string connectionString, StorageUnit unit, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
     {
         var connection = new SqlServerProviderFactory().Create(connectionString);
-        connection.Schema.Apply(Unit);
-        var session = connection.OpenSession(Unit, StorageAccess.Global);
-        foreach (var row in Rows)
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var row in rows)
         {
             session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
             session.Insert(new StorageValues(row));
@@ -327,12 +645,14 @@ public sealed class CorpusDifferentialTests
         return new CorpusSession("SQL Server", session.Query, connection.Dispose);
     }
 
-    private static MongoCorpusSession OpenMongo(string connectionString)
+    private static MongoCorpusSession OpenMongo(string connectionString) => OpenMongo(connectionString, Unit, Rows);
+
+    private static MongoCorpusSession OpenMongo(string connectionString, StorageUnit unit, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
     {
         var connection = new MongoDbProviderFactory().Create(connectionString);
-        connection.Schema.Apply(Unit);
-        var session = connection.OpenSession(Unit, MongoStorageAccess.Global);
-        foreach (var row in Rows)
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        foreach (var row in rows)
         {
             session.Delete(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
             session.Insert(new MongoStorageValues(row));

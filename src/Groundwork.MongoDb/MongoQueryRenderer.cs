@@ -45,6 +45,24 @@ public sealed class MongoQueryRenderer
         }
 
         var selectedIndex = options.FindPinnedIndex();
+        if (selectedIndex is not null && !selectedIndex.IncludesNulls && matchNone)
+        {
+            // A contradiction matches no document, but MongoDB still needs the partial-index
+            // eligibility predicate present when a pinned partial index is hinted.
+            var untyped = selectedIndex.Columns
+                .Where(column => !selectedIndex.ColumnTypes.ContainsKey(column))
+                .ToArray();
+            if (untyped.Length != 0)
+                throw new QueryRenderException(
+                    "GW-QUERY-009",
+                    $"Pinned MongoDB partial index '{selectedIndex.Name}' requires exact QueryIndexColumn types for its excluded columns: {string.Join(", ", untyped)}.");
+            var sparseEligibility = new BsonDocument("$and", new BsonArray(
+                selectedIndex.Columns.Select(column =>
+                    new BsonDocument(column, selectedIndex.ColumnTypes.TryGetValue(column, out var type) && type is QueryType knownType
+                        ? new BsonDocument("$type", MongoTypeName(knownType))
+                        : new BsonDocument("$exists", true)))));
+            filter = And(filter, sparseEligibility);
+        }
         if (selectedIndex is not null && !matchNone && !selectedIndex.IncludesNulls)
         {
             var unproven = selectedIndex.Columns
@@ -111,7 +129,8 @@ public sealed class MongoQueryRenderer
                 return new BsonDocument(range.Column.Name, operators);
             }
             case Predicate.ColumnCompare compare:
-                return new BsonDocument("$expr", new BsonDocument(
+            {
+                var operation = new BsonDocument(
                     compare.Op switch
                     {
                         CompareOp.Equal => "$eq",
@@ -122,12 +141,21 @@ public sealed class MongoQueryRenderer
                         CompareOp.GreaterThanOrEqual => "$gte",
                         _ => throw new ArgumentOutOfRangeException(nameof(compare.Op), compare.Op, null)
                     },
-                    new BsonArray { "$" + compare.Left.Name, "$" + compare.Right.Name }));
+                    new BsonArray { "$" + compare.Left.Name, "$" + compare.Right.Name });
+                return new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
+                {
+                    new BsonDocument("$ne", new BsonArray { "$" + compare.Left.Name, BsonNull.Value }),
+                    new BsonDocument("$ne", new BsonArray { "$" + compare.Right.Name, BsonNull.Value }),
+                    operation
+                }));
+            }
             case Predicate.ElementOf elementOf:
                 if (elementOf.Set.Type is null)
                     throw new QueryRenderException("GW-SEM-TYPE-007", "An element set must declare its exact element type before rendering.");
                 if (elementOf.Values.Length == 0)
-                    return elementOf.Quantifier == SetQuantifier.Any ? MatchNone() : new BsonDocument();
+                    return elementOf.Quantifier == SetQuantifier.Any
+                        ? MatchNone()
+                        : new BsonDocument(elementOf.Set.Name, new BsonDocument("$type", "array"));
                 var values = new BsonArray(elementOf.Values.Select(ToBson));
                 return new BsonDocument(elementOf.Set.Name,
                     new BsonDocument(elementOf.Quantifier == SetQuantifier.Any ? "$in" : "$all", values));
@@ -203,7 +231,7 @@ public sealed class MongoQueryRenderer
             QueryType.Decimal => new BsonDecimal128((decimal)value.Value!),
             QueryType.Double => new BsonDouble((double)value.Value!),
             QueryType.String => new BsonString((string)value.Value!),
-            QueryType.DateTimeOffset => new BsonDateTime(((DateTimeOffset)value.Value!).UtcDateTime),
+            QueryType.DateTimeOffset => new BsonInt64(((DateTimeOffset)value.Value!).UtcTicks),
             QueryType.Guid => new BsonBinaryData((Guid)value.Value!, GuidRepresentation.Standard),
             QueryType.Binary => new BsonBinaryData((byte[])value.Value!),
             _ => throw new ArgumentOutOfRangeException(nameof(value), value.Type, null)
@@ -211,6 +239,19 @@ public sealed class MongoQueryRenderer
     }
 
     private static BsonDocument MatchNone() => new(MatchNoneField, true);
+
+    private static string MongoTypeName(QueryType type) => type switch
+    {
+        QueryType.String => "string",
+        QueryType.Int32 => "int",
+        QueryType.Int64 => "long",
+        QueryType.Decimal => "decimal",
+        QueryType.Boolean => "bool",
+        QueryType.DateTimeOffset => "long",
+        QueryType.Guid or QueryType.Binary => "binData",
+        QueryType.Double => "double",
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
 
     private static IReadOnlyList<BsonDocument> RenderPipeline(
         BsonDocument filter,
@@ -241,7 +282,20 @@ public sealed class MongoQueryRenderer
                     nonNullRank
                 }))));
             sort.Add(rankName, 1);
-            sort.Add(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1);
+            var orderName = term.Column.Type == QueryType.String
+                ? "_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : term.Column.Name;
+            if (term.Column.Type == QueryType.String)
+            {
+                stages.Add(new BsonDocument("$set", new BsonDocument(orderName,
+                    new BsonDocument("$function", new BsonDocument
+                    {
+                        { "body", "function(value) { if (value === null || value === undefined) return null; var key = ''; for (var i = 0; i < value.length; i++) { var unit = value.charCodeAt(i).toString(16); key += ('0000' + unit).slice(-4); } return key; }" },
+                        { "args", new BsonArray { "$" + term.Column.Name } },
+                        { "lang", "js" }
+                    }))));
+            }
+            sort.Add(orderName, term.Direction == OrderDirection.Ascending ? 1 : -1);
         }
 
         if (includesTotalCount)
@@ -262,7 +316,11 @@ public sealed class MongoQueryRenderer
         {
             var cleanup = new BsonDocument();
             for (var index = 0; index < order.Count; index++)
+            {
                 cleanup.Add("_groundwork_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
+                if (order[index].Column.Type == QueryType.String)
+                    cleanup.Add("_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
+            }
             stages.Add(new BsonDocument("$project", cleanup));
         }
         if (paging.Offset is int offset)

@@ -136,8 +136,15 @@ public abstract class RelationalQueryRenderer
 
         var selectedIndex = options.FindPinnedIndex();
         var indexHintApplied = selectedIndex is not null && supportsIndexHints;
-        if (selectedIndex is not null && !matchNone && !selectedIndex.IncludesNulls)
+        if (selectedIndex is not null && !selectedIndex.IncludesNulls)
         {
+            if (matchNone)
+            {
+                // A contradiction matches no row, but SQL Server still requires a query using a
+                // filtered index to restate that index's filter. Keep the logical contradiction and
+                // make the null exclusion visible to the optimizer.
+                where = $"({where}) AND ({string.Join(" AND ", selectedIndex.Columns.Select(column => dialect.QuoteIdentifier(column) + " IS NOT NULL"))})";
+            }
             var unproven = selectedIndex.Columns
                 .Where(column => selectedIndex.NullableColumns.Contains(column) && CanMatchNull(request.Where, column))
                 .ToArray();
@@ -263,7 +270,11 @@ public abstract class RelationalQueryRenderer
             case Predicate.ElementOf elementOf:
                 return RenderElementOf(elementOf, parameters, ref parameterIndex);
             case Predicate.Not not:
-                return "NOT (" + RenderPredicate(not.Inner, parameters, ref parameterIndex, inValueLimit, table) + ")";
+            {
+                var inner = RenderPredicate(not.Inner, parameters, ref parameterIndex, inValueLimit, table);
+                // SQL's UNKNOWN must complement to TRUE for the total Q2 predicate algebra.
+                return "(CASE WHEN (" + inner + ") THEN 0 ELSE 1 END = 1)";
+            }
             case Predicate.And and:
             {
                 if (and.Terms.Length == 0)
@@ -353,8 +364,6 @@ public abstract class RelationalQueryRenderer
             CompareOp.GreaterThanOrEqual => ">=",
             _ => throw new ArgumentOutOfRangeException(nameof(compare.Op), compare.Op, null)
         };
-        if (compare.Op == CompareOp.NotEqual)
-            return "(" + left + " IS NULL OR " + right + " IS NULL OR " + left + " <> " + right + ")";
         return "(" + left + " IS NOT NULL AND " + right + " IS NOT NULL AND " + left + " " + op + " " + right + ")";
     }
 

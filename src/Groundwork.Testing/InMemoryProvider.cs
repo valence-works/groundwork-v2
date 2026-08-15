@@ -459,6 +459,13 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var validation = PortableQuerySemantics.Validate(request);
+        if (!validation.IsPortable)
+        {
+            var refusal = validation.Refusals[0];
+            throw new QueryRenderException(refusal.Code, refusal.Message + " (" + refusal.Path + ").");
+        }
+        ValidateInBudget(request.Where, suppliedOptions.InValueLimit, request.Table.Value);
         lock (database.Gate)
         {
             ThrowIfDisposed();
@@ -466,10 +473,173 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
                 ? entries.Values
                     .Where(entry => PortableQuerySemantics.Evaluate(request.Where, entry.Values))
                     .Select(entry => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(entry.Values, StringComparer.Ordinal))
-                    .ToArray()
-                : Array.Empty<IReadOnlyDictionary<string, object?>>();
-            return QueryResultMaterializer.Materialize(request, suppliedOptions, rows);
+                    .ToList()
+                : new List<IReadOnlyDictionary<string, object?>>();
+
+            if (request.LatestPerKey is not null)
+                rows = LatestPerKeyRows(rows, request.LatestPerKey);
+
+            var order = suppliedOptions.GetEffectiveOrder(request);
+            if (order.Length != 0)
+                rows.Sort(new MemoryRowComparer(order));
+
+            var deferContinuation = request.Result.IncludesTotalCount && request.Paging.ContinuationToken is not null;
+            if (!deferContinuation && request.Paging.ContinuationToken is { } token)
+            {
+                IReadOnlyList<QueryConstant> cursor;
+                try
+                {
+                    cursor = QueryContinuationToken.Decode(token, request, suppliedOptions);
+                }
+                catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
+                {
+                    throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
+                }
+                rows = rows.Where(row => IsAfter(row, order, cursor)).ToList();
+            }
+
+            var selectedIndex = suppliedOptions.FindPinnedIndex()?.Name;
+            if (!request.Result.IncludesTotalCount)
+                return QueryResultMaterializer.Materialize(request, suppliedOptions, rows, selectedIndex, sourceIncludesRequestedOffset: false);
+
+            if (rows.Count == 0)
+                return new QueryMaterializedResult(Array.Empty<IReadOnlyDictionary<string, object?>>(), 0L, null, selectedIndex);
+
+            var counted = rows.Select((row, index) => index == 0
+                ? (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(row)
+                {
+                    ["__groundwork_total_count"] = (long)rows.Count
+                }
+                : row).ToArray();
+            return QueryResultMaterializer.Materialize(request, suppliedOptions, counted, selectedIndex,
+                sourceIncludesRequestedOffset: false,
+                sourceIncludesContinuation: !deferContinuation);
         }
+    }
+
+    private static void ValidateInBudget(Predicate predicate, int limit, string table)
+    {
+        switch (predicate)
+        {
+            case Predicate.In membership when membership.Values.Distinct().Count() > limit:
+                throw new QueryRenderException(
+                    "GW-QUERY-015",
+                    $"Query on '{table}' has an In predicate on '{membership.Column.Name}' with {membership.Values.Distinct().Count()} distinct values, exceeding the configured maximum of {limit}.");
+            case Predicate.And and:
+                foreach (var term in and.Terms)
+                    ValidateInBudget(term, limit, table);
+                break;
+            case Predicate.Or or:
+                foreach (var term in or.Terms)
+                    ValidateInBudget(term, limit, table);
+                break;
+            case Predicate.Not not:
+                ValidateInBudget(not.Inner, limit, table);
+                break;
+        }
+    }
+
+    private static List<IReadOnlyDictionary<string, object?>> LatestPerKeyRows(
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
+        LatestPerKey latest)
+    {
+        return rows
+            .Where(row => row.TryGetValue(latest.Timestamp.Name, out var timestamp) && timestamp is DateTimeOffset)
+            .GroupBy(row => ValueIdentity(row.TryGetValue(latest.Key.Name, out var key) ? key : null), StringComparer.Ordinal)
+            .Select(group => group.OrderByDescending(row => ((DateTimeOffset)row[latest.Timestamp.Name]!).UtcTicks).First())
+            .ToList();
+    }
+
+    private static bool IsAfter(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<OrderTerm> order,
+        IReadOnlyList<QueryConstant> cursor)
+    {
+        for (var index = 0; index < order.Count; index++)
+        {
+            var term = order[index];
+            row.TryGetValue(term.Column.Name, out var actual);
+            var boundary = cursor[index].Kind == QueryConstantKind.Null ? null : cursor[index].Value;
+            var comparison = CompareForOrder(actual, boundary, term);
+            if (comparison > 0)
+                return true;
+            if (comparison < 0)
+                return false;
+        }
+        return false;
+    }
+
+    private sealed class MemoryRowComparer(IReadOnlyList<OrderTerm> order) : IComparer<IReadOnlyDictionary<string, object?>>
+    {
+        public int Compare(IReadOnlyDictionary<string, object?>? left, IReadOnlyDictionary<string, object?>? right)
+        {
+            if (ReferenceEquals(left, right)) return 0;
+            if (left is null) return -1;
+            if (right is null) return 1;
+            foreach (var term in order)
+            {
+                left.TryGetValue(term.Column.Name, out var leftValue);
+                right.TryGetValue(term.Column.Name, out var rightValue);
+                var comparison = CompareForOrder(leftValue, rightValue, term);
+                if (comparison != 0)
+                    return comparison;
+            }
+            return 0;
+        }
+    }
+
+    private static int CompareForOrder(object? left, object? right, OrderTerm term)
+    {
+        if (left is null || right is null)
+        {
+            var nullComparison = left is null && right is null ? 0 : left is null
+                ? term.NullOrder == NullOrder.First ? -1 : 1
+                : term.NullOrder == NullOrder.First ? 1 : -1;
+            return nullComparison;
+        }
+
+        var comparison = CompareValues(left, right);
+        return term.Direction == OrderDirection.Descending ? -comparison : comparison;
+    }
+
+    private static int CompareValues(object left, object right)
+    {
+        if (left is string leftText && right is string rightText)
+            return string.CompareOrdinal(leftText, rightText);
+        if (left is DateTimeOffset leftInstant && right is DateTimeOffset rightInstant)
+            return leftInstant.UtcTicks.CompareTo(rightInstant.UtcTicks);
+        if (left is Guid leftGuid && right is Guid rightGuid)
+            return CompareBytes(GuidBytes(leftGuid), GuidBytes(rightGuid));
+        if (left is byte[] leftBytes && right is byte[] rightBytes)
+            return CompareBytes(leftBytes, rightBytes);
+        return ((IComparable)left).CompareTo(right);
+    }
+
+    private static string ValueIdentity(object? value) => value switch
+    {
+        null => "null",
+        byte[] bytes => "b:" + Convert.ToBase64String(bytes),
+        DateTimeOffset instant => "t:" + instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
+        _ => value.ToString() ?? string.Empty
+    };
+
+    private static byte[] GuidBytes(Guid value)
+    {
+        var text = value.ToString("N");
+        var bytes = new byte[16];
+        for (var index = 0; index < bytes.Length; index++)
+            bytes[index] = byte.Parse(text.Substring(index * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        return bytes;
+    }
+
+    private static int CompareBytes(byte[] left, byte[] right)
+    {
+        for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
+        {
+            var comparison = left[index].CompareTo(right[index]);
+            if (comparison != 0) return comparison;
+        }
+        return left.Length.CompareTo(right.Length);
     }
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>

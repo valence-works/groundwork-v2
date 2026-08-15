@@ -26,6 +26,14 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
 
     protected override string RenderOrderTerm(OrderTerm term)
     {
+        if (term.Column.Type == QueryType.Guid)
+        {
+            var guidExpression = RenderGuidOrderKey(RenderColumn(term.Column));
+            var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+            var guidNullRank = term.NullOrder == NullOrder.First ? "0" : "1";
+            var guidNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
+            return "CASE WHEN " + RenderColumn(term.Column) + " IS NULL THEN " + guidNullRank + " ELSE " + guidNonNullRank + " END ASC, " + guidExpression + " " + guidDirection;
+        }
         var rendered = base.RenderOrderTerm(term);
         if (term.Column.Type != QueryType.String)
             return rendered;
@@ -120,7 +128,10 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     }
 
     protected override string RenderContains(string expression, string parameter) =>
-        "(LEN(@" + parameter + ") = 0 OR CHARINDEX(@" + parameter + ", " + expression + ") > 0)";
+        "(DATALENGTH(@" + parameter + ") = 0 OR CHARINDEX(@" + parameter + ", " + expression + ") > 0)";
+
+    private static string RenderGuidOrderKey(string expression) =>
+        "CONVERT(char(36), " + expression + ") COLLATE Latin1_General_100_BIN2";
 
     protected override string RenderEndsWith(string expression, string parameter) =>
         "(DATALENGTH(@" + parameter + ") = 0 OR (DATALENGTH(RIGHT(" + expression + ", DATALENGTH(@" + parameter + ") / 2)) = DATALENGTH(@" + parameter + ") AND RIGHT(" + expression + ", DATALENGTH(@" + parameter + ") / 2) = @" + parameter + "))";
@@ -134,7 +145,9 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             throw new QueryRenderException("GW-SEM-TYPE-007", "An element set must declare its exact element type before rendering.");
         var expression = Dialect.QuoteIdentifier(elementOf.Set.Name);
         if (elementOf.Values.Length == 0)
-            return elementOf.Quantifier == SetQuantifier.Any ? "1 = 0" : "1 = 1";
+            return elementOf.Quantifier == SetQuantifier.Any
+                ? "1 = 0"
+                : "(ISJSON(" + expression + ") = 1 AND LEFT(LTRIM(" + expression + "), 1) = '[')";
         var clauses = new List<string>();
         foreach (var value in elementOf.Values)
         {

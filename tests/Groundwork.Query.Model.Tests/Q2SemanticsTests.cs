@@ -72,6 +72,9 @@ public sealed class Q2SemanticsTests
 
         Assert.True(PortableQuerySemantics.Evaluate(any, new Dictionary<string, object?> { ["tags"] = new[] { "red", "blue" } }));
         Assert.False(PortableQuerySemantics.Evaluate(any, new Dictionary<string, object?> { ["tags"] = Array.Empty<string>() }));
+        Assert.False(PortableQuerySemantics.Evaluate(any, new Dictionary<string, object?>()));
+        Assert.False(PortableQuerySemantics.Evaluate(any, new Dictionary<string, object?> { ["tags"] = null }));
+        Assert.False(PortableQuerySemantics.Evaluate(any, new Dictionary<string, object?> { ["tags"] = "red" }));
         Assert.True(PortableQuerySemantics.Evaluate(complement, new Dictionary<string, object?> { ["tags"] = Array.Empty<string>() }));
         Assert.True(PortableQuerySemantics.Evaluate(complement, new Dictionary<string, object?>()));
     }

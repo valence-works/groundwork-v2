@@ -20,16 +20,20 @@ public enum QueryIndexPinning
 /// <summary>One query-visible index key and its nullable declaration.</summary>
 public sealed record QueryIndexColumn
 {
-    public QueryIndexColumn(string column, bool isNullable = true)
+    public QueryIndexColumn(string column, bool isNullable = true, QueryType? type = null)
     {
         if (string.IsNullOrWhiteSpace(column))
             throw new ArgumentException("An index column cannot be blank.", nameof(column));
         Column = column;
         IsNullable = isNullable;
+        Type = type;
     }
 
     public string Column { get; }
     public bool IsNullable { get; }
+
+    /// <summary>The declared value type, when the provider has enough schema context to supply it.</summary>
+    public QueryType? Type { get; }
 }
 
 /// <summary>A query-visible index declaration used to control native index selection.</summary>
@@ -41,6 +45,17 @@ public sealed record QueryIndexDeclaration
         QueryIndexPinning pinning = QueryIndexPinning.ProviderDefault,
         bool includesNulls = true,
         IEnumerable<string>? nullableColumns = null)
+        : this(name, columns, pinning, includesNulls, nullableColumns, null)
+    {
+    }
+
+    private QueryIndexDeclaration(
+        string name,
+        IEnumerable<string> columns,
+        QueryIndexPinning pinning,
+        bool includesNulls,
+        IEnumerable<string>? nullableColumns,
+        IReadOnlyDictionary<string, QueryType?>? columnTypes)
     {
         if (string.IsNullOrWhiteSpace(name))
             throw new ArgumentException("An index name cannot be blank.", nameof(name));
@@ -58,6 +73,9 @@ public sealed record QueryIndexDeclaration
         NullableColumns = (nullableColumns ?? Columns).ToImmutableHashSet(StringComparer.Ordinal);
         if (NullableColumns.Any(column => !Columns.Contains(column, StringComparer.Ordinal)))
             throw new ArgumentException("Nullable index columns must be declared index columns.", nameof(nullableColumns));
+        ColumnTypes = (columnTypes ?? new Dictionary<string, QueryType?>())
+            .Where(pair => Columns.Contains(pair.Key, StringComparer.Ordinal))
+            .ToImmutableDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
     }
 
     public QueryIndexDeclaration(
@@ -70,7 +88,7 @@ public sealed record QueryIndexDeclaration
     }
 
     private QueryIndexDeclaration(string name, IndexShape shape, QueryIndexPinning pinning, bool includesNulls)
-        : this(name, shape.Names, pinning, includesNulls, shape.NullableNames)
+        : this(name, shape.Names, pinning, includesNulls, shape.NullableNames, shape.Types)
     {
     }
 
@@ -79,8 +97,27 @@ public sealed record QueryIndexDeclaration
     public QueryIndexPinning Pinning { get; }
     public bool IncludesNulls { get; }
     public ImmutableHashSet<string> NullableColumns { get; }
+    public IReadOnlyDictionary<string, QueryType?> ColumnTypes { get; }
 
-    private sealed record IndexShape(ImmutableArray<string> Names, ImmutableArray<string> NullableNames);
+    /// <summary>Returns this declaration with provider-resolved query types attached to its columns.</summary>
+    public QueryIndexDeclaration WithColumnTypes(IReadOnlyDictionary<string, QueryType?> columnTypes)
+    {
+        if (columnTypes is null)
+            throw new ArgumentNullException(nameof(columnTypes));
+        return new QueryIndexDeclaration(
+            Name,
+            Columns.Select(column => new QueryIndexColumn(
+                column,
+                NullableColumns.Contains(column),
+                columnTypes.TryGetValue(column, out var type) ? type : null)),
+            Pinning,
+            IncludesNulls);
+    }
+
+    private sealed record IndexShape(
+        ImmutableArray<string> Names,
+        ImmutableArray<string> NullableNames,
+        IReadOnlyDictionary<string, QueryType?> Types);
 
     private static IndexShape Shape(IEnumerable<QueryIndexColumn> columns)
     {
@@ -91,7 +128,9 @@ public sealed record QueryIndexDeclaration
             throw new ArgumentException("Index columns cannot contain null references.", nameof(columns));
         return new(
             snapshot.Select(column => column.Column).ToImmutableArray(),
-            snapshot.Where(column => column.IsNullable).Select(column => column.Column).ToImmutableArray());
+            snapshot.Where(column => column.IsNullable).Select(column => column.Column).ToImmutableArray(),
+            snapshot.Where(column => column.Type is not null)
+                .ToDictionary(column => column.Column, column => column.Type, StringComparer.Ordinal));
     }
 }
 
@@ -118,10 +157,10 @@ public sealed record QueryRenderOptions
     /// <summary>Provider defaults are used unless a declaration explicitly requests pinning.</summary>
     public static QueryRenderOptions Default { get; } = new();
 
-    public ImmutableArray<QueryIndexDeclaration> Indexes { get; }
+    public ImmutableArray<QueryIndexDeclaration> Indexes { get; init; }
     public string? SelectedIndex { get; }
     /// <summary>Declared identity columns appended to the requested order for deterministic paging.</summary>
-    public ImmutableArray<ColumnRef> TieBreakColumns { get; }
+    public ImmutableArray<ColumnRef> TieBreakColumns { get; init; }
 
     /// <summary>Provider-resolved physical names for declared logical indexes.</summary>
     public IReadOnlyDictionary<string, string> PhysicalIndexNames { get; init; }
@@ -131,6 +170,20 @@ public sealed record QueryRenderOptions
 
     public string ResolvePhysicalIndexName(string logicalName) =>
         PhysicalIndexNames.TryGetValue(logicalName, out var physicalName) ? physicalName : logicalName;
+
+    /// <summary>Returns options with identity columns appended as deterministic paging tie-breaks.</summary>
+    public QueryRenderOptions WithIdentityTieBreaks(IEnumerable<ColumnRef> identityColumns)
+    {
+        if (identityColumns is null)
+            throw new ArgumentNullException(nameof(identityColumns));
+        var merged = TieBreakColumns
+            .Concat(identityColumns)
+            .Where(column => column is not null)
+            .GroupBy(column => column.Name, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToImmutableArray();
+        return this with { TieBreakColumns = merged };
+    }
 
     /// <summary>Returns the requested order followed by the declared identity tie-break columns.</summary>
     public ImmutableArray<OrderTerm> GetEffectiveOrder(QueryRequest request)
