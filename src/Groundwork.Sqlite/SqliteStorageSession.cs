@@ -54,7 +54,7 @@ internal sealed class SqliteStorageSession : IStorageSession
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
         var existing = ReadCore(key);
-        ValidateExpected(options, existing);
+        ValidateExpected(options, existing, Mutation.Delete);
         if (existing is null) return new WriteOutcome(WriteOutcomeStatus.NotFound);
         var (where, parameters) = KeyPredicate(key.Values);
         if (VersionColumnDefinition is not null)
@@ -82,8 +82,7 @@ internal sealed class SqliteStorageSession : IStorageSession
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (mutation == Mutation.Update && existing is null)
             return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        if (mutation != Mutation.Insert)
-            ValidateExpected(options, existing, mutation == Mutation.Upsert);
+        ValidateExpected(options, existing, mutation);
 
         var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
         var columns = supplied.ToList();
@@ -165,11 +164,23 @@ internal sealed class SqliteStorageSession : IStorageSession
                     throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
     }
 
-    private void ValidateExpected(WriteOptions? options, StoredEntry? existing, bool upsert = false)
+    private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
     {
         if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
-        if (VersionColumnDefinition is null || upsert) return;
+        if (VersionColumnDefinition is null) return;
+        if (mutation == Mutation.Insert)
+        {
+            if (existing is null && options?.ExpectedVersion is not null)
+                throw new ConcurrencyConflictException();
+            return;
+        }
+        if (mutation == Mutation.Upsert)
+        {
+            if (existing is null ? options?.ExpectedVersion is not null : options?.ExpectedVersion != existing.Version)
+                throw new ConcurrencyConflictException(existing?.Version);
+            return;
+        }
         if (existing is null || options?.ExpectedVersion != existing.Version)
             throw new ConcurrencyConflictException(existing?.Version);
     }
@@ -288,6 +299,6 @@ internal sealed class SqliteStorageSession : IStorageSession
         if (closed) throw new ObjectDisposedException(nameof(SqliteStorageSession));
     }
 
-    private enum Mutation { Insert, Update, Upsert }
-    private sealed class ConcurrencyConflictException(long? version) : Exception { public long? Version { get; } = version; }
+    private enum Mutation { Insert, Update, Upsert, Delete }
+    private sealed class ConcurrencyConflictException(long? version = null) : Exception { public long? Version { get; } = version; }
 }
