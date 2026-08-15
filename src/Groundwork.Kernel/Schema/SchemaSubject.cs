@@ -44,6 +44,9 @@ public sealed class SchemaSubject
                 Scope.ToString(),
                 Concurrency.ToString(),
                 Timestamps.ToString(),
+                AppendIdempotency is null
+                    ? "idempotency:none"
+                    : $"idempotency:{AppendIdempotency.Window.Ticks}:{AppendIdempotency.LedgerName}",
                 .. Columns.Select(CanonicalColumn),
                 .. Key.Columns.Select(column => $"key:{column}"),
                 .. DerivedColumns.Select(CanonicalDerivedColumn),
@@ -71,6 +74,8 @@ public sealed class SchemaSubject
 
     public TimestampDeclaration Timestamps => definition.Timestamps;
 
+    public AppendIdempotencyDeclaration? AppendIdempotency => definition.AppendIdempotency;
+
     public int SchemaVersion => definition.SchemaVersion;
 
     public SchemaEvolutionMetadata Evolution { get; }
@@ -85,6 +90,7 @@ public sealed class SchemaSubject
     private static void Validate(StorageUnit unit)
     {
         ConcurrencyDeclaration.ValidateDeclaration(unit);
+        unit.AppendIdempotency?.Validate();
         if (string.IsNullOrWhiteSpace(unit.Id.Value))
             throw new ArgumentException("A schema subject requires a non-empty storage-unit id.", nameof(unit));
         if (string.IsNullOrWhiteSpace(unit.Name))
@@ -150,6 +156,7 @@ public sealed class SchemaSubject
             SchemaVersion = index.SchemaVersion
         }).ToImmutableArray(),
         Scope = source.Scope,
+        AppendIdempotency = source.AppendIdempotency is null ? null : source.AppendIdempotency with { },
         Concurrency = source.Concurrency,
         Timestamps = source.Timestamps,
         SchemaVersion = source.SchemaVersion

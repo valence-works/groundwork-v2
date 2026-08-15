@@ -135,6 +135,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
             DerivedColumns = source.DerivedColumns,
             Indexes = indexes,
             Scope = source.Scope,
+            AppendIdempotency = source.AppendIdempotency,
             Concurrency = source.Concurrency,
             Timestamps = source.Timestamps,
             SchemaVersion = source.SchemaVersion

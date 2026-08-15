@@ -118,6 +118,7 @@ public enum MongoWriteOutcomeStatus
     Updated,
     Upserted,
     Deleted,
+    Replayed,
     NotFound,
     UniqueViolation,
     ConcurrencyConflict
@@ -272,6 +273,11 @@ public interface IMongoStorageSession
     MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
     MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null);
+
+    MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values);
+
+    MongoWriteOutcome Append(OperationId operationId, params MongoStorageValues[] values) =>
+        Append(operationId, (IReadOnlyList<MongoStorageValues>)values);
 }
 
 public interface IMongoUnitOfWork : IDisposable

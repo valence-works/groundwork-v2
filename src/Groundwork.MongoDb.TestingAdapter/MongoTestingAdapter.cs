@@ -122,6 +122,14 @@ internal sealed class MongoTestingSession(
         return ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
     }
 
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(operationId, values);
+        var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
+        return ToTesting(inner.Append(operationId, native));
+    }
+
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
         => ApplyBatch(writes, exactOutcomes: false);
 

@@ -214,6 +214,8 @@ public enum WriteOutcomeStatus
     Updated,
     Upserted,
     Deleted,
+    /// <summary>The operation nonce was accepted previously within its replay window.</summary>
+    Replayed,
     NotFound,
     UniqueViolation,
     ConcurrencyConflict,
@@ -274,6 +276,8 @@ public sealed record WriteOutcome
         WriteOutcomeStatus.Updated or
         WriteOutcomeStatus.Upserted or
         WriteOutcomeStatus.Deleted;
+
+    public bool Replayed => Status == WriteOutcomeStatus.Replayed;
 }
 
 /// <summary>Resolved write result detail, including lazy failure disambiguation.</summary>
@@ -417,6 +421,24 @@ public interface IStorageSession
     WriteOutcome Upsert(StorageValues values, WriteOptions? options = null);
 
     WriteOutcome Delete(StorageKey key, WriteOptions? options = null);
+
+    /// <summary>
+    /// Appends a batch under one caller-supplied operation identity. The provider commits the
+    /// durable operation ledger entry and all payload rows atomically.
+    /// </summary>
+    WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values);
+
+    /// <summary>Convenience overload for a one-row append.</summary>
+    WriteOutcome Append(OperationId operationId, StorageValues value) =>
+        Append(operationId, new[] { value });
+
+    /// <summary>Convenience overload for a caller-supplied append batch.</summary>
+    WriteOutcome Append(OperationId operationId, params StorageValues[] values) =>
+        Append(operationId, (IReadOnlyList<StorageValues>)values);
+
+    /// <summary>Alias emphasizing that the operation carries a batch payload.</summary>
+    WriteOutcome AppendBatch(OperationId operationId, IReadOnlyList<StorageValues> values) =>
+        Append(operationId, values);
 }
 
 public interface IUnitOfWork : IDisposable

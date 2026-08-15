@@ -167,6 +167,88 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         });
     }
 
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(operationId, values);
+        foreach (var value in values)
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        return ExecuteWrite(() => AppendCore(operationId, values, declaration));
+    }
+
+    private WriteOutcome AppendCore(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        AppendIdempotencyDeclaration declaration)
+    {
+        EnsureLedgerTable(declaration.LedgerName);
+        var providerNow = DateTimeOffset.UtcNow;
+        var scope = Access.Scope?.Value ?? string.Empty;
+        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
+
+        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE rowid IN (SELECT rowid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
+        {
+            reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
+            reclaim.ExecuteNonQuery();
+        }
+
+        var expiredExisting = false;
+        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
+        {
+            AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
+            using var reader = existing.ExecuteReader();
+            if (reader.Read())
+            {
+                var committedAt = DateTimeOffset.Parse(reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
+                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
+                expiredExisting = true;
+            }
+        }
+
+        if (expiredExisting)
+        {
+            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
+            deleteExpired.ExecuteNonQuery();
+        }
+
+        using (var insertLedger = Command($"INSERT OR IGNORE INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}) VALUES (@unit, @scope, @nonce, @committed_at);"))
+        {
+            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
+            insertLedger.Parameters.AddWithValue("@committed_at", FormatLedgerTime(providerNow));
+            if (insertLedger.ExecuteNonQuery() == 0)
+                return new WriteOutcome(WriteOutcomeStatus.Replayed);
+        }
+
+        var writes = values.Select(value => RowWrite.Insert(Unit, value)).ToArray();
+        var outcomes = ApplyBatchCore(writes);
+        if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
+            throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
+        return new WriteOutcome(WriteOutcomeStatus.Inserted);
+    }
+
+    private void EnsureLedgerTable(string table)
+    {
+        using var command = Command($"CREATE TABLE IF NOT EXISTS {Quote(table)} (" +
+            $"{Quote(LedgerUnit)} TEXT NOT NULL, " +
+            $"{Quote(LedgerScope)} TEXT NOT NULL, " +
+            $"{Quote(LedgerNonce)} TEXT NOT NULL, " +
+            $"{Quote(LedgerCommittedAt)} TEXT NOT NULL, " +
+            $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}));");
+        command.ExecuteNonQuery();
+    }
+
+    private static void AddLedgerParameters(SqliteCommand command, string unit, string scope, string nonce)
+    {
+        command.Parameters.AddWithValue("@unit", unit);
+        command.Parameters.AddWithValue("@scope", scope);
+        command.Parameters.AddWithValue("@nonce", nonce);
+    }
+
+    private static string FormatLedgerTime(DateTimeOffset value) =>
+        value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
     internal void Close() => closed = true;
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
@@ -774,6 +856,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     private ColumnDefinition? ScopeColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.ScopeColumn);
     private ColumnDefinition? VersionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.VersionColumn);
     private ColumnDefinition? ActionColumnDefinition => Unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.ActionColumn);
+    private const string LedgerUnit = "unit";
+    private const string LedgerScope = "scope";
+    private const string LedgerNonce = "nonce";
+    private const string LedgerCommittedAt = "committed_at";
     private static string Quote(string value) => SqliteProviderConnection.QuoteIdentifier(value);
     private static object? ToSqlite(object? value, ColumnDefinition definition) => SqliteProviderConnection.ToSqliteValue(value, definition);
 

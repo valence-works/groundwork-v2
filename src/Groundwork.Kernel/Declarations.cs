@@ -175,6 +175,14 @@ public sealed record StorageUnit
     public IReadOnlyList<DerivedColumnDefinition> DerivedColumns { get; init; } = [];
     public IReadOnlyList<IndexDefinition> Indexes { get; init; } = [];
     public ScopePolicy Scope { get; init; } = ScopePolicy.Global;
+    /// <summary>Optional durable idempotency contract for batch appends.</summary>
+    public AppendIdempotencyDeclaration? AppendIdempotency { get; init; }
+    /// <summary>Alias for <see cref="AppendIdempotency"/> used by generic consumers.</summary>
+    public AppendIdempotencyDeclaration? Idempotency
+    {
+        get => AppendIdempotency;
+        init => AppendIdempotency = value;
+    }
     public ConcurrencyDeclaration Concurrency { get; init; } = ConcurrencyDeclaration.None;
     public TimestampDeclaration Timestamps { get; init; } = TimestampDeclaration.None;
     public int SchemaVersion { get; init; } = 1;
