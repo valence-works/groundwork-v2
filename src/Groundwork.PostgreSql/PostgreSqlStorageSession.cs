@@ -140,7 +140,10 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        return Execute(() => ConditionalUpsertCore(values, options));
+        var outcome = Execute(() => ConditionalUpsertCore(values, options));
+        if (outcome.Status == WriteOutcomeStatus.Inserted && Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
+            ApplyOnAppendRetention(options?.Observer);
+        return outcome;
     }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)

@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Runtime.CompilerServices;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
@@ -116,30 +115,13 @@ internal static class RetentionRows
     {
         var partitionColumns = declaration.PartitionColumns ?? [];
         return rows
-            .GroupBy(row => CanonicalPartition(row, partitionColumns), StringComparer.Ordinal)
+            .GroupBy(row => StructuralRetentionKey.From(row, partitionColumns), StructuralRetentionKeyComparer.Instance)
             .SelectMany(group => group
                 .OrderByDescending(row => row.GetValueOrDefault(declaration.OrderColumn), RetentionValueComparer.Instance)
-                .ThenBy(row => CanonicalKey(unit, row), StringComparer.Ordinal)
+                .ThenBy(row => StructuralRetentionKey.From(row, unit.Key.Columns), StructuralRetentionKeyComparer.Instance)
                 .Skip(declaration.KeepNewest))
             .ToArray();
     }
-
-    private static string CanonicalPartition(
-        IReadOnlyDictionary<string, object?> row,
-        IReadOnlyList<string> columns) =>
-        string.Join("\u001f", columns.Select(column => Canonical(row.GetValueOrDefault(column))));
-
-    private static string CanonicalKey(StorageUnit unit, IReadOnlyDictionary<string, object?> row) =>
-        string.Join("\u001f", unit.Key.Columns.Select(column => Canonical(row.GetValueOrDefault(column))));
-
-    private static string Canonical(object? value) => value switch
-    {
-        null => "null",
-        DateTimeOffset instant => "t:" + instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
-        byte[] bytes => "b:" + Convert.ToBase64String(bytes),
-        IFormattable formattable => value.GetType().FullName + ":" + formattable.ToString(null, CultureInfo.InvariantCulture),
-        _ => value.GetType().FullName + ":" + value
-    };
 
     private sealed class RetentionValueComparer : IComparer<object?>
     {
@@ -154,7 +136,73 @@ internal static class RetentionRows
                 return leftInstant.UtcTicks.CompareTo(rightInstant.UtcTicks);
             if (left is string leftText && right is string rightText)
                 return string.CompareOrdinal(leftText, rightText);
+            if (left is byte[] leftBytes && right is byte[] rightBytes)
+                return leftBytes.AsSpan().SequenceCompareTo(rightBytes);
+            if (left.GetType() != right.GetType())
+                return string.CompareOrdinal(left.GetType().FullName, right.GetType().FullName);
             return ((IComparable)left).CompareTo(right);
+        }
+    }
+
+    private sealed class StructuralRetentionKey
+    {
+        private StructuralRetentionKey(object?[] values) => Values = values;
+
+        internal object?[] Values { get; }
+
+        internal static StructuralRetentionKey From(
+            IReadOnlyDictionary<string, object?> row,
+            IReadOnlyList<string> columns) =>
+            new(columns.Select(column => row.GetValueOrDefault(column)).ToArray());
+    }
+
+    private sealed class StructuralRetentionKeyComparer :
+        IEqualityComparer<StructuralRetentionKey>,
+        IComparer<StructuralRetentionKey>
+    {
+        internal static StructuralRetentionKeyComparer Instance { get; } = new();
+
+        public bool Equals(StructuralRetentionKey? left, StructuralRetentionKey? right) => Compare(left, right) == 0;
+
+        public int GetHashCode(StructuralRetentionKey key)
+        {
+            var hash = new HashCode();
+            foreach (var value in key.Values)
+            {
+                hash.Add(value?.GetType());
+                switch (value)
+                {
+                    case null:
+                        break;
+                    case string text:
+                        hash.Add(text, StringComparer.Ordinal);
+                        break;
+                    case byte[] bytes:
+                        foreach (var item in bytes) hash.Add(item);
+                        break;
+                    case DateTimeOffset instant:
+                        hash.Add(instant.UtcTicks);
+                        break;
+                    default:
+                        hash.Add(value);
+                        break;
+                }
+            }
+            return hash.ToHashCode();
+        }
+
+        public int Compare(StructuralRetentionKey? left, StructuralRetentionKey? right)
+        {
+            if (ReferenceEquals(left, right)) return 0;
+            if (left is null) return -1;
+            if (right is null) return 1;
+            var count = Math.Min(left.Values.Length, right.Values.Length);
+            for (var index = 0; index < count; index++)
+            {
+                var comparison = RetentionValueComparer.Instance.Compare(left.Values[index], right.Values[index]);
+                if (comparison != 0) return comparison;
+            }
+            return left.Values.Length.CompareTo(right.Values.Length);
         }
     }
 }

@@ -1255,72 +1255,96 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         var batches = 0;
 
         // A capped collection is intentionally not used: caps apply to the whole collection,
-        // cannot keep N rows per partition, and reject document growth/index updates. A
-        // computed ordered watermark plus bounded deleteMany preserves ordinary collection semantics.
-        while (true)
+        // cannot keep N rows per partition, and reject document growth/index updates. Walk the
+        // sorted partition projection with a bounded cursor, then compute each partition's
+        // watermark through skip/limit and submit only that bounded id set to deleteMany.
+        // No stage accumulates every row identity for a partition in a server or client array.
+        if (declaration.PartitionColumns.Count == 0)
         {
-            options.CancellationToken.ThrowIfCancellationRequested();
-            var retainedIds = "__groundwork_retention_ids";
-            var victimId = "__groundwork_retention_id";
-            var pipeline = new[]
-            {
-                // $push preserves the preceding sort order. Grouping the sorted ids avoids
-                // $documentNumber's single-sort-field restriction while retaining the same
-                // primary-key tie break used by the relational and in-memory providers.
-                new BsonDocument("$sort", RetentionSort(Unit, declaration)),
-                new BsonDocument("$group", new BsonDocument
-                {
-                    { "_id", RetentionPartitionExpression(declaration) },
-                    { retainedIds, new BsonDocument("$push", "$_id") }
-                }),
-                new BsonDocument("$project", new BsonDocument
-                {
-                    { "_id", 0 },
-                    { victimId, new BsonDocument("$slice", new BsonArray
-                        { "$" + retainedIds, declaration.KeepNewest, options.MaxRowsPerBatch }) }
-                }),
-                new BsonDocument("$unwind", "$" + victimId),
-                new BsonDocument("$limit", options.MaxRowsPerBatch),
-                new BsonDocument("$project", new BsonDocument("_id", "$" + victimId))
-            };
-            var definition = PipelineDefinition<BsonDocument, BsonDocument>.Create(pipeline);
-            var victims = transactionSession is null
-                ? collection.Aggregate(definition).ToList()
-                : collection.Aggregate(transactionSession, definition).ToList();
-            if (victims.Count == 0)
-                break;
-
-            var ids = new BsonArray(victims.Select(document => document["_id"]));
-            var filter = new BsonDocument("_id", new BsonDocument("$in", ids));
-            var result = transactionSession is null
-                ? collection.DeleteMany(filter)
-                : collection.DeleteMany(transactionSession, filter);
-            var affected = checked((int)result.DeletedCount);
-            options.Observer?.Observe(new WritePathEvent("mongodb.retention-delete-many", filter.ToJson(), IsProbe: false));
-            deleted += affected;
-            batches++;
-            if (affected == 0 || victims.Count < options.MaxRowsPerBatch)
-                break;
+            DrainPartition(new BsonDocument());
+            return new RetentionResult(deleted, batches);
         }
 
+        var projection = new BsonDocument(declaration.PartitionColumns.Select(column =>
+            new BsonElement(column, 1)));
+        projection["_id"] = 0;
+        var partitionSort = new BsonDocument(declaration.PartitionColumns.Select(column =>
+            new BsonElement(column, 1)));
+        foreach (var key in Unit.Key.Columns)
+            partitionSort[key] = 1;
+        var partitions = Find(new BsonDocument())
+            .Project(projection)
+            .Sort(partitionSort);
+        partitions.Options.BatchSize = Math.Max(1, Math.Min(options.MaxRowsPerBatch, 512));
+        partitions.Options.AllowDiskUse = true;
+        using var cursor = partitions.ToCursor(options.CancellationToken);
+        BsonDocument? previous = null;
+        while (cursor.MoveNext(options.CancellationToken))
+        {
+            foreach (var document in cursor.Current)
+            {
+                options.CancellationToken.ThrowIfCancellationRequested();
+                var partition = new BsonDocument(declaration.PartitionColumns.Select(column =>
+                    new BsonElement(column, document.GetValue(column, BsonNull.Value))));
+                if (partition.Equals(previous))
+                    continue;
+                previous = partition;
+                DrainPartition(partition);
+            }
+        }
         return new RetentionResult(deleted, batches);
+
+        void DrainPartition(BsonDocument partitionFilter)
+        {
+            while (true)
+            {
+                options.CancellationToken.ThrowIfCancellationRequested();
+                var victimsQuery = Find(partitionFilter)
+                    .Sort(RetentionSort(Unit, declaration, includePartitions: false))
+                    .Skip(declaration.KeepNewest)
+                    .Limit(options.MaxRowsPerBatch)
+                    .Project(new BsonDocument("_id", 1));
+                victimsQuery.Options.BatchSize = options.MaxRowsPerBatch;
+                victimsQuery.Options.AllowDiskUse = true;
+                options.Observer?.Observe(new WritePathEvent(
+                    "mongodb.retention-watermark-find",
+                    $"MongoDB.Find(sort:order-desc+key-asc; skip:{declaration.KeepNewest}; limit:{options.MaxRowsPerBatch}; projection:_id)",
+                    IsProbe: false));
+                var victims = victimsQuery.ToList(options.CancellationToken);
+                if (victims.Count == 0)
+                    return;
+
+                var ids = new BsonArray(victims.Select(document => document["_id"]));
+                var filter = new BsonDocument("_id", new BsonDocument("$in", ids));
+                var result = transactionSession is null
+                    ? collection.DeleteMany(filter, options.CancellationToken)
+                    : collection.DeleteMany(transactionSession, filter, cancellationToken: options.CancellationToken);
+                var affected = checked((int)result.DeletedCount);
+                options.Observer?.Observe(new WritePathEvent(
+                    "mongodb.retention-delete-many",
+                    $"MongoDB.DeleteMany(ids<=:{options.MaxRowsPerBatch})",
+                    IsProbe: false));
+                deleted += affected;
+                batches++;
+                if (affected == 0 || victims.Count < options.MaxRowsPerBatch)
+                    return;
+            }
+        }
+
+        IFindFluent<BsonDocument, BsonDocument> Find(BsonDocument filter) => transactionSession is null
+            ? collection.Find(filter)
+            : collection.Find(transactionSession, filter);
     }
 
-    private static BsonValue RetentionPartitionExpression(RetentionDeclaration declaration)
-    {
-        if (declaration.PartitionColumns.Count == 0)
-            return BsonNull.Value;
-        if (declaration.PartitionColumns.Count == 1)
-            return "$" + declaration.PartitionColumns[0];
-        return new BsonDocument(declaration.PartitionColumns.Select(column =>
-            new BsonElement(column, "$" + column)));
-    }
-
-    private static BsonDocument RetentionSort(StorageUnit unit, RetentionDeclaration declaration)
+    private static BsonDocument RetentionSort(
+        StorageUnit unit,
+        RetentionDeclaration declaration,
+        bool includePartitions = true)
     {
         var sort = new BsonDocument();
-        foreach (var partition in declaration.PartitionColumns)
-            sort[partition] = 1;
+        if (includePartitions)
+            foreach (var partition in declaration.PartitionColumns)
+                sort[partition] = 1;
         sort[declaration.OrderColumn] = -1;
         foreach (var key in unit.Key.Columns.Where(key =>
                      !string.Equals(key, declaration.OrderColumn, StringComparison.Ordinal)))
@@ -1598,8 +1622,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
                 $"MongoDB conditional upsert cannot use ProviderSequence column '{sequence.Name}': sequence allocation requires a separate MongoDB command and transaction. Use Insert/Upsert or remove ProviderSequence for this one-command operation.");
         }
 
-        return ExecuteWithTransactionIfNeeded(transactional =>
+        var outcome = ExecuteWithTransactionIfNeeded(transactional =>
             transactional.ConditionalUpsertOne(values, options));
+        if (outcome.Status == MongoWriteOutcomeStatus.Inserted &&
+            Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
+            ApplyOnAppendRetention(options?.Observer);
+        return outcome;
     }
 
     private MongoWriteOutcome ConditionalUpsertOne(
@@ -2220,7 +2248,7 @@ internal static class SchemaIdentity
         unit.Scope,
         unit.Concurrency,
         unit.Timestamps,
-        unit.Retention is null ? "retention:none" : string.Join("|", unit.Retention.KeepNewest, unit.Retention.OrderColumn, unit.Retention.Trigger, string.Join(",", unit.Retention.PartitionColumns)),
+        Retention(unit.Retention),
         unit.SchemaVersion,
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
@@ -2255,8 +2283,16 @@ internal static class SchemaIdentity
 
     private static string Retention(RetentionDeclaration? retention) => retention is null
         ? "retention:none"
-        : string.Join("|", retention.KeepNewest, retention.OrderColumn, retention.Trigger,
-            string.Join(",", retention.PartitionColumns));
+        : Encode("retention", retention.KeepNewest, retention.OrderColumn, retention.Trigger,
+            Encode(retention.PartitionColumns.Cast<object?>().ToArray()));
+
+    private static string Encode(params object?[] parts) => string.Concat(parts.Select(part =>
+    {
+        var value = part is IFormattable formattable
+            ? formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture)
+            : part?.ToString();
+        return value is null ? "-1:" : $"{value.Length}:{value}";
+    }));
 }
 
 internal static class MongoDeclarationSnapshot

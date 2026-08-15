@@ -20,16 +20,19 @@ implement it natively and the testing provider supplies the reference behavior. 
 commands, and a later pass recomputes the current watermark and resumes safely.
 
 Relational providers rank rows with `ROW_NUMBER()` and delete only rows beyond the newest N in one
-bounded statement per pass. MongoDB sorts by order column and then primary key, groups the ordered
-identities per partition, and submits one bounded `deleteMany` set. This preserves the same
-deterministic tie break as the relational and in-memory providers. MongoDB does not use capped
-collections because a cap is collection-wide, cannot express N rows per partition, and prevents
-normal document growth and index updates.
+bounded statement per pass. MongoDB walks a disk-spillable, bounded-batch partition projection,
+then finds at most one configured batch of identities beyond each partition's ordered watermark
+and submits that set to `deleteMany`. It never gathers every identity in a partition into an array,
+and the order-column/primary-key sort preserves the same deterministic tie break as the relational
+and in-memory providers. MongoDB does not use capped collections because a cap is collection-wide,
+cannot express N rows per partition, and prevents normal document growth and index updates.
 
-`OnAppend` performs bounded cleanup after a successful single-row or native batch append. Concurrent
-committed appenders coalesce on a per-unit/per-scope dirty signal: one owner recomputes retention
-until the signal is drained while the other writers return without waiting behind cleanup. The
-cleanup commands are observable through `IWritePathObserver`; the live proof compares their count
-against an equal-size serial baseline. Cancellation is checked between native delete batches. SQL
-providers roll back the interrupted pass, while MongoDB may leave a completed bounded batch; both
-forms resume by recomputing the watermark and converge on the exact retained count.
+`OnAppend` performs bounded cleanup after a successful single-row append, inserted conditional
+upsert/CreateOnly, or native batch append. Concurrent committed appenders coalesce on a
+per-unit/per-scope dirty signal: one owner recomputes retention until the signal is drained while
+the other writers return without waiting behind cleanup. The provider-neutral proof blocks the
+active cleanup owner and requires every other writer to complete; the live proof also compares
+native cleanup commands against an equal-size barrier-started serial baseline. Cancellation is
+checked between native delete batches. SQL providers roll back the interrupted pass, while MongoDB
+may leave a completed bounded batch; both forms resume by recomputing the watermark and converge on
+the exact retained count.

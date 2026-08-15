@@ -45,14 +45,14 @@ public sealed class RetentionProofTests
     }
 
     [SkippableFact]
-    public void PostgreSQL_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
+    public async Task PostgreSQL_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run the PostgreSQL OnAppend proof.");
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
 
-        var serial = MeasureOnAppend(connection, "pgs", concurrent: false);
-        var concurrent = MeasureOnAppend(connection, "pgc", concurrent: true);
+        var serial = await MeasureOnAppend(connection, "pgs", concurrent: false);
+        var concurrent = await MeasureOnAppend(connection, "pgc", concurrent: true);
 
         Assert.True(concurrent.RetentionCommands * 2 <= serial.RetentionCommands,
             $"Concurrent OnAppend issued {concurrent.RetentionCommands} retention commands in {concurrent.Elapsed}; " +
@@ -78,17 +78,47 @@ public sealed class RetentionProofTests
         using var connection = new MongoDbTestingFactory().Create(connectionString!);
         AssertRetention(connection, "mongodb");
         AssertMongoRetentionDriftIsRefused(connection);
+        AssertMongoLargePartitionUsesBoundedWatermarks(connection);
     }
 
     [Fact]
-    public void OnAppend_retention_is_bounded_and_resumable()
+    public async Task OnAppend_retention_is_bounded_and_resumable()
     {
         using var connection = new InMemoryProviderFactory().Create("stream-retention-trigger-" + Guid.NewGuid().ToString("N"));
         var unit = RetentionUnit("stream-retention-trigger-" + Guid.NewGuid().ToString("N"), RetentionTrigger.OnAppend);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global);
-        Parallel.For(0, 64, index => session.Insert(Values(index % 2 == 0 ? "a" : "b")));
-        Assert.Equal(6, session.Query(All(unit)).Rows.Count);
+        for (var index = 0; index < 3; index++)
+            Assert.True(session.Insert(Values("a")).Succeeded);
+
+        const int concurrentWrites = 16;
+        using var start = new ManualResetEventSlim();
+        using var ready = new CountdownEvent(concurrentWrites);
+        using var blockingObserver = new BlockingRetentionObserver();
+        var tasks = Enumerable.Range(0, concurrentWrites).Select(_ => Task.Factory.StartNew(() =>
+        {
+            var writer = connection.OpenSession(unit, StorageAccess.Global);
+            ready.Signal();
+            start.Wait();
+            Assert.True(writer.Insert(Values("a"), new WriteOptions { Observer = blockingObserver }).Succeeded);
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+        Assert.True(ready.Wait(TimeSpan.FromSeconds(5)), "Concurrent writers did not reach the start gate.");
+        start.Set();
+        Assert.True(blockingObserver.FirstCleanup.Wait(TimeSpan.FromSeconds(5)), "The first cleanup did not start.");
+        try
+        {
+            Assert.True(SpinWait.SpinUntil(
+                () => tasks.Count(task => task.IsCompleted) == concurrentWrites - 1,
+                TimeSpan.FromSeconds(5)),
+                "Concurrent appenders waited behind the active cleanup owner.");
+        }
+        finally
+        {
+            blockingObserver.ReleaseCleanup.Set();
+        }
+        await Task.WhenAll(tasks);
+        Assert.InRange(blockingObserver.RetentionCommands, 1, 2);
+        Assert.Equal(3, session.Query(All(unit)).Rows.Count);
 
         var interruptedUnit = RetentionUnit(
             "stream-retention-resume-" + Guid.NewGuid().ToString("N"), RetentionTrigger.Explicit);
@@ -113,6 +143,92 @@ public sealed class RetentionProofTests
         var resumed = interruptedSession.ApplyRetention(new RetentionExecutionOptions { MaxRowsPerBatch = 2 });
         Assert.True(resumed.DeletedRows > 0);
         Assert.Equal(6, interruptedSession.Query(All(interruptedUnit)).Rows.Count);
+    }
+
+    [Fact]
+    public void InMemory_retention_partition_identity_is_structural_when_values_contain_the_legacy_delimiter()
+    {
+        using var connection = new InMemoryProviderFactory().Create("s3-structural-partition-" + Guid.NewGuid().ToString("N"));
+        var name = "s3-structural-partition-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 8, IsNullable = false },
+                new() { Name = "p1", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "p2", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 1,
+                OrderColumn = "ordering",
+                PartitionColumns = ["p1", "p2"]
+            }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Insert("a1", "a\u001fSystem.String:b", "c", 1);
+        Insert("a2", "a\u001fSystem.String:b", "c", 2);
+        Insert("b1", "a", "b\u001fSystem.String:c", 1);
+        Insert("b2", "a", "b\u001fSystem.String:c", 2);
+
+        session.ApplyRetention();
+
+        var survivors = session.Query(All(unit)).Rows
+            .Select(row => (string)row["id"]!)
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(new[] { "a2", "b2" }, survivors);
+
+        void Insert(string id, string p1, string p2, long ordering) => Assert.True(session.Insert(
+            new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = id,
+                ["p1"] = p1,
+                ["p2"] = p2,
+                ["ordering"] = ordering
+            })).Succeeded);
+    }
+
+    [Fact]
+    public void InMemory_retention_tie_break_identity_is_structural_when_keys_contain_the_legacy_delimiter()
+    {
+        using var connection = new InMemoryProviderFactory().Create("s3-structural-tie-" + Guid.NewGuid().ToString("N"));
+        var name = "s3-structural-tie-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "k1", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "k2", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["k1", "k2"] },
+            Retention = new RetentionDeclaration { KeepNewest = 1, OrderColumn = "ordering" }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.True(session.Insert(TiedValues("a\u001fSystem.String:b", "c")).Succeeded);
+        Assert.True(session.Insert(TiedValues("a", "b\u001fSystem.String:c")).Succeeded);
+
+        session.ApplyRetention();
+
+        var survivor = Assert.Single(session.Query(All(unit)).Rows);
+        Assert.Equal("a", survivor["k1"]);
+        Assert.Equal("b\u001fSystem.String:c", survivor["k2"]);
+
+        static StorageValues TiedValues(string k1, string k2) => new(new Dictionary<string, object?>
+        {
+            ["k1"] = k1,
+            ["k2"] = k2,
+            ["ordering"] = 1L
+        });
     }
 
     [Fact]
@@ -155,11 +271,14 @@ public sealed class RetentionProofTests
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
         Assert.Equal(new[] { "a", "a", "a", "b", "b", "b" }, retainedPartitions);
-        var retentionCommands = observer.Commands.Count(command => command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase));
+        var retentionCommands = observer.Commands.Count(command =>
+            command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase) &&
+            !command.Operation.Contains("watermark", StringComparison.OrdinalIgnoreCase));
         Assert.InRange(retentionCommands, 1, result.Batches);
 
         AssertTiedOrderRetention(connection, provider);
         AssertNativeBatchOnAppend(connection, provider);
+        AssertConditionalCreateOnlyOnAppend(connection, provider);
         AssertInterruptedNativeRetentionResumes(connection, provider);
     }
 
@@ -204,7 +323,7 @@ public sealed class RetentionProofTests
         Assert.Equal(new[] { "a", "b" }, survivors);
     }
 
-    private static OnAppendMeasurement MeasureOnAppend(
+    private static async Task<OnAppendMeasurement> MeasureOnAppend(
         IStorageProviderConnection connection,
         string provider,
         bool concurrent)
@@ -230,7 +349,6 @@ public sealed class RetentionProofTests
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var observer = new WritePathObserver();
-        var stopwatch = Stopwatch.StartNew();
         Action<int> append = index =>
         {
             var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -241,10 +359,27 @@ public sealed class RetentionProofTests
             }), new WriteOptions { Observer = observer });
             Assert.True(outcome.Succeeded);
         };
+        var stopwatch = new Stopwatch();
         if (concurrent)
-            Parallel.For(0, writes, append);
+        {
+            using var start = new ManualResetEventSlim();
+            using var ready = new CountdownEvent(writes);
+            var tasks = Enumerable.Range(0, writes).Select(index => Task.Factory.StartNew(() =>
+            {
+                ready.Signal();
+                start.Wait();
+                append(index);
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+            Assert.True(ready.Wait(TimeSpan.FromSeconds(5)), "Native writers did not reach the start gate.");
+            stopwatch.Start();
+            start.Set();
+            await Task.WhenAll(tasks);
+        }
         else
+        {
+            stopwatch.Start();
             for (var index = 0; index < writes; index++) append(index);
+        }
         stopwatch.Stop();
 
         var verification = connection.OpenSession(unit, StorageAccess.Global);
@@ -309,6 +444,54 @@ public sealed class RetentionProofTests
             command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase));
     }
 
+    private static void AssertConditionalCreateOnlyOnAppend(
+        IStorageProviderConnection connection,
+        string provider)
+    {
+        var name = "s3-create-" + provider[..Math.Min(provider.Length, 8)] + "-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+                new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic(),
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 3,
+                OrderColumn = "ordering",
+                Trigger = RetentionTrigger.OnAppend
+            }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var concurrency = Assert.IsAssignableFrom<IConcurrencyStorageSession>(session);
+        var observer = new WritePathObserver();
+        for (var index = 0; index < 10; index++)
+        {
+            var values = new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
+                ["ordering"] = (long)index
+            });
+            var options = new WriteOptions { Precondition = WritePrecondition.CreateOnly, Observer = observer };
+            Assert.Equal(WriteOutcomeStatus.Inserted, concurrency.ConditionalUpsert(values, options).Status);
+            Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, concurrency.ConditionalUpsert(values, options).Status);
+        }
+
+        var survivors = session.Query(All(unit)).Rows
+            .Select(row => (string)row["id"]!)
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(new[] { "0007", "0008", "0009" }, survivors);
+        Assert.Contains(observer.Commands, command =>
+            command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static void AssertMongoRetentionDriftIsRefused(IStorageProviderConnection connection)
     {
         var name = "s3-mongo-drift-" + Guid.NewGuid().ToString("N");
@@ -337,6 +520,96 @@ public sealed class RetentionProofTests
 
         var originalSession = connection.OpenSession(original, StorageAccess.Global);
         Assert.Equal(2, originalSession.Unit.Retention!.KeepNewest);
+
+        var adversarialName = "s3-mongo-parts-" + Guid.NewGuid().ToString("N");
+        var commaPartition = new StorageUnit
+        {
+            Id = new StorageUnitId(adversarialName),
+            Name = adversarialName,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "a,b", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "a", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "b", Type = PortableType.String, MaxLength = 16, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 2,
+                OrderColumn = "ordering",
+                PartitionColumns = ["a,b"]
+            }
+        };
+        Assert.True(connection.Schema.Apply(commaPartition).Applied);
+        var splitPartitions = commaPartition with
+        {
+            Retention = commaPartition.Retention! with { PartitionColumns = ["a", "b"] }
+        };
+        var adversarialDrift = Assert.Throws<MongoSchemaConflictException>(() =>
+            connection.Schema.Diff(splitPartitions));
+        Assert.Contains("retention", adversarialDrift.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertMongoLargePartitionUsesBoundedWatermarks(IStorageProviderConnection connection)
+    {
+        const int rows = 2_000;
+        const int batchSize = 37;
+        var name = "s3-mongo-large-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "partition", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 11,
+                OrderColumn = "ordering",
+                PartitionColumns = ["partition"]
+            }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        {
+            for (var index = 0; index < rows; index++)
+            {
+                work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = index.ToString("D6", System.Globalization.CultureInfo.InvariantCulture),
+                    ["partition"] = "large",
+                    ["ordering"] = (long)index
+                })));
+            }
+            Assert.Equal(rows, work.Commit().Succeeded);
+        }
+
+        var observer = new WritePathObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var result = session.ApplyRetention(new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = batchSize,
+            Observer = observer
+        });
+
+        Assert.Equal(rows - 11, result.DeletedRows);
+        Assert.Equal(11, session.Query(All(unit)).Rows.Count);
+        var watermarkCommands = observer.Commands
+            .Where(command => command.Operation == "mongodb.retention-watermark-find")
+            .ToArray();
+        Assert.NotEmpty(watermarkCommands);
+        Assert.All(watermarkCommands, command => Assert.Contains($"limit:{batchSize}", command.CommandText));
+        var deleteCommands = observer.Commands
+            .Where(command => command.Operation == "mongodb.retention-delete-many")
+            .ToArray();
+        Assert.Equal(result.Batches, deleteCommands.Length);
+        Assert.All(deleteCommands, command => Assert.Contains($"ids<=:{batchSize}", command.CommandText));
     }
 
     private static void AssertInterruptedNativeRetentionResumes(
@@ -432,6 +705,34 @@ public sealed class RetentionProofTests
             if (command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase) &&
                 Interlocked.Increment(ref batches) == 1)
                 cancellation.Cancel();
+        }
+    }
+
+    private sealed class BlockingRetentionObserver : IWritePathObserver, IDisposable
+    {
+        private int retentionCommands;
+
+        internal ManualResetEventSlim FirstCleanup { get; } = new();
+
+        internal ManualResetEventSlim ReleaseCleanup { get; } = new();
+
+        internal int RetentionCommands => Volatile.Read(ref retentionCommands);
+
+        public void Observe(WritePathEvent command)
+        {
+            if (!command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase))
+                return;
+            if (Interlocked.Increment(ref retentionCommands) != 1)
+                return;
+            FirstCleanup.Set();
+            ReleaseCleanup.Wait();
+        }
+
+        public void Dispose()
+        {
+            ReleaseCleanup.Set();
+            FirstCleanup.Dispose();
+            ReleaseCleanup.Dispose();
         }
     }
 
