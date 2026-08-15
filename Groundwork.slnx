@@ -10,6 +10,12 @@
     <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
   </Folder>
   <Folder Name="/tests/" />
+  <Folder Name="/tests/Groundwork.Architecture.Tests/">
+    <Project Path="tests/Groundwork.Architecture.Tests/Groundwork.Architecture.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Kernel.ExternalModule/">
+    <Project Path="tests/Groundwork.Kernel.ExternalModule/Groundwork.Kernel.ExternalModule.csproj" />
+  </Folder>
   <Folder Name="/tests/Groundwork.Kernel.Tests/">
     <Project Path="tests/Groundwork.Kernel.Tests/Groundwork.Kernel.Tests.csproj" />
   </Folder>
