@@ -164,14 +164,24 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                 Execute(connection, transaction, RelationalSql.CreateTable(dialect, create.Subject.Definition));
                 break;
             case AddColumnOperation add:
-                Execute(connection, transaction, RelationalSql.AddColumn(dialect, add.Subject.Name, add.Column));
+                // Derived keys for non-null source columns are added as a nullable staging
+                // column, populated by the provider-neutral algorithm, then finalized below.
+                // Fresh CREATE TABLE plans still materialize the target nullability directly.
+                var stagedColumn = add.Column.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal) &&
+                                   !add.Column.IsNullable
+                    ? add.Column with { IsNullable = true }
+                    : add.Column;
+                Execute(connection, transaction, RelationalSql.AddColumn(dialect, add.Subject.Name, stagedColumn));
                 break;
             case BackfillColumnOperation backfill:
-                ExecuteOptional(
-                    connection,
-                    transaction,
-                    dialect.BackfillColumnSql(backfill.Subject.Name, backfill.Column),
-                    "BackfillColumn");
+                if (backfill.Derived is not null)
+                    BackfillDerivedColumn(connection, transaction, backfill);
+                else
+                    ExecuteOptional(
+                        connection,
+                        transaction,
+                        dialect.BackfillColumnSql(backfill.Subject.Name, backfill.Column),
+                        "BackfillColumn");
                 break;
             case FinalizeColumnOperation finalize:
                 dialect.FinalizeColumn(connection, transaction, finalize.Subject.Name, finalize.Column);
@@ -213,6 +223,68 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         if (sql is null)
             throw new NotSupportedException($"The relational dialect does not implement {operation}.");
         Execute(connection, transaction, sql);
+    }
+
+    private void BackfillDerivedColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        BackfillColumnOperation operation)
+    {
+        // A dialect may provide an authoritative SQL backfill for a derived column (for
+        // example, a provider-specific generated expression). The shipped dialects return
+        // null here because the portable search-key algorithm must run in the host process;
+        // retaining this hook keeps custom dialects and contract-test doubles operational.
+        if (dialect.BackfillColumnSql(operation.Subject.Name, operation.Column) is { } sql)
+        {
+            Execute(connection, transaction, sql);
+            return;
+        }
+
+        var source = operation.Derived!.SourceColumn;
+        var keyColumns = operation.Subject.Key.Columns;
+        var selected = new[] { source }
+            .Concat(keyColumns.Where(column => !string.Equals(column, source, StringComparison.Ordinal)))
+            .ToArray();
+        var select = $"SELECT {string.Join(", ", selected.Select(dialect.QuoteIdentifier))} FROM {dialect.QuoteIdentifier(operation.Subject.Name)};";
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = select;
+        using var reader = command.ExecuteReader();
+        var definitions = operation.Subject.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        var hidden = operation.Column.Name;
+        var rows = new List<IReadOnlyDictionary<string, object?>>();
+        while (reader.Read())
+        {
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+            for (var index = 0; index < selected.Length; index++)
+                values[selected[index]] = reader.IsDBNull(index) ? null : reader.GetValue(index);
+            rows.Add(values);
+        }
+        reader.Close();
+
+        foreach (var values in rows)
+        {
+            var projected = SearchKeyProjection.Populate(operation.Subject.Definition, values);
+            projected.TryGetValue(hidden, out var searchKey);
+
+            using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = $"UPDATE {dialect.QuoteIdentifier(operation.Subject.Name)} SET {dialect.QuoteIdentifier(hidden)}=@value WHERE " +
+                string.Join(" AND ", keyColumns.Select((column, index) =>
+                    $"{dialect.QuoteIdentifier(column)}=@key{index}")) + ";";
+            AddParameter(update, "@value", dialect.ConvertValue(searchKey, operation.Column));
+            for (var index = 0; index < keyColumns.Count; index++)
+                AddParameter(update, "@key" + index, dialect.ConvertValue(values[keyColumns[index]], definitions[keyColumns[index]]));
+            update.ExecuteNonQuery();
+        }
+    }
+
+    private static void AddParameter(DbCommand command, string name, object? value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value ?? DBNull.Value;
+        command.Parameters.Add(parameter);
     }
 
     private IReadOnlyList<PhysicalSchemaOperationAcknowledgement> ApplyOperationBatchCore(
@@ -337,7 +409,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                     $"The relational dialect returned no search-key algorithm catalog for '{table}'.");
             foreach (var expected in target.Subject.DerivedColumns)
             {
-                var expectedAlgorithm = ProjectionAlgorithmId(expected.Projection);
+                var expectedAlgorithm = ProjectionAlgorithmId(expected);
                 if (!algorithms.TryGetValue(expected.Name, out var actualAlgorithm) ||
                     !string.Equals(actualAlgorithm, expectedAlgorithm, StringComparison.Ordinal))
                 {
@@ -439,12 +511,12 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         return true;
     }
 
-    private static string ProjectionAlgorithmId(PortableProjection projection) => projection switch
+    private static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
     {
         PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
         PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
-        _ => throw new ArgumentOutOfRangeException(nameof(projection), projection, null)
+        _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Projection, null)
     };
 
     private static string? NormalizeIndexFilter(string? filter) =>

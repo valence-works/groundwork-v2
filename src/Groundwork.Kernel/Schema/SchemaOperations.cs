@@ -128,7 +128,9 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         column.MaxLength?.ToString(CultureInfo.InvariantCulture),
         column.Precision?.ToString(CultureInfo.InvariantCulture),
         column.Scale?.ToString(CultureInfo.InvariantCulture),
-        column.Collation?.ToString(),
+        column.Type == PortableType.String && (column.Collation is null or PortableCollation.Ordinal)
+            ? PortableCollation.Ordinal.ToString()
+            : column.Collation?.ToString(),
         column.Generation.ToString(),
         column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
     ]);
@@ -142,6 +144,7 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         Precision = column.Precision,
         Scale = column.Scale,
         Collation = column.Collation,
+        LogicalCollation = column.LogicalCollation,
         Default = column.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(column.Default.Value, column.Type)),
         Generation = column.Generation
     };
@@ -150,18 +153,41 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
 
 public sealed class BackfillColumnOperation : PhysicalSchemaOperation
 {
-    internal BackfillColumnOperation(SchemaSubject subject, ColumnDefinition column)
-        : base(PhysicalSchemaOperationKind.BackfillColumn, subject.Id, column.Name, null, AddColumnOperation.CanonicalColumn(column))
+    internal BackfillColumnOperation(
+        SchemaSubject subject,
+        ColumnDefinition column,
+        DerivedColumnDefinition? derived = null)
+        : base(
+            PhysicalSchemaOperationKind.BackfillColumn,
+            subject.Id,
+            column.Name,
+            null,
+            AddColumnOperation.CanonicalColumn(column),
+            derived is null ? null : SchemaFingerprint.Canonicalize([
+                derived.Name,
+                derived.SourceColumn,
+                derived.Projection.ToString(),
+                derived.AlgorithmId]))
     {
         Subject = subject;
         Column = AddColumnOperation.Snapshot(column);
-        RequiresAuthorization = subject.Evolution.IsDestructive;
+        Derived = derived is null ? null : new DerivedColumnDefinition
+        {
+            Name = derived.Name,
+            SourceColumn = derived.SourceColumn,
+            Projection = derived.Projection,
+            AlgorithmId = derived.AlgorithmId
+        };
+        RequiresAuthorization = subject.Evolution.IsDestructive || Derived is not null;
         SemanticMigrationId = subject.Evolution.SemanticMigrationId;
     }
 
     public SchemaSubject Subject { get; }
 
     public ColumnDefinition Column { get; }
+
+    /// <summary>Provider-neutral source and algorithm metadata for a derived-column backfill.</summary>
+    public DerivedColumnDefinition? Derived { get; }
 }
 
 public sealed class FinalizeColumnOperation : PhysicalSchemaOperation

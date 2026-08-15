@@ -13,6 +13,7 @@ public sealed class MongoQueryRenderer
     {
         ArgumentNullException.ThrowIfNull(request);
         options ??= QueryRenderOptions.Default;
+        request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
         if (options.InValueLimit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
 
@@ -44,6 +45,7 @@ public sealed class MongoQueryRenderer
         }
 
         var selectedIndex = options.FindPinnedIndex();
+        var expectedIndex = options.FindSelectedIndex();
         if (selectedIndex is not null && !selectedIndex.IncludesNulls && matchNone)
         {
             // A contradiction matches no document, but MongoDB still needs the partial-index
@@ -91,7 +93,8 @@ public sealed class MongoQueryRenderer
             request.Result.IncludesTotalCount,
             matchNone,
             order.Select(term => term.Column.Name).ToArray(),
-            pipeline);
+            pipeline,
+            expectedIndex?.Name);
     }
 
     private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>

@@ -106,6 +106,7 @@ public abstract class RelationalQueryRenderer
     {
         ArgumentNullException.ThrowIfNull(request);
         options ??= QueryRenderOptions.Default;
+        request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
         if (options.InValueLimit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
 

@@ -175,7 +175,8 @@ public enum MongoSchemaChangeKind
     CreateStorageUnit,
     AddColumn,
     CreateIndex,
-    AddDerivedColumn
+    AddDerivedColumn,
+    RebuildIndex
 }
 
 public sealed record MongoSchemaChange(MongoSchemaChangeKind Kind, string Identity);

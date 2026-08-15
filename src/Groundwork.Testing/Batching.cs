@@ -142,6 +142,21 @@ public sealed class RowWrite
 
     internal string Identity => IdentityFor(Unit, KeyValues);
 
+    internal RowWrite PopulateSearchKeyValues()
+    {
+        if (Values is null)
+            return this;
+        var values = SearchKeyProjection.Populate(Unit, Values.Values);
+        return Mode switch
+        {
+            RowWriteMode.Insert => Insert(Unit, new StorageValues(values), Options),
+            RowWriteMode.Update => Update(Unit, new StorageValues(values), Options),
+            RowWriteMode.Upsert => Upsert(Unit, new StorageValues(values), Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(Unit, new StorageValues(values), Options),
+            _ => this
+        };
+    }
+
     internal static string IdentityFor(
         StorageUnit unit,
         IReadOnlyDictionary<string, object?> keyValues) => string.Concat(
@@ -428,8 +443,12 @@ internal sealed class BatchContext
                         $"The provider returned {groupOutcomes.Count} outcomes for a batch of {finalWrites.Length} writes.");
                 foreach (var outcome in groupOutcomes)
                 {
+                    // Provider adapters may add provider-owned projection values and therefore
+                    // return a value-equivalent RowWrite instance. The logical key remains the
+                    // stable correlation identity across that physicalization boundary.
                     var item = group.Single(candidate =>
-                        ReferenceEquals(candidate.Final, outcome.Write));
+                        ReferenceEquals(candidate.Final, outcome.Write) ||
+                        candidate.Final.Identity == outcome.Write.Identity);
                     foreach (var original in item.Originals)
                         outcomes[original] = outcome.Outcome;
                 }

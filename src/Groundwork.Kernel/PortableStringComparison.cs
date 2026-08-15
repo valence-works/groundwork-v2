@@ -1,5 +1,3 @@
-using System.Collections.Frozen;
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -39,6 +37,7 @@ public static class PortableStringComparison
     public const string AsciiIgnoreCaseAlgorithmId = "groundwork-ascii-lower-v1";
     public const string LookupHashAlgorithmId = "groundwork-sha256-utf8-lowerhex-v1";
     public const string SearchKeyAlgorithmId = "groundwork-boundary-delimited-search-key-v1";
+    public const string SearchKeySuccessorAlgorithmId = "groundwork-search-key-successor-v1";
     private const string UnicodeOrdinalIgnoreCaseAlgorithmName = "groundwork-unicode-ordinal-ignore-case-v1";
 
     private static readonly Lazy<UnicodeOrdinalIgnoreCaseState> UnicodeOrdinalIgnoreCase = new(
@@ -65,27 +64,13 @@ public static class PortableStringComparison
     public static string CreateOrdinal(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        if (!IsWellFormedUnicode(value))
-            throw new ArgumentException("Ordinal strings must be well-formed UTF-16.", nameof(value));
-        return CreateUtf16Hex(value);
+        return PortableSearchKeyEncoding.CreateComparisonKey(value, PortableSearchKeyPolicy.Ordinal);
     }
 
     public static string CreateUnicodeOrdinalIgnoreCase(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        if (!IsWellFormedUnicode(value))
-            throw new ArgumentException("Unicode ordinal-ignore-case strings must be well-formed UTF-16.", nameof(value));
-
-        var mappings = UnicodeOrdinalIgnoreCase.Value.Mappings;
-        var normalized = new StringBuilder(value.Length * 6);
-        Span<char> encoded = stackalloc char[6];
-        foreach (var rune in value.EnumerateRunes())
-        {
-            var mapped = mappings.GetValueOrDefault(rune.Value, rune.Value);
-            mapped.TryFormat(encoded, out _, "X6", CultureInfo.InvariantCulture);
-            normalized.Append(encoded);
-        }
-        return normalized.ToString();
+        return PortableSearchKeyEncoding.CreateComparisonKey(value, PortableSearchKeyPolicy.UnicodeOrdinalIgnoreCase);
     }
 
     public static string Create(string value, PortableStringComparisonPolicy policy) => policy switch
@@ -97,60 +82,33 @@ public static class PortableStringComparison
     };
 
     public static string CreateSearchKey(string value, PortableStringComparisonPolicy policy) =>
-        CreateSearchKeyFromComparisonKey(Create(value, policy), policy);
+        PortableSearchKeyEncoding.Create(value, ToSearchKeyPolicy(policy));
+
+    /// <summary>
+    /// Returns the exclusive upper bound for a non-empty encoded prefix. A null result means the
+    /// prefix ends at the maximum representable encoded unit and therefore has no finite successor.
+    /// </summary>
+    public static string? CreateSearchKeySuccessor(string searchKey)
+    {
+        return PortableSearchKeyEncoding.CreateSuccessor(searchKey, PortableSearchKeyPolicy.AsciiIgnoreCase);
+    }
+
+    /// <summary>Returns the composite identity for a folded search-key projection.</summary>
+    public static string GetSearchKeyAlgorithmId(PortableStringComparisonPolicy policy) =>
+        $"{GetAlgorithmId(policy)}+{SearchKeyAlgorithmId}+{SearchKeySuccessorAlgorithmId}";
 
     public static string CreateSearchKeyFromComparisonKey(
         string comparisonKey,
         PortableStringComparisonPolicy policy)
+        => PortableSearchKeyEncoding.CreateSearchKeyFromComparisonKey(comparisonKey, ToSearchKeyPolicy(policy));
+
+    private static PortableSearchKeyPolicy ToSearchKeyPolicy(PortableStringComparisonPolicy policy) => policy switch
     {
-        ArgumentNullException.ThrowIfNull(comparisonKey);
-        var encodedUnitLength = policy switch
-        {
-            PortableStringComparisonPolicy.Ordinal => 4,
-            PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase => 6,
-            PortableStringComparisonPolicy.AsciiIgnoreCase => 1,
-            _ => throw new ArgumentOutOfRangeException(nameof(policy), policy, null)
-        };
-        if (comparisonKey.Length % encodedUnitLength != 0)
-        {
-            throw new ArgumentException(
-                "The comparison key does not contain complete encoded comparison units.",
-                nameof(comparisonKey));
-        }
-
-        if (policy == PortableStringComparisonPolicy.AsciiIgnoreCase)
-        {
-            return string.Create(comparisonKey.Length * 5, comparisonKey, static (buffer, source) =>
-            {
-                const string hex = "0123456789ABCDEF";
-                for (var index = 0; index < source.Length; index++)
-                {
-                    var character = source[index];
-                    var offset = index * 5;
-                    buffer[offset] = '|';
-                    buffer[offset + 1] = hex[(character >> 12) & 0xF];
-                    buffer[offset + 2] = hex[(character >> 8) & 0xF];
-                    buffer[offset + 3] = hex[(character >> 4) & 0xF];
-                    buffer[offset + 4] = hex[character & 0xF];
-                }
-            });
-        }
-
-        var unitCount = comparisonKey.Length / encodedUnitLength;
-        return string.Create(
-            comparisonKey.Length + unitCount,
-            (comparisonKey, encodedUnitLength),
-            static (buffer, state) =>
-            {
-                var target = 0;
-                for (var source = 0; source < state.comparisonKey.Length; source += state.encodedUnitLength)
-                {
-                    buffer[target++] = '|';
-                    state.comparisonKey.AsSpan(source, state.encodedUnitLength).CopyTo(buffer[target..]);
-                    target += state.encodedUnitLength;
-                }
-            });
-    }
+        PortableStringComparisonPolicy.Ordinal => PortableSearchKeyPolicy.Ordinal,
+        PortableStringComparisonPolicy.AsciiIgnoreCase => PortableSearchKeyPolicy.AsciiIgnoreCase,
+        PortableStringComparisonPolicy.UnicodeOrdinalIgnoreCase => PortableSearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+        _ => throw new ArgumentOutOfRangeException(nameof(policy), policy, null)
+    };
 
     public static string CreateBoundedPrefix(string comparisonKey, int maximumLength)
     {
@@ -206,46 +164,12 @@ public static class PortableStringComparison
     public static string CreateAsciiIgnoreCase(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        if (!IsAsciiIgnoreCaseValue(value))
-            throw new ArgumentException(
-                "ASCII-ignore-case values may contain only U+0020 through U+007E.",
-                nameof(value));
-        return string.Create(value.Length, value, static (buffer, source) =>
-        {
-            for (var index = 0; index < source.Length; index++)
-            {
-                var character = source[index];
-                buffer[index] = character is >= 'A' and <= 'Z' ? (char)(character + ('a' - 'A')) : character;
-            }
-        });
+        return PortableSearchKeyEncoding.CreateComparisonKey(value, PortableSearchKeyPolicy.AsciiIgnoreCase);
     }
-
-    private static string CreateUtf16Hex(string value) =>
-        string.Create(value.Length * 4, value, static (buffer, source) =>
-        {
-            const string hex = "0123456789ABCDEF";
-            for (var index = 0; index < source.Length; index++)
-            {
-                var character = source[index];
-                var offset = index * 4;
-                buffer[offset] = hex[(character >> 12) & 0xF];
-                buffer[offset + 1] = hex[(character >> 8) & 0xF];
-                buffer[offset + 2] = hex[(character >> 4) & 0xF];
-                buffer[offset + 3] = hex[character & 0xF];
-            }
-        });
 
     private static UnicodeOrdinalIgnoreCaseState CreateUnicodeOrdinalIgnoreCaseState()
     {
         var generatedMappings = UnicodeOrdinalCasingData.SimpleUppercaseMappings;
-        var mappings = new Dictionary<int, int>(UnicodeOrdinalCasingData.SimpleUppercaseMappingCount);
-        for (var index = 0; index < generatedMappings.Length; index += 2)
-        {
-            var scalar = generatedMappings[index];
-            var mapped = generatedMappings[index + 1];
-            mappings.Add(scalar, mapped);
-        }
-
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Span<byte> pair = stackalloc byte[8];
         for (var index = 0; index < generatedMappings.Length; index += 2)
@@ -257,8 +181,8 @@ public static class PortableStringComparison
             hash.AppendData(pair);
         }
         var fingerprint = Convert.ToHexStringLower(hash.GetHashAndReset());
-        return new(mappings.ToFrozenDictionary(), $"{UnicodeOrdinalIgnoreCaseAlgorithmName}-{fingerprint}");
+        return new($"{UnicodeOrdinalIgnoreCaseAlgorithmName}-{fingerprint}");
     }
 
-    private sealed record UnicodeOrdinalIgnoreCaseState(FrozenDictionary<int, int> Mappings, string AlgorithmId);
+    private sealed record UnicodeOrdinalIgnoreCaseState(string AlgorithmId);
 }

@@ -42,11 +42,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         var executionSource = WithScopePredicate(request);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != SqlServerSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(
                 index => index.Name,
                 index => SqlServerDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal)
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
@@ -155,15 +157,17 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
             return ApplyBatchFallback(writes);
 
-        var columns = PhysicalBatchColumns(writes[0]);
-        foreach (var write in writes)
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+
+        var columns = PhysicalBatchColumns(physicalWrites[0]);
+        foreach (var write in physicalWrites)
         {
             ValidateValues(write.Values!.Values, requireAllNonNullable: write.Mode == RowWriteMode.Insert);
             if (!PhysicalBatchColumns(write).Select(column => column.Name).SequenceEqual(columns.Select(column => column.Name), StringComparer.Ordinal))
                 return ApplyBatchFallback(writes);
         }
 
-        return ApplyMergeBatch(writes, columns);
+        return ApplyMergeBatch(physicalWrites, columns);
     }
 
     private IReadOnlyList<ColumnDefinition> PhysicalBatchColumns(RowWrite write)
@@ -424,6 +428,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, mutation == Mutation.Insert);
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
             column => column,
@@ -514,6 +519,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, requireAllNonNullable: false);
         if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");

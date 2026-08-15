@@ -97,7 +97,14 @@ public static class PhysicalSchemaDiffPlanner
         foreach (var column in target.Subject.Columns.OrderBy(column => column.Name, StringComparer.Ordinal))
         {
             operations.Add(new AddColumnOperation(target.Subject, column));
-            if (!column.IsNullable)
+            var derived = target.Subject.DerivedColumns.FirstOrDefault(item => item.Name == column.Name);
+            if (derived is not null)
+            {
+                operations.Add(new BackfillColumnOperation(target.Subject, column, derived));
+                if (!column.IsNullable)
+                    operations.Add(new FinalizeColumnOperation(target.Subject, column));
+            }
+            else if (!column.IsNullable)
             {
                 operations.Add(new BackfillColumnOperation(target.Subject, column));
                 operations.Add(new FinalizeColumnOperation(target.Subject, column));
@@ -141,6 +148,9 @@ public static class PhysicalSchemaDiffPlanner
                 !operation.Column.IsNullable &&
                 operation.Column.Default is null &&
                 operation.Column.Generation == ColumnGeneration.Supplied &&
+                !desired.OfType<BackfillColumnOperation>().Any(backfill =>
+                    backfill.Derived is not null &&
+                    string.Equals(backfill.Column.Name, operation.Column.Name, StringComparison.Ordinal)) &&
                 string.IsNullOrWhiteSpace(operation.SemanticMigrationId))
             .Select(operation => new SchemaRefusal(
                 "GW-SCHEMA-005",
@@ -155,7 +165,7 @@ public static class PhysicalSchemaDiffPlanner
 
             if (desiredBySlot.TryGetValue(current.SlotIdentity, out var replacement))
             {
-                if (IsIndexWidening(current, replacement))
+                if (IsIndexWidening(current, replacement) || IsSearchKeyRetarget(current, replacement))
                     continue;
                 if (!reportedSubjects.Add($"{current.SubjectId?.Value}:{current.SubjectIdentity}"))
                     continue;
@@ -185,12 +195,13 @@ public static class PhysicalSchemaDiffPlanner
             !appliedBySlot.TryGetValue(create.SlotIdentity, out var applied) ||
             !create.Index.Columns.Any(indexColumn =>
                 create.Subject.Columns.Any(column =>
-                    column.Name == indexColumn.Column && column.IsNullable)))
+                    column.Name == indexColumn.Column && column.IsNullable)) &&
+            !IsSearchKeyRetarget(applied, operation))
         {
             return operation;
         }
 
-        if (IsIndexWidening(applied, operation))
+        if (IsIndexWidening(applied, operation) || IsSearchKeyRetarget(applied, operation))
         {
             return new RebuildPhysicalIndexOperation(
                 create.Subject,
@@ -290,6 +301,49 @@ public static class PhysicalSchemaDiffPlanner
         }
 
         return true;
+    }
+
+    private static bool IsSearchKeyRetarget(
+        PhysicalSchemaAppliedOperation applied,
+        PhysicalSchemaOperation desired)
+    {
+        if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
+            desired is not CreatePhysicalIndexOperation create ||
+            !SchemaFingerprint.TryParseCanonical(applied.CanonicalPayload, out var operationParts) ||
+            operationParts.Length < 5 ||
+            !SchemaFingerprint.TryParseCanonical(operationParts[4]!, out var currentIndexParts) ||
+            currentIndexParts.Length < 5 ||
+            !Enum.TryParse<MissingValueBehavior>(currentIndexParts[2], out _) ||
+            !int.TryParse(currentIndexParts[3], out _))
+        {
+            return false;
+        }
+
+        var previousColumns = new List<IndexColumn>(currentIndexParts.Length - 4);
+        for (var index = 4; index < currentIndexParts.Length; index++)
+        {
+            var term = currentIndexParts[index];
+            if (term is null)
+                return false;
+            var separator = term.LastIndexOf(':');
+            if (separator <= 0 ||
+                !Enum.TryParse<SortDirection>(term[(separator + 1)..], out var direction))
+            {
+                return false;
+            }
+
+            previousColumns.Add(new IndexColumn(term[..separator], direction));
+        }
+
+        var previous = new IndexDefinition
+        {
+            Name = currentIndexParts[0]!,
+            IsUnique = bool.TryParse(currentIndexParts[1], out var unique) && unique,
+            MissingValues = Enum.Parse<MissingValueBehavior>(currentIndexParts[2]!),
+            SchemaVersion = int.TryParse(currentIndexParts[3], out var schemaVersion) ? schemaVersion : 0,
+            Columns = previousColumns
+        };
+        return SearchKeyProjection.IsIndexRetarget(previous, create.Index, create.Subject.DerivedColumns);
     }
 
     private static PhysicalSchemaAppliedSnapshot CreateSnapshot(

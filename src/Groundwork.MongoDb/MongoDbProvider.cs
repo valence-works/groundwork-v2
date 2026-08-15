@@ -132,6 +132,7 @@ internal sealed class MongoProviderState
     internal MongoAppliedUnit Resolve(StorageUnit declaration, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(declaration);
+        declaration = SearchKeyProjection.Expand(declaration);
         ValidateScope(declaration, access);
         lock (gate)
         {
@@ -154,7 +155,7 @@ internal sealed class MongoProviderState
             !string.Equals(fingerprint.AsString, SchemaIdentity.Fingerprint(declaration), StringComparison.Ordinal))
         {
             throw new MongoSchemaConflictException(
-                $"Storage unit '{declaration.Name}' differs from the applied MongoDB schema. Apply the schema before opening it.");
+                $"Storage unit '{declaration.Name}' differs from the applied MongoDB schema, including its folded search-key algorithm identity. Apply the exact schema and rebuild the derived search-key column before opening a session.");
         }
 
         var applied = new MongoAppliedUnit(MongoDeclarationSnapshot.Clone(declaration), declaration.Name);
@@ -175,7 +176,7 @@ internal sealed class MongoProviderState
         if (!string.Equals(SchemaIdentity.Fingerprint(applied), SchemaIdentity.Fingerprint(requested), StringComparison.Ordinal))
         {
             throw new MongoSchemaConflictException(
-                $"Storage unit '{requested.Name}' differs from the applied MongoDB schema. Apply the schema before opening it.");
+                $"Storage unit '{requested.Name}' differs from the applied MongoDB schema, including its folded search-key algorithm identity. Apply the exact schema and rebuild the derived search-key column before opening a session.");
         }
     }
 
@@ -258,6 +259,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 {
     public MongoSchemaDiff Diff(StorageUnit desired)
     {
+        desired = SearchKeyProjection.Expand(desired);
         ValidateDeclaration(desired);
         state.TryGet(desired.Id, out var current);
         var previousKeyOrder = current?.Declaration.Key.Columns ?? ReadSchemaKeyOrder(desired.Id);
@@ -279,6 +281,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
     public MongoSchemaApplyResult Apply(StorageUnit desired)
     {
+        desired = SearchKeyProjection.Expand(desired);
         ValidateDeclaration(desired);
         var portability = PortabilityValidator.Validate(desired, new PortabilityValidationContext(["mongodb"]));
         if (!portability.IsPortable)
@@ -305,12 +308,50 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         var actual = new MongoProviderCatalog(state).ReadIndexes(desired.Name, desired.Indexes);
 
         var collection = state.Context.Database.GetCollection<BsonDocument>(desired.Name);
-        CreateIndexes(collection, desired, actual);
-
         var changes = DiffForApply(desired, current?.Declaration, actual, !exists);
+        BackfillSearchKeys(collection, desired, current?.Declaration);
+        // A new unique folded index must see the fully backfilled key values. Creating it
+        // before projection would treat every legacy document as null and either admit an
+        // invalid index or fail before the actual duplicate-fold collision is observable.
+        CreateIndexes(collection, desired, actual, changes);
         PersistSchemaMetadata(desired);
         state.Remember(desired);
         return new MongoSchemaApplyResult(new MongoSchemaDiff(changes), changes.Count != 0);
+    }
+
+    private static void BackfillSearchKeys(
+        IMongoCollection<BsonDocument> collection,
+        StorageUnit desired,
+        StorageUnit? previous)
+    {
+        var previousDerived = previous?.DerivedColumns.ToDictionary(column => column.Name, StringComparer.Ordinal) ?? [];
+        var pending = desired.DerivedColumns.Where(column =>
+            !previousDerived.TryGetValue(column.Name, out var prior) || prior != column).ToArray();
+        if (pending.Length == 0)
+            return;
+
+        var columns = desired.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        foreach (var document in collection.Find(new BsonDocument()).ToEnumerable())
+        {
+            var updates = new BsonDocument();
+            foreach (var derived in pending)
+            {
+                var source = columns[derived.SourceColumn];
+                var hidden = columns[derived.Name];
+                var value = document.TryGetValue(source.Name, out var stored)
+                    ? MongoValueCodec.Decode(stored, source)
+                    : null;
+                var projected = SearchKeyProjection.Populate(desired,
+                    new Dictionary<string, object?>(StringComparer.Ordinal) { [source.Name] = value });
+                projected.TryGetValue(derived.Name, out var searchKey);
+                updates[hidden.Name] = MongoValueCodec.Encode(searchKey, hidden);
+            }
+
+            if (updates.ElementCount != 0)
+                collection.UpdateOne(
+                    new BsonDocument("_id", document.GetValue("_id")),
+                    new BsonDocument("$set", updates));
+        }
     }
 
     internal static IMongoCollection<BsonDocument> EnsureAdmission(
@@ -404,7 +445,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 : new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var expected in applied.Declaration.DerivedColumns)
             {
-                var algorithm = ProjectionAlgorithmId(expected.Projection);
+                var algorithm = ProjectionAlgorithmId(expected);
                 if (!persisted.TryGetValue(expected.Name, out var actual) ||
                     !string.Equals(actual, algorithm, StringComparison.Ordinal))
                 {
@@ -449,12 +490,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         return new MongoSchemaAdmissionReport(applied.Declaration.Id, columnDrift, indexDrift);
     }
 
-    private static string ProjectionAlgorithmId(PortableProjection projection) => projection switch
+    private static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
     {
         PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
         PortableProjection.Sha256 => PortableStringComparison.LookupHashAlgorithmId,
-        _ => throw new ArgumentOutOfRangeException(nameof(projection), projection, null)
+        _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Projection, null)
     };
 
     private static void EnsureCollection(MongoProviderState state, MongoAppliedUnit applied, string name)
@@ -469,11 +510,20 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static void CreateIndexes(
         IMongoCollection<BsonDocument> collection,
         StorageUnit unit,
-        IReadOnlyList<MongoProviderIndex> actual)
+        IReadOnlyList<MongoProviderIndex> actual,
+        IReadOnlyList<MongoSchemaChange>? changes = null)
     {
+        var rebuilds = (changes ?? [])
+            .Where(change => change.Kind == MongoSchemaChangeKind.RebuildIndex)
+            .Select(change => change.Identity)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var index in actual.Where(index => rebuilds.Contains(index.Name)))
+            collection.Indexes.DropOne(index.Name);
+
         foreach (var index in unit.Indexes)
         {
-            if (actual.Any(existing => string.Equals(existing.Name, index.Name, StringComparison.Ordinal)))
+            if (!rebuilds.Contains(index.Name) &&
+                actual.Any(existing => string.Equals(existing.Name, index.Name, StringComparison.Ordinal)))
                 continue;
             var specification = new MongoIndexSpecification(index, unit.Columns);
             var keys = new BsonDocument(specification.Terms.Select(term =>
@@ -553,7 +603,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             if (previous is null && native is null)
                 changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name));
             else if (previous is not null && !SchemaIdentity.IndexEquals(previous, index))
-                throw new MongoSchemaConflictException($"Index '{index.Name}' changed non-additively.");
+            {
+                if (SearchKeyProjection.IsIndexRetarget(previous, index, desired.DerivedColumns))
+                    changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.RebuildIndex, index.Name));
+                else
+                    throw new MongoSchemaConflictException($"Index '{index.Name}' changed non-additively.");
+            }
         }
         foreach (var previous in current.Indexes)
             if (!desired.Indexes.Any(index => index.Name == previous.Name))
@@ -576,11 +631,34 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
                 .. desired.Indexes.Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
             ];
         return current is null
-            ? desired.Indexes
-                .Where(index => actual.All(native => native.Name != index.Name))
-                .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
-                .ToArray()
+            ? [
+                .. desired.Indexes
+                    .Where(index => actual.Any(native => native.Name == index.Name &&
+                        IsIndexRetarget(native, index, desired.DerivedColumns)))
+                    .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.RebuildIndex, index.Name)),
+                .. desired.Indexes
+                    .Where(index => actual.All(native => native.Name != index.Name))
+                    .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
+            ]
             : BuildChanges(desired, current, actual);
+    }
+
+    private static bool IsIndexRetarget(
+        MongoProviderIndex actual,
+        IndexDefinition desired,
+        IReadOnlyList<DerivedColumnDefinition> derived)
+    {
+        var previous = new IndexDefinition
+        {
+            Name = actual.Name,
+            Columns = actual.Columns
+                .Select(column => new IndexColumn(column.Column, column.Direction))
+                .ToArray(),
+            IsUnique = actual.IsUnique,
+            MissingValues = actual.MissingValues,
+            SchemaVersion = actual.SchemaVersion
+        };
+        return SearchKeyProjection.IsIndexRetarget(previous, desired, derived);
     }
 
     private IReadOnlyList<string>? ReadSchemaKeyOrder(StorageUnitId id)
@@ -604,7 +682,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             ["derived"] = new BsonArray(unit.DerivedColumns.Select(column => new BsonDocument
             {
                 ["name"] = column.Name,
-                ["algorithmId"] = ProjectionAlgorithmId(column.Projection)
+                ["algorithmId"] = ProjectionAlgorithmId(column)
             }))
         };
         state.Metadata.ReplaceOne(
@@ -707,8 +785,10 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             : request;
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal)
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(index => index.Name, index => index.Name, StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new MongoQueryRenderer().Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName);
@@ -802,7 +882,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
             executionSource,
             renderOptions,
             rows,
-            renderOptions.FindPinnedIndex()?.Name,
+            command.ExpectedIndex,
             command.Hint is not null,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
@@ -810,7 +890,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
 
     private void AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options)
     {
-        var logicalIndex = options.FindPinnedIndex()?.Name;
+        var logicalIndex = query.ExpectedIndex;
         if (query.IsMatchNone || !ExplainAssertTestMode.ShouldAssert(logicalIndex)) return;
         if (transactionSession is not null)
             throw new InvalidOperationException(
@@ -920,20 +1000,25 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
                                Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence)))
             return ApplyBatchFallback(writes);
 
+        // Keep the logical RowWrite for outcome correlation and physicalize exactly once for
+        // the native command. Fallback and exact paths delegate to single-row methods, which
+        // perform their own physicalization.
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+
         // BulkWrite can acknowledge each model but cannot identify whether each
         // upsert inserted or updated. CommitWithOutcomes requests that exact evidence;
         // use the native single-row conditional primitive in that mode.
         if (exactOutcomes)
         {
-            return writes.Select(write =>
+            return writes.Zip(physicalWrites, (write, physical) =>
                 new RowWriteOutcome(write, ToTesting(
                     ExactOutcomeUpsert(
-                        new MongoStorageValues(write.Values!.Values),
+                        new MongoStorageValues(physical.Values!.Values),
                         ToNative(write.Options))))).ToArray();
         }
 
         var models = new List<WriteModel<BsonDocument>>(writes.Count);
-        foreach (var write in writes)
+        foreach (var write in physicalWrites)
         {
             var identity = MongoDocumentMapper.EncodeKey(Unit, write.Values!.Values);
             var document = MongoDocumentMapper.EncodeDocument(
@@ -1037,6 +1122,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MutationKind kind,
         bool exactOutcome = false)
     {
+        values = new MongoStorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         var keyValues = values.Values;
         var identity = MongoDocumentMapper.EncodeKey(Unit, keyValues);
         var existing = FindOne(identity);
@@ -1121,6 +1207,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorag
         MongoWriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new MongoStorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ThrowIfDisposed();
 
         // A provider sequence is allocated by a separate FindOneAndUpdate command.
@@ -1660,7 +1747,7 @@ internal static class SchemaIdentity
         unit.SchemaVersion,
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
-            string.Join("|", column.Name, column.SourceColumn, column.Projection))),
+            string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
         string.Join("|", unit.Indexes.Select(Index)));
 
     internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
@@ -1671,7 +1758,11 @@ internal static class SchemaIdentity
 
     private static string Column(ColumnDefinition column) => string.Join("|",
         column.Name, column.Type, column.IsNullable, column.MaxLength, column.Precision,
-        column.Scale, column.Collation, column.Generation,
+        column.Scale,
+        column.Type == PortableType.String && (column.Collation is null or PortableCollation.Ordinal)
+            ? PortableCollation.Ordinal
+            : column.Collation,
+        column.Generation,
         column.Default is null ? "default:absent" : "default:present:" + column.Default.Value);
 
     private static string Index(IndexDefinition index) => string.Join("|",

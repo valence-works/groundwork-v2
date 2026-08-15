@@ -16,7 +16,8 @@ public sealed class MongoQueryCommand
         bool includesTotalCount,
         bool isMatchNone,
         IReadOnlyList<string> appliedOrder,
-        IReadOnlyList<BsonDocument>? pipeline = null)
+        IReadOnlyList<BsonDocument>? pipeline = null,
+        string? expectedIndex = null)
     {
         Filter = (filter ?? throw new ArgumentNullException(nameof(filter))).DeepClone().AsBsonDocument;
         Sort = (sort ?? throw new ArgumentNullException(nameof(sort))).DeepClone().AsBsonDocument;
@@ -30,6 +31,7 @@ public sealed class MongoQueryCommand
         Pipeline = (pipeline ?? Array.Empty<BsonDocument>())
             .Select(stage => (stage ?? throw new ArgumentException("Mongo pipeline stages cannot be null.", nameof(pipeline))).DeepClone().AsBsonDocument)
             .ToImmutableArray();
+        ExpectedIndex = expectedIndex;
     }
 
     public BsonDocument Filter { get; }
@@ -43,4 +45,7 @@ public sealed class MongoQueryCommand
     public ImmutableArray<string> AppliedOrder { get; }
     /// <summary>When non-empty, execute this aggregation pipeline instead of a find command.</summary>
     public ImmutableArray<BsonDocument> Pipeline { get; }
+
+    /// <summary>Logical index expected from the optimizer, without implying a native hint.</summary>
+    public string? ExpectedIndex { get; }
 }

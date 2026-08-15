@@ -138,6 +138,26 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Mongo_provider_default_expectation_keeps_the_optimizer_in_control()
+    {
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration("ix_customers_id", ["id"], QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_customers_id")
+        {
+            PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["ix_customers_id"] = "__groundwork_ix_customers_ix_customers_id"
+            }
+        };
+
+        var command = new MongoQueryRenderer().Render(
+            Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 7L)), [], Paging.None, ResultShape.Rows.Instance), options);
+
+        Assert.Null(command.Hint);
+        Assert.Equal("ix_customers_id", command.ExpectedIndex);
+    }
+
+    [Fact]
     public void Mongo_partial_match_none_requires_exact_index_column_types()
     {
         var request = Request(new Predicate.In(Id, ImmutableArray<QueryConstant>.Empty), [], Paging.None, ResultShape.Rows.Instance);

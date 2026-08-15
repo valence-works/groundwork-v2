@@ -44,11 +44,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         var executionSource = WithScopePredicate(request);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != SqliteSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
         {
-            Indexes = suppliedOptions.Indexes.Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
             PhysicalIndexNames = Unit.Indexes.ToDictionary(
                 index => index.Name,
                 index => SqliteDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal)
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
@@ -145,11 +147,15 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
+        if (writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() != 1)
+            return ApplyBatchFallback(writes);
 
-        return writes[0].Mode switch
+        var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
+
+        return physicalWrites[0].Mode switch
         {
-            RowWriteMode.Insert => ApplyInsertBatch(writes),
-            RowWriteMode.Upsert => ApplyUpsertBatch(writes),
+            RowWriteMode.Insert => ApplyInsertBatch(physicalWrites),
+            RowWriteMode.Upsert => ApplyUpsertBatch(physicalWrites),
             _ => ApplyBatchFallback(writes)
         };
     }
@@ -367,6 +373,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
         bool exactOutcome = false) => ExecuteWrite(() =>
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, mutation == Mutation.Insert);
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
             column => column, column => values.Values.TryGetValue(column, out var value) ? value : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
@@ -419,6 +426,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IConcurrencyStorag
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
+        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, requireAllNonNullable: false);
 
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
