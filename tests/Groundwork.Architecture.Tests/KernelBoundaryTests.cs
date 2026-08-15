@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Xunit;
 
 namespace Groundwork.Architecture.Tests;
@@ -175,7 +176,12 @@ public sealed class KernelBoundaryTests
             var assemblies = groundworkAssemblies
                 .Select(context.LoadFromAssemblyPath)
                 .ToImmutableArray();
+            var runtimeDirectory = Path.TrimEndingDirectorySeparator(RuntimeEnvironment.GetRuntimeDirectory());
             var bclNames = trustedPlatformAssemblies
+                .Where(path => string.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(path)!),
+                    runtimeDirectory,
+                    StringComparison.Ordinal))
                 .Select(path => Path.GetFileNameWithoutExtension(path)!)
                 .ToImmutableHashSet(StringComparer.Ordinal);
 
