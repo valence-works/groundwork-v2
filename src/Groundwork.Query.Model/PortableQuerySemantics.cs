@@ -352,7 +352,7 @@ public static class PortableQuerySemantics
         if (left is DateTimeOffset leftInstant && right is DateTimeOffset rightInstant)
             return leftInstant.UtcTicks.CompareTo(rightInstant.UtcTicks);
         if (left is Guid leftGuid && right is Guid rightGuid)
-            return CompareBytes(GuidBytes(leftGuid), GuidBytes(rightGuid));
+            return PortableValueComparison.CompareGuid(leftGuid, rightGuid);
         if (left is IComparable comparable)
             return comparable.CompareTo(right);
         throw new ArgumentException("Values of type " + column.Type + " are not orderable.");
@@ -368,26 +368,6 @@ public static class PortableQuerySemantics
         CompareOp.GreaterThanOrEqual => comparison >= 0,
         _ => throw new ArgumentOutOfRangeException(nameof(op))
     };
-
-    private static byte[] GuidBytes(Guid value)
-    {
-        var text = value.ToString("D", CultureInfo.InvariantCulture).Replace("-", string.Empty);
-        var bytes = new byte[16];
-        for (var index = 0; index < bytes.Length; index++)
-            bytes[index] = byte.Parse(text.Substring(index * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
-        return bytes;
-    }
-
-    private static int CompareBytes(byte[] left, byte[] right)
-    {
-        for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
-        {
-            var comparison = left[index].CompareTo(right[index]);
-            if (comparison != 0)
-                return comparison;
-        }
-        return left.Length.CompareTo(right.Length);
-    }
 
     private static int IndexOf(string value, string needle, QueryStringComparisonPolicy policy) =>
         value.IndexOf(needle, StringComparisonFor(policy));
@@ -408,4 +388,29 @@ public static class PortableQuerySemantics
         QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase or QueryStringComparisonPolicy.AsciiIgnoreCase => StringComparer.OrdinalIgnoreCase,
         _ => throw new InvalidOperationException("Culture-dependent text comparison is not portable.")
     };
+}
+
+internal static class PortableValueComparison
+{
+    internal static int CompareGuid(Guid left, Guid right) => CompareBytes(GuidBytes(left), GuidBytes(right));
+
+    private static byte[] GuidBytes(Guid value)
+    {
+        var text = value.ToString("D", CultureInfo.InvariantCulture).Replace("-", string.Empty);
+        var bytes = new byte[16];
+        for (var index = 0; index < bytes.Length; index++)
+            bytes[index] = byte.Parse(text.Substring(index * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        return bytes;
+    }
+
+    private static int CompareBytes(byte[] left, byte[] right)
+    {
+        for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
+        {
+            var comparison = left[index].CompareTo(right[index]);
+            if (comparison != 0)
+                return comparison;
+        }
+        return left.Length.CompareTo(right.Length);
+    }
 }

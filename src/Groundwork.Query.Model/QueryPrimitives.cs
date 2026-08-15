@@ -188,6 +188,8 @@ public sealed class QueryConstant : IEquatable<QueryConstant>
             }
             return leftBytes.Length.CompareTo(rightBytes.Length);
         }
+        if (left.Value is Guid leftGuid && right.Value is Guid rightGuid)
+            return PortableValueComparison.CompareGuid(leftGuid, rightGuid);
         if (left.Value is IComparable comparable)
             return comparable.CompareTo(right.Value);
         return string.CompareOrdinal(left.ToCanonicalString(), right.ToCanonicalString());
