@@ -9,6 +9,7 @@ using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Mongo;
+using Groundwork.Testing;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using KernelSortDirection = Groundwork.Kernel.SortDirection;
@@ -665,7 +666,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
-internal sealed class MongoStorageSession : IMongoStorageSession
+internal sealed class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession
 {
     private readonly MongoProviderState state;
     private readonly MongoAppliedUnit applied;
@@ -857,6 +858,116 @@ internal sealed class MongoStorageSession : IMongoStorageSession
 
     public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
         ConditionalUpsertCore(values, options);
+
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+        => ApplyBatch(writes, exactOutcomes: false);
+
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
+    {
+        ArgumentNullException.ThrowIfNull(writes);
+        ThrowIfDisposed();
+        return ExecuteWithTransactionIfNeeded(transactional => transactional.ApplyBatchCore(writes, exactOutcomes));
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
+    {
+        if (writes.Count == 0)
+            return [];
+        if (writes.Any(write => write.Mode != RowWriteMode.Upsert ||
+                               write.Options.ExpectedVersion is not null ||
+                               write.Values is null ||
+                               Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence)))
+            return ApplyBatchFallback(writes);
+
+        // BulkWrite can acknowledge each model but cannot identify whether each
+        // upsert inserted or updated. CommitWithOutcomes requests that exact evidence;
+        // use the native single-row conditional primitive in that mode.
+        if (exactOutcomes)
+        {
+            return writes.Select(write =>
+                new RowWriteOutcome(write, ToTesting(
+                    ExactOutcomeUpsert(
+                        new MongoStorageValues(write.Values!.Values),
+                        ToNative(write.Options))))).ToArray();
+        }
+
+        var models = new List<WriteModel<BsonDocument>>(writes.Count);
+        foreach (var write in writes)
+        {
+            var identity = MongoDocumentMapper.EncodeKey(Unit, write.Values!.Values);
+            var document = MongoDocumentMapper.EncodeDocument(
+                Unit, write.Values.Values, identity, existing: null, _ =>
+                    throw new InvalidOperationException("ProviderSequence must use the fallback batch path."));
+            var set = new BsonDocument();
+            var setOnInsert = new BsonDocument();
+            foreach (var column in Unit.Columns)
+            {
+                if (Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
+                {
+                    // Mongo's _id is the lookup identity, not a substitute for the
+                    // declared key fields. Persist the key fields on insert so schema
+                    // admission and subsequent reads see the complete declaration.
+                    setOnInsert[column.Name] = document[column.Name];
+                    continue;
+                }
+                if (column.Name != "createdAt" && write.Values.Values.ContainsKey(column.Name))
+                    set[column.Name] = document[column.Name];
+                else
+                    setOnInsert[column.Name] = document[column.Name];
+            }
+            var update = new BsonDocument();
+            if (set.ElementCount != 0)
+                update["$set"] = set;
+            if (setOnInsert.ElementCount != 0)
+                update["$setOnInsert"] = setOnInsert;
+            if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
+                update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
+            models.Add(new UpdateOneModel<BsonDocument>(new BsonDocument("_id", identity), update)
+            {
+                IsUpsert = true
+            });
+        }
+
+        writes[0].Options.Observer?.Observe(new WritePathEvent(
+            "mongodb.batch-write",
+            "MongoDB.BulkWrite(UpdateOne upsert:true ordered:false)",
+            IsProbe: false));
+        try
+        {
+            if (transactionSession is null)
+                collection.BulkWrite(models, new BulkWriteOptions { IsOrdered = false });
+            else
+                collection.BulkWrite(transactionSession, models, new BulkWriteOptions { IsOrdered = false });
+            return writes.Select(write => new RowWriteOutcome(write,
+                new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
+        }
+        catch (MongoBulkWriteException<BsonDocument> exception)
+        {
+            var failures = exception.WriteErrors.ToDictionary(error => error.Index, error => error);
+            return writes.Select((write, index) =>
+                new RowWriteOutcome(write, failures.TryGetValue(index, out var error)
+                    ? new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, ExtractIndexName(error.Message))
+                    : new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
+        }
+    }
+
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
+        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+        {
+            RowWriteMode.Insert => ToTesting(Insert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Update => ToTesting(Update(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ToTesting(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Upsert => ToTesting(Upsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.ConditionalUpsert => ToTesting(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
+            RowWriteMode.Delete => ToTesting(Delete(new MongoStorageKey(write.Key!.Values), ToNative(write.Options))),
+            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+        })).ToArray();
+
+    private static MongoWriteOptions? ToNative(WriteOptions options) =>
+        new() { ExpectedVersion = options.ExpectedVersion, Observer = options.Observer };
+
+    private static WriteOutcome ToTesting(MongoWriteOutcome outcome) =>
+        new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName);
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
@@ -1060,6 +1171,73 @@ internal sealed class MongoStorageSession : IMongoStorageSession
                     : MongoWriteOutcomeStatus.UniqueViolation,
                 null,
                 indexName);
+        }
+    }
+
+    private MongoWriteOutcome ExactOutcomeUpsert(
+        MongoStorageValues values,
+        MongoWriteOptions? options)
+    {
+        var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
+        var document = MongoDocumentMapper.EncodeDocument(
+            Unit,
+            values.Values,
+            identity,
+            existing: null,
+            column => NextSequence(column, options?.Observer));
+        var set = new BsonDocument();
+        foreach (var column in Unit.Columns)
+        {
+            if (!values.Values.ContainsKey(column.Name) ||
+                Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) ||
+                column.Name == "createdAt" ||
+                column.Generation == ColumnGeneration.ProviderSequence)
+                continue;
+            set[column.Name] = document[column.Name];
+        }
+
+        var setOnInsert = new BsonDocument();
+        foreach (var element in document)
+        {
+            if (element.Name != "_id" && !set.Contains(element.Name))
+                setOnInsert[element.Name] = element.Value;
+        }
+        var update = new BsonDocument();
+        if (set.ElementCount != 0)
+            update["$set"] = set;
+        if (Unit.Concurrency == ConcurrencyDeclaration.Optimistic)
+            update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
+        if (setOnInsert.ElementCount != 0)
+            update["$setOnInsert"] = setOnInsert;
+
+        options?.Observer?.Observe(new WritePathEvent(
+            "mongodb.exact-batch-upsert",
+            "MongoDB.FindOneAndUpdate(upsert:true; return=before)",
+            IsProbe: false));
+        try
+        {
+            var filter = new BsonDocument("_id", identity);
+            var findOptions = new FindOneAndUpdateOptions<BsonDocument>
+            {
+                IsUpsert = true,
+                ReturnDocument = ReturnDocument.Before
+            };
+            var before = transactionSession is null
+                ? collection.FindOneAndUpdate(filter, update, findOptions)
+                : collection.FindOneAndUpdate(transactionSession, filter, update, findOptions);
+            var version = Unit.Concurrency == ConcurrencyDeclaration.Optimistic
+                ? before is null
+                    ? 1L
+                    : checked(before.GetValue(MongoDocumentMapper.VersionField, 0L).ToInt64() + 1)
+                : (long?)null;
+            return new MongoWriteOutcome(
+                before is null ? MongoWriteOutcomeStatus.Inserted : MongoWriteOutcomeStatus.Updated,
+                version);
+        }
+        catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+        {
+            var indexName = ExtractIndexName(exception.WriteError?.Message);
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, null, indexName);
         }
     }
 

@@ -12,6 +12,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
     private readonly StorageAccess access;
     private readonly HashSet<StorageUnitId> units;
     private readonly List<SqliteStorageSession> sessions = [];
+    private readonly BatchContext batch;
     private bool terminal;
 
     internal SqliteUnitOfWork(
@@ -19,13 +20,15 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         SqliteConnection connection,
         SqliteTransaction transaction,
         IEnumerable<StorageUnit> units,
-        StorageAccess access)
+        StorageAccess access,
+        BatchWriteOptions options)
     {
         this.owner = owner;
         this.connection = connection;
         this.transaction = transaction;
         this.units = units.Select(unit => unit.Id).ToHashSet();
         this.access = access;
+        batch = new BatchContext(options);
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -37,14 +40,65 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
         var session = new SqliteStorageSession(owner, SqliteSchemaCoordinator.Physicalize(unit), access, connection, transaction);
         sessions.Add(session);
-        return session;
+        var batched = new BatchStorageSession(session, batch);
+        batch.Register(batched);
+        return batched;
     }
 
-    public void Commit()
+    public void Stage(RowWrite write)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        ThrowIfTerminal();
+        if (!units.Contains(write.Unit.Id))
+            throw new InvalidOperationException($"Storage unit '{write.Unit.Id.Value}' was not declared for this unit of work.");
+        if (!sessions.Any(session => session.Unit.Id == write.Unit.Id))
+            _ = OpenSession(write.Unit);
+        batch.Stage(write);
+        if (batch.ReachedCap)
+            batch.FlushAll();
+    }
+
+    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
+
+    public BatchWriteReport CommitWithOutcomes()
     {
         ThrowIfTerminal();
-        try { transaction.Commit(); }
-        finally { Complete(); }
+        batch.RequireExactOutcomes();
+        return new BatchWriteReport(CompleteCommit());
+    }
+
+    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
+    {
+        ThrowIfTerminal();
+        try
+        {
+            batch.FlushAll();
+            transaction.Commit();
+            return batch.DrainCompleted();
+        }
+        catch
+        {
+            try { transaction.Rollback(); }
+            finally { Complete(); }
+            throw;
+        }
+        finally
+        {
+            if (!terminal)
+                Complete();
+        }
+    }
+
+    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(CommitWithOutcomes());
+    }
+
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(Commit());
     }
 
     public void Rollback()

@@ -7,14 +7,15 @@ using Groundwork.Testing;
 
 if (args.Length == 0 || !string.Equals(args[0], "roundtrips", StringComparison.OrdinalIgnoreCase))
 {
-    Console.Error.WriteLine("Usage: roundtrips --workload upsert --n <count> [--provider sqlite|postgresql|sqlserver|mongodb]");
+    Console.Error.WriteLine("Usage: roundtrips --workload upsert|commit --n <count> [--provider sqlite|postgresql|sqlserver|mongodb]");
     return 2;
 }
 
 var workload = Option(args, "--workload") ?? "upsert";
 var count = int.TryParse(Option(args, "--n"), out var parsed) && parsed > 0 ? parsed : 1;
 var providerName = Option(args, "--provider") ?? "sqlite";
-if (!string.Equals(workload, "upsert", StringComparison.OrdinalIgnoreCase))
+if (!string.Equals(workload, "upsert", StringComparison.OrdinalIgnoreCase) &&
+    !string.Equals(workload, "commit", StringComparison.OrdinalIgnoreCase))
     throw new ArgumentException($"Unsupported workload '{workload}'.");
 
 var (provider, connectionString, temporaryDirectory) = CreateProvider(providerName);
@@ -24,6 +25,11 @@ try
     {
         var unit = Unit(providerName);
         provider.Schema.Apply(unit);
+        if (string.Equals(workload, "commit", StringComparison.OrdinalIgnoreCase))
+        {
+            RunCommitWorkload(provider, unit, count, providerName);
+            return 0;
+        }
         var rawSession = provider.OpenSession(unit, StorageAccess.Global);
         if (rawSession is not IConcurrencyStorageSession session)
             throw new InvalidOperationException($"Provider '{providerName}' does not expose conditional upsert.");
@@ -103,3 +109,34 @@ static StorageUnit Unit(string provider) => new()
     Key = new KeyDefinition { Columns = ["id"] },
     Concurrency = ConcurrencyDeclaration.Optimistic
 };
+
+static void RunCommitWorkload(
+    IStorageProviderConnection provider,
+    StorageUnit unit,
+    int count,
+    string providerName)
+{
+    var observer = new WritePathObserver();
+    using var work = provider.BeginUnitOfWork(
+        StorageAccess.Global,
+        new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Aggregate },
+        unit);
+    for (var index = 0; index < count; index++)
+    {
+        work.Stage(RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "row-" + index,
+            ["value"] = "value-" + index,
+            ["createdAt"] = DateTimeOffset.UnixEpoch
+        }), new WriteOptions { Observer = observer }));
+    }
+
+    // Measure the aggregate-cost path. CommitWithOutcomes is intentionally more
+    // expensive on providers such as MongoDB because it requests exact row evidence.
+    var summary = work.Commit();
+    // The observer counts provider write commands. An explicit unit of work also
+    // has one transaction-open and one commit exchange, so include those in the
+    // proof's round-trip estimate.
+    var roundTrips = observer.RoundTrips + 2;
+    Console.WriteLine($"provider={providerName} workload=commit writes={count} round_trips={roundTrips} batch_round_trips={observer.RoundTrips} probes={observer.Commands.Count(command => command.IsProbe)} succeeded={summary.Succeeded} failed={summary.Failed}");
+}

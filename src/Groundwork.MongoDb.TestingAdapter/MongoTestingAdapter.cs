@@ -18,11 +18,22 @@ internal sealed class MongoTestingConnection(IMongoProviderConnection inner) : I
 
     public ISchemaCoordinator Schema { get; } = new MongoTestingSchema(inner.Schema);
 
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
+        "MongoDB", nativeBatch: true,
+        exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
+        batchCost: "uses unordered BulkWrite for aggregate commits");
+
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access) =>
         new MongoTestingSession(inner.OpenSession(unit, ToNative(access)));
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
-        new MongoTestingUnitOfWork(inner.BeginUnitOfWork(ToNative(access), units));
+        BeginUnitOfWork(access, BatchWriteOptions.Default, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        params StorageUnit[] units) =>
+        new MongoTestingUnitOfWork(inner.BeginUnitOfWork(ToNative(access), units), options);
 
     public void Dispose() => inner.Dispose();
 
@@ -57,7 +68,9 @@ internal sealed class MongoTestingSchema(IMongoSchemaCoordinator inner) : ISchem
         new SchemaChange((SchemaChangeKind)change.Kind, change.Identity)).ToArray());
 }
 
-internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorageSession, IConcurrencyStorageSession
+internal sealed class MongoTestingSession(
+    IMongoStorageSession inner,
+    Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession
 {
     public StorageUnit Unit => inner.Unit;
 
@@ -66,8 +79,11 @@ internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorage
         : StorageAccess.Scoped(inner.Access.Scope ?? throw new InvalidOperationException(
             "A scoped provider session requires a scope."));
 
-    public StoredEntry? Read(StorageKey key) =>
-        ToTesting(inner.Read(new MongoStorageKey(key.Values)));
+    public StoredEntry? Read(StorageKey key)
+    {
+        beforeRead?.Invoke(key);
+        return ToTesting(inner.Read(new MongoStorageKey(key.Values)));
+    }
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
         inner.Query(request, options);
@@ -86,6 +102,26 @@ internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorage
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) =>
         ToTesting(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
+
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+        => ApplyBatch(writes, exactOutcomes: false);
+
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
+    {
+        ArgumentNullException.ThrowIfNull(writes);
+        if (inner is IBatchedStorageSession native)
+            return native.ApplyBatch(writes, exactOutcomes);
+        return writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+        {
+            RowWriteMode.Insert => Insert(write.Values!, write.Options),
+            RowWriteMode.Update => Update(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+        })).ToArray();
+    }
 
     private static MongoWriteOptions? ToNative(WriteOptions? options) => options is null
         ? null
@@ -121,14 +157,99 @@ internal sealed class MongoTestingSession(IMongoStorageSession inner) : IStorage
         : new StoredEntry(new StorageValues(entry.Values.Values), entry.Version);
 }
 
-internal sealed class MongoTestingUnitOfWork(IMongoUnitOfWork inner) : IUnitOfWork
+internal sealed class MongoTestingUnitOfWork : IUnitOfWork
 {
-    public IStorageSession OpenSession(StorageUnit unit) =>
-        new MongoTestingSession(inner.OpenSession(unit));
+    private readonly IMongoUnitOfWork inner;
+    private readonly BatchContext batch;
+    private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
+    private bool terminal;
 
-    public void Commit() => inner.Commit();
+    internal MongoTestingUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options)
+    {
+        this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
+        batch = new BatchContext(options ?? throw new ArgumentNullException(nameof(options)));
+    }
 
-    public void Rollback() => inner.Rollback();
+    public IStorageSession OpenSession(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ThrowIfTerminal();
+        if (sessions.TryGetValue(unit.Id, out var existing))
+            return existing;
+        var session = new BatchStorageSession(new MongoTestingSession(inner.OpenSession(unit)), batch);
+        sessions.Add(unit.Id, session);
+        batch.Register(session);
+        return session;
+    }
 
-    public void Dispose() => inner.Dispose();
+    public void Stage(RowWrite write)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        ThrowIfTerminal();
+        if (!sessions.ContainsKey(write.Unit.Id))
+            _ = OpenSession(write.Unit);
+        batch.Stage(write);
+        if (batch.ReachedCap)
+            batch.FlushAll();
+    }
+
+    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
+
+    public BatchWriteReport CommitWithOutcomes()
+    {
+        ThrowIfTerminal();
+        batch.RequireExactOutcomes();
+        return new BatchWriteReport(CompleteCommit());
+    }
+
+    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
+    {
+        ThrowIfTerminal();
+        try
+        {
+            batch.FlushAll();
+            inner.Commit();
+            terminal = true;
+            return batch.DrainCompleted();
+        }
+        catch
+        {
+            try { inner.Rollback(); }
+            finally { terminal = true; }
+            throw;
+        }
+    }
+
+    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(CommitWithOutcomes());
+    }
+
+    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(Commit());
+    }
+
+    public void Rollback()
+    {
+        ThrowIfTerminal();
+        try { inner.Rollback(); }
+        finally { terminal = true; }
+    }
+
+    public void Dispose()
+    {
+        if (!terminal)
+            Rollback();
+        inner.Dispose();
+    }
+
+    private void ThrowIfTerminal()
+    {
+        if (terminal)
+            throw new InvalidOperationException("The unit of work is already terminal.");
+    }
+
 }
