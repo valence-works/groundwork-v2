@@ -32,7 +32,7 @@ public sealed class QueryModelContractTests
     [Fact]
     public void All_issue_230_leaf_shapes_construct_and_normalize()
     {
-        var elementSet = new ElementSetRef("order-tags");
+        var elementSet = new ElementSetRef("order-tags", QueryType.String);
         var predicate = new Predicate.And(ImmutableArray.Create<Predicate>(
             new Predicate.Equal(Name, QueryConstant.Of(Name, "Straße")),
             new Predicate.In(Name, ImmutableArray.Create(
@@ -108,11 +108,11 @@ public sealed class QueryModelContractTests
     public void Element_set_names_are_escaped_without_delimiter_aliases()
     {
         var commaInName = new Predicate.ElementOf(
-            new ElementSetRef("a,b"),
+            new ElementSetRef("a,b", QueryType.String),
             ImmutableArray.Create(QueryConstant.Of(Name, "c")),
             SetQuantifier.Any);
         var commaInValue = new Predicate.ElementOf(
-            new ElementSetRef("a"),
+            new ElementSetRef("a", QueryType.String),
             ImmutableArray.Create(QueryConstant.Of(Name, "b,c")),
             SetQuantifier.Any);
 
@@ -129,7 +129,7 @@ public sealed class QueryModelContractTests
         {
             CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("en-US");
             var english = PredicateNormalizer.Normalize(new Predicate.ElementOf(
-                new ElementSetRef("tags"),
+                new ElementSetRef("tags", QueryType.String),
                 new[] { QueryConstant.Of(Name, "I"), QueryConstant.Of(Name, "i"), QueryConstant.Of(Name, "İ"), QueryConstant.Of(Name, "ı") },
                 SetQuantifier.Any));
             var englishRequest = new QueryRequest(
@@ -141,7 +141,7 @@ public sealed class QueryModelContractTests
 
             CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("tr-TR");
             var turkish = PredicateNormalizer.Normalize(new Predicate.ElementOf(
-                new ElementSetRef("tags"),
+                new ElementSetRef("tags", QueryType.String),
                 new[] { QueryConstant.Of(Name, "I"), QueryConstant.Of(Name, "i"), QueryConstant.Of(Name, "İ"), QueryConstant.Of(Name, "ı") },
                 SetQuantifier.Any));
             var turkishRequest = new QueryRequest(

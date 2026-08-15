@@ -31,6 +31,18 @@ public enum QueryConstantKind
     Binary
 }
 
+/// <summary>Portable comparison policies for text values.</summary>
+public enum QueryStringComparisonPolicy
+{
+    Ordinal,
+    UnicodeOrdinalIgnoreCase,
+    AsciiIgnoreCase,
+    CurrentCulture,
+    InvariantCulture,
+    AccentInsensitive,
+    Icu
+}
+
 public sealed record TableId
 {
     public TableId(string value)
@@ -56,8 +68,9 @@ public sealed record ColumnRef
         bool isNullable = true,
         int? maxLength = null,
         byte? decimalPrecision = null,
-        byte? decimalScale = null)
-        : this(TableId.Empty, name, type, isNullable, maxLength, decimalPrecision, decimalScale)
+        byte? decimalScale = null,
+        QueryStringComparisonPolicy stringComparison = QueryStringComparisonPolicy.Ordinal)
+        : this(TableId.Empty, name, type, isNullable, maxLength, decimalPrecision, decimalScale, stringComparison)
     {
     }
 
@@ -68,7 +81,8 @@ public sealed record ColumnRef
         bool isNullable = true,
         int? maxLength = null,
         byte? decimalPrecision = null,
-        byte? decimalScale = null)
+        byte? decimalScale = null,
+        QueryStringComparisonPolicy stringComparison = QueryStringComparisonPolicy.Ordinal)
     {
         Table = table ?? throw new ArgumentNullException(nameof(table));
         if (string.IsNullOrWhiteSpace(name))
@@ -88,6 +102,7 @@ public sealed record ColumnRef
         MaxLength = maxLength;
         DecimalPrecision = decimalPrecision;
         DecimalScale = decimalScale;
+        StringComparison = stringComparison;
     }
 
     public TableId Table { get; }
@@ -97,6 +112,7 @@ public sealed record ColumnRef
     public int? MaxLength { get; }
     public byte? DecimalPrecision { get; }
     public byte? DecimalScale { get; }
+    public QueryStringComparisonPolicy StringComparison { get; }
 
     public override string ToString() => Table.Value.Length == 0 ? Name : Table + "." + Name;
 }
@@ -172,6 +188,8 @@ public sealed class QueryConstant : IEquatable<QueryConstant>
             }
             return leftBytes.Length.CompareTo(rightBytes.Length);
         }
+        if (left.Value is Guid leftGuid && right.Value is Guid rightGuid)
+            return PortableValueComparison.CompareGuid(leftGuid, rightGuid);
         if (left.Value is IComparable comparable)
             return comparable.CompareTo(right.Value);
         return string.CompareOrdinal(left.ToCanonicalString(), right.ToCanonicalString());
@@ -237,24 +255,18 @@ public sealed class QueryConstant : IEquatable<QueryConstant>
         {
             case QueryType.Boolean when value is bool boolean:
                 return boolean;
-            case QueryType.Int32 when TryIntegral(value, out var intValue) && intValue is >= int.MinValue and <= int.MaxValue:
-                return (int)intValue;
-            case QueryType.Int64 when TryIntegral(value, out var longValue):
+            case QueryType.Int32 when value is int intValue:
+                return intValue;
+            case QueryType.Int64 when value is long longValue:
                 return longValue;
-            case QueryType.Decimal when TryDecimal(value, out var decimalValue):
+            case QueryType.Decimal when value is decimal decimalValue:
                 ValidateDecimal(column, decimalValue);
                 return decimalValue;
-            case QueryType.Double when value is double doubleValue && !double.IsNaN(doubleValue) && !double.IsInfinity(doubleValue):
-                return doubleValue;
-            case QueryType.Double when value is float floatValue && !float.IsNaN(floatValue) && !float.IsInfinity(floatValue):
-                return (double)floatValue;
             case QueryType.String when value is string text:
                 ValidateString(column, text);
                 return text;
             case QueryType.DateTimeOffset when value is DateTimeOffset instant:
                 return instant;
-            case QueryType.DateTimeOffset when value is DateTime dateTime && dateTime.Kind == DateTimeKind.Utc:
-                return new DateTimeOffset(dateTime);
             case QueryType.Guid when value is Guid guid:
                 return guid;
             case QueryType.Binary when value is byte[] binary:
@@ -285,38 +297,6 @@ public sealed class QueryConstant : IEquatable<QueryConstant>
         if (value is byte[] binary)
             return (QueryConstantKind.Binary, (byte[])binary.Clone());
         throw new ArgumentException($"Value of type '{value.GetType()}' is not a supported query constant.", nameof(value));
-    }
-
-    private static bool TryIntegral(object value, out long result)
-    {
-        switch (value)
-        {
-            case byte item: result = item; return true;
-            case sbyte item: result = item; return true;
-            case short item: result = item; return true;
-            case ushort item: result = item; return true;
-            case int item: result = item; return true;
-            case uint item: result = item; return true;
-            case long item: result = item; return true;
-            case ulong item when item <= long.MaxValue: result = (long)item; return true;
-            default: result = 0; return false;
-        }
-    }
-
-    private static bool TryDecimal(object value, out decimal result)
-    {
-        if (TryIntegral(value, out var integer))
-        {
-            result = integer;
-            return true;
-        }
-        if (value is decimal decimalValue)
-        {
-            result = decimalValue;
-            return true;
-        }
-        result = 0;
-        return false;
     }
 
     private static void ValidateDecimal(ColumnRef column, decimal value)
@@ -398,7 +378,16 @@ public sealed record ElementSetRef
         Name = name;
     }
 
+    public ElementSetRef(string name, QueryType type)
+        : this(name)
+    {
+        if (!Enum.IsDefined(typeof(QueryType), type))
+            throw new ArgumentOutOfRangeException(nameof(type));
+        Type = type;
+    }
+
     public string Name { get; }
+    public QueryType? Type { get; }
 }
 
 public enum SetQuantifier

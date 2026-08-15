@@ -108,6 +108,7 @@ public sealed class KernelDeclarationTests
     {
         var externalReferences = typeof(StorageUnit).Assembly.GetReferencedAssemblies()
             .Where(reference => !reference.Name!.StartsWith("System", StringComparison.Ordinal) &&
+                !reference.Name.Equals("netstandard", StringComparison.Ordinal) &&
                 !reference.Name.Equals("Microsoft.Win32.Registry", StringComparison.Ordinal))
             .ToArray();
 
