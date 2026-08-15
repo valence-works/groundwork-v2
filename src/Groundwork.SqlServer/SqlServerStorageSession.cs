@@ -121,31 +121,68 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         ? null
         : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
-    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Insert);
-    public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Update);
-    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Mutate(values, options, Mutation.Upsert);
-    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        Execute(() => ConditionalUpsertCore(values, options));
+    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
+        return Mutate(values, options, Mutation.Insert);
+    }
+
+    public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
+        return Mutate(values, options, Mutation.Update);
+    }
+
+    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
+        return Mutate(values, options, Mutation.Upsert);
+    }
+
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
+    {
+        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
+        return Execute(() => ConditionalUpsertCore(values, options));
+    }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
         ExecuteWrite(() => ApplyBatchCore(writes));
 
-    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
+    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
-        var existing = ReadCore(key);
-        ValidateExpected(options, existing, Mutation.Delete);
-        if (existing is null) return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        var (where, parameters) = KeyPredicate(key.Values);
-        if (VersionColumnDefinition is not null)
+        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
+        return ExecuteWrite(() =>
         {
-            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
-            parameters["@expected"] = (options!.ExpectedVersion!.Value, VersionColumnDefinition);
-        }
-        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
-        AddParameters(command, parameters);
-        if (command.ExecuteNonQuery() == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
-        return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-    });
+            if (Unit.Concurrency.IsNone)
+            {
+                var (noneWhere, noneParameters) = KeyPredicate(key.Values);
+                using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+                AddParameters(noneCommand, noneParameters);
+                return noneCommand.ExecuteNonQuery() == 0
+                    ? new WriteOutcome(WriteOutcomeStatus.NotFound)
+                    : new WriteOutcome(WriteOutcomeStatus.Deleted);
+            }
+
+            var existing = ReadCore(key);
+            ValidateExpected(options, existing, Mutation.Delete);
+            if (existing is null)
+                return new WriteOutcome(WriteOutcomeStatus.NotFound);
+            var (where, parameters) = KeyPredicate(key.Values);
+            if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+                parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
+            }
+            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            AddParameters(command, parameters);
+            if (command.ExecuteNonQuery() == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
+        });
+    }
 
     internal void Close() => closed = true;
 
@@ -154,7 +191,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         ArgumentNullException.ThrowIfNull(writes);
         if (writes.Count == 0)
             return [];
-        if (writes.Any(write => write.Options.ExpectedVersion is not null))
+        if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
@@ -386,7 +423,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         {
             RowWriteMode.Insert => Insert(write.Values!, write.Options),
             RowWriteMode.Update => Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.ExpectedVersion is not null => ConditionalUpsert(write.Values!, write.Options),
+            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
@@ -440,12 +477,15 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 ? value
                 : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
             StringComparer.Ordinal));
-        var existing = ReadCore(key);
+        // None mode has no token to inspect. Keep direct writes single-statement and let the
+        // database report uniqueness/not-found from the write itself.
+        var existing = Unit.Concurrency.IsNone ? null : ReadCore(key);
         if (mutation == Mutation.Insert && existing is not null) return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
-        if (mutation == Mutation.Update && existing is null) return new WriteOutcome(WriteOutcomeStatus.NotFound);
+        if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic) return new WriteOutcome(WriteOutcomeStatus.NotFound);
         ValidateExpected(options, existing, mutation);
         if (mutation == Mutation.Upsert)
         {
+            if (Unit.Concurrency.IsNone) return UpsertNoneCore(values.Values, options);
             if (existing is null) return InsertCore(values.Values);
             return UpdateCore(values.Values, existing, options);
         }
@@ -471,7 +511,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
                 return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
             }
         }
-        return UpdateCore(values.Values, existing!, options);
+        return UpdateCore(values.Values, existing, options);
     });
 
     private WriteOutcome InsertCore(IReadOnlyDictionary<string, object?> values)
@@ -493,7 +533,56 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
     }
 
-    private WriteOutcome UpdateCore(IReadOnlyDictionary<string, object?> values, StoredEntry existing, WriteOptions? options)
+    private WriteOutcome UpsertNoneCore(IReadOnlyDictionary<string, object?> values, WriteOptions? options)
+    {
+        var supplied = UserColumns.Where(column => values.ContainsKey(column.Name)).ToArray();
+        var columns = supplied.ToList();
+        var parameters = BuildParameters(values, supplied);
+        if (ScopeColumnDefinition is not null)
+        {
+            columns.Add(ScopeColumnDefinition);
+            parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
+        }
+
+        var sql = RenderNoneUpsertSql(Unit, columns);
+        using var command = Command(sql);
+        AddParameters(command, parameters);
+        options?.Observer?.Observe(new WritePathEvent("sqlserver.upsert", sql, IsProbe: false));
+        try
+        {
+            command.ExecuteNonQuery();
+            return new WriteOutcome(WriteOutcomeStatus.Upserted);
+        }
+        catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
+        {
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
+        }
+    }
+
+    internal static string RenderNoneUpsertSql(
+        StorageUnit unit,
+        IReadOnlyList<ColumnDefinition> columns)
+    {
+        var sourceColumns = string.Join(", ", columns.Select(column => Quote(column.Name)));
+        var match = string.Join(" AND ", unit.Key.Columns.Select(column =>
+            $"target.{Quote(column)}=source.{Quote(column)}"));
+        var updates = columns
+            .Where(column => !unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) &&
+                             column.Name != SqlServerSchemaCoordinator.ScopeColumn &&
+                             column.Name != "createdAt" &&
+                             column.Name != SqlServerSchemaCoordinator.VersionColumn)
+            .Select(column => $"target.{Quote(column.Name)}=source.{Quote(column.Name)}")
+            .ToList();
+        if (updates.Count == 0)
+            updates.Add($"target.{Quote(unit.Key.Columns[0])}=target.{Quote(unit.Key.Columns[0])}");
+
+        return $"MERGE {Quote(unit.Name)} WITH (HOLDLOCK) AS target " +
+               $"USING (VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))})) AS source ({sourceColumns}) ON {match} " +
+               $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", updates)} " +
+               $"WHEN NOT MATCHED BY TARGET THEN INSERT ({sourceColumns}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))});";
+    }
+
+    private WriteOutcome UpdateCore(IReadOnlyDictionary<string, object?> values, StoredEntry? existing, WriteOptions? options)
     {
         var supplied = UserColumns.Where(column => values.ContainsKey(column.Name) && !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal)).ToArray();
         var sets = supplied.Select(column => $"{Quote(column.Name)}=@{column.Name}").ToList();
@@ -503,20 +592,33 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         if (VersionColumnDefinition is not null)
         {
             sets.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1");
-            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
-            parameters["@expected"] = (options!.ExpectedVersion!.Value, VersionColumnDefinition);
+            if (options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+                parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
+            }
         }
-        if (sets.Count == 0) return new WriteOutcome(WriteOutcomeStatus.Updated, existing.Version);
-        using var command = Command($"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};");
+        if (sets.Count == 0)
+        {
+            var noOpColumn = LogicalKeyColumns[0];
+            sets.Add($"{Quote(noOpColumn)}={Quote(noOpColumn)}");
+        }
+        var sql = $"UPDATE {Quote(Unit.Name)} SET {string.Join(", ", sets)} WHERE {where};";
+        using var command = Command(sql);
         AddParameters(command, parameters);
+        if (Unit.Concurrency.IsNone)
+            options?.Observer?.Observe(new WritePathEvent("sqlserver.update", sql, IsProbe: false));
         try
         {
-            if (command.ExecuteNonQuery() == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
-            return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing.Version + 1);
+            if (command.ExecuteNonQuery() == 0)
+                return new WriteOutcome(Unit.Concurrency.IsNone
+                    ? WriteOutcomeStatus.NotFound
+                    : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
+            return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
         }
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
         {
-            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version);
         }
     }
 
@@ -525,7 +627,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
         ValidateValues(values.Values, requireAllNonNullable: false);
-        if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
+        if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumnDefinition is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
 
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
@@ -562,16 +664,18 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         foreach (var pair in keyParameters)
             parameters[pair.Key] = pair.Value;
         if (VersionColumnDefinition is not null)
-            parameters["@expected"] = (options?.ExpectedVersion, VersionColumnDefinition);
+            parameters["@expected"] = (options?.Precondition.Version, VersionColumnDefinition);
 
         var where = string.Join(" AND ", LogicalKeyColumns.Select(column =>
             $"target.{Quote(column)}=@key_{column}"));
         if (ScopeColumnDefinition is not null)
             where += $" AND target.{Quote(ScopeColumnDefinition.Name)}=@__groundwork_scope";
-        var updateCondition = VersionColumnDefinition is null
+        var updateCondition = VersionColumnDefinition is null || options?.Precondition.Kind == WritePreconditionKind.Unconditional
             ? "1=1"
-            : $"@expected IS NOT NULL AND target.{Quote(VersionColumnDefinition.Name)}=@expected";
-        var insertCondition = VersionColumnDefinition is null ? "1=1" : "@expected IS NULL";
+            : options?.Precondition.Kind == WritePreconditionKind.CreateOnly
+                ? "1=0"
+                : $"target.{Quote(VersionColumnDefinition.Name)}=@expected";
+        var insertCondition = VersionColumnDefinition is null || options?.Precondition.Kind != WritePreconditionKind.IfVersion ? "1=1" : "1=0";
         var insertColumns = supplied.ToList();
         if (VersionColumnDefinition is not null)
         {
@@ -688,21 +792,22 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
     {
-        if (options?.ExpectedVersion is not null && VersionColumnDefinition is null)
-            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
         if (VersionColumnDefinition is null) return;
+        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
         if (mutation == Mutation.Insert)
-        {
-            if (existing is null && options?.ExpectedVersion is not null) throw new ConcurrencyConflictException();
             return;
-        }
+
         if (mutation == Mutation.Upsert)
         {
-            if (existing is null ? options?.ExpectedVersion is not null : options?.ExpectedVersion != existing.Version)
+            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
+                throw new ConcurrencyConflictException(existing.Version);
+            if (precondition.Kind == WritePreconditionKind.IfVersion &&
+                (existing is null || precondition.Version != existing.Version))
                 throw new ConcurrencyConflictException(existing?.Version);
             return;
         }
-        if (existing is null || options?.ExpectedVersion != existing.Version)
+        if (precondition.Kind == WritePreconditionKind.IfVersion &&
+            (existing is null || precondition.Version != existing.Version))
             throw new ConcurrencyConflictException(existing?.Version);
     }
 

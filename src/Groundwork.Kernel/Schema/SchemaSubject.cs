@@ -84,6 +84,7 @@ public sealed class SchemaSubject
 
     private static void Validate(StorageUnit unit)
     {
+        ConcurrencyDeclaration.ValidateDeclaration(unit);
         if (string.IsNullOrWhiteSpace(unit.Id.Value))
             throw new ArgumentException("A schema subject requires a non-empty storage-unit id.", nameof(unit));
         if (string.IsNullOrWhiteSpace(unit.Name))
@@ -99,6 +100,23 @@ public sealed class SchemaSubject
             unit.Key.Columns.Any(column => !columnSet.Contains(column)))
         {
             throw new ArgumentException("A schema subject key must name one or more declared columns.", nameof(unit));
+        }
+
+        var concurrency = unit.Concurrency ?? throw new ArgumentException(
+            "A schema subject requires a concurrency declaration.", nameof(unit));
+        if (concurrency.IsNone && concurrency.TokenColumn is not null)
+            throw new ArgumentException("A non-optimistic concurrency declaration cannot name a token column.", nameof(unit));
+        if (concurrency.IsOptimistic)
+        {
+            if (string.IsNullOrWhiteSpace(concurrency.TokenColumn))
+                throw new ArgumentException("An optimistic concurrency declaration requires a token column name.", nameof(unit));
+            var token = columns.FirstOrDefault(column => column.Name == concurrency.TokenColumn);
+            if (token is not null && (token.Type != PortableType.Int64 || token.IsNullable ||
+                                      token.Default?.Value is not long defaultValue || defaultValue != 0))
+            {
+                throw new ArgumentException(
+                    $"Optimistic token column '{concurrency.TokenColumn}' must be a non-null Int64 with default 0.", nameof(unit));
+            }
         }
 
         var indexes = unit.Indexes ?? [];

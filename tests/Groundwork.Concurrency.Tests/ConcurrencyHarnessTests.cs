@@ -265,7 +265,7 @@ public sealed class ConcurrencyHarnessTests
                 new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
-            Concurrency = ConcurrencyDeclaration.Optimistic
+            Concurrency = ConcurrencyDeclaration.Optimistic()
         };
         using var connection = factory.Create(connectionString);
         connection.Schema.Apply(unit);
@@ -283,7 +283,7 @@ public sealed class ConcurrencyHarnessTests
 
         using (var second = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
         {
-            second.Stage(RowWrite.Upsert(unit, Values("same", "second", secondCreatedAt), WriteOptions.ForVersion(1)));
+            second.Stage(RowWrite.Upsert(unit, Values("same", "second", secondCreatedAt), WriteOptions.IfVersion(1)));
             var report = second.CommitWithOutcomes();
             Assert.True(report.IsSuccessful);
             Assert.Equal(2, report.Outcomes.Single().Outcome.Version);
@@ -297,7 +297,7 @@ public sealed class ConcurrencyHarnessTests
         Assert.Equal(2, read.Version);
 
         using var stale = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
-        stale.Stage(RowWrite.Upsert(unit, Values("same", "stale", thirdCreatedAt), WriteOptions.ForVersion(1)));
+        stale.Stage(RowWrite.Upsert(unit, Values("same", "stale", thirdCreatedAt), WriteOptions.IfVersion(1)));
         var error = Assert.Throws<BatchWriteException>(() => stale.CommitWithOutcomes());
         Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, error.Outcomes.Single().Outcome.Status);
         Assert.Equal("second", connection.OpenSession(unit, StorageAccess.Global)

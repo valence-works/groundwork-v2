@@ -217,15 +217,15 @@ public sealed class InMemoryProviderTests
         Assert.Null(inserted.Version);
         Assert.Null(globalSession.Read(TestingFixture.Key("g"))!.Version);
         Assert.Throws<InvalidOperationException>(() =>
-            globalSession.Update(TestingFixture.Values("g", "changed"), WriteOptions.ForVersion(1)));
+            globalSession.Update(TestingFixture.Values("g", "changed"), WriteOptions.IfVersion(1)));
 
         var scopedInsert = scopedSession.Insert(TestingFixture.Values("s", "first"));
         Assert.Equal(1, scopedInsert.Version);
         Assert.Equal(WriteOutcomeStatus.Updated,
             scopedSession.Update(TestingFixture.Values("s", "second"),
-                WriteOptions.ForVersion(scopedInsert.Version!.Value)).Status);
+                WriteOptions.IfVersion(scopedInsert.Version!.Value)).Status);
         Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict,
-            scopedSession.Update(TestingFixture.Values("s", "stale"), WriteOptions.ForVersion(1)).Status);
+            scopedSession.Update(TestingFixture.Values("s", "stale"), WriteOptions.IfVersion(1)).Status);
     }
 
     [Fact]

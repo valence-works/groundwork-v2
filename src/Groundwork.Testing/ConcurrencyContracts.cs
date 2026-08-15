@@ -4,13 +4,6 @@ using Groundwork.Kernel;
 
 namespace Groundwork.Testing;
 
-/// <summary>The concurrency behavior exercised by the provider-neutral write harness.</summary>
-public enum ConcurrencyKind
-{
-    None,
-    Optimistic
-}
-
 /// <summary>Options for one deterministic concurrency scenario.</summary>
 public sealed record ConcurrencyProbeOptions
 {
@@ -34,7 +27,7 @@ public sealed record ConcurrencyWriteRequest(
     string Key,
     string? Value,
     DateTimeOffset CreatedAt,
-    long? ExpectedVersion);
+    WritePrecondition Precondition);
 
 public enum ConcurrencyWriteOutcomeStatus
 {
@@ -309,19 +302,23 @@ public static class ConcurrencyHarness
             var key = Key(seed, keyIndex);
             var value = $"writer-{writer}-key-{keyIndex}";
             var createdAt = Timestamp(seed, writer, keyIndex);
-            long? expected = null;
+            var precondition = options.Concurrency == ConcurrencyKind.Optimistic
+                ? WritePrecondition.CreateOnly
+                : WritePrecondition.Unconditional;
             var acceptedForKey = false;
             for (var attempt = 0; attempt < options.MaxAttemptsPerWrite; attempt++)
             {
                 if (attempt > 0)
                 {
                     var current = session.Read(key);
-                    expected = options.Concurrency == ConcurrencyKind.Optimistic
-                        ? current?.Version
-                        : null;
+                    precondition = options.Concurrency == ConcurrencyKind.Optimistic
+                        ? current is null
+                            ? WritePrecondition.CreateOnly
+                            : WritePrecondition.IfVersion(current.Version)
+                        : WritePrecondition.Unconditional;
                 }
 
-                var request = new ConcurrencyWriteRequest(key, value, createdAt, expected);
+                var request = new ConcurrencyWriteRequest(key, value, createdAt, precondition);
                 var result = session.ConditionalUpsert(request);
                 outcomes.Add(result);
                 if (result.Status == ConcurrencyWriteOutcomeStatus.ConcurrencyConflict)
@@ -458,7 +455,7 @@ public static class ConcurrencyHarness
             ],
             Key = new KeyDefinition { Columns = ["id"] },
             Concurrency = options.Concurrency == ConcurrencyKind.Optimistic
-                ? ConcurrencyDeclaration.Optimistic
+                ? ConcurrencyDeclaration.Optimistic()
                 : ConcurrencyDeclaration.None,
             Indexes = options.IncludePartialUniqueIndex
                 ?
@@ -579,8 +576,8 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
             ["value"] = request.Value,
             ["createdAt"] = request.CreatedAt
         });
-        var options = declaration.Concurrency == ConcurrencyDeclaration.Optimistic
-            ? new WriteOptions { ExpectedVersion = request.ExpectedVersion }
+        var options = declaration.Concurrency.IsOptimistic
+            ? new WriteOptions { Precondition = request.Precondition }
             : null;
         var result = concurrencySession.ConditionalUpsert(values, options);
         if (result.Status == WriteOutcomeStatus.ConcurrencyConflict)
@@ -592,7 +589,7 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
                 $"Provider returned '{result.Status}' for the W2 conditional upsert.");
         }
 
-        var version = declaration.Concurrency == ConcurrencyDeclaration.Optimistic
+        var version = declaration.Concurrency.IsOptimistic
             ? result.Version ?? throw new InvalidOperationException(
                 "An optimistic conditional upsert must return a version.")
             : logicalVersions.AddOrUpdate(request.Key, 1, (_, current) => checked(current + 1));
@@ -616,7 +613,7 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
             throw new InvalidOperationException($"Provider returned an incomplete W2 row for key '{key}'.");
         }
 
-        var version = declaration.Concurrency == ConcurrencyDeclaration.Optimistic
+        var version = declaration.Concurrency.IsOptimistic
             ? entry.Version ?? throw new InvalidOperationException(
                 "An optimistic W2 row must return a version.")
             : logicalVersions.TryGetValue(key, out var logical) ? logical : 0;

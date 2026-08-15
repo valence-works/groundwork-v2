@@ -34,7 +34,7 @@ internal static class TestingFixture
         Columns = Columns(),
         Key = new KeyDefinition { Columns = ["id"] },
         Scope = ScopePolicy.Scoped,
-        Concurrency = ConcurrencyDeclaration.Optimistic
+        Concurrency = ConcurrencyDeclaration.Optimistic()
     };
 
     public static StorageValues Values(string id, string value, string? uniqueValue = null) =>

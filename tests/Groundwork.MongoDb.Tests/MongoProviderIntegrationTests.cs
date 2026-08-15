@@ -442,7 +442,7 @@ public sealed class MongoProviderIntegrationTests
             Id = new StorageUnitId("p1-scope-" + Guid.NewGuid().ToString("N")),
             Name = "P1Scope_" + Guid.NewGuid().ToString("N"),
             Scope = ScopePolicy.Scoped,
-            Concurrency = ConcurrencyDeclaration.Optimistic
+            Concurrency = ConcurrencyDeclaration.Optimistic()
         };
         connection.Schema.Apply(unit);
         var first = connection.OpenSession(unit, MongoStorageAccess.Scoped(new StorageScope("a")));
@@ -453,9 +453,9 @@ public sealed class MongoProviderIntegrationTests
         Assert.Equal("Ada", first.Read(Key("same"))!.Values.Values["name"]);
         Assert.Null(second.Read(Key("same")));
         Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict,
-            first.Update(CustomerValues("same", null), MongoWriteOptions.ForVersion(9)).Status);
+            first.Update(CustomerValues("same", null), MongoWriteOptions.IfVersion(9)).Status);
         Assert.Equal(MongoWriteOutcomeStatus.Updated,
-            first.Update(CustomerValues("same", null), MongoWriteOptions.ForVersion(1)).Status);
+            first.Update(CustomerValues("same", null), MongoWriteOptions.IfVersion(1)).Status);
     }
 
     [SkippableFact]

@@ -367,7 +367,7 @@ public sealed record ProviderCapabilityReport
             evidencedCapabilities,
             IndexCapabilities.All,
             Enum.GetValues<PortableQueryOperation>().ToImmutableHashSet(),
-            Enum.GetValues<ConcurrencyDeclaration>().ToImmutableHashSet(),
+            new[] { ConcurrencyDeclaration.None, ConcurrencyDeclaration.Optimistic() }.ToImmutableHashSet(),
             warnings)
     {
     }
