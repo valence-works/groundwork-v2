@@ -29,13 +29,13 @@ native selection/plan verification.
 ## Execution boundary
 
 `IRecordStore` is the provider-neutral adapter seam. It accepts a kernel declaration, `RowValues`,
-and the Query.Model `QueryRequest`. The `Groundwork.Records.TestingAdapter` companion package
-provides the one-obvious-path `table.Open(connection)` extensions for the existing relational and
-Mongo provider connection contracts; application-specific adapters can implement `IRecordStore`
-when they have another execution boundary. `RecordTableSession<T>` maps typed insert, update,
-upsert, delete, and query operations onto that seam. This keeps provider dependencies out of
-`Groundwork.Records` while allowing the shipped adapter to use the existing W1 write path and Q8
-closed query surface.
+and the Query.Model `QueryRequest`. The `Groundwork.Records.Store` production integration package
+provides the one-obvious-path `table.Open(connection)` extensions for the provider-neutral
+connection contract; application-specific adapters can implement `IRecordStore` when they have
+another execution boundary. `RecordTableSession<T>` maps typed insert, update, upsert, delete,
+and query operations onto that seam. This keeps provider dependencies out of `Groundwork.Records`
+while allowing the shipped integration to use the existing W1 write path and Q8 closed query
+surface.
 
 Run the mapping benchmark with:
 

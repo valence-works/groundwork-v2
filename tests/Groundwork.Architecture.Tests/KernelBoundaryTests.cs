@@ -99,6 +99,9 @@ public sealed class KernelBoundaryTests
         return IsKernelAssembly(name) || IsSubstrateAssembly(name) || IsProviderAssembly(assembly) ||
                IsContractFamily(assembly) ||
                HasMetadata(assembly, "Groundwork.Tool", "true") ||
+               string.Equals(name, "Groundwork.Store", StringComparison.Ordinal) ||
+               string.Equals(name, "Groundwork.Diagnostics", StringComparison.Ordinal) ||
+               string.Equals(name, "Groundwork.Records.Store", StringComparison.Ordinal) ||
                string.Equals(name, "Groundwork.Query.Planning", StringComparison.Ordinal) ||
                string.Equals(name, "Groundwork.Testing", StringComparison.Ordinal) ||
                name?.StartsWith("Groundwork.Tool", StringComparison.Ordinal) == true;
