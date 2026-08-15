@@ -193,6 +193,14 @@ jobs:
         env:
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
         run: dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj --no-restore --configuration Release --filter "W2"
+      - name: Run W1 native write-path proof across all providers
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w1ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+        run: dotnet test tests/Groundwork.WritePath.Tests/Groundwork.WritePath.Tests.csproj --no-restore --configuration Release
+      - name: Measure W1 SQLite round trips
+        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --workload upsert --n 1
 
   postgresql-provider:
     runs-on: ubuntu-latest

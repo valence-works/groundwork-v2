@@ -94,6 +94,8 @@ public sealed record MongoWriteOptions
 {
     public long? ExpectedVersion { get; init; }
 
+    public IWritePathObserver? Observer { get; init; }
+
     public static MongoWriteOptions Unconditional { get; } = new();
 
     public static MongoWriteOptions ForVersion(long expectedVersion) =>
@@ -111,7 +113,10 @@ public enum MongoWriteOutcomeStatus
     ConcurrencyConflict
 }
 
-public sealed record MongoWriteOutcome(MongoWriteOutcomeStatus Status, long? Version = null)
+public sealed record MongoWriteOutcome(
+    MongoWriteOutcomeStatus Status,
+    long? Version = null,
+    string? UniqueIndexName = null)
 {
     public bool Succeeded => Status is MongoWriteOutcomeStatus.Inserted or
         MongoWriteOutcomeStatus.Updated or

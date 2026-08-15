@@ -47,7 +47,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         Mutate(values, options, Mutation.Upsert);
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
-        Mutate(values, options, Mutation.ConditionalUpsert);
+        Execute(() => ConditionalUpsertCore(values, options));
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => ExecuteWrite(() =>
     {
@@ -91,6 +91,84 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null)
         };
     });
+
+    private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        ValidateValues(values.Values, requireAllNonNullable: false);
+        if (options?.ExpectedVersion is not null && VersionColumn is null)
+            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
+
+        var key = KeyFromValues(values.Values);
+        var physical = PhysicalValues(values.Values, includeVersion: VersionColumn is not null);
+        var (keyPredicate, keyParameters) = KeyPredicate(key.Values);
+        var columns = physical.Keys.ToArray();
+        var updateColumns = columns.Where(column =>
+            !Unit.Key.Columns.Contains(column, StringComparer.Ordinal) &&
+            column != PostgreSqlSchemaCoordinator.ScopeColumn &&
+            column != "createdAt" &&
+            column != PostgreSqlSchemaCoordinator.VersionColumn).ToArray();
+        var updates = updateColumns.Select(column =>
+            $"{Quote(column)}=EXCLUDED.{Quote(column)}").ToList();
+        if (VersionColumn is not null)
+            updates.Add($"{Quote(VersionColumn.Name)}={Quote(Unit.Name)}.{Quote(VersionColumn.Name)}+1");
+        if (updates.Count == 0)
+        {
+            var noOpColumn = Unit.Key.Columns[0];
+            updates.Add($"{Quote(noOpColumn)}={Quote(Unit.Name)}.{Quote(noOpColumn)}");
+        }
+
+        var conflictPredicate = PartialKeyPredicate();
+        var conflict = $"({string.Join(", ", Unit.Key.Columns.Select(Quote))})" +
+            (conflictPredicate is null ? string.Empty : $" WHERE {conflictPredicate}");
+        var actionPredicate = VersionColumn is null
+            ? string.Empty
+            : $" WHERE @expected::bigint IS NOT NULL AND {Quote(Unit.Name)}.{Quote(VersionColumn.Name)}=@expected::bigint";
+        var source = VersionColumn is null || options?.ExpectedVersion is null
+            ? $"VALUES ({string.Join(", ", columns.Select(column => "@" + column))})"
+            : $"SELECT {string.Join(", ", columns.Select(column => "@" + column))} WHERE EXISTS (SELECT 1 FROM {Quote(Unit.Name)} WHERE {keyPredicate} AND {Quote(VersionColumn.Name)}=@expected::bigint)";
+        var returning = VersionColumn is null
+            ? "(xmax = 0) AS \"__groundwork_inserted\", NULL::bigint AS \"__groundwork_version\""
+            : $"(xmax = 0) AS \"__groundwork_inserted\", {Quote(VersionColumn.Name)} AS \"__groundwork_version\"";
+        var sql = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) " +
+                  $"{source} ON CONFLICT {conflict} DO UPDATE SET {string.Join(", ", updates)}{actionPredicate} " +
+                  $"RETURNING {returning};";
+        using var command = Command(sql);
+        AddParameters(command, physical);
+        foreach (var pair in keyParameters)
+            if (!physical.ContainsKey(pair.Key.TrimStart('@')))
+                Add(command, pair.Key.TrimStart('@'), pair.Value);
+        if (VersionColumn is not null)
+            Add(command, "expected", options?.ExpectedVersion);
+        options?.Observer?.Observe(new WritePathEvent("postgresql.conditional-upsert", sql, IsProbe: false));
+        try
+        {
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+                return DeferredConflict(key, options?.Observer);
+
+            var inserted = reader.GetBoolean(0);
+            var versionOrdinal = 1;
+            var version = reader.IsDBNull(versionOrdinal) ? (long?)null : reader.GetInt64(versionOrdinal);
+            return new WriteOutcome(inserted ? WriteOutcomeStatus.Inserted : WriteOutcomeStatus.Updated, version);
+        }
+        catch (DbException exception) when (new PostgreSqlDialect().TryMapUniqueViolation(exception, out var indexName))
+        {
+            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, indexName);
+        }
+    }
+
+    private WriteOutcome DeferredConflict(StorageKey key, IWritePathObserver? observer) =>
+        WriteOutcome.Deferred(
+            WriteOutcomeStatus.ConcurrencyConflict,
+            null,
+            () =>
+            {
+                var existing = ReadCore(key, observer);
+                return existing is null
+                    ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
+                    : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            });
 
     private WriteOutcome InsertCore(StorageValues values)
     {
@@ -193,12 +271,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         }
     }
 
-    private StoredEntry? ReadCore(StorageKey key)
+    private StoredEntry? ReadCore(StorageKey key, IWritePathObserver? observer = null)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumn is null ? [] : [VersionColumn]).ToArray();
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
+        observer?.Observe(new WritePathEvent("postgresql.write-probe", command.CommandText, IsProbe: true));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
             return null;
@@ -357,6 +436,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private void Add(NpgsqlCommand command, string name, object? value)
     {
         var parameter = command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        if (name == "expected")
+            parameter.NpgsqlDbType = NpgsqlDbType.Bigint;
         if (Unit.Columns.FirstOrDefault(column => column.Name == name)?.Type == PortableType.Json)
             parameter.NpgsqlDbType = NpgsqlDbType.Jsonb;
     }

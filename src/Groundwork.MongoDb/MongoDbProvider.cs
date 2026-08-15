@@ -709,7 +709,7 @@ internal sealed class MongoStorageSession : IMongoStorageSession
         Mutate(values, options, MutationKind.Upsert);
 
     public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
-        Mutate(values, options, MutationKind.Upsert, exactOutcome: true);
+        ConditionalUpsertCore(values, options);
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
@@ -815,6 +815,105 @@ internal sealed class MongoStorageSession : IMongoStorageSession
                 : MongoWriteOutcomeStatus.Updated;
         }
         return new MongoWriteOutcome(status, nextVersion);
+    }
+
+    private MongoWriteOutcome ConditionalUpsertCore(
+        MongoStorageValues values,
+        MongoWriteOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        ThrowIfDisposed();
+        return ExecuteWithTransactionIfNeeded(transactional =>
+            transactional.ConditionalUpsertOne(values, options));
+    }
+
+    private MongoWriteOutcome ConditionalUpsertOne(
+        MongoStorageValues values,
+        MongoWriteOptions? options)
+    {
+        var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
+        var document = MongoDocumentMapper.EncodeDocument(
+            Unit,
+            values.Values,
+            identity,
+            existing: null,
+            column => NextSequence(column));
+        var filter = new BsonDocument("_id", identity);
+        var optimistic = Unit.Concurrency == ConcurrencyDeclaration.Optimistic;
+        if (optimistic)
+        {
+            filter[MongoDocumentMapper.VersionField] = options?.ExpectedVersion is { } expected
+                ? new BsonInt64(expected)
+                : new BsonDocument("$exists", false);
+        }
+
+        var set = new BsonDocument();
+        foreach (var column in Unit.Columns)
+        {
+            if (!values.Values.ContainsKey(column.Name) ||
+                Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal) ||
+                column.Name == "createdAt" ||
+                column.Generation == ColumnGeneration.ProviderSequence)
+                continue;
+            set[column.Name] = document[column.Name];
+        }
+
+        var setOnInsert = new BsonDocument();
+        foreach (var element in document)
+        {
+            if (element.Name != "_id" && !set.Contains(element.Name))
+                setOnInsert[element.Name] = element.Value;
+        }
+        var update = new BsonDocument();
+        if (set.ElementCount != 0)
+            update["$set"] = set;
+        if (optimistic)
+            update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
+        if (setOnInsert.ElementCount != 0)
+            update["$setOnInsert"] = setOnInsert;
+
+        var commandDescription = "updateOne(" + filter.ToJson() + "," + update.ToJson() + ",upsert:true)";
+        options?.Observer?.Observe(new WritePathEvent("mongodb.conditional-upsert", commandDescription, IsProbe: false));
+        try
+        {
+            var result = transactionSession is null
+                ? collection.UpdateOne(filter, update, new UpdateOptions { IsUpsert = true })
+                : collection.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = true });
+            return result.UpsertedId is not null
+                ? new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, optimistic ? 1 : null)
+                : new MongoWriteOutcome(
+                    MongoWriteOutcomeStatus.Updated,
+                    optimistic && options?.ExpectedVersion is { } expectedVersion
+                        ? checked(expectedVersion + 1)
+                        : null);
+        }
+        catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+        {
+            var indexName = ExtractIndexName(exception.WriteError?.Message);
+            return new MongoWriteOutcome(
+                optimistic && IsIdentityIndex(indexName)
+                    ? MongoWriteOutcomeStatus.ConcurrencyConflict
+                    : MongoWriteOutcomeStatus.UniqueViolation,
+                null,
+                indexName);
+        }
+    }
+
+    private static bool IsIdentityIndex(string? indexName) =>
+        string.Equals(indexName, "_id_", StringComparison.Ordinal) ||
+        string.Equals(indexName, "_id", StringComparison.Ordinal);
+
+    private static string? ExtractIndexName(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return null;
+        var marker = " index: ";
+        var start = message.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+            return null;
+        start += marker.Length;
+        var end = message.IndexOf(' ', start);
+        return (end < 0 ? message[start..] : message[start..end]).Trim('"', '\'', '{', '}');
     }
 
     private MongoWriteOutcome DeleteCore(MongoStorageKey key, MongoWriteOptions? options)
