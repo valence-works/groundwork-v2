@@ -92,7 +92,9 @@ public static class RelationalAggregationExecutor
         ArgumentNullException.ThrowIfNull(profile);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(decode);
-        VerifyBudgets(connection, transaction, dialect, unit, profile, query, providerPredicate);
+        var hasTimeBucket = AggregationGrouping.TimeBucket(profile) is not null;
+        if (!hasTimeBucket)
+            VerifyBudgets(connection, transaction, dialect, unit, profile, query, providerPredicate);
         var command = providerPredicate is null
             ? RelationalAggregationRenderer.Render(dialect, unit, profile, query)
             : RelationalAggregationRenderer.RenderWithProviderPredicate(dialect, unit, profile, query, providerPredicate);
@@ -100,6 +102,7 @@ public static class RelationalAggregationExecutor
         native.Transaction = transaction;
         native.CommandText = command.CommandText;
         RelationalQueryResultReader.AddParameters(native, command);
+        AggregationExecutionDiagnostics.Observe("aggregate");
         using var reader = native.ExecuteReader();
         var rows = new List<AggregationRow>();
         while (reader.Read())
@@ -120,8 +123,8 @@ public static class RelationalAggregationExecutor
             }
 
             var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var groupColumn in profile.GroupByColumns)
-                values[groupColumn] = decode(groupColumn, raw.GetValueOrDefault(groupColumn));
+            foreach (var group in AggregationGrouping.EffectiveGroups(profile))
+                values[group.Alias] = decode(AggregationGrouping.SourceColumn(group), raw.GetValueOrDefault(group.Alias));
             foreach (var aggregate in profile.Aggregates)
             {
                 var value = raw.GetValueOrDefault(aggregate.Alias);
@@ -131,6 +134,12 @@ public static class RelationalAggregationExecutor
             }
             rows.Add(new AggregationRow(values));
         }
+
+        // Time-bucket commands carry their input/group/set evidence in the same result stream.
+        // Read all bounded groups before applying reduced-output predicates or Take so neither can
+        // hide an over-budget group.
+        if (hasTimeBucket)
+            rows = AggregationExecutor.ApplyResultQuery(unit, profile, query, rows).ToList();
 
         return new AggregationResult(
             rows,
@@ -165,6 +174,7 @@ public static class RelationalAggregationExecutor
         native.Transaction = transaction;
         native.CommandText = probe.CommandText;
         RelationalQueryResultReader.AddParameters(native, probe);
+        AggregationExecutionDiagnostics.Observe("budget-probe");
         using var reader = native.ExecuteReader();
         var groups = 0;
         while (reader.Read())

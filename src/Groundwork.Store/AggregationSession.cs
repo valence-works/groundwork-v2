@@ -36,7 +36,9 @@ public static class AggregationSessionExecutor
         // the closed aggregation surface's refusal codes provider-neutral (for example, a
         // StartsWith source predicate must not reach a provider's search-key renderer first).
         AggregationExecutor.ValidateQuery(unit, profile, query);
-        var requiredColumns = profile.GroupByColumns
+        var groups = AggregationGrouping.EffectiveGroups(profile);
+        var requiredColumns = groups
+            .Select(AggregationGrouping.SourceColumn)
             .Concat(profile.Aggregates.SelectMany(aggregate => aggregate switch
             {
                 Aggregate.Min min => [min.Column],
@@ -59,7 +61,7 @@ public static class AggregationSessionExecutor
         var probeLimit = profile.MaxInputRows == int.MaxValue ? int.MaxValue : profile.MaxInputRows + 1;
         var request = new QueryRequest(
             new TableId(unit.Name),
-            query.SourcePredicate ?? Predicate.AlwaysTrue.Instance,
+            AggregationGrouping.EffectiveSourcePredicate(unit, profile, query),
             order,
             Projection.All,
             Paging.OffsetLimit(0, probeLimit));

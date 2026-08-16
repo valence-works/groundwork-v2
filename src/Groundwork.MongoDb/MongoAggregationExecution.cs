@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
+using Groundwork.Store;
 using Groundwork.Substrate.Mongo;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -46,29 +47,31 @@ internal sealed partial class MongoStorageSession
         AggregationQuery query)
     {
         AggregationExecutor.ValidateQuery(Unit, profile, query);
-        var sourceFilter = query.SourcePredicate is null
+        var effectiveSource = AggregationGrouping.EffectiveSourcePredicate(Unit, profile, query);
+        var sourceFilter = effectiveSource is Predicate.AlwaysTrue
             ? null
-            : new MongoQueryRenderer().RenderAggregationSourcePredicate(query.SourcePredicate, Unit.Name);
-        VerifyNativeAggregationBudgets(profile, sourceFilter);
+            : new MongoQueryRenderer().RenderAggregationSourcePredicate(effectiveSource, Unit.Name);
+        var hasTimeBucket = AggregationGrouping.TimeBucket(profile) is not null;
+        if (!hasTimeBucket)
+            VerifyNativeAggregationBudgets(profile, query, sourceFilter);
         var stages = RenderNativeAggregationPipeline(Unit, profile, query, sourceFilter);
 
         var documents = RunAggregationPipeline(stages);
 
-        var inputCount = 0L;
         var rows = new List<AggregationRow>(documents.Count);
         foreach (var document in documents)
         {
-            inputCount = checked(inputCount + document[InputCountField].ToInt64());
+            var inputCount = document[InputCountField].ToInt64();
             if (inputCount > profile.MaxInputRows)
                 throw new AggregationBudgetExceededException(
                     "GW-AGG-BOUND-004",
                     $"Aggregation profile '{profile.Name}' refused more than MaxInputRows={profile.MaxInputRows}; input was not truncated.");
 
             var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var columnName in profile.GroupByColumns)
+            foreach (var group in AggregationGrouping.EffectiveGroups(profile))
             {
-                var column = Unit.Columns.Single(item => item.Name == columnName);
-                values[columnName] = Decode(document.GetValue(columnName, BsonNull.Value), column);
+                var column = Unit.Columns.Single(item => item.Name == AggregationGrouping.SourceColumn(group));
+                values[group.Alias] = Decode(document.GetValue(group.Alias, BsonNull.Value), column);
             }
             foreach (var aggregate in profile.Aggregates)
             {
@@ -109,12 +112,8 @@ internal sealed partial class MongoStorageSession
             throw new AggregationBudgetExceededException(
                 "GW-AGG-BOUND-005",
                 $"Aggregation profile '{profile.Name}' refused more than MaxGroups={profile.MaxGroups}; groups were not truncated.");
-        if (query.Take is <= 0)
-            throw new AggregationValidationException([new("GW-AGG-QUERY-003", "Aggregation Take must be positive when specified.", "take")]);
-        if (query.Take is int take && take > profile.MaxGroups)
-            throw new AggregationBudgetExceededException("GW-AGG-BOUND-006", $"Aggregation Take={take} exceeds MaxGroups={profile.MaxGroups}.");
-        if (query.Take is int pageSize)
-            rows = rows.Take(pageSize).ToList();
+        if (hasTimeBucket)
+            rows = AggregationExecutor.ApplyResultQuery(Unit, profile, query, rows).ToList();
         return new AggregationResult(
             rows,
             AggregationQueryFingerprint.CreateShapeFingerprint(Unit, profile, query),
@@ -130,10 +129,29 @@ internal sealed partial class MongoStorageSession
         BsonDocument? sourceFilter = null)
     {
         AggregationExecutor.ValidateQuery(unit, profile, query);
+        if (sourceFilter is null)
+        {
+            var effectiveSource = AggregationGrouping.EffectiveSourcePredicate(unit, profile, query);
+            if (effectiveSource is not Predicate.AlwaysTrue)
+                sourceFilter = new MongoQueryRenderer().RenderAggregationSourcePredicate(effectiveSource, unit.Name);
+        }
         var stages = new List<BsonDocument>();
+        var hasTimeBucket = AggregationGrouping.TimeBucket(profile) is not null;
         if (sourceFilter is not null)
             stages.Add(new BsonDocument("$match", sourceFilter));
         stages.Add(new BsonDocument("$limit", (long)profile.MaxInputRows + 1L));
+        if (hasTimeBucket)
+            stages.Add(new BsonDocument("$setWindowFields", new BsonDocument
+            {
+                ["output"] = new BsonDocument
+                {
+                    [InputCountField] = new BsonDocument
+                    {
+                        ["$sum"] = 1,
+                        ["window"] = new BsonDocument("documents", new BsonArray { "unbounded", "unbounded" })
+                    }
+                }
+            }));
 
         var setStage = new BsonDocument();
         foreach (var aggregate in profile.Aggregates)
@@ -148,11 +166,13 @@ internal sealed partial class MongoStorageSession
 
         var group = new BsonDocument
         {
-            [InputCountField] = new BsonDocument("$sum", 1)
+            [InputCountField] = hasTimeBucket
+                ? new BsonDocument("$max", "$" + InputCountField)
+                : new BsonDocument("$sum", 1)
         };
         var identity = new BsonDocument();
-        foreach (var column in profile.GroupByColumns)
-            identity[column] = Field(column);
+        foreach (var groupDescriptor in AggregationGrouping.EffectiveGroups(profile))
+            identity[groupDescriptor.Alias] = RenderGroupExpression(profile, query, groupDescriptor);
         group["_id"] = identity;
 
         foreach (var aggregate in profile.Aggregates)
@@ -202,8 +222,8 @@ internal sealed partial class MongoStorageSession
         stages.Add(new BsonDocument("$limit", (long)profile.MaxGroups + 1L));
 
         var projection = new BsonDocument { [InputCountField] = 1 };
-        foreach (var column in profile.GroupByColumns)
-            projection[column] = "$_id." + column;
+        foreach (var groupDescriptor in AggregationGrouping.EffectiveGroups(profile))
+            projection[groupDescriptor.Alias] = "$_id." + groupDescriptor.Alias;
         foreach (var aggregate in profile.Aggregates)
         {
             switch (aggregate)
@@ -225,11 +245,11 @@ internal sealed partial class MongoStorageSession
             }
         }
         stages.Add(new BsonDocument("$project", projection));
-        if (query.PostPredicate is not null)
+        if (query.PostPredicate is not null && !hasTimeBucket)
             stages.Add(new BsonDocument("$match", RenderPredicate(query.PostPredicate, unit, profile)));
 
         var sortOutput = new BsonDocument();
-        foreach (var term in AggregationQueryFingerprint.EffectiveOrderTerms(query, profile))
+        foreach (var term in hasTimeBucket ? [] : AggregationQueryFingerprint.EffectiveOrderTerms(query, profile))
         {
             var sortField = term.Alias;
             if (OutputType(unit, profile, term.Alias) == PortableType.String)
@@ -244,12 +264,15 @@ internal sealed partial class MongoStorageSession
         }
         if (sortOutput.ElementCount != 0)
             stages.Add(new BsonDocument("$sort", sortOutput));
-        if (query.Take is int pageLimit)
+        if (query.Take is int pageLimit && AggregationGrouping.TimeBucket(profile) is null)
             stages.Add(new BsonDocument("$limit", pageLimit));
         return stages;
     }
 
-    private void VerifyNativeAggregationBudgets(AggregationProfile profile, BsonDocument? sourceFilter)
+    private void VerifyNativeAggregationBudgets(
+        AggregationProfile profile,
+        AggregationQuery query,
+        BsonDocument? sourceFilter)
     {
         var inputStages = new List<BsonDocument>();
         if (sourceFilter is not null)
@@ -263,8 +286,8 @@ internal sealed partial class MongoStorageSession
                 $"Aggregation profile '{profile.Name}' refused more than MaxInputRows={profile.MaxInputRows}; input was not truncated.");
 
         var groupIdentity = new BsonDocument();
-        foreach (var column in profile.GroupByColumns)
-            groupIdentity[column] = Field(column);
+        foreach (var group in AggregationGrouping.EffectiveGroups(profile))
+            groupIdentity[group.Alias] = RenderGroupExpression(profile, query, group);
         var groupStages = new List<BsonDocument>();
         if (sourceFilter is not null)
             groupStages.Add(new BsonDocument("$match", sourceFilter));
@@ -279,7 +302,7 @@ internal sealed partial class MongoStorageSession
 
         foreach (var set in profile.Aggregates.OfType<Aggregate.SetUnion>())
         {
-            var evidence = RunAggregationPipeline(RenderSetBudgetProbe(profile, set, sourceFilter));
+            var evidence = RunAggregationPipeline(RenderSetBudgetProbe(profile, set, sourceFilter, query));
             if (evidence.Count != 0)
                 throw new AggregationBudgetExceededException(
                     "GW-AGG-BOUND-007",
@@ -290,16 +313,18 @@ internal sealed partial class MongoStorageSession
     internal static IReadOnlyList<BsonDocument> RenderSetBudgetProbe(
         AggregationProfile profile,
         Aggregate.SetUnion set,
-        BsonDocument? sourceFilter = null)
+        BsonDocument? sourceFilter = null,
+        AggregationQuery? query = null)
     {
+        query ??= AggregationQuery.For(profile.Name);
         var distinctIdentity = new BsonDocument();
-        foreach (var column in profile.GroupByColumns)
-            distinctIdentity[column] = new BsonString("$" + column);
+        foreach (var group in AggregationGrouping.EffectiveGroups(profile))
+            distinctIdentity[group.Alias] = RenderGroupExpression(profile, query, group);
         distinctIdentity[SetProbeValueField] = new BsonString("$" + set.Column);
 
         var groupByDistinct = new BsonDocument();
-        foreach (var column in profile.GroupByColumns)
-            groupByDistinct[column] = new BsonString("$_id." + column);
+        foreach (var group in AggregationGrouping.EffectiveGroups(profile))
+            groupByDistinct[group.Alias] = new BsonString("$_id." + group.Alias);
         var stages = new List<BsonDocument>();
         if (sourceFilter is not null)
             stages.Add(new BsonDocument("$match", sourceFilter));
@@ -327,6 +352,7 @@ internal sealed partial class MongoStorageSession
     {
         var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(stages);
         var options = new AggregateOptions { Collation = new Collation("simple") };
+        AggregationExecutionDiagnostics.Observe("aggregate");
         return (transactionSession is null
             ? collection.Aggregate(pipeline, options)
             : collection.Aggregate(transactionSession, pipeline, options)).ToList();
@@ -411,6 +437,119 @@ internal sealed partial class MongoStorageSession
 
     private static BsonString Field(string name) => new("$" + name);
 
+    private static BsonValue RenderGroupExpression(
+        AggregationProfile profile,
+        AggregationQuery query,
+        AggregationGroup group)
+    {
+        if (group is AggregationGroup.Column column)
+            return Field(column.Alias);
+
+        var bucket = (AggregationGroup.TimeBucket)group;
+        var field = Field(bucket.SourceColumn);
+        const long unixTicks = 621355968000000000L;
+        if (bucket.Kind == AggregationTimeBucketKind.FixedUtc)
+        {
+            var origin = AggregationGrouping.FixedUtcOrigin(profile, query)?.UtcTicks ?? unixTicks;
+            // Decimal128 keeps all .NET ticks (including a one-tick boundary adversary) exact;
+            // BSON double arithmetic would round these ~6e17 values before flooring.
+            var offset = new BsonDocument("$subtract", new BsonArray
+            {
+                new BsonDocument("$toDecimal", field),
+                new BsonDecimal128(origin)
+            });
+            var bucketOffset = new BsonDocument("$multiply", new BsonArray
+            {
+                new BsonDocument("$floor", new BsonDocument("$divide", new BsonArray
+                {
+                    offset,
+                    new BsonDecimal128(bucket.Width.Ticks)
+                })),
+                new BsonDecimal128(bucket.Width.Ticks)
+            });
+            return new BsonDocument("$toLong", new BsonDocument("$add", new BsonArray
+            {
+                new BsonDecimal128(origin),
+                bucketOffset
+            }));
+        }
+
+        var milliseconds = new BsonDocument("$toDate", new BsonDocument("$floor", new BsonDocument("$divide", new BsonArray
+        {
+            new BsonDocument("$subtract", new BsonArray
+            {
+                new BsonDocument("$toDecimal", field),
+                new BsonDecimal128(unixTicks)
+            }),
+            new BsonDecimal128(10_000L)
+        })));
+        var timeZoneId = AggregationGrouping.LocalTimeZoneId(profile, query);
+        var localMidnightText = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = milliseconds,
+            ["format"] = "%Y-%m-%dT00:00:00.000Z",
+            ["timezone"] = timeZoneId
+        });
+        var localMidnightWallClock = new BsonDocument("$dateFromString", new BsonDocument
+        {
+            ["dateString"] = localMidnightText
+        });
+        // MongoDB also selects the post-transition occurrence of ambiguous local midnight.
+        // The prior local noon supplies the pre-transition offset without relying on an
+        // ambiguous 23:xx wall time; the date check below rejects unrelated earlier changes.
+        var previousLocalNoonWallClock = new BsonDocument("$dateSubtract", new BsonDocument
+        {
+            ["startDate"] = localMidnightWallClock,
+            ["unit"] = "hour",
+            ["amount"] = 12
+        });
+        var previousLocalNoonText = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = previousLocalNoonWallClock,
+            ["format"] = "%Y-%m-%dT%H:%M:%S.%L"
+        });
+        var previousLocalNoonInstant = new BsonDocument("$dateFromString", new BsonDocument
+        {
+            ["dateString"] = previousLocalNoonText,
+            ["timezone"] = timeZoneId
+        });
+        var priorOffsetCandidate = new BsonDocument("$dateAdd", new BsonDocument
+        {
+            ["startDate"] = previousLocalNoonInstant,
+            ["unit"] = "hour",
+            ["amount"] = 12
+        });
+        var defaultMidnight = new BsonDocument("$dateTrunc", new BsonDocument
+        {
+            ["date"] = milliseconds,
+            ["unit"] = "day",
+            ["timezone"] = timeZoneId
+        });
+        var sourceLocalDate = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = milliseconds,
+            ["format"] = "%Y-%m-%d",
+            ["timezone"] = timeZoneId
+        });
+        var candidateLocalDate = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = priorOffsetCandidate,
+            ["format"] = "%Y-%m-%d",
+            ["timezone"] = timeZoneId
+        });
+        var earliestValidInstant = new BsonDocument("$cond", new BsonArray
+        {
+            new BsonDocument("$eq", new BsonArray { sourceLocalDate, candidateLocalDate }),
+            new BsonDocument("$min", new BsonArray { defaultMidnight, priorOffsetCandidate }),
+            defaultMidnight
+        });
+        return new BsonDocument("$add", new BsonArray
+        {
+            unixTicks,
+            new BsonDocument("$multiply", new BsonArray { new BsonDocument("$toLong", earliestValidInstant), 10_000L })
+        });
+    }
+
     private static string MinValueField(string alias) => MinValuePrefix + alias;
 
     private static string MaxValueField(string alias) => MaxValuePrefix + alias;
@@ -423,8 +562,11 @@ internal sealed partial class MongoStorageSession
 
     private static PortableType OutputType(StorageUnit unit, AggregationProfile profile, string alias)
     {
-        if (profile.GroupByColumns.Contains(alias, StringComparer.Ordinal))
-            return unit.Columns.Single(column => column.Name == alias).Type;
+        if (AggregationGrouping.EffectiveGroups(profile).Any(group => group.Alias == alias))
+        {
+            var group = AggregationGrouping.EffectiveGroups(profile).Single(group => group.Alias == alias);
+            return unit.Columns.Single(column => column.Name == AggregationGrouping.SourceColumn(group)).Type;
+        }
         var aggregate = profile.Aggregates.Single(item => item.Alias == alias);
         return aggregate switch
         {

@@ -105,6 +105,49 @@ public sealed class AggregationConformanceTests
         Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-SOURCE-007");
     }
 
+    [Fact]
+    public void TimeBucket_public_session_uses_the_invocation_origin_and_exclusive_range()
+    {
+        using var connection = new InMemoryProviderFactory().Create("aggregation-time-bucket-" + Guid.NewGuid().ToString("N"));
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation_time_bucket_public"),
+            Name = "aggregation_time_bucket_public",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "hourly",
+                    GroupByExpressions = [AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))],
+                    Aggregates = [new Aggregate.Count("count")]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var from = new DateTimeOffset(2026, 8, 16, 10, 15, 0, 500, TimeSpan.Zero);
+        var to = from.AddHours(1);
+        foreach (var row in new[]
+        {
+            new Dictionary<string, object?> { ["id"] = "first", ["createdAt"] = from },
+            new Dictionary<string, object?> { ["id"] = "upper", ["createdAt"] = to }
+        })
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(row)).Status);
+
+        var output = Assert.Single(session.Aggregate(new AggregationQuery("hourly")
+        {
+            TimeRange = new AggregationTimeRange(from, to)
+        }).Rows);
+        Assert.Equal(from, output["bucket"]);
+        Assert.Equal(1L, output["count"]);
+    }
+
     [SkippableFact]
     public void SQLServer_native_guid_source_ranges_and_column_comparisons_match_the_portable_oracle()
     {

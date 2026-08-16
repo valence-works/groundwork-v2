@@ -39,6 +39,134 @@ public abstract record Aggregate(string Alias)
         SortDirection Direction = SortDirection.Ascending) : Aggregate(Alias);
 }
 
+/// <summary>The closed set of calendar grouping operations supported by the aggregation contract.</summary>
+public enum AggregationTimeBucketKind
+{
+    /// <summary>
+    /// Fixed-width buckets anchored at the invocation's UTC origin. When omitted, a bounded
+    /// query uses <see cref="AggregationTimeRange.From"/> and an unbounded query uses Unix epoch.
+    /// </summary>
+    FixedUtc,
+
+    /// <summary>One local calendar day in the declared IANA time zone.</summary>
+    LocalCalendarDay
+}
+
+/// <summary>
+/// A provider-neutral grouping expression. Column groups retain the original column-only
+/// contract; time buckets are the only derived grouping expression admitted by v2.
+/// </summary>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "$type")]
+[JsonDerivedType(typeof(AggregationGroup.Column), "column")]
+[JsonDerivedType(typeof(AggregationGroup.TimeBucket), "timeBucket")]
+public abstract record AggregationGroup(string Alias)
+{
+    /// <summary>Groups by a declared column, retaining the column name as the output alias.</summary>
+    public sealed record Column(string Alias) : AggregationGroup(Alias);
+
+    /// <summary>
+    /// Groups by the portable bucket start for a declared DateTimeOffset column. Fixed buckets use
+    /// <see cref="AggregationTimeBucketKind.FixedUtc"/> and a positive <paramref name="Width"/>;
+    /// local calendar days use <see cref="AggregationTimeBucketKind.LocalCalendarDay"/> and take
+    /// their IANA zone from <see cref="AggregationQuery.TimeZoneId"/> at invocation time.
+    /// </summary>
+    public sealed record TimeBucket(
+        string Alias,
+        string SourceColumn,
+        AggregationTimeBucketKind Kind,
+        TimeSpan Width) : AggregationGroup(Alias)
+    {
+        public static TimeBucket FixedUtc(string alias, string column, TimeSpan width) =>
+            new(alias, column, AggregationTimeBucketKind.FixedUtc, width);
+
+        public static TimeBucket LocalCalendarDay(string alias, string column) =>
+            new(alias, column, AggregationTimeBucketKind.LocalCalendarDay, TimeSpan.Zero);
+    }
+}
+
+/// <summary>An inclusive/exclusive instant range applied to a time-bucket source column.</summary>
+public sealed record AggregationTimeRange
+{
+    public AggregationTimeRange(DateTimeOffset from, DateTimeOffset to)
+    {
+        From = from.ToUniversalTime();
+        To = to.ToUniversalTime();
+        if (To <= From)
+            throw new ArgumentException("An aggregation time range requires From to precede To.", nameof(to));
+    }
+
+    public DateTimeOffset From { get; }
+
+    public DateTimeOffset To { get; }
+}
+
+/// <summary>Exact provider-independent bucket arithmetic reused by native provider adapters.</summary>
+public static class AggregationTimeBucketCalculator
+{
+    public static DateTimeOffset Bucket(
+        DateTimeOffset timestamp,
+        AggregationTimeBucketKind kind,
+        TimeSpan width,
+        string? timeZoneId = null,
+        DateTimeOffset? origin = null)
+    {
+        timestamp = timestamp.ToUniversalTime();
+        return kind switch
+        {
+            AggregationTimeBucketKind.FixedUtc => FixedUtc(timestamp, width, origin),
+            AggregationTimeBucketKind.LocalCalendarDay => LocalCalendarDay(timestamp, timeZoneId),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
+    }
+
+    private static DateTimeOffset FixedUtc(DateTimeOffset timestamp, TimeSpan width, DateTimeOffset? origin)
+    {
+        if (width <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(width));
+        var anchor = (origin ?? DateTimeOffset.UnixEpoch).ToUniversalTime();
+        var ticks = timestamp.UtcTicks - anchor.UtcTicks;
+        var bucket = ticks >= 0
+            ? ticks / width.Ticks
+            : -((-ticks + width.Ticks - 1) / width.Ticks);
+        return anchor.AddTicks(checked(bucket * width.Ticks));
+    }
+
+    private static DateTimeOffset LocalCalendarDay(DateTimeOffset timestamp, string? timeZoneId)
+    {
+        if (string.IsNullOrWhiteSpace(timeZoneId))
+            throw new ArgumentException("A local calendar-day bucket requires an IANA time-zone id.", nameof(timeZoneId));
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+        var local = TimeZoneInfo.ConvertTime(timestamp, zone);
+        var localMidnight = DateTime.SpecifyKind(local.Date, DateTimeKind.Unspecified);
+        // A few IANA zones advance at local midnight. Pick the earliest valid instant on
+        // that calendar date rather than allowing ConvertTimeToUtc to throw. For an ambiguous
+        // midnight, the larger offset is the first occurrence and therefore the earliest UTC.
+        if (zone.IsInvalidTime(localMidnight))
+        {
+            var high = localMidnight.AddDays(1);
+            var low = localMidnight;
+            for (var iteration = 0; iteration < 64; iteration++)
+            {
+                var midpoint = low + TimeSpan.FromTicks((high - low).Ticks / 2);
+                if (zone.IsInvalidTime(midpoint))
+                    low = midpoint;
+                else
+                    high = midpoint;
+            }
+            localMidnight = high;
+        }
+
+        if (zone.IsAmbiguousTime(localMidnight))
+        {
+            var offset = zone.GetAmbiguousTimeOffsets(localMidnight).Max();
+            return new DateTimeOffset(localMidnight, offset).ToUniversalTime();
+        }
+
+        var utc = TimeZoneInfo.ConvertTimeToUtc(localMidnight, zone);
+        return new DateTimeOffset(utc, TimeSpan.Zero);
+    }
+}
+
 /// <summary>The only predicates that may be applied after a declared reduction.</summary>
 public enum AggregationPredicateOperator
 {
@@ -62,7 +190,13 @@ public sealed record AggregationPredicateAllowance
 public sealed record AggregationProfile
 {
     public required string Name { get; init; }
-    public required IReadOnlyList<string> GroupByColumns { get; init; }
+    /// <summary>Existing column-only grouping authoring surface.</summary>
+    public IReadOnlyList<string> GroupByColumns { get; init; } = [];
+    /// <summary>
+    /// Closed grouping expressions. When non-empty this is the profile's complete grouping list;
+    /// column-only declarations may continue using <see cref="GroupByColumns"/>.
+    /// </summary>
+    public IReadOnlyList<AggregationGroup> GroupByExpressions { get; init; } = [];
     public required IReadOnlyList<Aggregate> Aggregates { get; init; }
     public IReadOnlyList<AggregationPredicateAllowance> AllowedPredicates { get; init; } = [];
     public int MaxGroups { get; init; } = 1_000;
@@ -79,6 +213,7 @@ public static class AggregationProfileSnapshot
         {
             Name = profile.Name,
             GroupByColumns = ImmutableArray.CreateRange(profile.GroupByColumns ?? []),
+            GroupByExpressions = ImmutableArray.CreateRange((profile.GroupByExpressions ?? []).Select(Capture)),
             Aggregates = ImmutableArray.CreateRange((profile.Aggregates ?? []).Select(Capture)),
             AllowedPredicates = ImmutableArray.CreateRange((profile.AllowedPredicates ?? []).Select(allowance => new AggregationPredicateAllowance
             {
@@ -99,6 +234,14 @@ public static class AggregationProfileSnapshot
         Aggregate.SetUnion set => new Aggregate.SetUnion(set.Alias, set.Column, set.MaxValues),
         Aggregate.FirstBy first => new Aggregate.FirstBy(first.Alias, first.Column, first.OrderColumn, first.Direction),
         _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
+    };
+
+    public static AggregationGroup Capture(AggregationGroup group) => group switch
+    {
+        AggregationGroup.Column column => new AggregationGroup.Column(column.Alias),
+        AggregationGroup.TimeBucket bucket => new AggregationGroup.TimeBucket(
+            bucket.Alias, bucket.SourceColumn, bucket.Kind, bucket.Width),
+        _ => throw new ArgumentOutOfRangeException(nameof(group))
     };
 }
 
@@ -148,6 +291,26 @@ public sealed record AggregationQuery
         init => sourcePredicate = value is null ? null : PredicateNormalizer.Normalize(value);
     }
 
+    /// <summary>
+    /// Optional inclusive/exclusive range for a profile containing one time-bucket grouping. The
+    /// range is folded into the source predicate before grouping, so the upper bound is exclusive
+    /// on every provider and no source rows are materialized for zero-filled consumer buckets.
+    /// </summary>
+    public AggregationTimeRange? TimeRange { get; init; }
+
+    /// <summary>
+    /// Optional UTC anchor for a fixed-width time bucket. When omitted, a bounded query anchors at
+    /// <see cref="AggregationTimeRange.From"/> and an unbounded query uses the Unix epoch. The
+    /// anchor is part of the invocation identity because changing it changes bucket membership.
+    /// </summary>
+    public DateTimeOffset? TimeBucketOrigin { get; init; }
+
+    /// <summary>
+    /// IANA time-zone id for an invocation-local calendar-day bucket. It is intentionally query
+    /// scoped so one declared profile can serve callers in different zones.
+    /// </summary>
+    public string? TimeZoneId { get; init; }
+
     /// <summary>Optional output order.  It must be a group-by column or aggregate alias.</summary>
     public string? OrderBy { get; init; }
 
@@ -196,6 +359,15 @@ public static class AggregationQueryFingerprint
             ? PredicateCanonicalizer.ToCanonicalString(sourcePredicate)
             : PredicateCanonicalizer.ToShapeString(sourcePredicate));
         builder.Append("|post=").Append(CanonicalPost(query.PostPredicate, includeValues));
+        builder.Append("|time-range=").Append(query.TimeRange is { } range
+            ? range.From.UtcTicks.ToString(CultureInfo.InvariantCulture) + ":" + range.To.UtcTicks.ToString(CultureInfo.InvariantCulture)
+            : "none");
+        builder.Append("|time-bucket-origin=").Append(query.TimeBucketOrigin is { } origin
+            ? origin.ToUniversalTime().UtcTicks.ToString(CultureInfo.InvariantCulture)
+            : "default");
+        builder.Append("|time-zone=").Append(query.TimeZoneId is { } timeZoneId
+            ? Escape(timeZoneId)
+            : "default");
         builder.Append("|order=").Append(Escape(query.OrderBy ?? ""));
         builder.Append('|').Append(query.OrderDirection);
         builder.Append("|order-terms=").Append(string.Join(',', EffectiveOrderTerms(query, profile).Select(term =>
@@ -254,11 +426,139 @@ public static class AggregationQueryFingerprint
         AggregationProfile profile)
     {
         var terms = EffectiveOrderTerms(query).ToList();
-        foreach (var column in profile.GroupByColumns)
-            if (!terms.Any(term => string.Equals(term.Alias, column, StringComparison.Ordinal)))
-                terms.Add(new AggregationOrderTerm(column));
+        foreach (var group in AggregationGrouping.EffectiveGroups(profile))
+            if (!terms.Any(term => string.Equals(term.Alias, group.Alias, StringComparison.Ordinal)))
+                terms.Add(new AggregationOrderTerm(group.Alias));
         return terms;
     }
+}
+
+/// <summary>Shared semantics for the closed aggregation grouping expressions.</summary>
+internal static class AggregationGrouping
+{
+    public static IReadOnlyList<AggregationGroup> EffectiveGroups(AggregationProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        if (profile.GroupByExpressions is { Count: > 0 })
+            return profile.GroupByExpressions;
+        return (profile.GroupByColumns ?? []).Select(column => (AggregationGroup)new AggregationGroup.Column(column)).ToArray();
+    }
+
+    public static AggregationGroup.TimeBucket? TimeBucket(AggregationProfile profile)
+    {
+        var buckets = EffectiveGroups(profile).OfType<AggregationGroup.TimeBucket>().ToArray();
+        return buckets.Length switch
+        {
+            0 => null,
+            1 => buckets[0],
+            _ => throw new AggregationValidationException([new(
+                "GW-AGG-GROUP-006",
+                "A profile may declare at most one time-bucket grouping expression.",
+                "groupByExpressions")])
+        };
+    }
+
+    public static IReadOnlyList<string> Aliases(AggregationProfile profile) =>
+        EffectiveGroups(profile).Select(group => group.Alias).ToArray();
+
+    public static string SourceColumn(AggregationGroup group) => group switch
+    {
+        AggregationGroup.Column column => column.Alias,
+        AggregationGroup.TimeBucket bucket => bucket.SourceColumn,
+        _ => throw new ArgumentOutOfRangeException(nameof(group))
+    };
+
+    public static object? Evaluate(
+        AggregationGroup group,
+        IReadOnlyDictionary<string, object?> row,
+        DateTimeOffset? fixedUtcOrigin = null,
+        string? localTimeZoneId = null)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ArgumentNullException.ThrowIfNull(row);
+        var value = row.TryGetValue(SourceColumn(group), out var raw) ? raw : null;
+        return group switch
+        {
+            AggregationGroup.Column => value,
+            AggregationGroup.TimeBucket bucket => Bucket(value, bucket, fixedUtcOrigin, localTimeZoneId),
+            _ => throw new ArgumentOutOfRangeException(nameof(group))
+        };
+    }
+
+    public static DateTimeOffset? Bucket(
+        object? value,
+        AggregationGroup.TimeBucket bucket,
+        DateTimeOffset? fixedUtcOrigin = null,
+        string? localTimeZoneId = null)
+    {
+        if (value is null)
+            return null;
+        if (value is not DateTimeOffset timestamp)
+            throw new ArgumentException($"Time bucket input '{bucket.SourceColumn}' must be a DateTimeOffset.", nameof(value));
+        timestamp = timestamp.ToUniversalTime();
+        return AggregationTimeBucketCalculator.Bucket(timestamp, bucket.Kind, bucket.Width, localTimeZoneId, fixedUtcOrigin);
+    }
+
+    public static DateTimeOffset? FixedUtcOrigin(AggregationProfile profile, AggregationQuery query)
+    {
+        var bucket = TimeBucket(profile);
+        if (bucket?.Kind != AggregationTimeBucketKind.FixedUtc)
+            return null;
+        return (query.TimeBucketOrigin ?? query.TimeRange?.From ?? DateTimeOffset.UnixEpoch).ToUniversalTime();
+    }
+
+    public static string? LocalTimeZoneId(AggregationProfile profile, AggregationQuery query)
+    {
+        var bucket = TimeBucket(profile);
+        return bucket?.Kind == AggregationTimeBucketKind.LocalCalendarDay
+            ? query.TimeZoneId
+            : null;
+    }
+
+    public static Predicate EffectiveSourcePredicate(
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery query)
+    {
+        var predicates = new List<Predicate>();
+        if (query.SourcePredicate is not null)
+            predicates.Add(query.SourcePredicate);
+        if (TimeBucket(profile) is { } bucket)
+        {
+            var column = unit.Columns.Single(item => item.Name == bucket.SourceColumn);
+            var reference = new ColumnRef(
+                new TableId(unit.Name),
+                column.Name,
+                QueryType.DateTimeOffset,
+                column.IsNullable);
+            // A null instant has no portable bucket identity and is excluded rather than forming a
+            // provider-dependent null group. Non-nullable declarations need no predicate and
+            // cannot construct a null QueryConstant.
+            if (column.IsNullable)
+                predicates.Add(new Predicate.Not(new Predicate.Equal(reference, QueryConstant.Of(reference, null))));
+            if (query.TimeRange is { } range)
+            {
+                predicates.Add(new Predicate.Range(
+                    reference,
+                    Bound.Inclusive(QueryConstant.Of(reference, range.From)),
+                    Bound.Exclusive(QueryConstant.Of(reference, range.To))));
+            }
+        }
+        else if (query.TimeRange is not null)
+        {
+            throw new AggregationValidationException([new(
+                "GW-AGG-QUERY-010",
+                "TimeRange requires a time-bucket grouping expression.",
+                "timeRange")]);
+        }
+        return predicates.Count switch
+        {
+            0 => Predicate.AlwaysTrue.Instance,
+            1 => predicates[0],
+            _ => new Predicate.And(predicates)
+        };
+    }
+
 }
 
 /// <summary>A materialized row from a declared aggregation profile.</summary>
@@ -376,18 +676,50 @@ public static class AggregationProfileValidator
             Add("GW-AGG-BOUND-001", "MaxGroups must be positive; an unbounded aggregation is refused.", paths + ".maxGroups");
         if (profile.MaxInputRows <= 0)
             Add("GW-AGG-BOUND-002", "MaxInputRows must be positive; an unbounded aggregation is refused.", paths + ".maxInputRows");
-        if (profile.GroupByColumns is null || profile.GroupByColumns.Count == 0)
+        var groups = AggregationGrouping.EffectiveGroups(profile);
+        if (profile.GroupByExpressions is { Count: > 0 } && profile.GroupByColumns is { Count: > 0 })
+            Add("GW-AGG-GROUP-001", "Use either GroupByColumns or GroupByExpressions, not both.", paths + ".groupByExpressions");
+        if (groups.Count(group => group is AggregationGroup.TimeBucket) > 1)
+            Add("GW-AGG-GROUP-006", "A profile may declare at most one time-bucket grouping expression.", paths + ".groupByExpressions");
+        if (groups.Count == 0)
             Add("GW-AGG-GROUP-001", "At least one group-by column is required.", paths + ".groupByColumns");
         else
         {
-            foreach (var name in profile.GroupByColumns)
+            foreach (var group in groups)
             {
-                if (string.IsNullOrWhiteSpace(name) || !columns.ContainsKey(name))
-                    Add("GW-AGG-COLUMN-001", $"Group-by column '{name}' is not declared.", paths + ".groupByColumns");
-                else if (name.StartsWith("__groundwork_aggregation_", StringComparison.Ordinal))
-                    Add("GW-AGG-DECL-009", $"Group-by column '{name}' uses a reserved aggregation alias.", paths + ".groupByColumns");
+                if (group is null || string.IsNullOrWhiteSpace(group.Alias))
+                {
+                    Add("GW-AGG-DECL-009", "Group-by aliases are required.", paths + ".groupByExpressions");
+                    continue;
+                }
+                if (group.Alias.StartsWith("__groundwork_aggregation_", StringComparison.Ordinal))
+                    Add("GW-AGG-DECL-009", $"Group-by alias '{group.Alias}' uses a reserved aggregation alias.", paths + ".groupByExpressions");
+                switch (group)
+                {
+                    case AggregationGroup.Column column when !columns.ContainsKey(column.Alias):
+                        Add("GW-AGG-COLUMN-001", $"Group-by column '{column.Alias}' is not declared.", paths + ".groupByColumns");
+                        break;
+                    case AggregationGroup.Column:
+                        break;
+                    case AggregationGroup.TimeBucket bucket:
+                        if (string.IsNullOrWhiteSpace(bucket.SourceColumn) ||
+                            !columns.TryGetValue(bucket.SourceColumn, out var timestamp) ||
+                            timestamp.Type != PortableType.DateTimeOffset)
+                            Add("GW-AGG-GROUP-002", $"Time bucket '{bucket.Alias}' requires a DateTimeOffset source column.", paths + ".groupByExpressions." + bucket.Alias);
+                        if (bucket.Kind == AggregationTimeBucketKind.FixedUtc &&
+                            (bucket.Width <= TimeSpan.Zero || bucket.Width.Ticks <= 0))
+                            Add("GW-AGG-GROUP-003", $"Time bucket '{bucket.Alias}' requires a positive fixed UTC width.", paths + ".groupByExpressions." + bucket.Alias);
+                        if (bucket.Kind == AggregationTimeBucketKind.LocalCalendarDay && bucket.Width != TimeSpan.Zero)
+                            Add("GW-AGG-GROUP-012", $"Local calendar-day bucket '{bucket.Alias}' cannot declare a fixed width.", paths + ".groupByExpressions." + bucket.Alias);
+                        if (bucket.Kind is not (AggregationTimeBucketKind.FixedUtc or AggregationTimeBucketKind.LocalCalendarDay))
+                            Add("GW-AGG-GROUP-007", $"Time bucket '{bucket.Alias}' uses an unsupported bucket kind.", paths + ".groupByExpressions." + bucket.Alias);
+                        break;
+                    default:
+                        Add("GW-AGG-GROUP-007", "The grouping expression is not supported by the closed surface.", paths + ".groupByExpressions");
+                        break;
+                }
             }
-            AddDuplicateErrors(profile.GroupByColumns, "group-by column", paths + ".groupByColumns");
+            AddDuplicateErrors(groups.Select(group => group?.Alias ?? string.Empty), "group-by alias", paths + ".groupByExpressions");
         }
 
         if (profile.Aggregates is null || profile.Aggregates.Count == 0)
@@ -406,7 +738,7 @@ public static class AggregationProfileValidator
                     Add("GW-AGG-DECL-004", "Aggregate aliases are required.", paths + ".aggregates");
                 if (aggregate.Alias.StartsWith("__groundwork_aggregation_", StringComparison.Ordinal))
                     Add("GW-AGG-DECL-010", $"Aggregate alias '{aggregate.Alias}' uses a reserved name.", paths + ".aggregates");
-                if (profile.GroupByColumns?.Contains(aggregate.Alias, StringComparer.Ordinal) == true)
+                if (groups.Any(group => string.Equals(group.Alias, aggregate.Alias, StringComparison.Ordinal)))
                     Add("GW-AGG-DECL-005", $"Aggregate alias '{aggregate.Alias}' collides with a group-by column.", paths + ".aggregates");
                 switch (aggregate)
                 {
@@ -524,41 +856,44 @@ public static class AggregationExecutor
         query ??= AggregationQuery.For(profile.Name);
         ValidateQuery(unit, profile, query);
 
+        var groups = AggregationGrouping.EffectiveGroups(profile);
+        var sourcePredicate = AggregationGrouping.EffectiveSourcePredicate(unit, profile, query);
+        var fixedUtcOrigin = AggregationGrouping.FixedUtcOrigin(profile, query);
+        var localTimeZoneId = AggregationGrouping.LocalTimeZoneId(profile, query);
         var input = new List<IReadOnlyDictionary<string, object?>>(Math.Min(profile.MaxInputRows, 4096));
         foreach (var row in rows)
         {
             if (row is null)
                 throw new ArgumentException("Aggregation input rows cannot contain null references.", nameof(rows));
-            if (query.SourcePredicate is not null && !PortableQuerySemantics.Evaluate(query.SourcePredicate, row))
+            if (!PortableQuerySemantics.Evaluate(sourcePredicate, row))
                 continue;
             input.Add(row);
             if (input.Count > profile.MaxInputRows)
                 throw new AggregationBudgetExceededException("GW-AGG-BOUND-004", $"Aggregation profile '{profile.Name}' refused more than MaxInputRows={profile.MaxInputRows}; input was not truncated.");
         }
 
-        var groups = new Dictionary<GroupKey, Group>();
+        var grouped = new Dictionary<GroupKey, Group>();
         foreach (var row in input)
         {
-            var key = new GroupKey(profile.GroupByColumns.Select(column =>
-                row.TryGetValue(column, out var value) ? value : null));
-            if (!groups.TryGetValue(key, out var group))
+            var key = new GroupKey(groups.Select(group => AggregationGrouping.Evaluate(group, row, fixedUtcOrigin, localTimeZoneId)));
+            if (!grouped.TryGetValue(key, out var group))
             {
-                if (groups.Count == profile.MaxGroups)
+                if (grouped.Count == profile.MaxGroups)
                     throw new AggregationBudgetExceededException("GW-AGG-BOUND-005", $"Aggregation profile '{profile.Name}' refused more than MaxGroups={profile.MaxGroups}; groups were not truncated.");
                 group = new Group();
-                groups.Add(key, group);
+                grouped.Add(key, group);
             }
             group.Rows.Add(row);
         }
 
-        var output = groups.Values.Select(group => Reduce(unit, profile, group.Rows)).ToList();
+        var output = grouped.Values.Select(group => Reduce(unit, profile, group.Rows, fixedUtcOrigin, localTimeZoneId)).ToList();
         ApplyPostPredicate(profile, query, output);
         var orderTerms = AggregationQueryFingerprint.EffectiveOrderTerms(query, profile);
         if (orderTerms.Count != 0)
             output.Sort((left, right) => CompareOutput(left, right, orderTerms));
         else
         {
-            output.Sort((left, right) => CompareGroupRows(left, right, profile.GroupByColumns));
+            output.Sort((left, right) => CompareGroupRows(left, right, AggregationGrouping.Aliases(profile)));
         }
 
         if (query.Take is <= 0)
@@ -573,11 +908,16 @@ public static class AggregationExecutor
             AggregationQueryFingerprint.Create(unit, profile, query));
     }
 
-    private static AggregationRow Reduce(StorageUnit unit, AggregationProfile profile, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    private static AggregationRow Reduce(
+        StorageUnit unit,
+        AggregationProfile profile,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
+        DateTimeOffset? fixedUtcOrigin,
+        string? localTimeZoneId)
     {
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        foreach (var column in profile.GroupByColumns)
-            values[column] = rows[0].TryGetValue(column, out var key) ? key : null;
+        foreach (var group in AggregationGrouping.EffectiveGroups(profile))
+            values[group.Alias] = AggregationGrouping.Evaluate(group, rows[0], fixedUtcOrigin, localTimeZoneId);
 
         foreach (var aggregate in profile.Aggregates)
         {
@@ -690,6 +1030,56 @@ public static class AggregationExecutor
         if (query.SourcePredicate is not null)
             ValidateSourcePredicate(unit, query.SourcePredicate);
 
+        if (query.TimeRange is not null)
+        {
+            _ = AggregationGrouping.TimeBucket(profile) ?? throw new AggregationValidationException([new(
+                "GW-AGG-QUERY-010",
+                "TimeRange requires a time-bucket grouping expression.",
+                "timeRange")]);
+            if (query.TimeRange.From >= query.TimeRange.To)
+                throw new AggregationValidationException([new("GW-AGG-QUERY-011", "TimeRange requires From to precede To.", "timeRange")]);
+        }
+        if (query.TimeBucketOrigin is { } origin)
+        {
+            var bucket = AggregationGrouping.TimeBucket(profile) ?? throw new AggregationValidationException([new(
+                "GW-AGG-QUERY-012",
+                "TimeBucketOrigin requires a time-bucket grouping expression.",
+                "timeBucketOrigin")]);
+            if (bucket.Kind != AggregationTimeBucketKind.FixedUtc)
+                throw new AggregationValidationException([new(
+                    "GW-AGG-QUERY-013",
+                    "TimeBucketOrigin is only valid for fixed UTC time buckets.",
+                    "timeBucketOrigin")]);
+            _ = origin.ToUniversalTime();
+        }
+        if (AggregationGrouping.TimeBucket(profile) is { Kind: AggregationTimeBucketKind.LocalCalendarDay } &&
+            string.IsNullOrWhiteSpace(query.TimeZoneId))
+            throw new AggregationValidationException([new(
+                "GW-AGG-QUERY-014",
+                "A local calendar-day bucket requires an invocation IANA time-zone id.",
+                "timeZoneId")]);
+        if (query.TimeZoneId is { } timeZoneId)
+        {
+            var bucket = AggregationGrouping.TimeBucket(profile) ?? throw new AggregationValidationException([new(
+                "GW-AGG-QUERY-015",
+                "TimeZoneId requires a time-bucket grouping expression.",
+                "timeZoneId")]);
+            if (bucket.Kind != AggregationTimeBucketKind.LocalCalendarDay)
+                throw new AggregationValidationException([new(
+                    "GW-AGG-QUERY-016",
+                    "TimeZoneId is only valid for local calendar-day buckets.",
+                    "timeZoneId")]);
+            TimeZoneInfo zone;
+            try { zone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId); }
+            catch (TimeZoneNotFoundException) { throw new AggregationValidationException([new("GW-AGG-QUERY-017", $"Time zone '{timeZoneId}' is not installed.", "timeZoneId")]); }
+            catch (InvalidTimeZoneException) { throw new AggregationValidationException([new("GW-AGG-QUERY-017", $"Time zone '{timeZoneId}' is invalid.", "timeZoneId")]); }
+            if (!zone.HasIanaId || !TimeZoneInfo.TryConvertIanaIdToWindowsId(timeZoneId, out _))
+                throw new AggregationValidationException([new(
+                    "GW-AGG-QUERY-017",
+                    $"Time zone '{timeZoneId}' is not a supported IANA time-zone id.",
+                    "timeZoneId")]);
+        }
+
         if (query.OrderBy is not null && query.OrderByTerms is { Count: > 0 })
             throw new AggregationValidationException([new("GW-AGG-QUERY-006", "Use either the simple OrderBy authoring path or OrderByTerms, not both.", "orderBy")]);
         var seenOrderAliases = new HashSet<string>(StringComparer.Ordinal);
@@ -717,6 +1107,31 @@ public static class AggregationExecutor
             throw new AggregationValidationException([new("GW-AGG-QUERY-003", "Aggregation Take must be positive when specified.", "take")]);
         if (query.Take is int take && take > profile.MaxGroups)
             throw new AggregationBudgetExceededException("GW-AGG-BOUND-006", $"Aggregation Take={take} exceeds MaxGroups={profile.MaxGroups}.");
+    }
+
+    /// <summary>
+    /// Applies reduced-output filtering and paging after a native provider has returned all
+    /// bounded groups. Native time-bucket commands use this to keep budget evidence visible even
+    /// when a caller supplies a Take or a post-reduction predicate.
+    /// </summary>
+    internal static IReadOnlyList<AggregationRow> ApplyResultQuery(
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery query,
+        IEnumerable<AggregationRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ValidateQuery(unit, profile, query);
+        var output = rows.ToList();
+        ApplyPostPredicate(profile, query, output);
+        var orderTerms = AggregationQueryFingerprint.EffectiveOrderTerms(query, profile);
+        if (orderTerms.Count != 0)
+            output.Sort((left, right) => CompareOutput(left, right, orderTerms));
+        else
+            output.Sort((left, right) => CompareGroupRows(left, right, AggregationGrouping.Aliases(profile)));
+        if (query.Take is int pageSize)
+            output = output.Take(pageSize).ToList();
+        return output;
     }
 
     private static void ApplyPostPredicate(AggregationProfile profile, AggregationQuery query, List<AggregationRow> output)
@@ -862,7 +1277,7 @@ public static class AggregationExecutor
     }
 
     private static bool IsDeclaredOutput(AggregationProfile profile, string alias) =>
-        profile.GroupByColumns.Contains(alias, StringComparer.Ordinal) || profile.Aggregates.Any(aggregate => aggregate.Alias == alias);
+        AggregationGrouping.Aliases(profile).Contains(alias, StringComparer.Ordinal) || profile.Aggregates.Any(aggregate => aggregate.Alias == alias);
 
     private static int CompareOutput(
         AggregationRow left,

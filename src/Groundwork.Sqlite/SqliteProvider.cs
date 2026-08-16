@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Store;
@@ -210,6 +211,25 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             connection.CreateFunction<string, string>(
                 "groundwork_scope_token",
                 static scope => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scope))),
+                isDeterministic: true);
+            connection.CreateFunction<string?, long, int, string?, long?, string?>(
+                "groundwork_time_bucket",
+                static (value, widthTicks, kind, timeZoneId, originTicks) =>
+                {
+                    if (value is null)
+                        return null;
+                    var timestamp = DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                    var origin = originTicks is long ticks
+                        ? new DateTimeOffset(ticks, TimeSpan.Zero)
+                        : (DateTimeOffset?)null;
+                    var bucket = AggregationTimeBucketCalculator.Bucket(
+                        timestamp,
+                        (AggregationTimeBucketKind)kind,
+                        TimeSpan.FromTicks(widthTicks),
+                        timeZoneId,
+                        origin);
+                    return bucket.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+                },
                 isDeterministic: true);
             connection.CreateCollation("GROUNDWORK_DECIMAL_18_4", static (left, right) =>
             {
