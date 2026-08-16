@@ -6,6 +6,7 @@ using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
 using Groundwork.Sqlite;
+using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 using Groundwork.PublicApi.Consumer;
 
@@ -17,6 +18,7 @@ try
 {
     using var connection = new SqliteProviderFactory().Create("Data Source=" + databasePath);
     RunRecordsJourney(connection);
+    RunExactAppendJourney(connection);
     RunDocumentsJourney(connection);
     RunFailureJourneys(connection);
     Console.WriteLine("Groundwork public API clean-room journey passed.");
@@ -25,6 +27,34 @@ finally
 {
     if (File.Exists(databasePath))
         File.Delete(databasePath);
+}
+
+static void RunExactAppendJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("append_records"),
+        Name = "append_records",
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 200 }
+        ],
+        Key = new KeyDefinition { Columns = ["sequence"] },
+        AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The exact append schema did not apply.");
+
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    var operation = new OperationId(DateTimeOffset.UtcNow, "public-exact-append");
+    var values = new StorageValues(new Dictionary<string, object?> { ["payload"] = "package-only" });
+    var committed = session.AppendWithOutcomes(operation, values);
+    Require(committed.Status == WriteOutcomeStatus.Inserted && committed.Outcomes.Count == 1, "The package-only exact append did not return one inserted outcome.");
+    Require(committed.Outcomes[0].GeneratedValue<long>("sequence") == 1, "The package-only exact append did not return the generated sequence.");
+
+    var replayed = session.AppendWithOutcomes(operation, values);
+    Require(replayed.Status == WriteOutcomeStatus.Replayed, "The package-only exact append did not replay.");
+    Require(replayed.Outcomes[0].GeneratedValue<long>("sequence") == 1, "The package-only replay did not preserve its generated sequence.");
 }
 
 static void RunRecordsJourney(IStorageProviderConnection connection)

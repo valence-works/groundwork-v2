@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -242,21 +242,36 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
-        var outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration));
+        var execution = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: false));
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return new WriteOutcome(execution.Status);
+    }
+
+    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        foreach (var value in values)
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        var outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: true).ToReport());
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
             ApplyOnAppendRetention(observer: null);
         return outcome;
     }
 
-    private WriteOutcome AppendCore(
+    private AppendExecution AppendCore(
         OperationId operationId,
         IReadOnlyList<StorageValues> values,
-        AppendIdempotencyDeclaration declaration)
+        AppendIdempotencyDeclaration declaration,
+        bool exactOutcomes)
     {
         EnsureLedgerTable(declaration.LedgerName);
         var providerNow = ProviderNow();
         var scope = Access.Scope?.Value ?? string.Empty;
+        var fingerprint = ExactAppendCodec.Fingerprint(Unit, values);
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
         using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE ctid IN (SELECT ctid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
         {
@@ -266,7 +281,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         }
 
         var expiredExisting = false;
-        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
+        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
         {
             AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
             using var reader = existing.ExecuteReader();
@@ -274,7 +289,21 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             {
                 var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
                 if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
+                {
+                    var storedFingerprint = reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture);
+                    var storedResult = reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture);
+                    if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
+                    {
+                        if (!exactOutcomes)
+                            return new AppendExecution(WriteOutcomeStatus.Replayed, null);
+                        throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
+                    }
+                    if (!exactOutcomes)
+                        return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
+                    if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
+                        throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
+                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
+                }
                 expiredExisting = true;
             }
         }
@@ -285,12 +314,30 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             deleteExpired.ExecuteNonQuery();
         }
 
-        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}) VALUES (@unit, @scope, @nonce, @committed_at) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;"))
+        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;"))
         {
             AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
             Add(insertLedger, "committed_at", FormatLedgerTime(providerNow));
+            Add(insertLedger, "fingerprint", fingerprint);
+            Add(insertLedger, "result", string.Empty);
             if (insertLedger.ExecuteNonQuery() == 0)
-                return new WriteOutcome(WriteOutcomeStatus.Replayed);
+            {
+                using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+                AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
+                using var reader = replay.ExecuteReader();
+                if (!reader.Read() || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
+                {
+                    if (!exactOutcomes)
+                        return new AppendExecution(WriteOutcomeStatus.Replayed, null);
+                    throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
+                }
+                var storedFingerprint = Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!;
+                if (!exactOutcomes)
+                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
+                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
+                return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
+            }
         }
 
         var logicalUnit = IdempotencyRules.LogicalUnit(Unit, PostgreSqlSchemaCoordinator.ScopeColumn);
@@ -302,7 +349,14 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             : ApplyBatchCore(writes);
         if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
             throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
-        return new WriteOutcome(WriteOutcomeStatus.Inserted);
+        var report = new AppendExecution(WriteOutcomeStatus.Inserted, outcomes.Select(outcome => outcome.Outcome).ToArray());
+        using (var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
+        {
+            AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
+            Add(complete, "result", ExactAppendCodec.SerializeOutcomes(report.Outcomes!));
+            complete.ExecuteNonQuery();
+        }
+        return report;
     }
 
     private RowWriteOutcome InsertAppendSequence(RowWrite write)
@@ -319,12 +373,23 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
             $"{Quote(LedgerScope)} text NOT NULL, " +
             $"{Quote(LedgerNonce)} text NOT NULL, " +
             $"{Quote(LedgerCommittedAt)} text NOT NULL, " +
+            $"{Quote(LedgerFingerprint)} text NULL, " +
+            $"{Quote(LedgerResult)} text NULL, " +
             $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}));");
         command.ExecuteNonQuery();
+
+        EnsureLedgerColumn(table, LedgerFingerprint);
+        EnsureLedgerColumn(table, LedgerResult);
 
         using var cleanupIndex = Command($"CREATE INDEX IF NOT EXISTS {Quote(IdempotencyRules.CleanupIndexName(table))} " +
             $"ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
         cleanupIndex.ExecuteNonQuery();
+    }
+
+    private void EnsureLedgerColumn(string table, string column)
+    {
+        using var alter = Command($"ALTER TABLE {Quote(table)} ADD COLUMN IF NOT EXISTS {Quote(column)} text NULL;");
+        alter.ExecuteNonQuery();
     }
 
     private void AddLedgerParameters(NpgsqlCommand command, string unit, string scope, string nonce)
@@ -1059,6 +1124,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
     private const string LedgerScope = "scope";
     private const string LedgerNonce = "nonce";
     private const string LedgerCommittedAt = "committed_at";
+    private const string LedgerFingerprint = "input_fingerprint";
+    private const string LedgerResult = "exact_result";
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
@@ -1076,6 +1143,12 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IConcurrencySt
         Upsert,
         ConditionalUpsert,
         Delete
+    }
+
+    private sealed record AppendExecution(WriteOutcomeStatus Status, IReadOnlyList<WriteOutcome>? Outcomes)
+    {
+        internal AppendOutcomeReport ToReport() =>
+            new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
     }
 
     private sealed class ConcurrencyConflictException(long? version = null) : Exception

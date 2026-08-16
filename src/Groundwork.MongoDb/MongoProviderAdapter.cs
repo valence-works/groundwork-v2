@@ -28,6 +28,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
             return descriptors
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
+                .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ExactAppendOutcomes ||
+                                     inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ProviderSequence ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Select(descriptor => descriptor.Id == BatchWriteCapabilities.ProviderSequence
@@ -37,8 +39,13 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
         }
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access) =>
-        new MongoStoreSession(inner.OpenSession(unit, ToNative(access)));
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    {
+        var session = inner.OpenSession(unit, ToNative(access));
+        return inner.ProviderSequenceFit is ProviderFit.Supported
+            ? new MongoExactStoreSession(session)
+            : new MongoStoreSession(session);
+    }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
         BeginUnitOfWork(access, BatchWriteOptions.Default, units);
@@ -47,7 +54,10 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units) =>
-        new MongoStoreUnitOfWork(inner.BeginUnitOfWork(ToNative(access), units), options);
+        new MongoStoreUnitOfWork(
+            inner.BeginUnitOfWork(ToNative(access), units),
+            options,
+            inner.ProviderSequenceFit is ProviderFit.Supported);
 
     public void Dispose() => inner.Dispose();
 
@@ -82,7 +92,7 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
         new SchemaChange((SchemaChangeKind)change.Kind, change.Identity)).ToArray());
 }
 
-internal sealed class MongoStoreSession(
+internal class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
@@ -178,7 +188,7 @@ internal sealed class MongoStoreSession(
         ? null
         : new MongoWriteOptions { Precondition = options.Precondition, Observer = options.Observer };
 
-    private static WriteOutcome ToStore(MongoWriteOutcome result) =>
+    protected static WriteOutcome ToStore(MongoWriteOutcome result) =>
         new((WriteOutcomeStatus)result.Status, result.Version, result.UniqueIndexName,
             result.GeneratedValues);
 
@@ -209,17 +219,40 @@ internal sealed class MongoStoreSession(
         : new StoredEntry(new StorageValues(entry.Values.Values), entry.Version);
 }
 
+internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession
+{
+    private readonly IMongoStorageSession exactInner;
+
+    internal MongoExactStoreSession(IMongoStorageSession inner)
+        : base(inner) => exactInner = inner;
+
+    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        if (exactInner is not IMongoExactAppendStorageSession exact)
+            throw new NotSupportedException(
+                "GW-APPEND-003: this MongoDB deployment does not advertise exact append outcomes; use a transaction-capable deployment and inspect IExactAppendStorageSession before using AppendWithOutcomes.");
+        var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
+        var result = exact.AppendWithOutcomes(operationId, native);
+        return new AppendOutcomeReport(
+            (WriteOutcomeStatus)result.Status,
+            result.Outcomes.Select(ToStore).ToArray());
+    }
+}
+
 internal sealed class MongoStoreUnitOfWork : IUnitOfWork
 {
     private readonly IMongoUnitOfWork inner;
     private readonly BatchContext batch;
+    private readonly bool exactAvailable;
     private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
     private bool terminal;
 
-    internal MongoStoreUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options)
+    internal MongoStoreUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options, bool exactAvailable)
     {
         this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
         batch = new BatchContext(options ?? throw new ArgumentNullException(nameof(options)));
+        this.exactAvailable = exactAvailable;
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -228,7 +261,11 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
         ThrowIfTerminal();
         if (sessions.TryGetValue(unit.Id, out var existing))
             return existing;
-        var session = new BatchStorageSession(new MongoStoreSession(inner.OpenSession(unit)), batch);
+        var native = inner.OpenSession(unit);
+        var store = exactAvailable
+            ? new MongoExactStoreSession(native)
+            : new MongoStoreSession(native);
+        var session = new BatchStorageSession(store, batch);
         sessions.Add(unit.Id, session);
         batch.Register(session);
         return session;

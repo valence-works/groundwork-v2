@@ -325,6 +325,16 @@ public interface IMongoStorageSession
         Append(operationId, (IReadOnlyList<MongoStorageValues>)values);
 }
 
+/// <summary>Internal bridge for the provider-neutral exact append capability.</summary>
+internal interface IMongoExactAppendStorageSession
+{
+    MongoAppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<MongoStorageValues> values);
+}
+
+internal sealed record MongoAppendOutcomeReport(
+    MongoWriteOutcomeStatus Status,
+    IReadOnlyList<MongoWriteOutcome> Outcomes);
+
 public interface IMongoUnitOfWork : IDisposable
 {
     IMongoStorageSession OpenSession(StorageUnit unit);

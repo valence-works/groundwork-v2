@@ -496,6 +496,45 @@ public interface IStorageSession
         Append(operationId, values);
 }
 
+/// <summary>Optional provider capability for replay-stable per-row append outcomes.</summary>
+public interface IExactAppendStorageSession
+{
+    AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values);
+}
+
+/// <summary>Public exact-append entry points that fail clearly when a provider lacks the capability.</summary>
+public static class ExactAppendSessionExtensions
+{
+    public static AppendOutcomeReport AppendWithOutcomes(
+        this IStorageSession session,
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(values);
+        if (session is not IExactAppendStorageSession exact)
+        {
+            throw new NotSupportedException(
+                "GW-APPEND-003: this provider session does not advertise exact append outcomes; " +
+                "inspect IExactAppendStorageSession before using AppendWithOutcomes.");
+        }
+
+        return exact.AppendWithOutcomes(operationId, values);
+    }
+
+    public static AppendOutcomeReport AppendWithOutcomes(
+        this IStorageSession session,
+        OperationId operationId,
+        StorageValues value) =>
+        AppendWithOutcomes(session, operationId, new[] { value });
+
+    public static AppendOutcomeReport AppendWithOutcomes(
+        this IStorageSession session,
+        OperationId operationId,
+        params StorageValues[] values) =>
+        AppendWithOutcomes(session, operationId, (IReadOnlyList<StorageValues>)values);
+}
+
 /// <summary>
 /// Owns one staged transaction, the sessions it creates, and their provider resources. Commit and
 /// rollback are terminal operations; disposing a non-terminal unit rolls it back and releases its

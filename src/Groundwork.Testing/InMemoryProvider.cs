@@ -108,7 +108,7 @@ internal sealed class InMemoryDatabase
 
     // This is the reference provider's durable kernel-owned ledger. It lives beside, rather than
     // inside, a storage unit so the key is always (unit, scope, nonce), including for global units.
-    internal readonly Dictionary<IdempotencyLedgerKey, DateTimeOffset> IdempotencyLedger = [];
+    internal readonly Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry> IdempotencyLedger = [];
 
     internal InMemoryUnitState GetState(StorageUnit requested, StorageAccess access)
     {
@@ -548,12 +548,12 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStorageSession, IRetentionStorageSession
+internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IRetentionStorageSession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
     private readonly bool liveState;
-    private readonly Dictionary<IdempotencyLedgerKey, DateTimeOffset>? stagedLedger;
+    private readonly Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry>? stagedLedger;
     private readonly Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits;
     private readonly string partition;
     private bool disposed;
@@ -563,7 +563,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         InMemoryUnitState state,
         StorageAccess access,
         bool liveState = false,
-        Dictionary<IdempotencyLedgerKey, DateTimeOffset>? stagedLedger = null,
+        Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry>? stagedLedger = null,
         Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits = null)
     {
         this.database = database;
@@ -928,11 +928,27 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        WriteOutcome outcome;
+        AppendOutcomeReport outcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            outcome = AppendCore(operationId, values, declaration);
+            outcome = AppendCore(operationId, values, declaration, exactOutcomes: false);
+        }
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return new(outcome.Status);
+    }
+
+    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        AppendOutcomeReport outcome;
+        lock (database.Gate)
+        {
+            ThrowIfDisposed();
+            outcome = AppendCore(operationId, values, declaration, exactOutcomes: true);
         }
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
@@ -940,31 +956,40 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
         return outcome;
     }
 
-    private WriteOutcome AppendCore(
+    private AppendOutcomeReport AppendCore(
         OperationId operationId,
         IReadOnlyList<StorageValues> values,
-        AppendIdempotencyDeclaration declaration)
+        AppendIdempotencyDeclaration declaration,
+        bool exactOutcomes)
     {
         var now = DateTimeOffset.UtcNow;
         var ledger = liveState
             ? database.IdempotencyLedger
             : stagedLedger ?? throw new InvalidOperationException("The staged append ledger is unavailable.");
-        ReclaimLedger(ledger, Unit.Id, now, declaration.Window);
+        var workingLedger = ledger.ToDictionary(pair => pair.Key, pair => pair.Value);
+        ReclaimLedger(workingLedger, Unit.Id, now, declaration.Window);
         var ledgerKey = new IdempotencyLedgerKey(Unit.Id, partition, operationId.Nonce);
-        if (ledger.TryGetValue(ledgerKey, out var committedAt))
+        var fingerprint = ExactAppendCodec.Fingerprint(Unit, values);
+        if (workingLedger.TryGetValue(ledgerKey, out var existing))
         {
-            if (IdempotencyRules.IsWithinWindow(committedAt, now, declaration.Window))
-                return new WriteOutcome(WriteOutcomeStatus.Replayed);
-            ledger.Remove(ledgerKey);
+            if (IdempotencyRules.IsWithinWindow(existing.CommittedAt, now, declaration.Window))
+            {
+                if (exactOutcomes && !string.Equals(existing.Fingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new AppendIdempotencyConflictException(Unit.Id.Value, partition, operationId.Nonce, existing.Fingerprint, fingerprint);
+                return new AppendOutcomeReport(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(existing.SerializedOutcomes));
+            }
+            workingLedger.Remove(ledgerKey);
         }
 
         var candidate = CurrentState().Clone();
+        var outcomes = new List<WriteOutcome>(values.Count);
         foreach (var value in values)
         {
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
             var outcome = Mutation.Apply(candidate, partition, value, WriteOptions.Unconditional, MutationKind.Insert);
             if (!outcome.Succeeded)
                 throw new InvalidOperationException($"Append row failed with outcome '{outcome.Status}'.");
+            outcomes.Add(outcome);
         }
 
         state = candidate;
@@ -972,19 +997,22 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
             database.Units[Unit.Id] = candidate;
         else
             stagedUnits![Unit.Id] = candidate;
-        ledger[ledgerKey] = now;
-        return new WriteOutcome(WriteOutcomeStatus.Inserted);
+        workingLedger[ledgerKey] = new IdempotencyLedgerEntry(now, fingerprint, ExactAppendCodec.SerializeOutcomes(outcomes));
+        ledger.Clear();
+        foreach (var pair in workingLedger)
+            ledger[pair.Key] = pair.Value;
+        return new AppendOutcomeReport(WriteOutcomeStatus.Inserted, outcomes);
     }
 
     private static void ReclaimLedger(
-        Dictionary<IdempotencyLedgerKey, DateTimeOffset> ledger,
+        Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry> ledger,
         StorageUnitId unit,
         DateTimeOffset providerNow,
         TimeSpan window)
     {
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, window);
         foreach (var key in ledger
-                     .Where(pair => pair.Key.Unit == unit && pair.Value <= cutoff)
+                     .Where(pair => pair.Key.Unit == unit && pair.Value.CommittedAt <= cutoff)
                      .Take(128)
                      .Select(pair => pair.Key)
                      .ToArray())
@@ -1045,13 +1073,18 @@ internal sealed class InMemoryStorageSession : IStorageSession, IConcurrencyStor
 
 internal readonly record struct IdempotencyLedgerKey(StorageUnitId Unit, string Scope, string Nonce);
 
+internal sealed record IdempotencyLedgerEntry(
+    DateTimeOffset CommittedAt,
+    string Fingerprint,
+    string SerializedOutcomes);
+
 internal sealed class InMemoryUnitOfWork : IUnitOfWork
 {
     private readonly InMemoryDatabase database;
     private readonly StorageAccess access;
     private readonly Dictionary<StorageUnitId, InMemoryUnitState> staged;
     private readonly Dictionary<StorageUnitId, long> baseRevisions;
-    private readonly Dictionary<IdempotencyLedgerKey, DateTimeOffset> stagedLedger;
+    private readonly Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry> stagedLedger;
     private readonly List<InMemoryStorageSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;

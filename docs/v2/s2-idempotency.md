@@ -45,3 +45,27 @@ converge on the declared newest-N watermark.
 Providers advertise the contract through
 `BatchWriteCapabilities.AppendIdempotency`; the stream-capability proof covers
 replay, provider-time skew, expiry, and rollback of a failed payload batch.
+
+## Exact generated outcomes
+
+When a caller needs provider-generated values (for example a sequence key), it
+can opt into the additive `IExactAppendStorageSession` capability through the
+`IStorageSession.AppendWithOutcomes` extension:
+
+```csharp
+var first = session.AppendWithOutcomes(operation, values);
+var replay = session.AppendWithOutcomes(operation, values);
+
+// Both calls expose the same ordered per-row generated values.
+var sequence = replay.Outcomes[0].GeneratedValue<long>("sequence");
+```
+
+The provider ledger stores a versioned, injective fingerprint of the declared
+portable input values and the versioned exact outcome payload in the same
+transaction as the rows. A replay returns those stored outcomes without
+allocating another sequence. Reusing the same unit/scope/nonce with a different
+payload throws `GW-APPEND-001` and writes nothing. An existing legacy ledger
+entry remains replayable through status-only `Append`; exact replay refuses it
+with `GW-APPEND-002` because no generated values were persisted. Providers that
+cannot guarantee the required transaction semantics omit the exact capability
+and the extension reports `GW-APPEND-003` before attempting a write.
