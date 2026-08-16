@@ -23,6 +23,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(MissingValueBehavior);
         _ = typeof(IndexBuilder);
         _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
+        _ = typeof(PortabilityValidator);
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
@@ -59,6 +60,7 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by-sparse", index => index.Column("nullable").ExcludeMissingValues()));
+        _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by-sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(

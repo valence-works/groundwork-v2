@@ -5,6 +5,7 @@ Groundwork.Kernel.ProviderOwnedColumns
 Groundwork.Kernel.MissingValueBehavior
 Groundwork.Kernel.IndexBuilder
 Groundwork.Kernel.StorageDeclarationBuilder
+Groundwork.Kernel.PortabilityValidator
 Groundwork.Query.Model.QueryRequest
 Groundwork.Query.Planning.QueryCoverageException
 Groundwork.Records.RecordTable

@@ -198,9 +198,17 @@ public sealed class SchemaSubject
         }
 
         AggregationProfileValidator.ValidateUnit(unit);
-        // SchemaSubject validates only retention here. The full portability pass belongs to
-        // provider/build seams and would reject pre-existing declarations that remain valid in
-        // this schema model (for example, an unbounded string used only by a legacy index).
+        var duplicateIndexes = PortabilityValidator.ValidateDuplicatePhysicalIndexSignatures(unit);
+        if (!duplicateIndexes.IsPortable)
+        {
+            var refusal = duplicateIndexes.Refusals[0];
+            throw new ArgumentException(
+                $"{refusal.Code} at {refusal.Path}: {refusal.Message}", nameof(unit));
+        }
+
+        // The rest of the portability pass belongs to provider/build seams and would reject
+        // pre-existing declarations that remain valid in this schema model (for example, an
+        // unbounded string used only by a legacy index).
         var portability = PortabilityValidator.ValidateRetention(unit);
         if (!portability.IsPortable)
         {

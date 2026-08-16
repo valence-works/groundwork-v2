@@ -150,6 +150,92 @@ public sealed class PortabilityTests
     }
 
     [Fact]
+    public void Duplicate_physical_index_signatures_are_refused_with_both_logical_names()
+    {
+        var result = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("tenant", PortableType.String, nullable: false, maxLength: 64)
+        ],
+            indexes:
+            [
+                Index("by-tenant-primary", "tenant", unique: true),
+                Index("by-tenant-alias", "tenant", unique: true)
+            ],
+            key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, item => item.Code == "GW-PORT-009");
+        Assert.Equal("indexes.by-tenant-primary|by-tenant-alias", refusal.Path);
+        Assert.Contains("by-tenant-primary", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("by-tenant-alias", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("consolidate", refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Physical_index_signature_distinguishes_order_direction_uniqueness_and_missing_values()
+    {
+        var unit = Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("tenant", PortableType.String, nullable: true, maxLength: 64)
+        ],
+            indexes:
+            [
+                Index("by-tenant-ascending", "tenant", unique: false),
+                new IndexDefinition
+                {
+                    Name = "by-tenant-descending",
+                    Columns = [new IndexColumn("tenant", SortDirection.Descending)]
+                },
+                new IndexDefinition
+                {
+                    Name = "by-tenant-sparse",
+                    Columns = [new IndexColumn("tenant")],
+                    MissingValues = MissingValueBehavior.Excluded
+                },
+                Index("by-tenant-unique", "tenant", unique: true)
+            ],
+            key: ["id"]);
+
+        Assert.DoesNotContain(Validate(unit).Refusals, item => item.Code == "GW-PORT-009");
+    }
+
+    [Fact]
+    public void Fluent_declaration_refuses_duplicate_physical_index_signatures()
+    {
+        var exception = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("duplicates", "duplicates")
+            .Guid("id", column => column.Required())
+            .String("tenant", 64, column => column.Required())
+            .Key("id")
+            .UniqueIndex("by-tenant-primary", index => index.Column("tenant"))
+            .UniqueIndex("by-tenant-alias", index => index.Column("tenant"))
+            .Build());
+
+        Assert.Contains(exception.Findings, item => item.Code == "GW-PORT-009" &&
+            item.Path == "indexes.by-tenant-primary|by-tenant-alias");
+    }
+
+    [Fact]
+    public void Schema_subject_refuses_duplicate_physical_index_signatures_before_fingerprinting()
+    {
+        var unit = Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("tenant", PortableType.String, nullable: false, maxLength: 64)
+        ],
+            indexes:
+            [
+                Index("by-tenant-primary", "tenant", unique: true),
+                Index("by-tenant-alias", "tenant", unique: true)
+            ],
+            key: ["id"]);
+
+        var exception = Assert.Throws<ArgumentException>(() => new Groundwork.Kernel.Schema.SchemaSubject(unit));
+
+        Assert.Contains("GW-PORT-009", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("by-tenant-primary", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("by-tenant-alias", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Provider_sequence_requires_non_nullable_int64()
     {
         var result = Validate(Unit([
@@ -319,7 +405,20 @@ public sealed class PortabilityTests
                 key: ["tenant", "id"]),
             new PortabilityValidationContext(
                 ["mongodb"],
-                priorAppliedMongoCompositeKeyOrder: ["id", "tenant"]))
+                priorAppliedMongoCompositeKeyOrder: ["id", "tenant"])),
+        new(
+            "GW-PORT-009",
+            Unit(
+                [
+                    Column("id", PortableType.Guid, nullable: false),
+                    Column("tenant", PortableType.String, nullable: false, maxLength: 64)
+                ],
+                indexes:
+                [
+                    Index("by-tenant-primary", "tenant", unique: true),
+                    Index("by-tenant-alias", "tenant", unique: true)
+                ],
+                key: ["id"]))
     ];
 
     private sealed record PortabilityRuleFixture(

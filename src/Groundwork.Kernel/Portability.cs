@@ -111,6 +111,7 @@ public static class PortabilityValidator
             .GroupBy(column => column.Name, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
 
+        ValidateDuplicatePhysicalIndexSignatures(indexes, diagnostics);
         ValidateUniqueNullability(indexes, byName, diagnostics);
         ValidateDecimalShape(columns, diagnostics);
         ValidateBoundedIndexKeys(indexes, byName, diagnostics);
@@ -120,6 +121,21 @@ public static class PortabilityValidator
         ValidateRetention(unit.Retention ?? context.Retention, byName, diagnostics);
         ValidateMongoKeyOrder(unit, context, diagnostics);
 
+        return new(diagnostics);
+    }
+
+    internal static PortabilityValidationResult ValidateDuplicatePhysicalIndexSignatures(StorageUnit? unit)
+    {
+        if (unit is null)
+        {
+            return new([new(
+                "GW-PORT-000",
+                "A storage unit is required for portability validation.",
+                "storageUnit")]);
+        }
+
+        var diagnostics = new List<PortabilityRefusal>();
+        ValidateDuplicatePhysicalIndexSignatures(unit.Indexes ?? [], diagnostics);
         return new(diagnostics);
     }
 
@@ -138,6 +154,58 @@ public static class PortabilityValidator
         var diagnostics = new List<PortabilityRefusal>();
         ValidateRetention(unit.Retention, byName, diagnostics);
         return new(diagnostics);
+    }
+
+    private static void ValidateDuplicatePhysicalIndexSignatures(
+        IReadOnlyList<IndexDefinition> indexes,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        var firstBySignature = new Dictionary<PhysicalIndexSignature, IndexDefinition>();
+        foreach (var index in indexes.Where(index => index is not null))
+        {
+            var signature = new PhysicalIndexSignature(index);
+            if (!firstBySignature.TryGetValue(signature, out var first))
+            {
+                firstBySignature.Add(signature, index);
+                continue;
+            }
+
+            diagnostics.Add(new(
+                "GW-PORT-009",
+                $"Indexes '{first.Name}' and '{index.Name}' have the same physical signature; " +
+                "consolidate their query purposes onto one physical index.",
+                $"indexes.{first.Name}|{index.Name}"));
+        }
+    }
+
+    private sealed class PhysicalIndexSignature : IEquatable<PhysicalIndexSignature>
+    {
+        public PhysicalIndexSignature(IndexDefinition index)
+        {
+            IsUnique = index.IsUnique;
+            MissingValues = index.MissingValues;
+            Columns = (index.Columns ?? []).ToArray();
+        }
+
+        private bool IsUnique { get; }
+        private MissingValueBehavior MissingValues { get; }
+        private IReadOnlyList<IndexColumn> Columns { get; }
+
+        public bool Equals(PhysicalIndexSignature? other) =>
+            other is not null &&
+            IsUnique == other.IsUnique &&
+            MissingValues == other.MissingValues &&
+            Columns.SequenceEqual(other.Columns);
+
+        public override bool Equals(object? obj) => Equals(obj as PhysicalIndexSignature);
+
+        public override int GetHashCode()
+        {
+            var hash = HashCode.Combine(IsUnique, MissingValues);
+            foreach (var column in Columns)
+                hash = HashCode.Combine(hash, column?.Column, column?.Direction);
+            return hash;
+        }
     }
 
     private static void ValidateUniqueNullability(
