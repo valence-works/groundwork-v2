@@ -7,6 +7,10 @@ Groundwork.Records.RecordTable
 Groundwork.Records.RecordTableStoreUnitOfWork
 Groundwork.Records.RecordWriteOptions
 Groundwork.Store.BatchWriteOptions
+Groundwork.Store.RetentionIdempotencyDeclaration
+Groundwork.Store.RetentionOperationResult
+Groundwork.Store.IStorageInspectionSession
+Groundwork.Store.IExactRetentionStorageSession
 Groundwork.Store.RowWrite
 Groundwork.Store.StorageAccess
 Groundwork.Store.StorageKey

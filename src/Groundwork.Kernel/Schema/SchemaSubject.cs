@@ -48,6 +48,9 @@ public sealed class SchemaSubject
                 AppendIdempotency is null
                     ? "idempotency:none"
                     : $"idempotency:{AppendIdempotency.Window.Ticks}:{AppendIdempotency.LedgerName}",
+                RetentionIdempotency is null
+                    ? "retention-idempotency:none"
+                    : $"retention-idempotency:{RetentionIdempotency.Window.Ticks}:{RetentionIdempotency.LedgerName}",
                 .. Columns.Select(CanonicalColumn),
                 .. Key.Columns.Select(column => $"key:{column}"),
                 .. DerivedColumns.Select(CanonicalDerivedColumn),
@@ -81,6 +84,8 @@ public sealed class SchemaSubject
     public RetentionDeclaration? Retention => definition.Retention;
 
     public AppendIdempotencyDeclaration? AppendIdempotency => definition.AppendIdempotency;
+
+    public RetentionIdempotencyDeclaration? RetentionIdempotency => definition.RetentionIdempotency;
 
     public int SchemaVersion => definition.SchemaVersion;
 
@@ -120,21 +125,24 @@ public sealed class SchemaSubject
         var ledgers = new Dictionary<string, (string Name, StorageUnit Unit)>(StringComparer.OrdinalIgnoreCase);
         foreach (var unit in units)
         {
-            if (unit.AppendIdempotency is not { } declaration)
-                continue;
-            if (ledgers.TryGetValue(declaration.LedgerName, out var prior) &&
-                !string.Equals(prior.Name, declaration.LedgerName, StringComparison.Ordinal))
+            foreach (var declaration in new[] { unit.AppendIdempotency?.LedgerName, unit.RetentionIdempotency?.LedgerName }
+                         .Where(name => name is not null)
+                         .Select(name => name!))
             {
-                throw new ArgumentException(
-                    $"Schema manifest ledger names cannot differ only by provider identifier casing: '{prior.Name}' and '{declaration.LedgerName}'.",
-                    nameof(declarations));
-            }
-            ledgers.TryAdd(declaration.LedgerName, (declaration.LedgerName, unit));
-            if (names.TryGetValue(declaration.LedgerName, out var owner))
-            {
-                throw new ArgumentException(
-                    $"Schema manifest ledger '{declaration.LedgerName}' collides with storage unit '{owner.Name}' under provider identifier comparison.",
-                    nameof(declarations));
+                if (ledgers.TryGetValue(declaration, out var prior) &&
+                    !string.Equals(prior.Name, declaration, StringComparison.Ordinal))
+                {
+                    throw new ArgumentException(
+                        $"Schema manifest ledger names cannot differ only by provider identifier casing: '{prior.Name}' and '{declaration}'.",
+                        nameof(declarations));
+                }
+                ledgers.TryAdd(declaration, (declaration, unit));
+                if (names.TryGetValue(declaration, out var owner))
+                {
+                    throw new ArgumentException(
+                        $"Schema manifest ledger '{declaration}' collides with storage unit '{owner.Name}' under provider identifier comparison.",
+                        nameof(declarations));
+                }
             }
         }
     }
@@ -145,6 +153,7 @@ public sealed class SchemaSubject
     {
         ConcurrencyDeclaration.ValidateDeclaration(unit);
         unit.AppendIdempotency?.Validate(unit);
+        unit.RetentionIdempotency?.Validate(unit);
         if (string.IsNullOrWhiteSpace(unit.Id.Value))
             throw new ArgumentException("A schema subject requires a non-empty storage-unit id.", nameof(unit));
         if (string.IsNullOrWhiteSpace(unit.Name))
@@ -225,6 +234,7 @@ public sealed class SchemaSubject
         AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
         AppendIdempotency = source.AppendIdempotency is null ? null : source.AppendIdempotency with { },
+        RetentionIdempotency = source.RetentionIdempotency is null ? null : source.RetentionIdempotency with { },
         Concurrency = source.Concurrency,
         Timestamps = source.Timestamps,
         Retention = source.Retention is null ? null : new RetentionDeclaration

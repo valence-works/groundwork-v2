@@ -10,6 +10,9 @@ public sealed record RetentionExecutionOptions
 {
     public int MaxRowsPerBatch { get; init; } = 512;
 
+    /// <summary>Optional per-pass retention override. Null uses the declaration; zero deletes all rows.</summary>
+    public int? KeepNewestOverride { get; init; }
+
     public IWritePathObserver? Observer { get; init; }
 
     public CancellationToken CancellationToken { get; init; }
@@ -39,7 +42,7 @@ public static class RetentionSessionExtensions
     {
         ArgumentNullException.ThrowIfNull(session);
         options ??= new RetentionExecutionOptions();
-        ValidateOptions(options);
+        ValidateExecutionOptions(options);
         return session is IRetentionStorageSession native
             ? native.ApplyRetention(options)
             : ApplyReference(session, options);
@@ -68,7 +71,11 @@ public static class RetentionSessionExtensions
             Projection.All,
             Paging.None);
         var rows = session.Query(request).Rows;
-        var victims = RetentionRows.OrderVictims(session.Unit, declaration, rows);
+        var victims = RetentionRows.OrderVictims(
+            session.Unit,
+            declaration,
+            EffectiveKeepNewest(session.Unit, options),
+            rows);
         return DeleteVictims(session, victims, options);
     }
 
@@ -99,10 +106,23 @@ public static class RetentionSessionExtensions
         return new RetentionResult(deleted, batches);
     }
 
-    private static void ValidateOptions(RetentionExecutionOptions options)
+    internal static void ValidateExecutionOptions(RetentionExecutionOptions options)
     {
         if (options.MaxRowsPerBatch <= 0)
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
+        if (options.KeepNewestOverride is < 0)
+            throw new ArgumentOutOfRangeException(nameof(options.KeepNewestOverride),
+                "KeepNewestOverride cannot be negative.");
+    }
+
+    internal static int EffectiveKeepNewest(StorageUnit unit, RetentionExecutionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(options);
+        var declaration = unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{unit.Name}' does not declare retention.");
+        ValidateExecutionOptions(options);
+        return options.KeepNewestOverride ?? declaration.KeepNewest;
     }
 }
 
@@ -111,6 +131,7 @@ internal static class RetentionRows
     internal static IReadOnlyList<IReadOnlyDictionary<string, object?>> OrderVictims(
         StorageUnit unit,
         RetentionDeclaration declaration,
+        int keepNewest,
         IEnumerable<IReadOnlyDictionary<string, object?>> rows)
     {
         var partitionColumns = declaration.PartitionColumns ?? [];
@@ -119,7 +140,7 @@ internal static class RetentionRows
             .SelectMany(group => group
                 .OrderByDescending(row => row.GetValueOrDefault(declaration.OrderColumn), RetentionValueComparer.Instance)
                 .ThenBy(row => StructuralRetentionKey.From(row, unit.Key.Columns), StructuralRetentionKeyComparer.Instance)
-                .Skip(declaration.KeepNewest))
+                .Skip(keepNewest))
             .ToArray();
     }
 

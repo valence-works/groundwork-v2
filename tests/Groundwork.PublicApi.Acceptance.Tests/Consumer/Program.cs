@@ -25,6 +25,7 @@ try
     using var connection = new SqliteProviderFactory().Create("Data Source=" + databasePath);
     RunRecordsJourney(connection);
     RunExactAppendJourney(connection);
+    RunLifecycleJourney(connection);
     RunDocumentsJourney(connection);
     RunFailureJourneys(connection);
     Console.WriteLine("Groundwork public API clean-room journey passed.");
@@ -61,6 +62,34 @@ static void RunExactAppendJourney(IStorageProviderConnection connection)
     var replayed = session.AppendWithOutcomes(operation, values);
     Require(replayed.Status == WriteOutcomeStatus.Replayed, "The package-only exact append did not replay.");
     Require(replayed.Outcomes[0].GeneratedValue<long>("sequence") == 1, "The package-only replay did not preserve its generated sequence.");
+}
+
+static void RunLifecycleJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("lifecycle_records"),
+        Name = "lifecycle_records",
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 200 }
+        ],
+        Key = new KeyDefinition { Columns = ["sequence"] },
+        Retention = new RetentionDeclaration { KeepNewest = 1, OrderColumn = "sequence" },
+        RetentionIdempotency = new RetentionIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The lifecycle schema did not apply.");
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "first" }));
+    session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "second" }));
+    Require(session.Inspect().LifetimeCommittedSequenceHighWater == 2, "The public lifecycle inspection did not expose the committed high-water.");
+    var operation = new OperationId(DateTimeOffset.UtcNow, "public-retention");
+    var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1, KeepNewestOverride = 0 });
+    var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1, KeepNewestOverride = 0 });
+    Require(executed.Status == RetentionOperationStatus.Executed && executed.DeletedRows == 2, "The public exact retention override did not delete all rows.");
+    Require(replayed.Status == RetentionOperationStatus.Replayed && replayed.DeletedRows == executed.DeletedRows, "The public exact retention did not replay its result.");
+    Require(session.Inspect().LifetimeCommittedSequenceHighWater == 2, "The public exact retention override reset the sequence high-water.");
 }
 
 static void RunRecordsJourney(IStorageProviderConnection connection)

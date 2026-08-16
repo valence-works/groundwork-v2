@@ -105,6 +105,13 @@ public sealed class StorageDeclarationBuilder
 
     public StorageDeclarationBuilder Retain(RetentionDeclaration declaration) => Retention(declaration);
 
+    /// <summary>Opts the unit into replay-stable operation-identified retention.</summary>
+    public StorageDeclarationBuilder RetentionIdempotency(TimeSpan window, string ledgerName = ProviderReservedLedgerNames.DefaultRetentionLedger)
+    {
+        state.SetRetentionIdempotency(new RetentionIdempotencyDeclaration { Window = window, LedgerName = ledgerName });
+        return this;
+    }
+
     public StorageDeclarationBuilder Scoped()
     {
         state.SetScope(ScopePolicy.Scoped);
@@ -129,7 +136,7 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Index(string name, Action<IndexBuilder> configure) =>
         AddIndex(name, configure, unique: false);
 
-    public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = "__groundwork_operations")
+    public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = ProviderReservedLedgerNames.DefaultAppendLedger)
     {
         state.SetAppendIdempotency(new AppendIdempotencyDeclaration { Window = window, LedgerName = ledgerName });
         return this;
@@ -330,6 +337,7 @@ internal sealed class StorageDeclarationState
     private ScopePolicy scope = ScopePolicy.Global;
     private RetentionDeclaration? retention;
     private AppendIdempotencyDeclaration? appendIdempotency;
+    private RetentionIdempotencyDeclaration? retentionIdempotency;
 
     public StorageDeclarationState(string id, string name)
     {
@@ -401,6 +409,9 @@ internal sealed class StorageDeclarationState
     public void SetAppendIdempotency(AppendIdempotencyDeclaration declaration) =>
         appendIdempotency = declaration ?? throw new ArgumentNullException(nameof(declaration));
 
+    public void SetRetentionIdempotency(RetentionIdempotencyDeclaration declaration) =>
+        retentionIdempotency = declaration ?? throw new ArgumentNullException(nameof(declaration));
+
     public StorageUnit Build(PortabilityValidationContext? context)
     {
         var unit = new StorageUnit
@@ -414,6 +425,7 @@ internal sealed class StorageDeclarationState
             Scope = scope,
             Concurrency = concurrency,
             AppendIdempotency = appendIdempotency,
+            RetentionIdempotency = retentionIdempotency,
             Retention = retention
         };
 
@@ -428,6 +440,18 @@ internal sealed class StorageDeclarationState
                 "GW-DECL-CONCURRENCY-001",
                 $"The concurrency declaration is invalid: {exception.Message}",
                 "concurrency"));
+        }
+        try
+        {
+            if (retentionIdempotency is not null)
+                RetentionIdempotencyDeclaration.ValidateOwner(unit);
+        }
+        catch (ArgumentException exception)
+        {
+            declarationFindings.Add(new DeclarationFinding(
+                RetentionIdempotencyDeclaration.MissingRetentionDiagnosticCode,
+                exception.Message,
+                "retentionIdempotency"));
         }
         var validationContext = context is null || context.Retention is not null || retention is null
             ? context

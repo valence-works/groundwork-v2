@@ -40,7 +40,9 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         "SQL Server", nativeBatch: true,
         exactOutcomeCost: "one OUTPUT result per MERGE batch",
         batchCost: "uses one durable table-valued-parameter MERGE batch; VALUES is a compatibility fallback",
-        exactAppendOutcomes: true);
+        exactAppendOutcomes: true,
+        durableHighWaterInspection: true,
+        exactRetention: true);
 
     internal object Gate => gate;
 

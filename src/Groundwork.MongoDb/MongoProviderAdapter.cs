@@ -25,11 +25,17 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
                 "MongoDB", nativeBatch: true,
                 exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
                 batchCost: "uses unordered BulkWrite for aggregate commits",
-                exactAppendOutcomes: true);
+                exactAppendOutcomes: true,
+                durableHighWaterInspection: true,
+                exactRetention: true);
             return descriptors
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ExactAppendOutcomes ||
+                                     inner.ProviderSequenceFit is ProviderFit.Supported)
+                .Where(descriptor => descriptor.Id != BatchWriteCapabilities.DurableHighWaterInspection ||
+                                     inner.ProviderSequenceFit is ProviderFit.Supported)
+                .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ExactRetention ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.ProviderSequence ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
@@ -220,7 +226,7 @@ internal class MongoStoreSession(
         : new StoredEntry(new StorageValues(entry.Values.Values), entry.Version);
 }
 
-internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession
+internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     private readonly IMongoStorageSession exactInner;
 
@@ -238,6 +244,21 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
         return new AppendOutcomeReport(
             (WriteOutcomeStatus)result.Status,
             result.Outcomes.Select(ToStore).ToArray());
+    }
+
+    public StorageInspection Inspect()
+    {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
+        if (exactInner is not IStorageInspectionSession inspection)
+            throw new NotSupportedException("GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
+        return inspection.Inspect();
+    }
+
+    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
+    {
+        if (exactInner is not IExactRetentionStorageSession exact)
+            throw new NotSupportedException("GW-RETENTION-003: this provider session does not advertise exact retention operations.");
+        return exact.ApplyRetention(operationId, options);
     }
 }
 

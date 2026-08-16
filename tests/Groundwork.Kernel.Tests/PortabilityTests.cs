@@ -199,6 +199,28 @@ public sealed class PortabilityTests
         AssertCode(result, "GW-PORT-007", "payload");
     }
 
+    [Fact]
+    public void Retention_negative_keep_newest_is_refused_but_zero_is_portable()
+    {
+        var negative = Validate(
+            Unit([Column("sequence", PortableType.Int64, nullable: false)]),
+            new PortabilityValidationContext(retention: new RetentionDeclaration
+            {
+                KeepNewest = -1,
+                OrderColumn = "sequence"
+            }));
+        var zero = Validate(
+            Unit([Column("sequence", PortableType.Int64, nullable: false)]),
+            new PortabilityValidationContext(retention: new RetentionDeclaration
+            {
+                KeepNewest = 0,
+                OrderColumn = "sequence"
+            }));
+
+        AssertCode(negative, "GW-PORT-007", "sequence");
+        Assert.DoesNotContain(zero.Refusals, refusal => refusal.Code == "GW-PORT-007");
+    }
+
     [Theory]
     [InlineData(PortableType.String, true)]
     [InlineData(PortableType.Int32, true)]

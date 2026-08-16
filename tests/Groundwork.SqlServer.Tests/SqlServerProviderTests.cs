@@ -82,6 +82,122 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public void Lifecycle_identity_columns_use_binary_collation_and_preserve_case_distinct_scopes_and_nonces()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var name = "s7_sqlserver_lifecycle_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Scope = ScopePolicy.Scoped,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 100, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 1,
+                OrderColumn = "sequence",
+                Trigger = RetentionTrigger.Explicit
+            },
+            RetentionIdempotency = new RetentionIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) },
+            AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var upper = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("A")));
+        var lower = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("a")));
+        upper.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "upper-1" }));
+        upper.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "upper-2" }));
+        lower.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "lower-1" }));
+        lower.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "lower-2" }));
+
+        Assert.Equal(2L, upper.Inspect().LifetimeCommittedSequenceHighWater);
+        Assert.Equal(4L, lower.Inspect().LifetimeCommittedSequenceHighWater);
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            upper.Append(new OperationId(DateTimeOffset.UtcNow, "AppendCase"),
+                [new StorageValues(new Dictionary<string, object?> { ["payload"] = "append-upper" })]).Status);
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            upper.Append(new OperationId(DateTimeOffset.UtcNow, "appendcase"),
+                [new StorageValues(new Dictionary<string, object?> { ["payload"] = "append-lower" })]).Status);
+        Assert.Equal(RetentionOperationStatus.Executed,
+            upper.ApplyRetention(new OperationId(DateTimeOffset.UtcNow, "CaseNonce")).Status);
+        Assert.Equal(RetentionOperationStatus.Executed,
+            upper.ApplyRetention(new OperationId(DateTimeOffset.UtcNow, "casenonce")).Status);
+        Assert.Equal(RetentionOperationStatus.Executed,
+            lower.ApplyRetention(new OperationId(DateTimeOffset.UtcNow, "CaseNonce")).Status);
+
+        using var sql = new SqlConnection(fixture.ConnectionString);
+        sql.Open();
+        using var command = sql.CreateCommand();
+        command.CommandText = """
+            SELECT t.name, c.name, c.collation_name
+            FROM sys.tables t
+            JOIN sys.columns c ON c.object_id = t.object_id
+            WHERE t.name IN (N'__groundwork_sequence_high_waters', N'__groundwork_operations', N'__groundwork_retention_operations')
+              AND c.name IN (N'unit', N'scope', N'nonce');
+            """;
+        using var reader = command.ExecuteReader();
+        var collations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        while (reader.Read())
+            collations[$"{reader.GetString(0)}.{reader.GetString(1)}"] = reader.GetString(2);
+
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_sequence_high_waters.unit"]);
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_sequence_high_waters.scope"]);
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_retention_operations.unit"]);
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_retention_operations.scope"]);
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_retention_operations.nonce"]);
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_operations.unit"]);
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_operations.scope"]);
+        Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_operations.nonce"]);
+    }
+
+    [Fact]
+    public void Existing_lifecycle_table_with_legacy_collation_is_refused_with_migration_guidance()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var name = "s7_sqlserver_legacy_lifecycle_" + Guid.NewGuid().ToString("N");
+        var ledger = "s7_legacy_retention_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 100, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 100, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Retention = new RetentionDeclaration { KeepNewest = 1, OrderColumn = "id", Trigger = RetentionTrigger.Explicit },
+            RetentionIdempotency = new RetentionIdempotencyDeclaration
+            {
+                Window = TimeSpan.FromMinutes(10),
+                LedgerName = ledger
+            }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using (var sql = new SqlConnection(fixture.ConnectionString))
+        {
+            sql.Open();
+            using var create = sql.CreateCommand();
+            create.CommandText = $"CREATE TABLE [{ledger}] (unit nvarchar(450) NOT NULL, scope nvarchar(128) NOT NULL, nonce nvarchar(256) NOT NULL, committed_at nvarchar(64) NOT NULL, input_fingerprint nvarchar(128) NULL, exact_result nvarchar(max) NULL, PRIMARY KEY NONCLUSTERED (unit, scope, nonce));";
+            create.ExecuteNonQuery();
+        }
+
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            connection.OpenSession(unit, StorageAccess.Global).ApplyRetention(
+                new OperationId(DateTimeOffset.UtcNow, "legacy")));
+        Assert.StartsWith("GW-SQLSERVER-LIFECYCLE-001", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("Recreate or migrate", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Unbounded_primary_string_is_refused_before_connection_open()
     {
         using var connection = new SqlServerProviderFactory().Create(
@@ -124,9 +240,11 @@ public sealed class SqlServerFixture : IAsyncLifetime
             DECLARE @sql nvarchar(max) = N'';
             SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
             FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
-            WHERE t.name IN (N'conformance-global',N'conformance-scoped',N'__groundwork_schema_history',N'__groundwork_schema_fences')
+            WHERE t.name IN (N'conformance-global',N'conformance-scoped',N'__groundwork_schema_history',N'__groundwork_schema_fences',N'__groundwork_sequence_high_waters',N'__groundwork_operations',N'__groundwork_retention_operations')
                OR t.name LIKE N'customer[_]%'
-               OR t.name LIKE N'w2_sqlserver[_]%';
+               OR t.name LIKE N'w2_sqlserver[_]%'
+               OR t.name LIKE N's7_sqlserver[_]%'
+               OR t.name LIKE N's7_legacy_retention[_]%';
             IF @sql <> N'' EXEC sys.sp_executesql @sql;
             """;
         command.ExecuteNonQuery();

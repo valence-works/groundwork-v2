@@ -23,7 +23,8 @@ internal static class TestingFixture
             {
                 Name = "unique-value",
                 Columns = [new IndexColumn("uniqueValue")],
-                IsUnique = true
+                IsUnique = true,
+                MissingValues = MissingValueBehavior.Excluded
             }
         ]
     };
@@ -51,8 +52,8 @@ internal static class TestingFixture
 
     private static IReadOnlyList<ColumnDefinition> Columns() =>
     [
-        new() { Name = "id", Type = PortableType.String, IsNullable = false },
-        new() { Name = "value", Type = PortableType.String },
-        new() { Name = "uniqueValue", Type = PortableType.String }
+        new() { Name = "id", Type = PortableType.String, MaxLength = 128, IsNullable = false },
+        new() { Name = "value", Type = PortableType.String, MaxLength = 128 },
+        new() { Name = "uniqueValue", Type = PortableType.String, MaxLength = 128 }
     ];
 }

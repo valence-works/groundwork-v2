@@ -42,6 +42,10 @@ public sealed record RetentionDeclaration
     {
     }
 
+    /// <summary>
+    /// The number of newest rows retained per partition. Zero is valid and deletes every
+    /// retained row while leaving ProviderSequence lifetime high-water evidence intact.
+    /// </summary>
     public required int KeepNewest { get; init; }
 
     public required string OrderColumn { get; init; }
@@ -391,7 +395,7 @@ public static class PortabilityValidator
             return;
 
         var name = retention.OrderColumn ?? string.Empty;
-        var invalidKeepNewest = retention.KeepNewest <= 0;
+        var invalidKeepNewest = retention.KeepNewest < 0;
         var invalidTrigger = !Enum.IsDefined(retention.Trigger);
         var invalidPartition = (retention.PartitionColumns ?? []).Any(partition =>
             string.IsNullOrWhiteSpace(partition) || !byName.ContainsKey(partition));
@@ -400,7 +404,7 @@ public static class PortabilityValidator
         {
             diagnostics.Add(new(
                 "GW-PORT-007",
-                $"Retention requires a positive KeepNewest value, a declared non-nullable orderable order column '{name}', and declared partition columns.",
+                $"Retention requires a non-negative KeepNewest value, a declared non-nullable orderable order column '{name}', and declared partition columns.",
                 $"retention.{name}"));
         }
     }

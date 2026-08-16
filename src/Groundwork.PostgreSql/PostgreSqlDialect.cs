@@ -247,29 +247,38 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     public override void EnsureInfrastructure(DbConnection connection)
     {
-        using var command = Command(connection, null, """
-            CREATE TABLE IF NOT EXISTS "__groundwork_schema_history" (
-                "subject_id" text NOT NULL,
-                "provider_name" text NOT NULL,
-                "target_fingerprint" text NOT NULL,
-                "state_json" text NOT NULL,
-                PRIMARY KEY ("subject_id", "provider_name")
-            );
-            CREATE TABLE IF NOT EXISTS "__groundwork_schema_locks" (
-                "subject_id" text NOT NULL,
-                "provider_name" text NOT NULL,
-                "owner_id" text NOT NULL,
-                "fence" bigint NOT NULL,
-                PRIMARY KEY ("subject_id", "provider_name")
-            );
-            CREATE TABLE IF NOT EXISTS "__groundwork_search_key_algorithms" (
-                "table_name" text NOT NULL,
-                "column_name" text NOT NULL,
-                "algorithm_id" text NOT NULL,
-                PRIMARY KEY ("table_name", "column_name")
-            );
-            """);
-        command.ExecuteNonQuery();
+        const string infrastructureResource = "groundwork:infrastructure";
+        AcquireApplicationLock(connection, infrastructureResource);
+        try
+        {
+            using var command = Command(connection, null, """
+                CREATE TABLE IF NOT EXISTS "__groundwork_schema_history" (
+                    "subject_id" text NOT NULL,
+                    "provider_name" text NOT NULL,
+                    "target_fingerprint" text NOT NULL,
+                    "state_json" text NOT NULL,
+                    PRIMARY KEY ("subject_id", "provider_name")
+                );
+                CREATE TABLE IF NOT EXISTS "__groundwork_schema_locks" (
+                    "subject_id" text NOT NULL,
+                    "provider_name" text NOT NULL,
+                    "owner_id" text NOT NULL,
+                    "fence" bigint NOT NULL,
+                    PRIMARY KEY ("subject_id", "provider_name")
+                );
+                CREATE TABLE IF NOT EXISTS "__groundwork_search_key_algorithms" (
+                    "table_name" text NOT NULL,
+                    "column_name" text NOT NULL,
+                    "algorithm_id" text NOT NULL,
+                    PRIMARY KEY ("table_name", "column_name")
+                );
+                """);
+            command.ExecuteNonQuery();
+        }
+        finally
+        {
+            ReleaseApplicationLock(connection, infrastructureResource);
+        }
     }
 
     public override void ApplyProviderDefinition(

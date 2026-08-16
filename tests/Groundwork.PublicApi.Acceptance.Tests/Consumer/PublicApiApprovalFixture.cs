@@ -30,6 +30,11 @@ internal static class PublicApiApprovalFixture
         _ = typeof(AppendOutcomeReport);
         _ = typeof(IExactAppendStorageSession);
         _ = typeof(AppendIdempotencyConflictException);
+        _ = typeof(RetentionIdempotencyDeclaration);
+        _ = typeof(RetentionOperationResult);
+        _ = typeof(RetentionExecutionOptions);
+        _ = typeof(IStorageInspectionSession);
+        _ = typeof(IExactRetentionStorageSession);
         _ = typeof(StorageAccess);
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
@@ -43,6 +48,10 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
             (session, operation, values) => session.AppendWithOutcomes(operation, values));
+        _ = new Func<IStorageSession, OperationId, RetentionExecutionOptions, RetentionOperationResult>(
+            (session, operation, options) => session.ApplyRetention(operation, options));
+        _ = new RetentionExecutionOptions { KeepNewestOverride = 0 };
+        _ = new Func<IStorageSession, StorageInspection>(session => session.Inspect());
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableStoreUnitOfWork<ApprovalRecord>>((table, connection) => table.BeginUnitOfWork(connection, BatchWriteOptions.Exact));
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));

@@ -12,9 +12,13 @@ Retention = new RetentionDeclaration
 }
 ```
 
-The declaration is rejected with `GW-PORT-007` before schema I/O when `KeepNewest` is not
-positive, the order column is missing, nullable, or not one of the portable ordered types, or a
-partition column is missing. `session.ApplyRetention()` is the public execution seam; providers
+The declaration is rejected with `GW-PORT-007` before schema I/O when `KeepNewest` is negative, the
+order column is missing, nullable, or not one of the portable ordered types, or a partition column
+is missing. `KeepNewest = 0` is portable and means delete every retained row in each partition;
+the lifetime sequence high-water is not reset. A pass may set
+`RetentionExecutionOptions.KeepNewestOverride` to any non-negative value without changing the
+declaration or schema; zero therefore supports an operation-identified delete-all pass even when
+the declaration retains rows by default. `session.ApplyRetention()` is the public execution seam; providers
 implement it natively and the testing provider supplies the reference behavior. The optional
 `MaxRowsPerBatch` bound makes a pass interruptible: cancellation is checked between bounded delete
 commands, and a later pass recomputes the current watermark and resumes safely.

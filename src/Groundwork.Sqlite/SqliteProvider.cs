@@ -56,7 +56,9 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         "SQLite", nativeBatch: true,
         exactOutcomeCost: "one RETURNING result per native batch",
         batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback",
-        exactAppendOutcomes: true);
+        exactAppendOutcomes: true,
+        durableHighWaterInspection: true,
+        exactRetention: true);
 
     internal object Gate => gate;
 

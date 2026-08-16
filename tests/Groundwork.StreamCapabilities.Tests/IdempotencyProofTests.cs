@@ -375,7 +375,57 @@ public sealed class IdempotencyProofTests
         Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
             "idempotency-ledger-provider-collision-" + Guid.NewGuid().ToString("N"),
             ledgerName: "__groundwork_sequences")));
+        Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
+            "idempotency-ledger-provider-collision-" + Guid.NewGuid().ToString("N"),
+            ledgerName: "__groundwork_sequence_high_waters")));
+        Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
+            "idempotency-ledger-provider-collision-" + Guid.NewGuid().ToString("N"),
+            ledgerName: "__groundwork_retention_operations")));
+        Assert.Throws<ArgumentException>(() => new SchemaSubject(LifecycleUnitWithRetentionLedger(
+            "idempotency-ledger-provider-collision-" + Guid.NewGuid().ToString("N"),
+            "__groundwork_operations")));
     }
+
+    [Fact]
+    public void Append_and_retention_idempotency_cannot_share_a_ledger_name()
+    {
+        var name = "idempotency-ledger-cross-kind-" + Guid.NewGuid().ToString("N");
+        var unit = Unit(name) with
+        {
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 1,
+                OrderColumn = "id",
+                Trigger = RetentionTrigger.Explicit
+            },
+            RetentionIdempotency = new RetentionIdempotencyDeclaration
+            {
+                Window = TimeSpan.FromMinutes(10),
+                LedgerName = "__groundwork_operations"
+            }
+        };
+
+        var exception = Assert.Throws<ArgumentException>(() => new SchemaSubject(unit));
+        Assert.Contains("cannot share", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static StorageUnit LifecycleUnitWithRetentionLedger(string name, string ledgerName) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
+            new() { Name = "payload", Type = PortableType.String, MaxLength = 450, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Retention = new RetentionDeclaration { KeepNewest = 1, OrderColumn = "id", Trigger = RetentionTrigger.Explicit },
+        RetentionIdempotency = new RetentionIdempotencyDeclaration
+        {
+            Window = TimeSpan.FromMinutes(10),
+            LedgerName = ledgerName
+        }
+    };
 
     [Fact]
     public void SQLite_manifest_rejects_cross_unit_case_folded_ledger_collision_before_schema_io()

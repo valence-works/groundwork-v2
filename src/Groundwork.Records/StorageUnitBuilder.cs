@@ -86,6 +86,9 @@ public sealed class StorageDeclarationBuilder
 
     public StorageDeclarationBuilder Retain(RetentionDeclaration declaration) => Wrap(inner.Retain(declaration));
 
+    public StorageDeclarationBuilder RetentionIdempotency(TimeSpan window, string ledgerName = "__groundwork_retention_operations") =>
+        Wrap(inner.RetentionIdempotency(window, ledgerName));
+
     public StorageDeclarationBuilder Scoped() => Wrap(inner.Scoped());
 
     public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns) => Wrap(inner.UniqueIndex(name, columns));
