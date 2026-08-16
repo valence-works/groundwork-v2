@@ -2153,7 +2153,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                         isUpsert: !hasSequenceLocator &&
                                   (!Unit.Concurrency.IsOptimistic || existing is null));
                     inserted = result.UpsertedId is not null;
-                    if (Unit.Concurrency.IsOptimistic && result.MatchedCount == 0)
+                    if (Unit.Concurrency.IsOptimistic &&
+                        result.MatchedCount == 0 &&
+                        result.UpsertedId is null)
                         return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
                 }
             }
