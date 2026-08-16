@@ -29,6 +29,16 @@ jobs:
       - run: dotnet restore Groundwork.slnx
       - run: dotnet test Groundwork.slnx --no-restore --configuration Release
 
+  documents-package-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build Documents from a local package feed only
+        run: tests/Groundwork.Documents.External/verify-local-package.sh
+
   query-differential:
     runs-on: ubuntu-latest
     services:

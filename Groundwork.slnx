@@ -10,6 +10,9 @@
   <Folder Name="/src/Groundwork.Records/">
     <Project Path="src/Groundwork.Records/Groundwork.Records.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Documents/">
+    <Project Path="src/Groundwork.Documents/Groundwork.Documents.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Testing/">
     <Project Path="src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </Folder>
@@ -138,5 +141,8 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Records.Tests/">
     <Project Path="tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Documents.Tests/">
+    <Project Path="tests/Groundwork.Documents.Tests/Groundwork.Documents.Tests.csproj" />
   </Folder>
 </Solution>
