@@ -820,6 +820,115 @@ public sealed class MongoProviderIntegrationTests
             first.Update(CustomerValues("same", null), MongoWriteOptions.IfVersion(1)).Status);
     }
 
+    [SkippableTheory]
+    [InlineData(ScopePolicy.Global)]
+    [InlineData(ScopePolicy.Scoped)]
+    public void Optimistic_upsert_classifies_insert_update_and_stale_cas_for_each_scope(ScopePolicy scope)
+    {
+        using var connection = OpenConnection();
+        var unit = OptimisticUpsertUnit("optimistic-upsert", scope);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var access = scope == ScopePolicy.Scoped
+            ? MongoStorageAccess.Scoped(new StorageScope("tenant-a"))
+            : MongoStorageAccess.Global;
+        var session = connection.OpenSession(unit, access);
+
+        var inserted = session.Upsert(OptimisticUpsertValues("one", "first"));
+        Assert.Equal(MongoWriteOutcomeStatus.Upserted, inserted.Status);
+        Assert.Equal(1, inserted.Version);
+
+        var updated = session.Upsert(OptimisticUpsertValues("one", "second"));
+        Assert.Equal(MongoWriteOutcomeStatus.Upserted, updated.Status);
+        Assert.Equal(2, updated.Version);
+        Assert.Equal("second", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" }))!.Values.Values["payload"]);
+
+        var stale = session.Upsert(
+            OptimisticUpsertValues("one", "stale"), MongoWriteOptions.IfVersion(1));
+        Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict, stale.Status);
+        Assert.Equal(2, stale.Version);
+        Assert.Equal("second", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" }))!.Values.Values["payload"]);
+
+        var missingWithCas = session.Upsert(
+            OptimisticUpsertValues("two", "cas"), MongoWriteOptions.IfVersion(1));
+        Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict, missingWithCas.Status);
+        Assert.Null(session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = "two" })));
+    }
+
+    [SkippableFact]
+    public void Optimistic_upsert_classification_is_preserved_inside_a_transaction()
+    {
+        using var connection = OpenConnection();
+        Skip.If(connection.ProviderSequenceFit is ProviderFit.Unsupported,
+            "MongoDB standalone deployments cannot execute unit-of-work transactions.");
+        var unit = OptimisticUpsertUnit("optimistic-upsert-transaction");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using var work = connection.BeginUnitOfWork(MongoStorageAccess.Global, unit);
+        var session = work.OpenSession(unit);
+        var inserted = session.Upsert(OptimisticUpsertValues("one", "first"));
+        var updated = session.Upsert(OptimisticUpsertValues("one", "second"));
+        var stale = session.Upsert(
+            OptimisticUpsertValues("one", "stale"), MongoWriteOptions.IfVersion(1));
+
+        Assert.Equal(MongoWriteOutcomeStatus.Upserted, inserted.Status);
+        Assert.Equal(1, inserted.Version);
+        Assert.Equal(MongoWriteOutcomeStatus.Upserted, updated.Status);
+        Assert.Equal(2, updated.Version);
+        Assert.Equal(MongoWriteOutcomeStatus.ConcurrencyConflict, stale.Status);
+        Assert.Equal(2, stale.Version);
+        Assert.Equal("second", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" }))!.Values.Values["payload"]);
+        work.Commit();
+    }
+
+    [SkippableTheory]
+    [InlineData(ScopePolicy.Global)]
+    [InlineData(ScopePolicy.Scoped)]
+    public void Optimistic_aggregate_and_exact_batches_classify_insert_and_update(ScopePolicy scope)
+    {
+        using var connection = OpenConnection();
+        var unit = OptimisticUpsertUnit("optimistic-upsert-batch", scope);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var access = scope == ScopePolicy.Scoped
+            ? MongoStorageAccess.Scoped(new StorageScope("tenant-a"))
+            : MongoStorageAccess.Global;
+        var session = connection.OpenSession(unit, access);
+        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        var aggregateInsert = Assert.Single(batch.ApplyBatch(
+            [RowWrite.Upsert(unit, OptimisticUpsertStoreValues("one", "first"))]));
+        Assert.Equal(WriteOutcomeStatus.Upserted, aggregateInsert.Outcome.Status);
+        Assert.Equal(1, session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" }))!.Version);
+
+        var aggregateUpdate = Assert.Single(batch.ApplyBatch(
+            [RowWrite.Upsert(unit, OptimisticUpsertStoreValues("one", "second"))]));
+        Assert.Equal(WriteOutcomeStatus.Upserted, aggregateUpdate.Outcome.Status);
+        Assert.Equal(2, session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" }))!.Version);
+
+        var exactInsert = Assert.Single(batch.ApplyBatch(
+            [RowWrite.Upsert(unit, OptimisticUpsertStoreValues("two", "first"))],
+            exactOutcomes: true));
+        Assert.Equal(WriteOutcomeStatus.Inserted, exactInsert.Outcome.Status);
+        Assert.Equal(1, exactInsert.Outcome.Version);
+
+        var exactUpdate = Assert.Single(batch.ApplyBatch(
+            [RowWrite.Upsert(unit, OptimisticUpsertStoreValues("two", "second"))],
+            exactOutcomes: true));
+        Assert.Equal(WriteOutcomeStatus.Updated, exactUpdate.Outcome.Status);
+        Assert.Equal(2, exactUpdate.Outcome.Version);
+
+        var stale = Assert.Single(batch.ApplyBatch(
+            [RowWrite.Upsert(unit, OptimisticUpsertStoreValues("two", "stale"), WriteOptions.IfVersion(1))]));
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, stale.Outcome.Status);
+        Assert.Equal("second", session.Read(new MongoStorageKey(
+            new Dictionary<string, object?> { ["id"] = "two" }))!.Values.Values["payload"]);
+    }
+
     [SkippableFact]
     public void Provider_sequence_is_capability_gated_by_mongodb_transactions()
     {
@@ -977,6 +1086,30 @@ public sealed class MongoProviderIntegrationTests
             Concurrency = concurrency ?? ConcurrencyDeclaration.None
         };
     }
+
+    private static StorageUnit OptimisticUpsertUnit(string idPrefix, ScopePolicy scope = ScopePolicy.Global)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        return new StorageUnit
+        {
+            Id = new StorageUnitId($"mongo-{idPrefix}-{suffix}"),
+            Name = $"MongoOptimisticUpsert_{suffix}",
+            Scope = scope,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+    }
+
+    private static MongoStorageValues OptimisticUpsertValues(string id, string payload) =>
+        new(new Dictionary<string, object?> { ["id"] = id, ["payload"] = payload });
+
+    private static StorageValues OptimisticUpsertStoreValues(string id, string payload) =>
+        new(new Dictionary<string, object?> { ["id"] = id, ["payload"] = payload });
 
     private static IMongoProviderConnection OpenConnection()
     {
