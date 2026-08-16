@@ -232,6 +232,53 @@ public sealed class PortabilityTests
         Assert.Contains(name.Length == 0 ? "<empty>" : name, diagnostic.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("__groundwork_scope")]
+    [InlineData("__groundwork_version")]
+    [InlineData("__groundwork_action")]
+    public void Consumer_storage_unit_names_cannot_reuse_provider_owned_column_names(string name)
+    {
+        var unit = Unit([Column("id", PortableType.Guid, nullable: false)], name: name, key: ["id"]);
+
+        var validation = Assert.Single(Validate(unit).Refusals, item => item.Code == "GW-PORT-010");
+        Assert.Equal("name", validation.Path);
+        var schemaException = Assert.Throws<ArgumentException>(() => new Groundwork.Kernel.Schema.SchemaSubject(unit));
+        Assert.Contains("GW-PORT-010", schemaException.Message, StringComparison.Ordinal);
+
+        var builderException = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("logical_unit", name)
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build());
+        Assert.Contains(builderException.Findings, item => item.Code == "GW-PORT-010" && item.Path == "name");
+    }
+
+    [Theory]
+    [InlineData("__groundwork_scope")]
+    [InlineData("__groundwork_version")]
+    [InlineData("__groundwork_action")]
+    public void Consumer_index_names_cannot_reuse_provider_owned_column_names(string name)
+    {
+        var unit = Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: "valid_unit",
+            indexes: [Index(name, "id")],
+            key: ["id"]);
+
+        var validation = Assert.Single(Validate(unit).Refusals, item => item.Code == "GW-PORT-010");
+        Assert.Equal("indexes[0].name", validation.Path);
+        var schemaException = Assert.Throws<ArgumentException>(() => new Groundwork.Kernel.Schema.SchemaSubject(unit));
+        Assert.Contains("GW-PORT-010", schemaException.Message, StringComparison.Ordinal);
+
+        var builderException = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("logical_unit", "valid_unit")
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Index(name, "id")
+            .Build());
+        Assert.Contains(builderException.Findings, item => item.Code == "GW-PORT-010" && item.Path == "indexes[0].name");
+    }
+
     [Fact]
     public void Rendered_storage_unit_names_are_capped_at_63_ascii_bytes()
     {
@@ -262,7 +309,7 @@ public sealed class PortabilityTests
             key: ["id"]);
 
         var diagnostic = Assert.Single(Validate(unit).Refusals, item => item.Code == "GW-PORT-010");
-        Assert.Equal("indexes.by.id.name", diagnostic.Path);
+        Assert.Equal("indexes[0].name", diagnostic.Path);
         Assert.Contains("by.id", diagnostic.Message, StringComparison.Ordinal);
     }
 
@@ -280,7 +327,7 @@ public sealed class PortabilityTests
             key: ["id"]);
 
         var diagnostic = Assert.Single(Validate(unit).Refusals, item => item.Code == "GW-PORT-011");
-        Assert.Equal("indexes.by_value.name", diagnostic.Path);
+        Assert.Equal("indexes[1].name", diagnostic.Path);
         Assert.Contains("more than once", diagnostic.Message, StringComparison.Ordinal);
     }
 
@@ -300,7 +347,7 @@ public sealed class PortabilityTests
             .Build());
 
         Assert.Contains(unitException.Findings, item => item.Code == "GW-PORT-010" && item.Path == "name");
-        Assert.Contains(indexException.Findings, item => item.Code == "GW-PORT-010" && item.Path == "indexes.by.id.name");
+        Assert.Contains(indexException.Findings, item => item.Code == "GW-PORT-010" && item.Path == "indexes[0].name");
     }
 
     [Fact]

@@ -313,6 +313,50 @@ static void RunAggregationSourcePredicateJourney(IStorageProviderConnection conn
 
 static void RunFailureJourneys(IStorageProviderConnection connection)
 {
+    var overlongName = new string('u', PortabilityValidator.MaximumPortableIdentifierLength + 2);
+    var forgedOverlong = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("logical.id/with spaces and punctuation"),
+        Name = overlongName,
+        Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Guid, IsNullable = false }],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+    var overlongDiagnostic = PortabilityValidator.Validate(forgedOverlong).Refusals.Single(
+        refusal => refusal.Code == "GW-PORT-010");
+    Require(overlongDiagnostic.Path == "name" &&
+            overlongDiagnostic.Message.Contains(overlongName, StringComparison.Ordinal) &&
+            overlongDiagnostic.Message.Contains("at most 63 ASCII bytes", StringComparison.Ordinal) &&
+            overlongDiagnostic.Message.Contains("shorter", StringComparison.OrdinalIgnoreCase),
+        "The packed public API did not expose the stable overlong physical-name diagnostic.");
+    try
+    {
+        connection.Schema.Apply(forgedOverlong);
+        throw new InvalidOperationException("The provider admitted an overlong physical storage-unit name.");
+    }
+    catch (InvalidOperationException exception)
+    {
+        Require(exception.Message.Contains("GW-PORT-010", StringComparison.Ordinal) &&
+                exception.Message.Contains("at name", StringComparison.Ordinal) &&
+                exception.Message.Contains(overlongName, StringComparison.Ordinal) &&
+                exception.Message.Contains("at most 63 ASCII bytes", StringComparison.Ordinal) &&
+                exception.Message.Contains("shorter", StringComparison.OrdinalIgnoreCase),
+            "The provider did not refuse the forged overlong name before schema I/O.");
+    }
+
+    var forgedMalformedIndex = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("logical.index.id/with spaces"),
+        Name = "valid_unit",
+        Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Guid, IsNullable = false }],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by.id", Columns = [new IndexColumn("id")] }]
+    };
+    var malformedIndexDiagnostic = PortabilityValidator.Validate(forgedMalformedIndex).Refusals.Single(
+        refusal => refusal.Code == "GW-PORT-010");
+    Require(malformedIndexDiagnostic.Path == "indexes[0].name" &&
+            malformedIndexDiagnostic.Message.Contains("by.id", StringComparison.Ordinal),
+        "The packed public API did not expose a structural malformed-index diagnostic path.");
+
     try
     {
         _ = RecordTable.For<JsonRecord>("json_failure")

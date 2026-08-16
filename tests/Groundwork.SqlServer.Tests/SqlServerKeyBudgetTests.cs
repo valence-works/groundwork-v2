@@ -7,6 +7,30 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerKeyBudgetTests
 {
     [Fact]
+    public void Batch_type_names_use_the_validated_physical_name_not_the_logical_id()
+    {
+        var physical = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.id/with spaces/" + new string('x', 80)),
+            Name = "batch_type_boundary",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        var batchTypeName = SqlServerSchemaCoordinator.BatchTypeName(physical);
+
+        Assert.Equal($"__groundwork_batch_type_{physical.Name.Length}_{physical.Name}", batchTypeName);
+        Assert.DoesNotContain("logical", batchTypeName, StringComparison.Ordinal);
+        Assert.NotEqual(batchTypeName, SqlServerSchemaCoordinator.BatchTypeName(
+            physical with { Name = "batch_type_boundary_variant" }));
+        Assert.True(PortabilityValidator.ValidatePhysicalIdentifier(
+            batchTypeName,
+            "sqlserver.batchType.name",
+            maximumByteLength: 128,
+            allowProviderOwnedPrefix: true).IsPortable);
+    }
+
+    [Fact]
     public void A_string_key_at_1700_bytes_is_admitted()
     {
         SqlServerIndexKeyBudgetValidator.Validate(Unit(

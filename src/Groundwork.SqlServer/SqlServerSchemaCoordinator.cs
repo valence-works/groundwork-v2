@@ -86,8 +86,19 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
                     derived.AlgorithmId ?? throw new InvalidOperationException($"Derived search-key column '{derived.Name}' is missing its algorithm identity.")))
             ]);
 
-    internal static string BatchTypeName(StorageUnit physical) =>
-        SqlServerPhysicalName.Normalize("__groundwork_batch_type_" + physical.Id.Value);
+    internal static string BatchTypeName(StorageUnit physical)
+    {
+        ArgumentNullException.ThrowIfNull(physical);
+        PortabilityValidator.EnsurePhysicalIdentifier(physical.Name, "name");
+        var composed = $"__groundwork_batch_type_{physical.Name.Length}_{physical.Name}";
+        var nativeName = SqlServerPhysicalName.Normalize(composed);
+        PortabilityValidator.EnsurePhysicalIdentifier(
+            nativeName,
+            "sqlserver.batchType.name",
+            maximumByteLength: 128,
+            allowProviderOwnedPrefix: true);
+        return nativeName;
+    }
 
     private static string BatchTypeCanonicalDefinition(StorageUnit physical) =>
         JsonSerializer.Serialize(physical.Columns.Select(column => new

@@ -258,7 +258,7 @@ public static class PortabilityValidator
             var column = columns[columnIndex];
             if (column is not null)
             {
-                ValidateIdentifier(column.Name, $"columns.{column.Name}", diagnostics);
+                ValidateIdentifier(column.Name, $"columns.{column.Name}", diagnostics, allowKnownProviderOwnedColumn: true);
 
                 if (column.Type == PortableType.String && column.Name is { } sourceName &&
                     !string.IsNullOrWhiteSpace(sourceName) &&
@@ -266,26 +266,30 @@ public static class PortabilityValidator
                     !declaredPhysicalNames.Contains(SearchKeyProjection.ColumnName(sourceName)))
                 {
                     var searchKey = SearchKeyProjection.ColumnName(sourceName);
-                    ValidateIdentifier(searchKey, $"derivedColumns.{searchKey}.name", diagnostics);
+                    ValidateIdentifier(searchKey, $"derivedColumns.{searchKey}.name", diagnostics, allowKnownProviderOwnedColumn: true);
                 }
             }
         }
 
         var keyColumns = unit.Key?.Columns ?? [];
         for (var keyIndex = 0; keyIndex < keyColumns.Count; keyIndex++)
-            ValidateIdentifier(keyColumns[keyIndex], $"key.columns[{keyIndex}]", diagnostics);
+            ValidateIdentifier(keyColumns[keyIndex], $"key.columns[{keyIndex}]", diagnostics, allowKnownProviderOwnedColumn: true);
 
         var indexNames = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var index in indexes.Where(index => index is not null))
+        for (var indexPosition = 0; indexPosition < indexes.Count; indexPosition++)
         {
-            ValidateIdentifier(index.Name, $"indexes.{index.Name}.name", diagnostics);
+            var index = indexes[indexPosition];
+            if (index is null)
+                continue;
+            var indexPath = $"indexes[{indexPosition}]";
+            ValidateIdentifier(index.Name, $"{indexPath}.name", diagnostics);
             if (index.Name is not null && indexNames.ContainsKey(index.Name))
             {
                 diagnostics.Add(new(
                     "GW-PORT-011",
                     $"Physical index name '{index.Name}' is declared more than once; " +
                     "choose a unique name for each physical index.",
-                    $"indexes.{index.Name}.name"));
+                    $"{indexPath}.name"));
             }
             else if (index.Name is not null)
             {
@@ -297,15 +301,16 @@ public static class PortabilityValidator
                 var column = indexColumns[columnIndex];
                 ValidateIdentifier(
                     column?.Column,
-                    $"indexes.{index.Name}.columns[{columnIndex}]",
-                    diagnostics);
+                    $"{indexPath}.columns[{columnIndex}]",
+                    diagnostics,
+                    allowKnownProviderOwnedColumn: true);
             }
         }
 
         foreach (var derived in (unit.DerivedColumns ?? []).Where(column => column is not null))
         {
-            ValidateIdentifier(derived.Name, $"derivedColumns.{derived.Name}.name", diagnostics);
-            ValidateIdentifier(derived.SourceColumn, $"derivedColumns.{derived.Name}.sourceColumn", diagnostics);
+            ValidateIdentifier(derived.Name, $"derivedColumns.{derived.Name}.name", diagnostics, allowKnownProviderOwnedColumn: true);
+            ValidateIdentifier(derived.SourceColumn, $"derivedColumns.{derived.Name}.sourceColumn", diagnostics, allowKnownProviderOwnedColumn: true);
         }
 
         if (unit.Concurrency?.TokenColumn is { } tokenColumn)
@@ -357,9 +362,10 @@ public static class PortabilityValidator
         string path,
         ICollection<PortabilityRefusal> diagnostics,
         int maximumByteLength = MaximumPortableIdentifierLength,
-        bool allowProviderOwnedPrefix = false)
+        bool allowProviderOwnedPrefix = false,
+        bool allowKnownProviderOwnedColumn = false)
     {
-        if (IsPortableIdentifier(identifier, maximumByteLength, allowProviderOwnedPrefix))
+        if (IsPortableIdentifier(identifier, maximumByteLength, allowProviderOwnedPrefix, allowKnownProviderOwnedColumn))
             return;
 
         var display = identifier switch
@@ -379,7 +385,8 @@ public static class PortabilityValidator
     private static bool IsPortableIdentifier(
         string? identifier,
         int maximumByteLength = MaximumPortableIdentifierLength,
-        bool allowProviderOwnedPrefix = false)
+        bool allowProviderOwnedPrefix = false,
+        bool allowKnownProviderOwnedColumn = false)
     {
         if (string.IsNullOrWhiteSpace(identifier) || identifier.Length > maximumByteLength ||
             !IsIdentifierStart(identifier[0]))
@@ -392,7 +399,7 @@ public static class PortabilityValidator
 
         return allowProviderOwnedPrefix ||
             !identifier.StartsWith("__groundwork_", StringComparison.Ordinal) ||
-            IsKnownProviderOwnedColumn(identifier);
+            allowKnownProviderOwnedColumn && IsKnownProviderOwnedColumn(identifier);
     }
 
     private static void ThrowIfInvalid(PortabilityValidationResult result)

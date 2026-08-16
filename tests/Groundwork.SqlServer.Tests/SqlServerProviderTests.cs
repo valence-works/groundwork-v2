@@ -100,6 +100,42 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public void Exact_batch_writes_with_an_unconstrained_logical_id_use_the_validated_physical_type_name()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.id/with spaces/" + new string('x', 80)),
+            Name = "sqlserver_batch_boundary",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 1,
+            ["payload"] = "one"
+        })));
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 2,
+            ["payload"] = "two"
+        })));
+
+        var report = work.CommitWithOutcomes();
+
+        Assert.Equal(2, report.Summary.Succeeded);
+        Assert.All(report.Outcomes, outcome => Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Outcome.Status));
+    }
+
+    [Fact]
     public void Lifecycle_identity_columns_use_binary_collation_and_preserve_case_distinct_scopes_and_nonces()
     {
         fixture.Reset();
