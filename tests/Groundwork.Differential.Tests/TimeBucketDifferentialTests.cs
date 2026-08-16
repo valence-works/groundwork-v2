@@ -10,6 +10,7 @@ using Xunit;
 
 namespace Groundwork.Differential.Tests;
 
+[Collection(NativeProviderDifferentialCollection.Name)]
 public sealed class TimeBucketDifferentialTests
 {
     [Fact]
