@@ -173,7 +173,7 @@ public sealed class StorageDeclarationBuilder
             throw new ArgumentNullException(nameof(configure));
         var builder = new IndexBuilder();
         configure(builder);
-        state.AddIndex(name, builder.Columns, unique);
+        state.AddIndex(name, builder.Columns, unique, builder.MissingValues);
         return this;
     }
 }
@@ -243,8 +243,10 @@ public sealed class ColumnBuilder
 public sealed class IndexBuilder
 {
     private readonly List<IndexColumn> columns = [];
+    private MissingValueBehavior missingValues = MissingValueBehavior.Included;
 
     internal IReadOnlyList<IndexColumn> Columns => columns;
+    internal MissingValueBehavior MissingValues => missingValues;
 
     public IndexBuilder Ascending(string column)
     {
@@ -260,6 +262,13 @@ public sealed class IndexBuilder
 
     /// <summary>Alias for Ascending, useful when composing a neutral index declaration.</summary>
     public IndexBuilder Column(string column) => Ascending(column);
+
+    /// <summary>Excludes missing values from this index, enabling sparse uniqueness for nullable columns.</summary>
+    public IndexBuilder ExcludeMissingValues()
+    {
+        missingValues = MissingValueBehavior.Excluded;
+        return this;
+    }
 }
 
 /// <summary>Authoring state for one closed aggregation profile.</summary>
@@ -383,7 +392,11 @@ internal sealed class StorageDeclarationState
         concurrency = ConcurrencyDeclaration.Optimistic(tokenColumn);
     }
 
-    public void AddIndex(string name, IEnumerable<IndexColumn> indexColumns, bool unique)
+    public void AddIndex(
+        string name,
+        IEnumerable<IndexColumn> indexColumns,
+        bool unique,
+        MissingValueBehavior missingValues = MissingValueBehavior.Included)
     {
         var indexName = RequireText(name, nameof(name));
         if (indexes.Any(index => string.Equals(index.Name, indexName, StringComparison.Ordinal)))
@@ -391,7 +404,13 @@ internal sealed class StorageDeclarationState
         var columns = (indexColumns ?? throw new ArgumentNullException(nameof(indexColumns))).ToArray();
         if (columns.Length == 0)
             throw new ArgumentException("An index requires at least one column.", nameof(indexColumns));
-        indexes.Add(new IndexDefinition { Name = indexName, Columns = Array.AsReadOnly(columns), IsUnique = unique });
+        indexes.Add(new IndexDefinition
+        {
+            Name = indexName,
+            Columns = Array.AsReadOnly(columns),
+            IsUnique = unique,
+            MissingValues = missingValues
+        });
     }
 
     public void AddAggregation(AggregationProfile profile)

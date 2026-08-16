@@ -37,11 +37,12 @@ public sealed class GeneratorContractTests
         Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
         Assert.Contains(result.Generated, generated => generated.Contains("TicketStorageUnit", StringComparison.Ordinal));
         Assert.Contains(result.Generated, generated => generated.Contains("GroundworkSchema", StringComparison.Ordinal));
-        Assert.Contains(result.Generated, generated => generated.Contains("MaxLength = 64", StringComparison.Ordinal));
-        Assert.Contains(result.Generated, generated => generated.Contains("Precision = 12", StringComparison.Ordinal));
-        Assert.Contains(result.Generated, generated => generated.Contains("Scale = 2", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("MaxLength(64)", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("Precision(12, 2)", StringComparison.Ordinal));
         Assert.Contains(result.Generated, generated => generated.Contains("OrdinalIgnoreCase", StringComparison.Ordinal));
-        Assert.Contains(result.Generated, generated => generated.Contains("SortDirection.Descending", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains(".Descending(\"created_at\")", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("ExcludeMissingValues()", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("MissingValues =", StringComparison.Ordinal));
 
         var assemblyAttribute = result.OutputCompilation.Assembly.GetAttributes()
             .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName);
@@ -116,7 +117,7 @@ public sealed class GeneratorContractTests
         var result = Run(source);
 
         Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-        Assert.Contains(result.Generated, generated => generated.Contains("Name = \"other\"", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains(".Column(\"other\"", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -148,7 +149,7 @@ public sealed class GeneratorContractTests
         var result = Run(source);
 
         Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-        Assert.Contains(result.Generated, generated => generated.Contains("Name = \"status\"", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains(".Column(\"status\"", StringComparison.Ordinal));
     }
 
     [Fact]

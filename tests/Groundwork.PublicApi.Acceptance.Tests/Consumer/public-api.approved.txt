@@ -2,9 +2,13 @@ Groundwork.Documents.DocumentUnit
 Groundwork.Documents.DocumentReadResult
 Groundwork.Kernel.PortableType
 Groundwork.Kernel.ProviderOwnedColumns
+Groundwork.Kernel.MissingValueBehavior
+Groundwork.Kernel.IndexBuilder
+Groundwork.Kernel.StorageDeclarationBuilder
 Groundwork.Query.Model.QueryRequest
 Groundwork.Query.Planning.QueryCoverageException
 Groundwork.Records.RecordTable
+Groundwork.Records.StorageDeclarationBuilder
 Groundwork.Records.RecordTableStoreUnitOfWork
 Groundwork.Records.RecordWriteOptions
 Groundwork.Store.BatchWriteOptions

@@ -20,6 +20,10 @@ internal static class PublicApiApprovalFixture
         _ = typeof(DocumentUnit);
         _ = typeof(DocumentReadResult<>);
         _ = typeof(PortableType);
+        _ = typeof(MissingValueBehavior);
+        _ = typeof(IndexBuilder);
+        _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
+        _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
         _ = typeof(QueryCoverageException);
@@ -53,6 +57,10 @@ internal static class PublicApiApprovalFixture
     {
         _ = new Func<string, IStorageProviderConnection>(connectionString => new SqliteProviderFactory().Create(connectionString));
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
+        _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
+            builder.UniqueIndex("by-sparse", index => index.Column("nullable").ExcludeMissingValues()));
+        _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
+            builder.UniqueIndex("by-sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
             (session, operation, values) => session.AppendWithOutcomes(operation, values));
         _ = new Func<IStorageSession, OperationId, RetentionExecutionOptions, RetentionOperationResult>(

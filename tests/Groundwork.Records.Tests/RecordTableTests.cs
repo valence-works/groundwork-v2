@@ -208,6 +208,22 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Records_storage_wrapper_exposes_sparse_index_authoring()
+    {
+        var definition = Groundwork.Records.StorageUnit
+            .Declare("sparse", "sparse")
+            .String("id", 32, column => column.Required())
+            .String("email", 320)
+            .Key("id")
+            .UniqueIndex("by-email", index => index
+                .Column("email")
+                .ExcludeMissingValues())
+            .Build();
+
+        Assert.Equal(MissingValueBehavior.Excluded, definition.Indexes.Single().MissingValues);
+    }
+
+    [Fact]
     public void Optimistic_concurrency_is_explicit_and_system_owned()
     {
         var table = CustomerTable();

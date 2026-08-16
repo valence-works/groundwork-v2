@@ -36,6 +36,24 @@ public sealed class BuilderTests
     }
 
     [Fact]
+    public void Fluent_index_can_exclude_missing_values_while_defaulting_to_included()
+    {
+        var definition = Groundwork.Kernel.StorageUnit
+            .Declare("sparse", "sparse")
+            .String("id", 32, column => column.Required())
+            .String("email", 320)
+            .Key("id")
+            .UniqueIndex("by-email", index => index
+                .Column("email")
+                .ExcludeMissingValues())
+            .Index("by-id", "id")
+            .Build();
+
+        Assert.Equal(MissingValueBehavior.Excluded, definition.Indexes[0].MissingValues);
+        Assert.Equal(MissingValueBehavior.Included, definition.Indexes[1].MissingValues);
+    }
+
+    [Fact]
     public void Fluent_build_reports_all_portability_failures_together()
     {
         var exception = Assert.Throws<StorageDeclarationException>(() =>
