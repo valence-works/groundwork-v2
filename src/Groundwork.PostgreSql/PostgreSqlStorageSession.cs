@@ -144,20 +144,30 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        if (Unit.Scope != ScopePolicy.Global)
-            return AggregationSessionExecutor.Execute(this, query);
-        return RelationalAggregationExecutor.Execute(
+        var decode = (string name, object? value) =>
+        {
+            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
+        };
+        return Unit.Scope == ScopePolicy.Scoped
+            ? RelationalAggregationExecutor.ExecuteScoped(
+                connection,
+                activeTransaction ?? transaction,
+                new PostgreSqlDialect(),
+                Unit,
+                AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+                query,
+                decode,
+                PostgreSqlSchemaCoordinator.ScopeColumn,
+                Access.Scope!)
+            : RelationalAggregationExecutor.Execute(
             connection,
             activeTransaction ?? transaction,
             new PostgreSqlDialect(),
             Unit,
             AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
             query,
-            (name, value) =>
-            {
-                var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-                return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-            });
+            decode);
     });
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)

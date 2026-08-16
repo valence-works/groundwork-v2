@@ -77,6 +77,63 @@ public sealed class MongoProviderIntegrationTests
         Assert.Contains("__groundwork_aggregation_set_probe_value", pipeline, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Native_scoped_pipeline_uses_group_count_order_limit_and_scope_collection_identity()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-scoped-aggregation-artifact"),
+            Name = "mongo_scoped_aggregation_artifact",
+            Scope = ScopePolicy.Scoped,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Count("count")],
+                    MaxInputRows = 20,
+                    MaxGroups = 10
+                }
+            ]
+        };
+        var profile = unit.AggregationProfiles.Single();
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms =
+            [
+                new AggregationOrderTerm("count", Groundwork.Kernel.SortDirection.Descending),
+                new AggregationOrderTerm("group", Groundwork.Kernel.SortDirection.Ascending)
+            ],
+            Take = 5
+        };
+
+        var stages = MongoStorageSession.RenderNativeAggregationPipeline(unit, profile, query);
+        var pipeline = string.Join("\n", stages.Select(stage => stage.ToJson()));
+        var applied = new MongoAppliedUnit(unit, unit.Name);
+        var firstCollection = MongoSchemaCoordinator.CollectionName(
+            applied,
+            MongoStorageAccess.Scoped(new StorageScope("tenant-a")));
+        var secondCollection = MongoSchemaCoordinator.CollectionName(
+            applied,
+            MongoStorageAccess.Scoped(new StorageScope("tenant-b")));
+
+        Assert.Contains("\"$group\"", pipeline, StringComparison.Ordinal);
+        Assert.Contains("\"count\" : { \"$sum\" : 1", pipeline, StringComparison.Ordinal);
+        Assert.Contains("\"$sort\"", pipeline, StringComparison.Ordinal);
+        Assert.Contains("\"$limit\" : 5", pipeline, StringComparison.Ordinal);
+        Assert.DoesNotContain("$addToSet", pipeline, StringComparison.Ordinal);
+        Assert.NotEqual(firstCollection, secondCollection);
+        Assert.Contains("__scope__", firstCollection, StringComparison.Ordinal);
+        Assert.Contains("__scope__", secondCollection, StringComparison.Ordinal);
+    }
+
     [SkippableFact]
     public void Native_set_union_refuses_MaxValues_before_materializing_the_result()
     {

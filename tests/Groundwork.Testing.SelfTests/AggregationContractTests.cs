@@ -72,4 +72,43 @@ public sealed class AggregationContractTests
         Assert.Equal("a", row["group"]);
         Assert.Equal(5L, Assert.IsType<long>(row["total"]));
     }
+
+    [Fact]
+    public void In_memory_scoped_aggregation_binds_scope_to_value_fingerprint()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-scoped-memory"),
+            Name = "AggregationScopedMemory",
+            Scope = ScopePolicy.Scoped,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Count("count")]
+                }
+            ]
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://aggregation-scoped");
+        connection.Schema.Apply(unit);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-b")));
+        first.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "same", ["group"] = "g" }));
+        second.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "same", ["group"] = "g" }));
+
+        var query = new AggregationQuery("summary");
+        var firstResult = first.Aggregate(query);
+        var secondResult = second.Aggregate(query);
+
+        Assert.Equal(firstResult.ShapeFingerprint, secondResult.ShapeFingerprint);
+        Assert.NotEqual(firstResult.ValueFingerprint, secondResult.ValueFingerprint);
+    }
 }

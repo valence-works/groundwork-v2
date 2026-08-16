@@ -13,6 +13,23 @@ internal sealed class SqlServerDialect : RelationalDialect
 {
     public override string ProviderName => "SQLServer";
 
+    protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        if (type == PortableType.Guid)
+        {
+            var descendingGuid = direction == SortDirection.Descending;
+            var guidOrder = descendingGuid ? "DESC" : "ASC";
+            var guidKey = SqlServerQueryRenderer.RenderGuidOrderKey(expression);
+            return $"CASE WHEN {expression} IS NULL THEN {(descendingGuid ? 1 : 0)} ELSE {(descendingGuid ? 0 : 1)} END, {guidKey} {guidOrder}";
+        }
+        if (type != PortableType.String)
+            return base.RenderAggregationOrder(expression, type, direction);
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        var ordinal = expression + " COLLATE Latin1_General_100_BIN2";
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {ordinal} {order}, DATALENGTH({expression}) {order}";
+    }
+
     public override RelationalQueryRenderer CreateQueryRenderer() => new SqlServerQueryRenderer();
 
     public override string RenderAggregationContains(string expression, string literal) =>

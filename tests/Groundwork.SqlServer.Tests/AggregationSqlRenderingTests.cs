@@ -8,6 +8,115 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class AggregationSqlRenderingTests
 {
     [Fact]
+    public void Renderer_uses_big_count_and_portable_multi_term_output_order()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-count-order"),
+            Name = "aggregation_count_order",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count"), new Aggregate.Min("minimum", "group")],
+            AllowedPredicates = []
+        };
+
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [
+                    new AggregationOrderTerm("count", SortDirection.Descending),
+                    new AggregationOrderTerm("minimum", SortDirection.Ascending)]
+            }).CommandText;
+
+        Assert.Contains("COUNT_BIG(*) AS [count]", sql, StringComparison.Ordinal);
+        Assert.Contains("[count] DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("COLLATE Latin1_General_100_BIN2", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_uses_the_query_guid_order_key_for_aggregation_output()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-guid-order"),
+            Name = "aggregation_guid_order",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.Guid, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")],
+            AllowedPredicates = []
+        };
+
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [new AggregationOrderTerm("group", SortDirection.Ascending)]
+            }).CommandText;
+
+        Assert.Contains("CONVERT(char(36), [group]) COLLATE Latin1_General_100_BIN2 ASC", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Scoped_native_sql_artifacts_inject_scope_before_grouping_and_budget_probe()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-scoped-artifact"),
+            Name = "aggregation_scoped_artifact",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")],
+            AllowedPredicates = []
+        };
+        var scope = new ColumnRef(new TableId(unit.Name), SqlServerSchemaCoordinator.ScopeColumn, QueryType.String, isNullable: false);
+        var providerPredicate = new Predicate.Equal(scope, QueryConstant.Of(scope, "tenant-a"));
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)],
+            Take = 5
+        };
+
+        var command = RelationalAggregationRenderer.RenderWithProviderPredicate(new SqlServerDialect(), unit, profile, query, providerPredicate).CommandText;
+        var probe = RelationalAggregationRenderer.RenderBudgetProbeWithProviderPredicate(new SqlServerDialect(), unit, profile, query, providerPredicate).CommandText;
+
+        Assert.StartsWith("WITH ", command, StringComparison.Ordinal);
+        Assert.Contains(SqlServerSchemaCoordinator.ScopeColumn, command, StringComparison.Ordinal);
+        Assert.Contains("COUNT_BIG(*) AS [count]", command, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", command, StringComparison.Ordinal);
+        Assert.Contains("FETCH NEXT 5 ROWS ONLY", command, StringComparison.Ordinal);
+        Assert.Contains(SqlServerSchemaCoordinator.ScopeColumn, probe, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", probe, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Renderer_uses_typed_literals_and_null_aware_membership()
     {
         var unit = new StorageUnit

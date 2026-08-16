@@ -36,6 +36,30 @@ identity; the same identities are available through `AggregationQueryFingerprint
 cache diagnostics. The legacy rows-only `AggregationResult` constructor leaves these nullable
 fingerprints unset.
 
+The public query surface also supports deterministic multi-term ordering:
+
+```csharp
+var query = new AggregationQuery("diagnostic-summary")
+{
+    OrderByTerms =
+    [
+        new AggregationOrderTerm("count", SortDirection.Descending),
+        new AggregationOrderTerm("service", SortDirection.Ascending)
+    ],
+    Take = 100
+};
+```
+
+Terms name only declared group or aggregate aliases. Missing group columns are appended as
+ascending tie-breakers, and duplicate aliases or invalid directions are refused at admission.
+`Aggregate.Count` is a source-free `Int64` count and is rendered by each provider's native
+grouping operation.
+
+Scoped sessions add the provider-owned physical scope restriction before source filtering and
+reduction. A scope is never exposed as a caller-visible column or predicate. Scope values bind the
+operation's `ValueFingerprint`, while `ShapeFingerprint` intentionally remains the same for the
+same profile and query shape across scopes. Privileged cross-scope aggregation is refused.
+
 ## Portable reducers
 
 `Min` and `Max` ignore null input and return null when a group has no non-null values. `Sum` accepts
@@ -50,7 +74,10 @@ may declare multiple `FirstBy` reducers with independent order columns and direc
 `MaxInputRows` and `MaxGroups` are refusal budgets, not page sizes. Exceeding either budget fails
 the operation; rows or groups are never silently truncated. Native providers cap the input at one
 row beyond `MaxInputRows` and run bounded group/set cardinality evidence before materializing
-aggregate values.
+aggregate values. A native operation intentionally consists of one or more bounded budget-evidence
+commands followed by the final grouped-result command; all commands are provider-native and none
+materializes source rows or calls the ordinary `Query` path. This is not a promise of one network
+round trip.
 
 Profiles are part of the schema subject fingerprint, so changing a reducer, alias, allowance, or
 budget is schema semantic drift and cannot be hidden behind a query.

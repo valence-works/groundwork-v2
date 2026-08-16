@@ -342,6 +342,8 @@ public static class PortabilityValidator
                     case Aggregate.Sum sum:
                         ValidateIdentifier(sum.Column, profilePath + ".aggregates." + sum.Alias, diagnostics);
                         break;
+                    case Aggregate.Count:
+                        break;
                     case Aggregate.SetUnion set:
                         ValidateIdentifier(set.Column, profilePath + ".aggregates." + set.Alias, diagnostics);
                         break;

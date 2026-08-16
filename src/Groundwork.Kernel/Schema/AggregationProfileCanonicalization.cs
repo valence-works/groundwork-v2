@@ -34,6 +34,7 @@ public static class AggregationProfileCanonicalization
     {
         Aggregate.Min min => SchemaFingerprint.Canonicalize(["min", min.Alias, min.Column]),
         Aggregate.Max max => SchemaFingerprint.Canonicalize(["max", max.Alias, max.Column]),
+        Aggregate.Count count => SchemaFingerprint.Canonicalize(["count", count.Alias]),
         Aggregate.Sum sum => SchemaFingerprint.Canonicalize(["sum", sum.Alias, sum.Column]),
         Aggregate.SetUnion set => SchemaFingerprint.Canonicalize(["setUnion", set.Alias, set.Column, set.MaxValues.ToString(CultureInfo.InvariantCulture)]),
         Aggregate.FirstBy first => SchemaFingerprint.Canonicalize(["firstBy", first.Alias, first.Column, first.OrderColumn, first.Direction.ToString()]),

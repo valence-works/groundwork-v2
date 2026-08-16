@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
+using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
 using Groundwork.Testing;
 using Groundwork.Store;
@@ -44,6 +45,61 @@ public sealed class PostgreSqlDialectTests
 
         Assert.Contains("= ANY(\"labels\")", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSTR(", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Aggregation_string_order_wraps_aliases_in_a_result_relation()
+    {
+        var unit = AggregationUnit();
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count"), new Aggregate.Min("minimum", "label")]
+        };
+
+        var sql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("minimum", SortDirection.Ascending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)]
+        }).CommandText;
+
+        Assert.Contains("SELECT * FROM \"__groundwork_aggregation_result\"", sql, StringComparison.Ordinal);
+        Assert.Contains("string_to_array(\"minimum\", NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN \"minimum\" IS NULL", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Scoped_native_sql_artifacts_inject_scope_before_grouping_and_budget_probe()
+    {
+        var unit = AggregationUnit();
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var scope = new ColumnRef(new TableId(unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String, isNullable: false);
+        var providerPredicate = new Predicate.Equal(scope, QueryConstant.Of(scope, "tenant-a"));
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)],
+            Take = 5
+        };
+
+        var command = RelationalAggregationRenderer.RenderWithProviderPredicate(dialect, unit, profile, query, providerPredicate).CommandText;
+        var probe = RelationalAggregationRenderer.RenderBudgetProbeWithProviderPredicate(dialect, unit, profile, query, providerPredicate).CommandText;
+
+        Assert.StartsWith("WITH ", command, StringComparison.Ordinal);
+        Assert.Contains(PostgreSqlSchemaCoordinator.ScopeColumn, command, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS \"count\"", command, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", command, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 5", command, StringComparison.Ordinal);
+        Assert.Contains(PostgreSqlSchemaCoordinator.ScopeColumn, probe, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", probe, StringComparison.Ordinal);
     }
 
     private static StorageUnit AggregationUnit() => new()

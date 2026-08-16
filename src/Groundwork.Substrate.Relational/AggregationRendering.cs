@@ -48,7 +48,23 @@ public static class RelationalAggregationRenderer
         RelationalDialect dialect,
         StorageUnit unit,
         AggregationProfile profile,
-        AggregationQuery? query = null)
+        AggregationQuery? query = null) =>
+        RenderCore(dialect, unit, profile, query, providerPredicate: null);
+
+    internal static RelationalAggregationCommand RenderWithProviderPredicate(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery query,
+        Predicate providerPredicate) =>
+        RenderCore(dialect, unit, profile, query, providerPredicate);
+
+    private static RelationalAggregationCommand RenderCore(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery? query,
+        Predicate? providerPredicate)
     {
         ArgumentNullException.ThrowIfNull(dialect);
         ArgumentNullException.ThrowIfNull(unit);
@@ -63,13 +79,14 @@ public static class RelationalAggregationRenderer
         {
             Aggregate.Min min => [min.Column],
             Aggregate.Max max => [max.Column],
+            Aggregate.Count => Array.Empty<string>(),
             Aggregate.Sum sum => [sum.Column],
             Aggregate.SetUnion set => [set.Column],
             Aggregate.FirstBy first => [first.Column, first.OrderColumn],
             _ => Array.Empty<string>()
         }).Concat(unit.Key.Columns).Distinct(StringComparer.Ordinal).Select(quote).ToArray();
         var source = string.Join(", ", groups.Concat(sourceColumns).Distinct(StringComparer.Ordinal));
-        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate);
+        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate, providerPredicate);
         var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: true, sourceFragment?.CommandText);
 
         var selections = new List<string>(groups);
@@ -80,16 +97,15 @@ public static class RelationalAggregationRenderer
         selections.Add($"MAX({quote(InputCount)}) AS {quote(InputCount)}");
         selections.Add($"COUNT(*) OVER() AS {quote(GroupCount)}");
         var grouped = $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input AS {quote(groupedAlias)} GROUP BY {string.Join(", ", groups)}";
+        var resultAlias = quote("__groundwork_aggregation_result");
         var sql = query.PostPredicate is null
-            ? $"WITH {ctes} {grouped}"
-            : $"WITH {ctes}, {quote("__groundwork_aggregation_result")} AS ({grouped}) SELECT * FROM {quote("__groundwork_aggregation_result")} WHERE {RenderPredicate(dialect, unit, profile, query.PostPredicate, quote)}";
-        if (query.OrderBy is not null)
-            sql += " ORDER BY " + RenderOrderTerm(
-                dialect,
-                quote(query.OrderBy),
-                query.OrderDirection);
-        else
-            sql += " ORDER BY " + string.Join(", ", groups.Select(column => RenderOrderTerm(dialect, column, SortDirection.Ascending)));
+            ? $"WITH {ctes}, {resultAlias} AS ({grouped}) SELECT * FROM {resultAlias}"
+            : $"WITH {ctes}, {resultAlias} AS ({grouped}) SELECT * FROM {resultAlias} WHERE {RenderPredicate(dialect, unit, profile, query.PostPredicate, quote)}";
+        var orderTerms = AggregationQueryFingerprint.EffectiveOrderTerms(query, profile);
+        sql += " ORDER BY " + string.Join(", ", orderTerms.Select(term => dialect.RenderAggregationOrder(
+            quote(term.Alias),
+            OutputTypeForAlias(unit, profile, term.Alias),
+            term.Direction)));
         var outputLimit = query.Take is int take ? take : (long)profile.MaxGroups + 1L;
         sql += IsSqlServer(dialect)
             ? $" OFFSET 0 ROWS FETCH NEXT {outputLimit.ToString(CultureInfo.InvariantCulture)} ROWS ONLY"
@@ -106,7 +122,23 @@ public static class RelationalAggregationRenderer
         RelationalDialect dialect,
         StorageUnit unit,
         AggregationProfile profile,
-        AggregationQuery? query = null)
+        AggregationQuery? query = null) =>
+        RenderBudgetProbeCore(dialect, unit, profile, query, providerPredicate: null);
+
+    internal static RelationalAggregationCommand RenderBudgetProbeWithProviderPredicate(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery query,
+        Predicate providerPredicate) =>
+        RenderBudgetProbeCore(dialect, unit, profile, query, providerPredicate);
+
+    private static RelationalAggregationCommand RenderBudgetProbeCore(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery? query,
+        Predicate? providerPredicate)
     {
         ArgumentNullException.ThrowIfNull(dialect);
         ArgumentNullException.ThrowIfNull(unit);
@@ -119,7 +151,7 @@ public static class RelationalAggregationRenderer
         var setColumns = profile.Aggregates.OfType<Aggregate.SetUnion>()
             .Select(set => quote(set.Column));
         var source = string.Join(", ", groups.Concat(setColumns).Distinct(StringComparer.Ordinal));
-        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate);
+        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate, providerPredicate);
         var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: false, sourceFragment?.CommandText);
         var selections = new List<string>(groups)
         {
@@ -137,9 +169,14 @@ public static class RelationalAggregationRenderer
     private static RelationalPredicateFragment? RenderSourceFragment(
         RelationalDialect dialect,
         StorageUnit unit,
-        Groundwork.Query.Model.Predicate? predicate) => predicate is null
+        Groundwork.Query.Model.Predicate? predicate,
+        Groundwork.Query.Model.Predicate? providerPredicate) => predicate is null && providerPredicate is null
             ? null
-            : dialect.CreateQueryRenderer().RenderPredicateFragment(predicate, unit.Name);
+            : dialect.CreateQueryRenderer().RenderPredicateFragment(
+                predicate is null ? providerPredicate! : providerPredicate is null
+                    ? predicate
+                    : new Predicate.And([predicate, providerPredicate]),
+                unit.Name);
 
     private static string RenderBoundedInputCtes(
         RelationalDialect dialect,
@@ -201,6 +238,7 @@ public static class RelationalAggregationRenderer
         {
             Aggregate.Min min => $"MIN({quote(min.Column)})",
             Aggregate.Max max => $"MAX({quote(max.Column)})",
+            Aggregate.Count => IsSqlServer(dialect) ? "COUNT_BIG(*)" : "COUNT(*)",
             Aggregate.Sum sum => RenderSum(dialect, quote, unit, sum),
             Aggregate.SetUnion set => RenderSetUnion(dialect, quote, set),
             Aggregate.FirstBy first => RenderFirstBy(dialect, quote, profile, groupedAlias, first),
@@ -336,12 +374,28 @@ public static class RelationalAggregationRenderer
             Aggregate.Sum sum => sum.Column,
             Aggregate.SetUnion set => set.Column,
             Aggregate.FirstBy first => first.Column,
+            Aggregate.Count => null,
             _ => throw new InvalidOperationException("Unknown aggregate declaration.")
         };
+        if (aggregate is Aggregate.Count)
+            return PortableType.Int64;
         var sourceType = unit.Columns.Single(column => column.Name == source).Type;
         return aggregate is Aggregate.Sum && sourceType is (PortableType.Int32 or PortableType.Int64)
             ? PortableType.Int64
             : sourceType;
+    }
+
+    private static PortableType OutputTypeForAlias(StorageUnit unit, AggregationProfile profile, string alias)
+    {
+        // Aggregate aliases are allowed to reuse a source-column name. Resolve the declared
+        // output first; otherwise Count("label") would be ordered as the source String column
+        // instead of its native Int64 result.
+        if (profile.Aggregates.Any(aggregate =>
+                string.Equals(aggregate.Alias, alias, StringComparison.Ordinal)))
+            return OutputType(unit, profile, alias);
+
+        return unit.Columns.Single(column =>
+            string.Equals(column.Name, alias, StringComparison.Ordinal)).Type;
     }
 
 }

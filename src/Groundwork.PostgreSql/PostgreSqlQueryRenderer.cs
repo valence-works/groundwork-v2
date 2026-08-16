@@ -133,7 +133,7 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         return "CASE WHEN jsonb_typeof(" + expression + ") = 'array' THEN (" + exists + ") ELSE FALSE END";
     }
 
-    private static string RenderOrdinalKey(string expression) =>
+    internal static string RenderOrdinalKey(string expression) =>
         "COALESCE((SELECT string_agg(CASE WHEN ascii(chars.ch) <= 65535 THEN lpad(to_hex(ascii(chars.ch)), 4, '0') ELSE " +
         "lpad(to_hex(55296 + ((ascii(chars.ch) - 65536) >> 10)), 4, '0') || " +
         "lpad(to_hex(56320 + ((ascii(chars.ch) - 65536) & 1023)), 4, '0') END, '' ORDER BY chars.ord) " +
