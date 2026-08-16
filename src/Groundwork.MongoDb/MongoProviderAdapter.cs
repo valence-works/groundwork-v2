@@ -27,7 +27,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
                 batchCost: "uses unordered BulkWrite for aggregate commits",
                 exactAppendOutcomes: true,
                 durableHighWaterInspection: true,
-                exactRetention: true);
+                exactRetention: true,
+                atomicCommit: inner.ProviderSequenceFit is ProviderFit.Supported);
             return descriptors
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
@@ -60,18 +61,27 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
     public IUnitOfWork BeginUnitOfWork(
         StorageAccess access,
         BatchWriteOptions options,
-        params StorageUnit[] units) =>
-        new MongoStoreUnitOfWork(
+        params StorageUnit[] units)
+    {
+        StorageAccessValidation.EnsureUnitOfWork(access);
+        return new MongoStoreUnitOfWork(
             inner.BeginUnitOfWork(ToNative(access), units),
             options,
             inner.ProviderSequenceFit is ProviderFit.Supported);
+    }
 
     public void Dispose() => inner.Dispose();
 
-    private static MongoStorageAccess ToNative(StorageAccess access) => access.Policy == ScopePolicy.Global
-        ? MongoStorageAccess.Global
-        : MongoStorageAccess.Scoped(access.Scope ?? throw new InvalidOperationException(
-            "A scoped access context requires a scope."));
+    private static MongoStorageAccess ToNative(StorageAccess access) => access.Kind switch
+    {
+        StorageAccessKind.Global => MongoStorageAccess.Global,
+        StorageAccessKind.Scoped => MongoStorageAccess.Scoped(access.Scope ?? throw new InvalidOperationException(
+            "A scoped access context requires a scope.")),
+        StorageAccessKind.PrivilegedAcrossScopes => MongoStorageAccess.PrivilegedAcrossScopes(
+            access.Audit ?? throw new InvalidOperationException(
+                "Privileged across-scope access requires audit metadata.")),
+        _ => throw new ArgumentOutOfRangeException(nameof(access.Kind), access.Kind, null)
+    };
 }
 
 internal sealed class MongoStoreCatalog(IMongoProviderCatalog inner) : IProviderCatalog
@@ -101,29 +111,43 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
 
 internal class MongoStoreSession(
     IMongoStorageSession inner,
-    Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
+    Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     public StorageUnit Unit => inner.Unit;
 
-    public StorageAccess Access => inner.Access.Policy == ScopePolicy.Global
-        ? StorageAccess.Global
-        : StorageAccess.Scoped(inner.Access.Scope ?? throw new InvalidOperationException(
-            "A scoped provider session requires a scope."));
+    public StorageAccess Access => inner.Access.IsPrivilegedAcrossScopes
+        ? StorageAccess.PrivilegedAcrossScopes(inner.Access.Audit ?? throw new InvalidOperationException(
+            "A privileged provider session requires audit metadata."))
+        : inner.Access.Policy == ScopePolicy.Global
+            ? StorageAccess.Global
+            : StorageAccess.Scoped(inner.Access.Scope ?? throw new InvalidOperationException(
+                "A scoped provider session requires a scope."));
 
     public StoredEntry? Read(StorageKey key)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "read");
         beforeRead?.Invoke(key);
         return ToStore(inner.Read(new MongoStorageKey(key.Values)));
     }
 
-    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
-        inner.Query(request, options);
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+    {
+        StorageAccessValidation.EnsureOrdinaryQuery(Access);
+        return inner.Query(request, options);
+    }
 
-    public AggregationResult Aggregate(AggregationQuery query) =>
-        inner.Aggregate(query);
+    public CrossScopeQueryResult QueryAcrossScopes(QueryRequest request, QueryRenderOptions? options = null) =>
+        inner.QueryAcrossScopes(request, options);
+
+    public AggregationResult Aggregate(AggregationQuery query)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        return inner.Aggregate(query);
+    }
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
         return ToStore(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
@@ -131,6 +155,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
         return ToStore(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
@@ -138,6 +163,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
         return ToStore(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
@@ -145,6 +171,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         return ToStore(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
@@ -152,12 +179,14 @@ internal class MongoStoreSession(
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
         return ToStore(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
     }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "retention");
         if (inner is IRetentionStorageSession native)
             return native.ApplyRetention(options);
         return RetentionSessionExtensions.ApplyRetention(this, options);
@@ -165,6 +194,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "append");
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
@@ -176,6 +206,7 @@ internal class MongoStoreSession(
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         ArgumentNullException.ThrowIfNull(writes);
         if (inner is IBatchedStorageSession native)
             return native.ApplyBatch(writes, exactOutcomes);
@@ -235,6 +266,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "append");
         ArgumentNullException.ThrowIfNull(values);
         if (exactInner is not IMongoExactAppendStorageSession exact)
             throw new NotSupportedException(
@@ -248,6 +280,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 
     public StorageInspection Inspect()
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         if (exactInner is not IStorageInspectionSession inspection)
             throw new NotSupportedException("GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
@@ -256,6 +289,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "retention");
         if (exactInner is not IExactRetentionStorageSession exact)
             throw new NotSupportedException("GW-RETENTION-003: this provider session does not advertise exact retention operations.");
         return exact.ApplyRetention(operationId, options);

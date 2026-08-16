@@ -106,7 +106,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         ArgumentNullException.ThrowIfNull(access);
         if (unit.Scope != access.Policy)
             throw new InvalidOperationException($"Storage unit '{unit.Name}' requires {unit.Scope} access.");
-        if (unit.Scope == ScopePolicy.Scoped && access.Scope is null)
+        if (unit.Scope == ScopePolicy.Scoped && access.Scope is null && !access.IsPrivilegedAcrossScopes)
             throw new InvalidOperationException($"Storage unit '{unit.Name}' requires a storage scope.");
         if (unit.Scope == ScopePolicy.Global && access.Scope is not null)
             throw new InvalidOperationException($"Storage unit '{unit.Name}' is global and cannot use a storage scope.");
@@ -115,6 +115,8 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        ProviderOwnedColumns.ValidateLogicalDeclaration(source);
+        ConcurrencyDeclaration.ValidateDeclaration(source);
         source = SearchKeyProjection.Expand(source);
         var columns = source.Columns.Select(column => column with { }).ToList();
         var key = source.Key.Columns.ToList();

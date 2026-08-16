@@ -73,6 +73,7 @@ public static class ExactRetentionSessionExtensions
         RetentionExecutionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "retention");
         options ??= new RetentionExecutionOptions();
         RetentionSessionExtensions.ValidateExecutionOptions(options);
         if (session is not IExactRetentionStorageSession exact)

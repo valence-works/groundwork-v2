@@ -18,3 +18,9 @@ production-supported: they cannot provide the transaction/session guarantees
 required by exact append and durable idempotency. A provider may be marked
 production-supported in a later release when the matrix is updated with its
 topology, test evidence, and operational owner.
+
+All relational providers and the reference provider advertise
+`groundwork.operational.atomic-commit`. MongoDB advertises it only when the
+connected deployment reports transaction support; standalone MongoDB omits the
+descriptor. All five conformance providers support audited, query-only
+cross-scope access for scoped units.

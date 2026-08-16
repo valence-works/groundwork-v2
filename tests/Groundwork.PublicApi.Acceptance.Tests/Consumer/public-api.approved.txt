@@ -1,6 +1,7 @@
 Groundwork.Documents.DocumentUnit
 Groundwork.Documents.DocumentReadResult
 Groundwork.Kernel.PortableType
+Groundwork.Kernel.ProviderOwnedColumns
 Groundwork.Query.Model.QueryRequest
 Groundwork.Query.Planning.QueryCoverageException
 Groundwork.Records.RecordTable
@@ -13,6 +14,12 @@ Groundwork.Store.IStorageInspectionSession
 Groundwork.Store.IExactRetentionStorageSession
 Groundwork.Store.RowWrite
 Groundwork.Store.StorageAccess
+Groundwork.Store.StorageAccessAudit
+Groundwork.Store.StorageAccessEvent
+Groundwork.Store.IStorageAccessObserver
+Groundwork.Store.IPrivilegedCrossScopeQuerySession
+Groundwork.Store.CrossScopeQueryResult
+Groundwork.Store.CrossScopeQueryRow
 Groundwork.Store.StorageKey
 Groundwork.Store.StorageValues
 Groundwork.Sqlite.SqliteProviderFactory

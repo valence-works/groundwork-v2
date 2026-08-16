@@ -43,7 +43,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback",
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
-        exactRetention: true);
+        exactRetention: true,
+        atomicCommit: true);
 
     internal string ConnectionString => connectionString;
 
@@ -82,6 +83,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
+        StorageAccessValidation.EnsureUnitOfWork(access);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
@@ -225,7 +227,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     {
         if (unit.Scope != access.Policy)
             throw new InvalidOperationException($"Storage unit '{unit.Name}' requires {unit.Scope} access.");
-        if (unit.Scope == ScopePolicy.Scoped && access.Scope is null)
+        if (unit.Scope == ScopePolicy.Scoped && access.Scope is null && !access.IsPrivilegedAcrossScopes)
             throw new InvalidOperationException($"Storage unit '{unit.Name}' requires a storage scope.");
         if (unit.Scope == ScopePolicy.Global && access.Scope is not null)
             throw new InvalidOperationException($"Storage unit '{unit.Name}' is global and cannot use a storage scope.");
@@ -234,6 +236,8 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        ProviderOwnedColumns.ValidateLogicalDeclaration(source);
+        ConcurrencyDeclaration.ValidateDeclaration(source);
         if (source.Retention is not null)
         {
             var portability = PortabilityValidator.Validate(source);

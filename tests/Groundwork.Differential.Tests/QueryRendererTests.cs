@@ -355,6 +355,32 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Search_key_rewrites_preserve_privileged_continuation_binding()
+    {
+        var status = new ColumnRef(Table, "status", QueryType.String, true, 32,
+            stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
+        var options = new QueryRenderOptions(tieBreakColumns: [Id])
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                [status.Name] = new(status.Name, "__groundwork_search_status",
+                    QuerySearchKeyPolicy.AsciiIgnoreCase, 160)
+            }
+        };
+        var first = Request(new Predicate.StartsWith(status, "Op"), [], Paging.Keyset(1), ResultShape.Rows.Instance);
+        first = QueryRequestExecution.WithProviderPredicate(first, first.Where, "privileged-audit-binding");
+        var token = QueryContinuationToken.Encode(first, options, [QueryConstant.Of(Id, 7L)]);
+        var next = Request(first.Where, [], Paging.Continuation(token, 1), ResultShape.Rows.Instance);
+        next = QueryRequestExecution.WithProviderPredicate(next, next.Where, "privileged-audit-binding");
+
+        var relational = new SqliteQueryRenderer().Render(next, options);
+        var mongo = new MongoQueryRenderer().Render(next, options);
+
+        Assert.Contains("__groundwork_search_status", relational.CommandText, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_search_status", mongo.Filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Provider_cursor_and_json_array_renderers_preserve_contract_guards()
     {
         var guid = new ColumnRef(Table, "guid", QueryType.Guid, false);

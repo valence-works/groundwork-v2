@@ -442,6 +442,122 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Privileged_cross_scope_access_is_audited_query_only_and_scope_preserving()
+    {
+        var factory = new InMemoryProviderFactory();
+        using var connection = factory.Create("memory://privileged-cross-scope");
+        var unit = TestingFixture.ScopedUnit("privileged-cross-scope");
+        connection.Schema.Apply(unit);
+
+        connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")))
+            .Insert(TestingFixture.Values("same", "shared"));
+        connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-b")))
+            .Insert(TestingFixture.Values("same", "shared"));
+
+        var observer = new RecordingAccessObserver();
+        var access = StorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("elsa-recovery", "recover-stalled-workflows", observer));
+        var session = connection.OpenSession(unit, access);
+        var table = new TableId(unit.Name);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.Keyset(1),
+            ResultShape.TotalCount.Instance);
+
+        Assert.True(session.Access.IsPrivilegedAcrossScopes);
+        Assert.Equal("elsa-recovery", session.Access.Audit!.Identity);
+        Assert.Equal("recover-stalled-workflows", session.Access.Audit.Purpose);
+        Assert.Throws<InvalidOperationException>(() => session.Read(TestingFixture.Key("same")));
+        Assert.Throws<InvalidOperationException>(() =>
+            session.Insert(TestingFixture.Values("other", "refused")));
+        Assert.Throws<InvalidOperationException>(() => session.Query(request));
+        Assert.Throws<InvalidOperationException>(() => session.Inspect());
+        Assert.Throws<InvalidOperationException>(() => session.ApplyRetention());
+
+        var first = session.QueryAcrossScopes(request);
+
+        var auditEvent = Assert.Single(observer.Events);
+        Assert.Equal(unit.Id, auditEvent.Unit);
+        Assert.Equal("query-across-scopes", auditEvent.Operation);
+        Assert.Equal("elsa-recovery", auditEvent.Identity);
+        Assert.Equal("recover-stalled-workflows", auditEvent.Purpose);
+        Assert.Equal(2, first.TotalCount);
+        Assert.Single(first.Rows);
+        Assert.Equal("tenant-a", first.Rows[0].Scope.Value);
+        Assert.Equal("same", first.Rows[0].Values["id"]);
+        Assert.NotNull(first.NextContinuationToken);
+        AssertOpaque(first.NextContinuationToken!, "tenant-a", "tenant-b", "elsa-recovery", "recover-stalled-workflows");
+
+        var second = session.QueryAcrossScopes(new QueryRequest(
+            table,
+            request.Where,
+            request.Order,
+            request.Projection,
+            Paging.Continuation(first.NextContinuationToken!, 1),
+            request.Result));
+        Assert.Single(second.Rows);
+        Assert.Equal("tenant-b", second.Rows[0].Scope.Value);
+
+        var differentAudit = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("other-operator", "recover-stalled-workflows")));
+        var tokenFailure = Assert.Throws<QueryRenderException>(() => differentAudit.QueryAcrossScopes(
+            new QueryRequest(table, request.Where, request.Order, request.Projection,
+                Paging.Continuation(first.NextContinuationToken!, 1), request.Result)));
+        Assert.Equal("GW-QUERY-013", tokenFailure.Code);
+    }
+
+    private sealed class RecordingAccessObserver : IStorageAccessObserver
+    {
+        public List<StorageAccessEvent> Events { get; } = [];
+
+        public void Observe(StorageAccessEvent accessEvent) => Events.Add(accessEvent);
+    }
+
+    [Theory]
+    [InlineData(null, "purpose")]
+    [InlineData("", "purpose")]
+    [InlineData("identity", null)]
+    [InlineData("identity", " ")]
+    public void Privileged_cross_scope_audit_rejects_blank_identity_or_purpose(
+        string? identity,
+        string? purpose)
+    {
+        Assert.ThrowsAny<ArgumentException>(() => new StorageAccessAudit(identity!, purpose!));
+    }
+
+    [Fact]
+    public void Privileged_cross_scope_audit_rejects_malformed_utf16()
+    {
+        var high = new string('\uD800', 1);
+        var low = new string('\uDC00', 1);
+        Assert.Throws<ArgumentException>(() => new StorageAccessAudit(high, "purpose"));
+        Assert.Throws<ArgumentException>(() => new StorageAccessAudit("identity", low));
+    }
+
+    [Theory]
+    [InlineData("__groundwork_scope")]
+    [InlineData("__groundwork_scope_token")]
+    public void Provider_owned_cross_scope_columns_cannot_be_declared_by_applications(string reservedName)
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://reserved-cross-scope-column");
+        var unit = TestingFixture.GlobalUnit("reserved-cross-scope-column-" + Guid.NewGuid().ToString("N")) with
+        {
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = reservedName, Type = PortableType.String }
+            ]
+        };
+
+        var failure = Assert.Throws<ArgumentException>(() => connection.Schema.Apply(unit));
+
+        Assert.Contains("provider-owned", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Unit_of_work_commits_and_rolls_back_staged_values()
     {
         var factory = new InMemoryProviderFactory();
@@ -776,6 +892,8 @@ public sealed class InMemoryProviderTests
             descriptor => descriptor.Id == BatchWriteCapabilities.StagedUnitOfWork);
         Assert.Contains(connection.Capabilities,
             descriptor => descriptor.Id == BatchWriteCapabilities.PerRowOutcomes);
+        Assert.Contains(connection.Capabilities,
+            descriptor => descriptor.Id == WellKnownCapabilities.AtomicCommit);
     }
 
     [Fact]
@@ -978,5 +1096,18 @@ public sealed class InMemoryProviderTests
     private sealed class MutableValue
     {
         public string Text { get; set; } = "mutable";
+    }
+
+    private static void AssertOpaque(string token, params string[] forbiddenValues)
+    {
+        var segments = token.Split('.').Skip(1).Select(segment =>
+        {
+            var padded = segment.Replace('-', '+').Replace('_', '/');
+            padded += new string('=', (4 - padded.Length % 4) % 4);
+            return System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+        });
+        var decoded = string.Join("|", segments);
+        foreach (var forbidden in forbiddenValues)
+            Assert.DoesNotContain(forbidden, decoded, StringComparison.Ordinal);
     }
 }

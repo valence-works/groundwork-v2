@@ -10,20 +10,163 @@ namespace Groundwork.Store;
 /// <summary>Explicit access context for a storage session.</summary>
 public sealed record StorageAccess
 {
-    private StorageAccess(ScopePolicy policy, StorageScope? scope)
+    private StorageAccess(
+        StorageAccessKind kind,
+        ScopePolicy policy,
+        StorageScope? scope,
+        StorageAccessAudit? audit)
     {
+        Kind = kind;
         Policy = policy;
         Scope = scope;
+        Audit = audit;
     }
 
-    public static StorageAccess Global { get; } = new(ScopePolicy.Global, null);
+    public static StorageAccess Global { get; } =
+        new(StorageAccessKind.Global, ScopePolicy.Global, null, null);
+
+    public StorageAccessKind Kind { get; }
 
     public ScopePolicy Policy { get; }
 
     public StorageScope? Scope { get; }
 
+    public StorageAccessAudit? Audit { get; }
+
+    public bool IsPrivilegedAcrossScopes => Kind == StorageAccessKind.PrivilegedAcrossScopes;
+
     public static StorageAccess Scoped(StorageScope scope) =>
-        new(ScopePolicy.Scoped, scope ?? throw new ArgumentNullException(nameof(scope)));
+        new(StorageAccessKind.Scoped, ScopePolicy.Scoped,
+            scope ?? throw new ArgumentNullException(nameof(scope)), null);
+
+    /// <summary>
+    /// Opens an audited, query-only view across every scope of one scoped unit. Point operations
+    /// remain ambiguous and are refused; open an ordinary scoped session for those operations.
+    /// </summary>
+    public static StorageAccess PrivilegedAcrossScopes(StorageAccessAudit audit) =>
+        new(StorageAccessKind.PrivilegedAcrossScopes, ScopePolicy.Scoped, null,
+            audit ?? throw new ArgumentNullException(nameof(audit)));
+}
+
+public enum StorageAccessKind
+{
+    Global,
+    Scoped,
+    PrivilegedAcrossScopes
+}
+
+/// <summary>Required operator identity and purpose attached to privileged cross-scope access.</summary>
+public sealed record StorageAccessAudit
+{
+    public const int MaxIdentityLength = 128;
+    public const int MaxPurposeLength = 256;
+
+    public StorageAccessAudit(
+        string identity,
+        string purpose,
+        IStorageAccessObserver? observer = null)
+    {
+        Identity = Validate(identity, MaxIdentityLength, nameof(identity), "audit identity");
+        Purpose = Validate(purpose, MaxPurposeLength, nameof(purpose), "access purpose");
+        Observer = observer;
+    }
+
+    public string Identity { get; }
+
+    public string Purpose { get; }
+
+    public IStorageAccessObserver? Observer { get; }
+
+    private static string Validate(string value, int maxLength, string parameter, string description)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value, parameter);
+        if (!string.Equals(value, value.Trim(), StringComparison.Ordinal))
+            throw new ArgumentException($"The {description} cannot have leading or trailing whitespace.", parameter);
+        if (value.Length > maxLength)
+            throw new ArgumentException($"The {description} cannot exceed {maxLength} UTF-16 code units.", parameter);
+        if (value.IndexOf('\0') >= 0)
+            throw new ArgumentException($"The {description} cannot contain NUL characters.", parameter);
+        ValidateWellFormedUnicode(value, parameter, description);
+        return value;
+    }
+
+    private static void ValidateWellFormedUnicode(string value, string parameter, string description)
+    {
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]))
+            {
+                if (index + 1 >= value.Length || !char.IsLowSurrogate(value[index + 1]))
+                    throw new ArgumentException($"The {description} must contain well-formed UTF-16.", parameter);
+                index++;
+            }
+            else if (char.IsLowSurrogate(value[index]))
+            {
+                throw new ArgumentException($"The {description} must contain well-formed UTF-16.", parameter);
+            }
+        }
+    }
+}
+
+/// <summary>One auditable use of privileged storage access.</summary>
+public sealed record StorageAccessEvent(
+    StorageUnitId Unit,
+    string Operation,
+    string Identity,
+    string Purpose);
+
+/// <summary>Receives privileged-access evidence before provider work begins.</summary>
+public interface IStorageAccessObserver
+{
+    void Observe(StorageAccessEvent accessEvent);
+}
+
+/// <summary>Shared fail-closed checks for operations performed through an access-bound session.</summary>
+public static class StorageAccessValidation
+{
+    public static void EnsureOrdinaryQuery(StorageAccess access)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        if (access.IsPrivilegedAcrossScopes)
+        {
+            throw new InvalidOperationException(
+                "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
+        }
+    }
+
+    public static void EnsurePointOperation(StorageAccess access, string operation)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        ArgumentException.ThrowIfNullOrWhiteSpace(operation);
+        if (access.IsPrivilegedAcrossScopes)
+        {
+            throw new InvalidOperationException(
+                $"GW-ACCESS-003: privileged cross-scope access is query-only; '{operation}' requires an ordinary session with an explicit scope.");
+        }
+    }
+
+    public static void EnsureUnitOfWork(StorageAccess access)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        if (access.IsPrivilegedAcrossScopes)
+        {
+            throw new InvalidOperationException(
+                "GW-ACCESS-003: privileged cross-scope access is query-only and cannot begin a unit of work.");
+        }
+    }
+
+    public static void ObservePrivilegedQuery(StorageAccess access, StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(unit);
+        var audit = access.Audit ?? throw new InvalidOperationException(
+            "GW-ACCESS-001: cross-scope queries require audit metadata.");
+        audit.Observer?.Observe(new StorageAccessEvent(
+            unit.Id,
+            "query-across-scopes",
+            audit.Identity,
+            audit.Purpose));
+    }
 }
 
 /// <summary>A defensive snapshot of values belonging to one storage unit.</summary>
@@ -511,6 +654,7 @@ public static class StorageInspectionSessionExtensions
     public static StorageInspection Inspect(this IStorageSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "inspect");
         if (session is not IStorageInspectionSession inspection)
         {
             throw new NotSupportedException(
@@ -541,6 +685,34 @@ public interface IExactAppendStorageSession
     AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values);
 }
 
+/// <summary>Optional query-only capability advertised by a privileged cross-scope session.</summary>
+public interface IPrivilegedCrossScopeQuerySession
+{
+    CrossScopeQueryResult QueryAcrossScopes(
+        QueryRequest request,
+        QueryRenderOptions? options = null);
+}
+
+/// <summary>Public cross-scope query entry point with explicit capability and access checks.</summary>
+public static class PrivilegedCrossScopeQuerySessionExtensions
+{
+    public static CrossScopeQueryResult QueryAcrossScopes(
+        this IStorageSession session,
+        QueryRequest request,
+        QueryRenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(request);
+        if (!session.Access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
+        if (session is not IPrivilegedCrossScopeQuerySession privileged)
+            throw new NotSupportedException(
+                "GW-ACCESS-002: this provider session does not advertise privileged cross-scope queries.");
+        return privileged.QueryAcrossScopes(request, options);
+    }
+}
+
 /// <summary>Public exact-append entry points that fail clearly when a provider lacks the capability.</summary>
 public static class ExactAppendSessionExtensions
 {
@@ -551,6 +723,7 @@ public static class ExactAppendSessionExtensions
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(values);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "append");
         if (session is not IExactAppendStorageSession exact)
         {
             throw new NotSupportedException(

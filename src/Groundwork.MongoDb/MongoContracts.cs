@@ -13,20 +13,28 @@ namespace Groundwork.MongoDb;
 /// <summary>Access context used by the provider-native MongoDB session contract.</summary>
 public sealed record MongoStorageAccess
 {
-    private MongoStorageAccess(ScopePolicy policy, StorageScope? scope)
+    private MongoStorageAccess(ScopePolicy policy, StorageScope? scope, StorageAccessAudit? audit)
     {
         Policy = policy;
         Scope = scope;
+        Audit = audit;
     }
 
-    public static MongoStorageAccess Global { get; } = new(ScopePolicy.Global, null);
+    public static MongoStorageAccess Global { get; } = new(ScopePolicy.Global, null, null);
 
     public ScopePolicy Policy { get; }
 
     public StorageScope? Scope { get; }
 
+    public StorageAccessAudit? Audit { get; }
+
+    public bool IsPrivilegedAcrossScopes => Audit is not null;
+
     public static MongoStorageAccess Scoped(StorageScope scope) =>
-        new(ScopePolicy.Scoped, scope ?? throw new ArgumentNullException(nameof(scope)));
+        new(ScopePolicy.Scoped, scope ?? throw new ArgumentNullException(nameof(scope)), null);
+
+    public static MongoStorageAccess PrivilegedAcrossScopes(StorageAccessAudit audit) =>
+        new(ScopePolicy.Scoped, null, audit ?? throw new ArgumentNullException(nameof(audit)));
 }
 
 /// <summary>A defensive value snapshot for one MongoDB storage operation.</summary>
@@ -291,6 +299,8 @@ public interface IMongoStorageSession
     MongoStoredEntry? Read(MongoStorageKey key);
 
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
+
+    CrossScopeQueryResult QueryAcrossScopes(QueryRequest request, QueryRenderOptions? options = null);
 
     /// <summary>Executes one named, declared aggregation profile through the native provider.</summary>
     AggregationResult Aggregate(AggregationQuery query);

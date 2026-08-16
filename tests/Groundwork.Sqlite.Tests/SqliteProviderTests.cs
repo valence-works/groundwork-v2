@@ -416,6 +416,62 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Privileged_cross_scope_query_is_native_scope_preserving_and_query_only()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var name = "sqlite-cross-scope-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Scope = ScopePolicy.Scoped
+        };
+        connection.Schema.Apply(unit);
+        connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")))
+            .Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "same", ["value"] = "shared" }));
+        connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-b")))
+            .Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "same", ["value"] = "shared" }));
+
+        var session = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("sqlite-proof", "recover-stalled-workflows")));
+        var table = new TableId(unit.Name);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.Keyset(1),
+            ResultShape.TotalCount.Instance);
+
+        Assert.Throws<InvalidOperationException>(() => session.Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "same" })));
+        var first = session.QueryAcrossScopes(request);
+
+        Assert.Equal(2, first.TotalCount);
+        Assert.Single(first.Rows);
+        Assert.NotNull(first.NextContinuationToken);
+        var second = session.QueryAcrossScopes(new QueryRequest(
+            table,
+            request.Where,
+            request.Order,
+            request.Projection,
+            Paging.Continuation(first.NextContinuationToken!, 1),
+            request.Result));
+        Assert.Single(second.Rows);
+        Assert.Equal(
+            new[] { "tenant-a", "tenant-b" },
+            first.Rows.Concat(second.Rows).Select(row => row.Scope.Value).Order(StringComparer.Ordinal));
+        Assert.All(first.Rows.Concat(second.Rows), row => Assert.Equal("same", row.Values["id"]));
+    }
+
+    [Fact]
     public void Provider_sequence_only_insert_uses_default_values()
     {
         using var store = TemporaryStore.Create();

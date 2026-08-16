@@ -1,6 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
+using Groundwork.Store;
 
 namespace Groundwork.SqlServer;
 
@@ -23,9 +24,21 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     protected override string RenderIndexHint(string indexName) =>
         "WITH (INDEX(" + Dialect.QuoteIdentifier(indexName) + "))";
 
-    protected override string RenderColumn(ColumnRef column) => column.Type == QueryType.String
-        ? base.RenderColumn(column) + " COLLATE Latin1_General_100_BIN2"
-        : base.RenderColumn(column);
+    protected override string RenderColumn(ColumnRef column)
+    {
+        if (string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal))
+        {
+            var scope = Dialect.QuoteIdentifier(SqlServerSchemaCoordinator.ScopeColumn);
+            return "CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(max), CONVERT(varchar(max), " +
+                   scope + " COLLATE Latin1_General_100_BIN2_UTF8))), 2)";
+        }
+        return column.Type == QueryType.String
+            ? base.RenderColumn(column) + " COLLATE Latin1_General_100_BIN2"
+            : base.RenderColumn(column);
+    }
+
+    protected override bool RequiresExplicitSelection(ColumnRef column) =>
+        string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal);
 
     protected override string RenderOrderTerm(OrderTerm term)
     {
