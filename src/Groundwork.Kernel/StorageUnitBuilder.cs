@@ -441,6 +441,18 @@ internal sealed class StorageDeclarationState
                 $"The concurrency declaration is invalid: {exception.Message}",
                 "concurrency"));
         }
+        try
+        {
+            if (retentionIdempotency is not null)
+                RetentionIdempotencyDeclaration.ValidateOwner(unit);
+        }
+        catch (ArgumentException exception)
+        {
+            declarationFindings.Add(new DeclarationFinding(
+                RetentionIdempotencyDeclaration.MissingRetentionDiagnosticCode,
+                exception.Message,
+                "retentionIdempotency"));
+        }
         var validationContext = context is null || context.Retention is not null || retention is null
             ? context
             : new PortabilityValidationContext(

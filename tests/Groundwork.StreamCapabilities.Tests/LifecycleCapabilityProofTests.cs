@@ -54,6 +54,35 @@ public sealed class LifecycleCapabilityProofTests
     }
 
     [Fact]
+    public void SQL_Server_schema_admission_rejects_retention_idempotency_without_retention_before_provider_io()
+    {
+        var name = "lifecycle-retention-idempotency-without-retention-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 100 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.None,
+            RetentionIdempotency = new RetentionIdempotencyDeclaration
+            {
+                Window = TimeSpan.FromMinutes(1)
+            }
+        };
+
+        using var connection = new SqlServerProviderFactory().Create(
+            "Server=invalid-host.invalid,1433;Database=master;User Id=sa;Password=Groundwork!2026;Encrypt=False;TrustServerCertificate=True");
+
+        var refusal = Assert.Throws<ArgumentException>(() => connection.Schema.Diff(unit));
+
+        Assert.StartsWith("GW-RETENTION-004", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("Declare Retention", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Inspection_capability_refusal_precedes_unit_shape_validation()
     {
         var name = "lifecycle-inspection-capability-order-" + Guid.NewGuid().ToString("N");

@@ -6,7 +6,12 @@ must survive process restart and acknowledgement loss:
 ```csharp
 var unit = new StorageUnit
 {
-    // columns, key, and retention declaration omitted here
+    // columns and key omitted here
+    Retention = new RetentionDeclaration
+    {
+        KeepNewest = 100,
+        OrderColumn = "sequence"
+    },
     RetentionIdempotency = new RetentionIdempotencyDeclaration
     {
         Window = TimeSpan.FromHours(24),
@@ -19,6 +24,10 @@ var result = session.ApplyRetention(
     new OperationId(DateTimeOffset.UtcNow, "retention-cycle-2026-08-16"),
     new RetentionExecutionOptions { MaxRowsPerBatch = 128, KeepNewestOverride = 10 });
 ```
+
+`RetentionIdempotency` is valid only when the same unit declares `Retention`; schema
+admission and declaration builders refuse the invalid combination with `GW-RETENTION-004`.
+Use `Retention` alone for status-only retention; it does not require an operation ledger.
 
 `IStorageInspectionSession` is the additive durable high-water capability. Its
 empty result is represented by a null high-water, which is distinct from a

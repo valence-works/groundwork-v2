@@ -2,9 +2,15 @@ using System.Text;
 
 namespace Groundwork.Kernel;
 
-/// <summary>Declares the durable replay window and ledger for operation-identified retention.</summary>
+/// <summary>
+/// Declares the durable replay window and ledger for operation-identified retention.
+/// The owning storage unit must also declare <see cref="RetentionDeclaration"/>;
+/// use retention alone when status-only retention is desired.
+/// </summary>
 public sealed record RetentionIdempotencyDeclaration
 {
+    internal const string MissingRetentionDiagnosticCode = "GW-RETENTION-004";
+
     public required TimeSpan Window { get; init; }
 
     public string LedgerName { get; init; } = ProviderReservedLedgerNames.DefaultRetentionLedger;
@@ -13,6 +19,9 @@ public sealed record RetentionIdempotencyDeclaration
 
     public void Validate(StorageUnit? owner)
     {
+        if (owner is not null)
+            ValidateOwner(owner);
+
         if (Window <= TimeSpan.Zero)
             throw new ArgumentException("A retention idempotency window must be positive.", nameof(Window));
         if (string.IsNullOrWhiteSpace(LedgerName) ||
@@ -49,4 +58,19 @@ public sealed record RetentionIdempotencyDeclaration
                 nameof(LedgerName));
         }
     }
+
+    internal static void ValidateOwner(StorageUnit owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        if (owner.Retention is null && owner.RetentionIdempotency is not null)
+        {
+            throw new ArgumentException(
+                MissingRetentionMessage(owner),
+                nameof(owner));
+        }
+    }
+
+    internal static string MissingRetentionMessage(StorageUnit owner) =>
+        $"{MissingRetentionDiagnosticCode}: storage unit '{owner.Name}' declares RetentionIdempotency without Retention. " +
+        "Declare Retention(...) before RetentionIdempotency(...); omit RetentionIdempotency for status-only retention.";
 }
