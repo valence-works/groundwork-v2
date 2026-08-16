@@ -908,7 +908,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     private const string HighWaterValue = "high_water";
     private readonly MongoProviderState state;
@@ -1472,6 +1472,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             RowWriteMode.Upsert => ToStore(Upsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
             RowWriteMode.ConditionalUpsert => ToStore(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
             RowWriteMode.Delete => ToStore(Delete(new MongoStorageKey(write.Key!.Values), ToNative(write.Options))),
+            RowWriteMode.CompareAndDelete => ToStore(CompareAndDelete(new MongoStorageKey(write.Key!.Values), write.ExpectedValues, ToNative(write.Options))),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
 
@@ -2548,6 +2549,78 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted, Unit.Concurrency.IsOptimistic ? existingVersion : null);
     }
 
+    public MongoWriteOutcome CompareAndDelete(
+        MongoStorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        MongoWriteOptions? options = null)
+    {
+        RefusePrivilegedOperation("compare-and-delete");
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(expectedValues);
+        WritePreconditionValidator.Validate(Unit, WriteOperation.CompareAndDelete, ToStoreOptions(options));
+        var validated = CompareAndDeleteValidation.Validate(
+            Unit,
+            new StorageKey(key.Values),
+            expectedValues,
+            ToStoreOptions(options));
+        ThrowIfDisposed();
+        return ExecuteWithTransactionIfNeeded(
+            transactional => transactional.CompareAndDeleteCore(key, validated, options),
+            requireTransaction: true);
+    }
+
+    private MongoWriteOutcome CompareAndDeleteCore(
+        MongoStorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        MongoWriteOptions? options)
+    {
+        var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
+        var existing = Unit.Concurrency.IsOptimistic
+            ? FindOne(identity, options?.Observer)
+            : null;
+        if (Unit.Concurrency.IsOptimistic && existing is null)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
+        var existingVersion = Version(identity, existing);
+        var filter = new BsonDocument("_id", identity);
+        foreach (var pair in expectedValues)
+        {
+            var definition = Unit.Columns.FirstOrDefault(column => column.Name == pair.Key)
+                ?? throw new ArgumentException($"Comparison column '{pair.Key}' is not declared by '{Unit.Name}'.", nameof(expectedValues));
+            filter[pair.Key] = MongoValueCodec.Encode(pair.Value, definition);
+        }
+        if (Unit.Concurrency.IsOptimistic && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            filter[MongoDocumentMapper.VersionField] = options.Precondition.Version!.Value;
+
+        options?.Observer?.Observe(new WritePathEvent("mongodb.compare-and-delete", "MongoDB.DeleteOne", IsProbe: false));
+        var result = DeleteOne(filter);
+        if (result.DeletedCount != 0)
+        {
+            RemoveVersion(identity, options?.Observer);
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted, existingVersion);
+        }
+
+        existing ??= FindOne(identity, options?.Observer);
+        if (existing is null)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
+        existingVersion ??= Version(identity, existing);
+        if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
+            options.Precondition.Version != existingVersion)
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion);
+        return MatchesExpected(existing, expectedValues)
+            ? new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion)
+            : new MongoWriteOutcome(MongoWriteOutcomeStatus.ComparisonMismatch, existingVersion);
+    }
+
+    private bool MatchesExpected(
+        BsonDocument existing,
+        IReadOnlyDictionary<string, object?> expectedValues) =>
+        expectedValues.All(pair =>
+        {
+            var definition = Unit.Columns.Single(column => column.Name == pair.Key);
+            var actual = existing.TryGetValue(pair.Key, out var stored) ? stored : BsonNull.Value;
+            return actual.Equals(MongoValueCodec.Encode(pair.Value, definition));
+        });
+
     private bool ConcurrencyAllows(
         BsonDocument? existing,
         long? currentVersion,
@@ -2632,11 +2705,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return metadata is null ? null : metadata.GetValue("version", 0).ToInt64();
     }
 
-    private void RemoveVersion(BsonValue identity)
+    private void RemoveVersion(BsonValue identity, IWritePathObserver? observer = null)
     {
         if (Unit.Concurrency.IsOptimistic)
         {
             var filter = new BsonDocument("_id", MetadataId(identity));
+            observer?.Observe(new WritePathEvent("mongodb.compare-and-delete-version-delete", "MongoDB.DeleteOne(metadata)", IsProbe: false));
             if (transactionSession is null)
                 state.Metadata.DeleteOne(filter);
             else
@@ -2644,10 +2718,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
     }
 
-    private BsonDocument? FindOne(BsonValue identity) =>
-        transactionSession is null
+    private BsonDocument? FindOne(BsonValue identity, IWritePathObserver? observer = null)
+    {
+        observer?.Observe(new WritePathEvent("mongodb.compare-and-delete-read", "MongoDB.FindOne", IsProbe: true));
+        return transactionSession is null
             ? collection.Find(new BsonDocument("_id", identity)).FirstOrDefault()
             : collection.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();
+    }
 
     private void InsertOne(BsonDocument document)
     {
@@ -2702,18 +2779,23 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             state.Metadata.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = true });
     }
 
-    private T ExecuteWithTransactionIfNeeded<T>(Func<MongoStorageSession, T> operation)
+    private T ExecuteWithTransactionIfNeeded<T>(
+        Func<MongoStorageSession, T> operation,
+        bool requireTransaction = false)
     {
         if (transactionSession is not null)
             return operation(this);
-        if (!Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence) &&
+        if (!requireTransaction &&
+            !Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence) &&
             Unit.AppendIdempotency is null &&
             Unit.RetentionIdempotency is null)
             return operation(this);
 
-        var transactionReason = Unit.AppendIdempotency is null
-            ? Unit.RetentionIdempotency is null ? "ProviderSequence" : "ExactRetention"
-            : "AppendIdempotency";
+        var transactionReason = requireTransaction
+            ? "CompareAndDelete"
+            : Unit.AppendIdempotency is null
+                ? Unit.RetentionIdempotency is null ? "ProviderSequence" : "ExactRetention"
+                : "AppendIdempotency";
         state.Context.RequireTransactions(transactionReason);
         MongoException? lastTransientFailure = null;
         for (var attempt = 0; attempt < 5; attempt++)

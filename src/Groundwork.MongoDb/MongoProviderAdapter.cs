@@ -28,7 +28,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
                 exactAppendOutcomes: true,
                 durableHighWaterInspection: true,
                 exactRetention: true,
-                atomicCommit: inner.ProviderSequenceFit is ProviderFit.Supported);
+                atomicCommit: inner.ProviderSequenceFit is ProviderFit.Supported,
+                compareAndDelete: inner.ProviderSequenceFit is ProviderFit.Supported);
             return descriptors
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
@@ -218,6 +219,9 @@ internal class MongoStoreSession(
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            RowWriteMode.CompareAndDelete => this is ICompareAndDeleteStorageSession compareAndDelete
+                ? compareAndDelete.CompareAndDelete(write.Key!, write.ExpectedValues, write.Options)
+                : throw new NotSupportedException("The provider session does not support compare-and-delete."),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
     }
@@ -257,7 +261,7 @@ internal class MongoStoreSession(
         : new StoredEntry(new StorageValues(entry.Values.Values), entry.Version);
 }
 
-internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, ICompareAndDeleteStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     private readonly IMongoStorageSession exactInner;
 
@@ -276,6 +280,23 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
         return new AppendOutcomeReport(
             (WriteOutcomeStatus)result.Status,
             result.Outcomes.Select(ToStore).ToArray());
+    }
+
+    public WriteOutcome CompareAndDelete(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "compare-and-delete");
+        var validated = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        if (exactInner is not IMongoCompareAndDeleteStorageSession compareAndDelete)
+            throw new NotSupportedException(
+                "GW-COMPARE-DELETE-001: this MongoDB deployment does not advertise transactional compare-and-delete.");
+        var result = compareAndDelete.CompareAndDelete(
+            new MongoStorageKey(key.Values),
+            validated,
+            new MongoWriteOptions { Precondition = options?.Precondition ?? WritePrecondition.Unconditional, Observer = options?.Observer });
+        return ToStore(result);
     }
 
     public StorageInspection Inspect()
@@ -321,7 +342,7 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
         var store = exactAvailable
             ? new MongoExactStoreSession(native)
             : new MongoStoreSession(native);
-        var session = new BatchStorageSession(store, batch);
+        var session = BatchStorageSession.Create(store, batch);
         sessions.Add(unit.Id, session);
         batch.Register(session);
         return session;

@@ -60,7 +60,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
         exactRetention: true,
-        atomicCommit: true);
+        atomicCommit: true,
+        compareAndDelete: true);
 
     internal object Gate => gate;
 

@@ -44,7 +44,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
         exactRetention: true,
-        atomicCommit: true);
+        atomicCommit: true,
+        compareAndDelete: true);
 
     internal string ConnectionString => connectionString;
 

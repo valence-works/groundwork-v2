@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -301,6 +301,71 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
         });
     }
+
+    public WriteOutcome CompareAndDelete(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null)
+    {
+        var expected = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        return ExecuteWrite(() =>
+        {
+            var (where, parameters) = KeyPredicate(key.Values);
+            foreach (var pair in expected)
+            {
+                if (pair.Value is null)
+                {
+                    where += $" AND {Quote(pair.Key)} IS NULL";
+                }
+                else
+                {
+                    var parameter = "@compare_" + pair.Key;
+                    where += $" AND {Quote(pair.Key)}={parameter}";
+                    parameters[parameter] = ToSqlite(pair.Value, Column(pair.Key));
+                }
+            }
+            if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+                parameters["@expected"] = options.Precondition.Version!.Value;
+            }
+
+            var returning = VersionColumnDefinition is null ? string.Empty : $" RETURNING {Quote(VersionColumnDefinition.Name)};";
+            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where}{returning}");
+            AddParameters(command, parameters);
+            options?.Observer?.Observe(new WritePathEvent("sqlite.compare-and-delete", command.CommandText, IsProbe: false));
+            if (VersionColumnDefinition is not null)
+            {
+                using (var reader = command.ExecuteReader())
+                {
+                    if (reader.Read())
+                        return new WriteOutcome(WriteOutcomeStatus.Deleted, Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture));
+                }
+            }
+            else if (command.ExecuteNonQuery() != 0)
+            {
+                return new WriteOutcome(WriteOutcomeStatus.Deleted);
+            }
+
+            var existing = ReadCore(key, options?.Observer, "sqlite.compare-and-delete-read");
+            if (existing is null)
+                return new WriteOutcome(WriteOutcomeStatus.NotFound);
+            if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
+                options.Precondition.Version != existing.Version)
+                return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            return MatchesExpected(existing, expected)
+                ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
+                : new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
+        });
+    }
+
+    private bool MatchesExpected(StoredEntry existing, IReadOnlyDictionary<string, object?> expected) =>
+        expected.All(pair =>
+        {
+            var definition = Column(pair.Key);
+            return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
+                CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
+        });
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
@@ -902,6 +967,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            RowWriteMode.CompareAndDelete => CompareAndDelete(write.Key!, write.ExpectedValues, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
 
@@ -1331,13 +1397,16 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version); }
     }
 
-    private StoredEntry? ReadCore(StorageKey key, IWritePathObserver? observer = null)
+    private StoredEntry? ReadCore(
+        StorageKey key,
+        IWritePathObserver? observer = null,
+        string? observerOperation = null)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
-        observer?.Observe(new WritePathEvent("sqlite.write-probe", command.CommandText, IsProbe: true));
+        observer?.Observe(new WritePathEvent(observerOperation ?? "sqlite.write-probe", command.CommandText, IsProbe: true));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);

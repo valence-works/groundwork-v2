@@ -92,6 +92,31 @@ internal static class ExactAppendCodec
         return Convert.ToHexStringLower(SHA256.HashData(writer.ToArray()));
     }
 
+    internal static string FingerprintRowWrite(
+        StorageUnit unit,
+        RowWriteMode mode,
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(expectedValues);
+        ArgumentNullException.ThrowIfNull(options);
+        var types = unit.Columns.ToDictionary(column => column.Name, column => column.Type, StringComparer.Ordinal);
+        var writer = new BufferWriter();
+        writer.WriteByte(Version);
+        writer.WriteString(unit.Id.Value);
+        writer.WriteInt32((int)mode);
+        writer.WriteInt32((int)options.Precondition.Kind);
+        writer.WriteBoolean(options.Precondition.Version.HasValue);
+        if (options.Precondition.Version is { } version)
+            writer.WriteInt64(version);
+        WriteMap(writer, key.Values, types);
+        WriteMap(writer, expectedValues, types);
+        return Convert.ToHexStringLower(SHA256.HashData(writer.ToArray()));
+    }
+
     internal static string SerializeOutcomes(IReadOnlyList<WriteOutcome> outcomes)
     {
         ArgumentNullException.ThrowIfNull(outcomes);

@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -280,6 +280,64 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                 : new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
         });
     }
+
+    public WriteOutcome CompareAndDelete(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null)
+    {
+        var expected = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        return ExecuteWrite(() =>
+        {
+            // Lock the identity row in the current transaction before classifying a
+            // zero-row delete. This keeps absence and comparison mismatch tied to one
+            // serializable provider decision even when the surrounding UOW uses
+            // PostgreSQL's default ReadCommitted isolation.
+            var existing = ReadCore(key, options?.Observer, forUpdate: true, observerOperation: "postgresql.compare-and-delete-read");
+            if (existing is null)
+                return new WriteOutcome(WriteOutcomeStatus.NotFound);
+            if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
+                options.Precondition.Version != existing.Version)
+                return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            if (!MatchesExpected(existing, expected))
+                return new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
+
+            var (where, parameters) = KeyPredicate(key.Values);
+            foreach (var pair in expected)
+            {
+                if (pair.Value is null)
+                {
+                    where += $" AND {Quote(pair.Key)} IS NULL";
+                }
+                else
+                {
+                    var parameter = "@compare_" + pair.Key;
+                    where += $" AND {Quote(pair.Key)}={parameter}";
+                    parameters[parameter] = ConvertValue(pair.Value, Column(pair.Key));
+                }
+            }
+            if (VersionColumn is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumn.Name)}=@expected";
+                parameters["@expected"] = options.Precondition.Version!.Value;
+            }
+
+            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            AddParameters(command, parameters);
+            options?.Observer?.Observe(new WritePathEvent("postgresql.compare-and-delete", command.CommandText, IsProbe: false));
+            return command.ExecuteNonQuery() != 0
+                ? new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version)
+                : new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+        });
+    }
+
+    private bool MatchesExpected(StoredEntry existing, IReadOnlyDictionary<string, object?> expected) =>
+        expected.All(pair =>
+        {
+            var definition = Column(pair.Key);
+            return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
+                CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
+        });
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
@@ -792,6 +850,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            RowWriteMode.CompareAndDelete => CompareAndDelete(write.Key!, write.ExpectedValues, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
 
@@ -1125,13 +1184,18 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         }
     }
 
-    private StoredEntry? ReadCore(StorageKey key, IWritePathObserver? observer = null)
+    private StoredEntry? ReadCore(
+        StorageKey key,
+        IWritePathObserver? observer = null,
+        bool forUpdate = false,
+        string? observerOperation = null)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumn is null ? [] : [VersionColumn]).ToArray();
-        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
+        var locking = forUpdate ? " FOR UPDATE" : string.Empty;
+        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where}{locking};");
         AddParameters(command, parameters);
-        observer?.Observe(new WritePathEvent("postgresql.write-probe", command.CommandText, IsProbe: true));
+        observer?.Observe(new WritePathEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, IsProbe: true));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
             return null;

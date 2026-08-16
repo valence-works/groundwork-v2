@@ -284,7 +284,8 @@ public enum WriteOperation
     Update,
     Upsert,
     Delete,
-    ConditionalUpsert
+    ConditionalUpsert,
+    CompareAndDelete
 }
 
 /// <summary>Validates operation/precondition combinations before provider I/O.</summary>
@@ -311,6 +312,7 @@ public static class WritePreconditionValidator
             WriteOperation.Insert => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.CreateOnly,
             WriteOperation.Update => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.IfVersion,
             WriteOperation.Delete => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.IfVersion,
+            WriteOperation.CompareAndDelete => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.IfVersion,
             WriteOperation.Upsert or WriteOperation.ConditionalUpsert => precondition.Kind is WritePreconditionKind.Unconditional or WritePreconditionKind.CreateOnly or WritePreconditionKind.IfVersion,
             _ => false
         };
@@ -362,6 +364,8 @@ public enum WriteOutcomeStatus
     NotFound,
     UniqueViolation,
     ConcurrencyConflict,
+    /// <summary>The row exists, but one or more declared compare-and-delete values differ.</summary>
+    ComparisonMismatch,
     /// <summary>The staged input was superseded by a later write to the same key.</summary>
     Superseded
 }

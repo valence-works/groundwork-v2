@@ -16,6 +16,7 @@ Groundwork.Store.BatchWriteOptions
 Groundwork.Store.RetentionIdempotencyDeclaration
 Groundwork.Store.RetentionOperationResult
 Groundwork.Store.IStorageInspectionSession
+Groundwork.Store.ICompareAndDeleteStorageSession
 Groundwork.Store.IExactRetentionStorageSession
 Groundwork.Store.RowWrite
 Groundwork.Store.StorageAccess

@@ -28,6 +28,8 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId ExactRetention { get; } = new("groundwork.storage.exact-retention");
 
+    public static CapabilityId CompareAndDelete { get; } = new("groundwork.storage.compare-and-delete");
+
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
@@ -63,6 +65,11 @@ public static class BatchWriteCapabilities
         "Replay-stable exact retention",
         "Records a caller operation identity and immutable retention result so acknowledgement-loss retries replay without deleting again.");
 
+    public static CapabilityDescriptor CompareAndDeleteDescriptor { get; } = new(
+        CompareAndDelete,
+        "Atomic compare-and-delete",
+        "Deletes one identified row only when every declared equality value matches in the provider-owned atomic decision; row absence and comparison mismatch remain distinct.");
+
     public static CapabilityDescriptor AtomicCommitDescriptor { get; } = new(
         WellKnownCapabilities.AtomicCommit,
         "Atomic commit",
@@ -70,7 +77,7 @@ public static class BatchWriteCapabilities
         EvidenceGatedByDefault: true);
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, CompareAndDeleteDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -99,7 +106,8 @@ public static class BatchWriteCapabilities
         bool exactAppendOutcomes,
         bool durableHighWaterInspection,
         bool exactRetention,
-        bool atomicCommit = false)
+        bool atomicCommit = false,
+        bool compareAndDelete = false)
     {
         var descriptors = new List<CapabilityDescriptor>
         {
@@ -140,6 +148,11 @@ public static class BatchWriteCapabilities
             {
                 Description = $"Commits all staged writes across declared {provider} storage units in one provider transaction."
             });
+        if (compareAndDelete)
+            descriptors.Add(CompareAndDeleteDescriptor with
+            {
+                Description = $"Deletes one identified row on {provider} only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch."
+            });
         if (nativeBatch)
             descriptors.Add(NativeBatchDescriptor);
         return Array.AsReadOnly(descriptors.ToArray());
@@ -163,7 +176,9 @@ public enum RowWriteMode
     Upsert,
     /// <summary>Executes the provider's atomic optimistic-concurrency upsert primitive.</summary>
     ConditionalUpsert,
-    Delete
+    Delete,
+    /// <summary>Deletes one row only when its declared equality values still match.</summary>
+    CompareAndDelete
 }
 
 /// <summary>One provider-neutral row mutation staged in a unit of work.</summary>
@@ -176,13 +191,23 @@ public sealed class RowWrite
         RowWriteMode mode,
         StorageValues? values,
         StorageKey? key,
-        WriteOptions? options)
+        WriteOptions? options,
+        IReadOnlyDictionary<string, object?>? expectedValues = null)
     {
         Unit = unit ?? throw new ArgumentNullException(nameof(unit));
         Mode = mode;
         Values = values;
         Key = key;
         Options = options ?? WriteOptions.Unconditional;
+        ExpectedValues = mode == RowWriteMode.CompareAndDelete
+            ? CompareAndDeleteValidation.Validate(
+                unit,
+                key!,
+                expectedValues ?? throw new ArgumentNullException(nameof(expectedValues)),
+                Options)
+            : expectedValues is null
+                ? ImmutableExpectedValues.Empty
+                : new StorageValues(expectedValues).Values;
 
         WritePreconditionValidator.Validate(
             unit,
@@ -193,11 +218,12 @@ public sealed class RowWrite
                 RowWriteMode.Upsert => WriteOperation.Upsert,
                 RowWriteMode.ConditionalUpsert => WriteOperation.ConditionalUpsert,
                 RowWriteMode.Delete => WriteOperation.Delete,
+                RowWriteMode.CompareAndDelete => WriteOperation.CompareAndDelete,
                 _ => throw new ArgumentOutOfRangeException(nameof(mode))
             },
             Options);
 
-        if (mode == RowWriteMode.Delete)
+        if (mode is RowWriteMode.Delete or RowWriteMode.CompareAndDelete)
         {
             if (key is null)
                 throw new ArgumentNullException(nameof(key), "A delete must provide a key.");
@@ -227,6 +253,25 @@ public sealed class RowWrite
 
     public WriteOptions Options { get; }
 
+    /// <summary>Immutable equality values required by a compare-and-delete write.</summary>
+    public IReadOnlyDictionary<string, object?> ExpectedValues { get; }
+
+    /// <summary>Internal compare-and-delete correlation fingerprint.</summary>
+    internal string Fingerprint
+    {
+        get
+        {
+            if (Mode != RowWriteMode.CompareAndDelete)
+                return string.Empty;
+
+            var values = Key?.Values ?? Values?.Values ?? ImmutableExpectedValues.Empty;
+            var key = new StorageKey(Unit.Key.Columns
+                .Where(column => !CompareAndDeleteValidation.IsProviderOwnedColumn(column))
+                .ToDictionary(column => column, column => values.GetValueOrDefault(column), StringComparer.Ordinal));
+            return RowWriteFingerprint.Create(Unit, Mode, key, ExpectedValues, Options);
+        }
+    }
+
     public static RowWrite Insert(StorageUnit unit, StorageValues values, WriteOptions? options = null) =>
         new(unit, RowWriteMode.Insert, values, null, options);
 
@@ -242,6 +287,13 @@ public sealed class RowWrite
     public static RowWrite Delete(StorageUnit unit, StorageKey key, WriteOptions? options = null) =>
         new(unit, RowWriteMode.Delete, null, key, options);
 
+    public static RowWrite CompareAndDelete(
+        StorageUnit unit,
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null) =>
+        new(unit, RowWriteMode.CompareAndDelete, null, key, options, expectedValues);
+
     internal IReadOnlyDictionary<string, object?> KeyValues =>
         Key?.Values ?? Unit.Key.Columns.ToDictionary(
             column => column,
@@ -250,7 +302,7 @@ public sealed class RowWrite
                 : throw new ArgumentException($"Key column '{column}' is required.", nameof(Values)),
             StringComparer.Ordinal);
 
-    internal string ColumnSet => Mode == RowWriteMode.Delete
+    internal string ColumnSet => Mode is RowWriteMode.Delete or RowWriteMode.CompareAndDelete
         ? string.Join("\u001f", Unit.Key.Columns)
         : string.Join("\u001f", Values!.Values.Keys.OrderBy(value => value, StringComparer.Ordinal));
 
@@ -605,6 +657,11 @@ internal sealed class BatchContext
                     // when a generated key has not yet been assigned to the declaration.
                     var item = groupItems[index];
                     var outcome = groupOutcomes[index];
+                    if (!string.Equals(outcome.Write.Fingerprint, finalWrites[index].Fingerprint, StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            $"GW-BATCH-FINGERPRINT-001: provider outcome {index} does not identify the submitted row write.");
+                    }
                     foreach (var original in item.Originals)
                         outcomes[original] = outcome.Outcome;
                 }
@@ -683,10 +740,15 @@ internal sealed class BatchContext
 }
 
 /// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
-internal sealed class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
-    private readonly IStorageSession inner;
-    private readonly BatchContext context;
+    protected readonly IStorageSession inner;
+    protected readonly BatchContext context;
+
+    internal static BatchStorageSession Create(IStorageSession inner, BatchContext context) =>
+        inner is ICompareAndDeleteStorageSession
+            ? new BatchCompareAndDeleteStorageSession(inner, context)
+            : new BatchStorageSession(inner, context);
 
     internal BatchStorageSession(IStorageSession inner, BatchContext context)
     {
@@ -785,8 +847,32 @@ internal sealed class BatchStorageSession : IStorageSession, IExactAppendStorage
                 ? concurrency.ConditionalUpsert(write.Values!, write.Options)
                 : throw new NotSupportedException("The provider session does not support conditional upsert."),
             RowWriteMode.Delete => inner.Delete(write.Key!, write.Options),
+            RowWriteMode.CompareAndDelete => inner is ICompareAndDeleteStorageSession compareAndDelete
+                ? compareAndDelete.CompareAndDelete(write.Key!, write.ExpectedValues, write.Options)
+                : throw new NotSupportedException("The provider session does not support compare-and-delete."),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
         return outcomes;
+    }
+}
+
+internal sealed class BatchCompareAndDeleteStorageSession : BatchStorageSession, ICompareAndDeleteStorageSession
+{
+    internal BatchCompareAndDeleteStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+
+    public WriteOutcome CompareAndDelete(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null)
+    {
+        if (inner is not ICompareAndDeleteStorageSession compareAndDelete)
+            throw new NotSupportedException(
+                "GW-COMPARE-DELETE-001: this provider does not advertise atomic compare-and-delete.");
+
+        context.FlushFor(Unit, key);
+        return compareAndDelete.CompareAndDelete(key, expectedValues, options);
     }
 }
