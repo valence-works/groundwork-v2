@@ -27,7 +27,7 @@ concurrency:
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "true"
-  FEEDZ_NUGET_SOURCE: ${{ vars.FEEDZ_NUGET_SOURCE || 'https://f.feedz.io/valence-works/groundwork/nuget/index.json' }}
+  FEEDZ_NUGET_SOURCE: https://f.feedz.io/valence-works/groundwork/nuget/index.json
 
 jobs:
   package:
@@ -108,15 +108,39 @@ jobs:
         run: |
           test -n "$FEEDZ_API_KEY"
           test -n "$FEEDZ_NUGET_SOURCE"
-      - name: Push packages and symbols to Feedz
+      - name: Push packages to Feedz
         env:
           FEEDZ_API_KEY: ${{ secrets.FEEDZ_API_KEY }}
           PACKAGE_VERSION: ${{ needs.package.outputs.version }}
         run: |
           set -euo pipefail
-          for package in artifacts/packages/*."$PACKAGE_VERSION".nupkg artifacts/packages/*."$PACKAGE_VERSION".snupkg; do
+          for package in artifacts/packages/*."$PACKAGE_VERSION".nupkg; do
             test -f "$package"
             dotnet nuget push "$package" --api-key "$FEEDZ_API_KEY" --source "$FEEDZ_NUGET_SOURCE" --skip-duplicate
+          done
+      - name: Push symbol packages to Feedz with retry
+        env:
+          FEEDZ_API_KEY: ${{ secrets.FEEDZ_API_KEY }}
+          PACKAGE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          for package in artifacts/packages/*."$PACKAGE_VERSION".snupkg; do
+            test -f "$package"
+            pushed=false
+            for attempt in {1..12}; do
+              if dotnet nuget push "$package" --api-key "$FEEDZ_API_KEY" --source "$FEEDZ_NUGET_SOURCE" --skip-duplicate; then
+                pushed=true
+                break
+              fi
+              if [[ "$attempt" -lt 12 ]]; then
+                echo "Feedz has not admitted the symbol package yet; retrying ($attempt/12)." >&2
+                sleep 10
+              fi
+            done
+            [[ "$pushed" == true ]] || {
+              echo "Could not publish symbol package $package to Feedz." >&2
+              exit 1
+            }
           done
 
   verify-feed:
@@ -127,7 +151,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: groundwork-packages-*
+          merge-multiple: true
+          path: artifacts/packages
       - name: Restore every public package and the tool from Feedz
         env:
           PACKAGE_VERSION: ${{ needs.publish.outputs.version }}
-        run: eng/verify-published-packages.sh "$FEEDZ_NUGET_SOURCE" "$PACKAGE_VERSION"
+        run: eng/verify-published-packages.sh "$FEEDZ_NUGET_SOURCE" "$PACKAGE_VERSION" artifacts/packages

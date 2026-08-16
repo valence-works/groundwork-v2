@@ -86,6 +86,7 @@ public sealed class PackagingContractTests
         Assert.Contains("needs: package", workflow, StringComparison.Ordinal);
         Assert.Contains("verify-package-layout.sh", workflow, StringComparison.Ordinal);
         Assert.Contains("release", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("vars.FEEDZ_NUGET_SOURCE", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("NUGET_API_KEY", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("api.nuget.org/v3/index.json", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("find src/Groundwork", workflow, StringComparison.Ordinal);
@@ -122,7 +123,13 @@ public sealed class PackagingContractTests
         Assert.True(remoteProof > verifyJob);
         Assert.Contains("needs: publish", workflow, StringComparison.Ordinal);
         Assert.Contains("needs.publish.outputs.version", workflow, StringComparison.Ordinal);
+        Assert.Contains("\"$FEEDZ_NUGET_SOURCE\" \"$PACKAGE_VERSION\" artifacts/packages", workflow, StringComparison.Ordinal);
+        Assert.Contains("Push symbol packages to Feedz with retry", workflow, StringComparison.Ordinal);
         Assert.True(File.Exists(Path.Combine(root, "eng", "verify-published-packages.sh")));
+
+        var remoteVerifier = File.ReadAllText(Path.Combine(root, "eng", "verify-published-packages.sh"));
+        Assert.Contains(".nupkg.sha512", remoteVerifier, StringComparison.Ordinal);
+        Assert.Contains("Artifact hash mismatch", remoteVerifier, StringComparison.Ordinal);
     }
 
     private static string FindRepositoryRoot()

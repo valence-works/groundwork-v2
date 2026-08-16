@@ -4,12 +4,17 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 feed="${1:-}"
 version="${2:-}"
+expected_packages="${3:-}"
 test -n "$feed" || {
-  echo "Usage: $0 <feed-service-index> <exact-version>" >&2
+  echo "Usage: $0 <feed-service-index> <exact-version> <expected-package-directory>" >&2
   exit 2
 }
 test -n "$version" || {
-  echo "Usage: $0 <feed-service-index> <exact-version>" >&2
+  echo "Usage: $0 <feed-service-index> <exact-version> <expected-package-directory>" >&2
+  exit 2
+}
+test -d "$expected_packages" || {
+  echo "Expected package directory '$expected_packages' does not exist." >&2
   exit 2
 }
 
@@ -30,6 +35,42 @@ while IFS='|' read -r package_id _; do
   dotnet add "$probe_root/GroundworkFeedProbe.csproj" package "$package_id" \
     --version "$version" --no-restore >/dev/null
 done < "$repo_root/eng/public-packages.txt"
+
+verify_artifact_hash() {
+  local package_id="$1"
+  local cache_id="${package_id,,}"
+  local expected="$expected_packages/$package_id.$version.nupkg"
+  local restored_hash="$package_cache/$cache_id/$version/$cache_id.$version.nupkg.sha512"
+  local restored_package=""
+  if [[ "$package_id" == "Groundwork.Tool" ]]; then
+    restored_package="$probe_root/tool/.store/$cache_id/$version/$cache_id/$version/$package_id.nupkg"
+  fi
+  test -f "$expected" || {
+    echo "Expected artifact is missing: $expected" >&2
+    exit 1
+  }
+  [[ -n "$restored_package" ]] || test -f "$restored_hash" || {
+    echo "Restored package hash is missing: $restored_hash" >&2
+    exit 1
+  }
+  [[ -z "$restored_package" ]] || test -f "$restored_package" || {
+    echo "Restored tool package is missing: $restored_package" >&2
+    exit 1
+  }
+
+  local expected_hash
+  local actual_hash
+  expected_hash="$(openssl dgst -sha512 -binary "$expected" | openssl base64 -A)"
+  if [[ -n "$restored_package" ]]; then
+    actual_hash="$(openssl dgst -sha512 -binary "$restored_package" | openssl base64 -A)"
+  else
+    actual_hash="$(tr -d '\r\n' < "$restored_hash")"
+  fi
+  [[ "$actual_hash" == "$expected_hash" ]] || {
+    echo "Artifact hash mismatch for $package_id $version." >&2
+    exit 1
+  }
+}
 
 restore_succeeded=false
 for attempt in {1..12}; do
@@ -54,6 +95,7 @@ while IFS='|' read -r package_id _; do
     echo "Feed restore did not materialize $package_id $version." >&2
     exit 1
   }
+  verify_artifact_hash "$package_id"
 done < "$repo_root/eng/public-packages.txt"
 
 tool_succeeded=false
@@ -71,6 +113,7 @@ done
   echo "Could not install Groundwork.Tool $version from $feed." >&2
   exit 1
 }
+verify_artifact_hash Groundwork.Tool
 
 expected="Groundwork.Tool $version"
 actual="$("$probe_root/tool/groundwork" --version)"
