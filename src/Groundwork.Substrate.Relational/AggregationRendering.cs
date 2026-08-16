@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Collections.Immutable;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Substrate.Relational;
 
@@ -7,13 +9,25 @@ namespace Groundwork.Substrate.Relational;
 public sealed class RelationalAggregationCommand
 {
     public RelationalAggregationCommand(string commandText, AggregationProfile profile)
+        : this(commandText, profile, [])
+    {
+    }
+
+    public RelationalAggregationCommand(
+        string commandText,
+        AggregationProfile profile,
+        IEnumerable<QueryRenderParameter> parameters)
     {
         CommandText = commandText ?? throw new ArgumentNullException(nameof(commandText));
         Profile = profile ?? throw new ArgumentNullException(nameof(profile));
+        Parameters = (parameters ?? throw new ArgumentNullException(nameof(parameters))).ToImmutableArray();
+        if (Parameters.Any(parameter => parameter is null))
+            throw new ArgumentException("Aggregation parameters cannot contain null references.", nameof(parameters));
     }
 
     public string CommandText { get; }
     public AggregationProfile Profile { get; }
+    public ImmutableArray<QueryRenderParameter> Parameters { get; }
 }
 
 /// <summary>
@@ -55,7 +69,8 @@ public static class RelationalAggregationRenderer
             _ => Array.Empty<string>()
         }).Concat(unit.Key.Columns).Distinct(StringComparer.Ordinal).Select(quote).ToArray();
         var source = string.Join(", ", groups.Concat(sourceColumns).Distinct(StringComparer.Ordinal));
-        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: true);
+        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate);
+        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: true, sourceFragment?.CommandText);
 
         var selections = new List<string>(groups);
         const string groupedAlias = "__groundwork_aggregation_grouped";
@@ -79,7 +94,7 @@ public static class RelationalAggregationRenderer
         sql += IsSqlServer(dialect)
             ? $" OFFSET 0 ROWS FETCH NEXT {outputLimit.ToString(CultureInfo.InvariantCulture)} ROWS ONLY"
             : $" LIMIT {outputLimit.ToString(CultureInfo.InvariantCulture)}";
-        return new RelationalAggregationCommand(sql + ";", profile);
+        return new RelationalAggregationCommand(sql + ";", profile, sourceFragment?.Parameters ?? []);
     }
 
     /// <summary>
@@ -90,18 +105,22 @@ public static class RelationalAggregationRenderer
     public static RelationalAggregationCommand RenderBudgetProbe(
         RelationalDialect dialect,
         StorageUnit unit,
-        AggregationProfile profile)
+        AggregationProfile profile,
+        AggregationQuery? query = null)
     {
         ArgumentNullException.ThrowIfNull(dialect);
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(profile);
         AggregationProfileValidator.Validate(unit, profile);
+        query ??= AggregationQuery.For(profile.Name);
+        AggregationExecutor.ValidateQuery(unit, profile, query);
         var quote = dialect.QuoteIdentifier;
         var groups = profile.GroupByColumns.Select(quote).ToArray();
         var setColumns = profile.Aggregates.OfType<Aggregate.SetUnion>()
             .Select(set => quote(set.Column));
         var source = string.Join(", ", groups.Concat(setColumns).Distinct(StringComparer.Ordinal));
-        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: false);
+        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate);
+        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: false, sourceFragment?.CommandText);
         var selections = new List<string>(groups)
         {
             $"MAX({quote(InputCount)}) AS {quote(InputCount)}"
@@ -112,8 +131,15 @@ public static class RelationalAggregationRenderer
         var select = IsSqlServer(dialect)
             ? $"SELECT TOP ({groupProbe}) {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)}"
             : $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)} LIMIT {groupProbe}";
-        return new RelationalAggregationCommand($"WITH {ctes} {select};", profile);
+        return new RelationalAggregationCommand($"WITH {ctes} {select};", profile, sourceFragment?.Parameters ?? []);
     }
+
+    private static RelationalPredicateFragment? RenderSourceFragment(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        Groundwork.Query.Model.Predicate? predicate) => predicate is null
+            ? null
+            : dialect.CreateQueryRenderer().RenderPredicateFragment(predicate, unit.Name);
 
     private static string RenderBoundedInputCtes(
         RelationalDialect dialect,
@@ -121,19 +147,22 @@ public static class RelationalAggregationRenderer
         AggregationProfile profile,
         string source,
         IReadOnlyList<string> groups,
-        bool includeFirstRanks)
+        bool includeFirstRanks,
+        string? sourcePredicate)
     {
         var quote = dialect.QuoteIdentifier;
         var probeRows = ((long)profile.MaxInputRows + 1L).ToString(CultureInfo.InvariantCulture);
         var boundedSource = IsSqlServer(dialect)
-            ? $"SELECT TOP ({probeRows}) {source} FROM {quote(unit.Name)}"
-            : $"SELECT {source} FROM {quote(unit.Name)} LIMIT {probeRows}";
+            ? $"SELECT TOP ({probeRows}) {source} FROM {quote(unit.Name)}{Where(sourcePredicate)}"
+            : $"SELECT {source} FROM {quote(unit.Name)}{Where(sourcePredicate)} LIMIT {probeRows}";
         var windowColumns = new List<string> { "*", $"COUNT(*) OVER() AS {quote(InputCount)}" };
         if (includeFirstRanks)
             windowColumns.AddRange(profile.Aggregates.OfType<Aggregate.FirstBy>().Select(first =>
                 $"ROW_NUMBER() OVER (PARTITION BY {string.Join(", ", groups)} ORDER BY {FirstOrder(first, quote, unit)}) AS {quote(FirstRankAlias(first.Alias))}"));
         return $"__groundwork_aggregation_source AS ({boundedSource}), " +
             $"__groundwork_aggregation_input AS (SELECT {string.Join(", ", windowColumns)} FROM __groundwork_aggregation_source)";
+
+        static string Where(string? predicate) => predicate is null ? string.Empty : " WHERE " + predicate;
     }
 
     private static string FirstOrder(Aggregate.FirstBy first, Func<string, string> quote, StorageUnit unit)

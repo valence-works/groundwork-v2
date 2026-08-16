@@ -6,6 +6,11 @@ has one renderer over the public substrate contract: SQLite, PostgreSQL, and SQL
 sort documents, and an aggregation pipeline when explicit null ranks or a count are required. The
 renderers are synchronous and do not change the query model.
 
+Relational aggregation source predicates use the same ordinary renderer fragment as `QueryRequest`:
+provider hooks, portable ordering (including SQL Server GUID ordering), substring semantics, and
+adapted bound parameters therefore cannot drift between a normal query and pre-reduction input.
+The aggregate command and its budget probe bind the same fragment parameters before execution.
+
 `Paging.Keyset(limit)` is the first keyset page. `Paging.Continuation` carries a typed tuple made
 with `QueryContinuationToken.Encode`; the tuple contains every requested order term followed by
 the explicitly supplied `QueryRenderOptions.TieBreakColumns`. Applications must supply their

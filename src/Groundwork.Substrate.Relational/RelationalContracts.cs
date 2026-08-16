@@ -17,6 +17,10 @@ public abstract class RelationalDialect
 
     public abstract string ProviderName { get; }
 
+    /// <summary>Creates the provider's ordinary query renderer for shared predicate fragments.</summary>
+    public virtual RelationalQueryRenderer CreateQueryRenderer() =>
+        throw new NotSupportedException($"Relational dialect '{ProviderName}' does not expose a query renderer.");
+
     /// <summary>Whether CreateTableSql materializes the complete column set in one statement.</summary>
     public virtual bool CreateTableIncludesColumns => false;
 
@@ -30,6 +34,14 @@ public abstract class RelationalDialect
     /// <summary>Renders exact membership for a JSON/array SetUnion output.</summary>
     public virtual string RenderAggregationContains(string expression, string literal) =>
         throw new NotSupportedException("A relational dialect must define exact SetUnion membership rendering.");
+
+    /// <summary>Renders an ordinal source-string containment operation for aggregation input.</summary>
+    public virtual string RenderAggregationSourceContains(string expression, string literal) =>
+        throw new NotSupportedException("A relational dialect must define ordinal aggregation source containment rendering.");
+
+    /// <summary>Renders an ordinal source-string suffix operation for aggregation input.</summary>
+    public virtual string RenderAggregationSourceEndsWith(string expression, string literal) =>
+        throw new NotSupportedException("A relational dialect must define ordinal aggregation source suffix rendering.");
 
     /// <summary>Renders a typed literal for a post-reduction aggregation predicate.</summary>
     public virtual string RenderAggregationLiteral(object? value, PortableType type) => value switch

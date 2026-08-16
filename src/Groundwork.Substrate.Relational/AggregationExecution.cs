@@ -53,11 +53,12 @@ public static class RelationalAggregationExecutor
         ArgumentNullException.ThrowIfNull(profile);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(decode);
-        VerifyBudgets(connection, transaction, dialect, unit, profile);
+        VerifyBudgets(connection, transaction, dialect, unit, profile, query);
         var command = dialect.RenderAggregation(unit, profile, query);
         using var native = connection.CreateCommand();
         native.Transaction = transaction;
         native.CommandText = command.CommandText;
+        RelationalQueryResultReader.AddParameters(native, command);
         using var reader = native.ExecuteReader();
         var rows = new List<AggregationRow>();
         while (reader.Read())
@@ -90,7 +91,10 @@ public static class RelationalAggregationExecutor
             rows.Add(new AggregationRow(values));
         }
 
-        return new AggregationResult(rows);
+        return new AggregationResult(
+            rows,
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, query),
+            AggregationQueryFingerprint.Create(unit, profile, query));
     }
 
     private static AggregationBudgetExceededException SumOverflow(
@@ -107,12 +111,14 @@ public static class RelationalAggregationExecutor
         DbTransaction? transaction,
         RelationalDialect dialect,
         StorageUnit unit,
-        AggregationProfile profile)
+        AggregationProfile profile,
+        AggregationQuery query)
     {
-        var probe = RelationalAggregationRenderer.RenderBudgetProbe(dialect, unit, profile);
+        var probe = RelationalAggregationRenderer.RenderBudgetProbe(dialect, unit, profile, query);
         using var native = connection.CreateCommand();
         native.Transaction = transaction;
         native.CommandText = probe.CommandText;
+        RelationalQueryResultReader.AddParameters(native, probe);
         using var reader = native.ExecuteReader();
         var groups = 0;
         while (reader.Read())

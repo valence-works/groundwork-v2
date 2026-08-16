@@ -24,6 +24,10 @@ public static class AggregationSessionExecutor
         ArgumentNullException.ThrowIfNull(query);
         var profile = AggregationProfileValidator.ResolveOrThrow(unit, query.ProfileName);
         AggregationProfileValidator.Validate(unit, profile);
+        // Admit the complete query before handing its predicate to a provider renderer. This keeps
+        // the closed aggregation surface's refusal codes provider-neutral (for example, a
+        // StartsWith source predicate must not reach a provider's search-key renderer first).
+        AggregationExecutor.ValidateQuery(unit, profile, query);
         var requiredColumns = profile.GroupByColumns
             .Concat(profile.Aggregates.SelectMany(aggregate => aggregate switch
             {
@@ -46,7 +50,7 @@ public static class AggregationSessionExecutor
         var probeLimit = profile.MaxInputRows == int.MaxValue ? int.MaxValue : profile.MaxInputRows + 1;
         var request = new QueryRequest(
             new TableId(unit.Name),
-            Predicate.AlwaysTrue.Instance,
+            query.SourcePredicate ?? Predicate.AlwaysTrue.Instance,
             order,
             Projection.All,
             Paging.OffsetLimit(0, probeLimit));

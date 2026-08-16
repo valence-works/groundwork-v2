@@ -128,12 +128,13 @@ public sealed class KernelDeclarationTests
     }
 
     [Fact]
-    public void Kernel_assembly_references_only_the_BCL()
+    public void Kernel_assembly_references_only_the_BCL_and_query_model()
     {
         var externalReferences = typeof(StorageUnit).Assembly.GetReferencedAssemblies()
             .Where(reference => !reference.Name!.StartsWith("System", StringComparison.Ordinal) &&
                 !reference.Name.Equals("netstandard", StringComparison.Ordinal) &&
-                !reference.Name.Equals("Microsoft.Win32.Registry", StringComparison.Ordinal))
+                !reference.Name.Equals("Microsoft.Win32.Registry", StringComparison.Ordinal) &&
+                !reference.Name.Equals("Groundwork.Query.Model", StringComparison.Ordinal))
             .ToArray();
 
         Assert.Empty(externalReferences);

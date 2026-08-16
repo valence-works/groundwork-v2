@@ -97,6 +97,14 @@ public sealed class MongoQueryRenderer
             expectedIndex?.Name);
     }
 
+    internal BsonDocument RenderAggregationSourcePredicate(Predicate predicate, string table, int inValueLimit = 1_000)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        if (inValueLimit <= 0)
+            throw new ArgumentOutOfRangeException(nameof(inValueLimit));
+        return RenderPredicate(predicate, new QueryRenderOptions { InValueLimit = inValueLimit }, table);
+    }
+
     private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
         options.GetEffectiveOrder(request);
 
@@ -179,7 +187,7 @@ public sealed class MongoQueryRenderer
             case Predicate.Substring substring when substring.Anchor is Anchor.Contains or Anchor.EndsWith:
                 return new BsonDocument(substring.Column.Name,
                     new BsonRegularExpression(
-                        Regex.Escape(substring.Needle) + (substring.Anchor == Anchor.EndsWith ? "$" : string.Empty),
+                        Regex.Escape(substring.Needle) + (substring.Anchor == Anchor.EndsWith ? "\\z" : string.Empty),
                         string.Empty));
             case Predicate.Not not:
                 return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, options, table) });

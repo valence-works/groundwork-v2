@@ -36,6 +36,21 @@ public sealed class RelationalQueryCommand
     public ImmutableArray<string> AppliedOrder { get; }
 }
 
+/// <summary>One provider-rendered predicate fragment and its bound values.</summary>
+internal sealed class RelationalPredicateFragment
+{
+    public RelationalPredicateFragment(string commandText, IEnumerable<QueryRenderParameter> parameters)
+    {
+        CommandText = commandText ?? throw new ArgumentNullException(nameof(commandText));
+        Parameters = (parameters ?? throw new ArgumentNullException(nameof(parameters))).ToImmutableArray();
+        if (Parameters.Any(parameter => parameter is null))
+            throw new ArgumentException("Predicate parameters cannot contain null references.", nameof(parameters));
+    }
+
+    public string CommandText { get; }
+    public ImmutableArray<QueryRenderParameter> Parameters { get; }
+}
+
 /// <summary>Executes a rendered relational command while leaving value decoding to the provider.</summary>
 public static class RelationalQueryResultReader
 {
@@ -71,7 +86,20 @@ public static class RelationalQueryResultReader
     {
         ArgumentNullException.ThrowIfNull(command);
         ArgumentNullException.ThrowIfNull(query);
-        foreach (var value in query.Parameters)
+        AddParameters(command, query.Parameters);
+    }
+
+    /// <summary>Adds the bound values from an aggregation command to a native command.</summary>
+    public static void AddParameters(DbCommand command, RelationalAggregationCommand query)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(query);
+        AddParameters(command, query.Parameters);
+    }
+
+    private static void AddParameters(DbCommand command, IEnumerable<QueryRenderParameter> values)
+    {
+        foreach (var value in values)
         {
             var parameter = command.CreateParameter();
             parameter.ParameterName = "@" + value.Name;
@@ -238,6 +266,33 @@ public abstract class RelationalQueryRenderer
             effectiveOrder.Select(term => term.Column.Name).ToArray());
     }
 
+    /// <summary>
+    /// Renders a normalized portable predicate using the same provider hooks, parameter adaptation,
+    /// and literal semantics as an ordinary query. The returned fragment is safe to place after a
+    /// relational <c>WHERE</c> keyword; callers remain responsible for admission and table binding.
+    /// </summary>
+    internal RelationalPredicateFragment RenderPredicateFragment(
+        Predicate predicate,
+        string table,
+        int inValueLimit = 1_000)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        if (string.IsNullOrWhiteSpace(table))
+            throw new ArgumentException("A source table is required.", nameof(table));
+        if (inValueLimit <= 0)
+            throw new ArgumentOutOfRangeException(nameof(inValueLimit));
+
+        var parameters = new List<QueryRenderParameter>();
+        var parameterIndex = 0;
+        var normalized = PredicateNormalizer.Normalize(predicate);
+        var commandText = RenderPredicate(normalized, parameters, ref parameterIndex, inValueLimit, table);
+        if (parameters.Count > parameterBudget)
+            throw new QueryRenderException(
+                "GW-QUERY-015",
+                $"Query on '{table}' requires {parameters.Count} parameters, exceeding the {ProviderName} provider budget of {parameterBudget}.");
+        return new RelationalPredicateFragment(commandText, parameters);
+    }
+
     protected abstract string ProviderName { get; }
 
     protected virtual string RenderCountExpression() => "COUNT(*) OVER()";
@@ -302,7 +357,7 @@ public abstract class RelationalQueryRenderer
     private IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
         options.GetEffectiveOrder(request);
 
-    private string RenderPredicate(
+    protected string RenderPredicate(
         Predicate predicate,
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex,
@@ -420,7 +475,7 @@ public abstract class RelationalQueryRenderer
         return "(" + string.Join(" AND ", parts) + ")";
     }
 
-    private string RenderColumnCompare(Predicate.ColumnCompare compare)
+    protected virtual string RenderColumnCompare(Predicate.ColumnCompare compare)
     {
         var left = RenderColumn(compare.Left);
         var right = RenderColumn(compare.Right);

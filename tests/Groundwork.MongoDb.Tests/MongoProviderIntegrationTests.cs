@@ -102,6 +102,54 @@ public sealed class MongoProviderIntegrationTests
         Assert.Equal("GW-AGG-BOUND-007", exception.Code);
     }
 
+    [SkippableFact]
+    public void Native_EndsWith_does_not_match_a_trailing_newline()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-aggregation-suffix-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_aggregation_suffix_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false },
+                new() { Name = "amount", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "label", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Sum("total", "amount")]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "newline", ["group"] = "newline", ["amount"] = 1L, ["label"] = "plain\n"
+        }));
+        session.Insert(new MongoStorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "exact", ["group"] = "exact", ["amount"] = 2L, ["label"] = "plain"
+        }));
+
+        var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+        var result = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Substring(label, "plain", Anchor.EndsWith)
+        });
+
+        var row = Assert.Single(result.Rows);
+        Assert.Equal("exact", row["group"]);
+        Assert.Equal(2L, row["total"]);
+    }
+
     [Fact]
     public void Aggregation_fingerprint_sorts_allowance_entries_like_the_kernel()
     {

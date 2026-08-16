@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
 using Xunit;
 
@@ -160,5 +161,41 @@ public sealed class AggregationSqlRenderingTests
             }).CommandText;
         Assert.Contains("OPENJSON([labels])", predicateSql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSTR(", predicateSql, StringComparison.Ordinal);
+
+        var lowOrder = new ColumnRef(new TableId(unit.Name), "lowOrder", QueryType.Int64, isNullable: false);
+        var sourcePredicateCommand = RelationalAggregationRenderer.Render(
+            new SqlServerDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
+            });
+        var sourceProbeCommand = RelationalAggregationRenderer.RenderBudgetProbe(
+            new SqlServerDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
+            });
+        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = @p0)", sourcePredicateCommand.CommandText, StringComparison.Ordinal);
+        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = @p0)", sourceProbeCommand.CommandText, StringComparison.Ordinal);
+        var sourceParameter = Assert.Single(sourcePredicateCommand.Parameters);
+        var probeParameter = Assert.Single(sourceProbeCommand.Parameters);
+        Assert.Equal(sourceParameter.Type, probeParameter.Type);
+        Assert.Equal(sourceParameter.Value, probeParameter.Value);
+
+        var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+        var substringCommand = RelationalAggregationRenderer.Render(
+            new SqlServerDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Substring(label, "plain", Anchor.Contains)
+            });
+        Assert.Contains("CHARINDEX(@p0, [label] COLLATE Latin1_General_100_BIN2) > 0", substringCommand.CommandText, StringComparison.Ordinal);
+        Assert.Equal("plain", substringCommand.Parameters.Single().Value);
     }
 }

@@ -88,6 +88,23 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex)
     {
+        if (range.Column.Type == QueryType.Guid)
+        {
+            var guidExpression = RenderColumn(range.Column);
+            var guidKey = RenderGuidOrderKey(guidExpression);
+            var guidParts = new List<string> { guidExpression + " IS NOT NULL" };
+            if (range.Lower is { } guidLower)
+            {
+                var parameter = AddParameter(range.Column, guidLower.Value, parameters, ref parameterIndex);
+                guidParts.Add(guidKey + (guidLower.IsInclusive ? " >= " : " > ") + RenderGuidOrderKey("@" + parameter));
+            }
+            if (range.Upper is { } guidUpper)
+            {
+                var parameter = AddParameter(range.Column, guidUpper.Value, parameters, ref parameterIndex);
+                guidParts.Add(guidKey + (guidUpper.IsInclusive ? " <= " : " < ") + RenderGuidOrderKey("@" + parameter));
+            }
+            return "(" + string.Join(" AND ", guidParts) + ")";
+        }
         if (range.Column.Type != QueryType.String)
             return base.RenderRange(range, parameters, ref parameterIndex);
 
@@ -101,6 +118,27 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
         if (range.Upper is { } upper)
             parts.Add(RenderStringBound(expression, range.Column, upper, isLower: false, parameters, ref parameterIndex));
         return "(" + string.Join(" AND ", parts) + ")";
+    }
+
+    protected override string RenderColumnCompare(Predicate.ColumnCompare compare)
+    {
+        if (compare.Left.Type != QueryType.Guid || compare.Right.Type != QueryType.Guid)
+            return base.RenderColumnCompare(compare);
+
+        var left = RenderColumn(compare.Left);
+        var right = RenderColumn(compare.Right);
+        var op = compare.Op switch
+        {
+            CompareOp.Equal => "=",
+            CompareOp.NotEqual => "<>",
+            CompareOp.LessThan => "<",
+            CompareOp.LessThanOrEqual => "<=",
+            CompareOp.GreaterThan => ">",
+            CompareOp.GreaterThanOrEqual => ">=",
+            _ => throw new ArgumentOutOfRangeException(nameof(compare.Op), compare.Op, null)
+        };
+        return "(" + left + " IS NOT NULL AND " + right + " IS NOT NULL AND " +
+            RenderGuidOrderKey(left) + " " + op + " " + RenderGuidOrderKey(right) + ")";
     }
 
     private string RenderSearchKeyRange(
