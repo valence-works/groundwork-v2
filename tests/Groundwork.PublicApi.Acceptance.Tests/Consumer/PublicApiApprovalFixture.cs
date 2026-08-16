@@ -6,6 +6,7 @@ using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
 using Groundwork.Sqlite;
+using Groundwork.Testing;
 
 namespace Groundwork.PublicApi.Consumer;
 
@@ -33,6 +34,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
         _ = typeof(SqliteProviderFactory);
+        _ = typeof(InMemoryProviderFactory);
     }
 
     public static void CompileCallableSurface()
@@ -46,6 +48,7 @@ internal static class PublicApiApprovalFixture
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));
         _ = new Func<DocumentUnit<ApprovalDocument>, RowValues, DocumentReadResult<ApprovalDocument>>((unit, values) => unit.Read(values, null));
         _ = new Func<RecordTable<ApprovalRecord>, IGwQueryable<ApprovalRecord>>(table => table.Query.Where(row => row.Value == "approved"));
+        _ = new Func<string, IStorageProviderConnection>(connectionString => new InMemoryProviderFactory().Create(connectionString));
         _ = new Func<QueryRequest, RuntimeCoverageGate>(request => new RuntimeCoverageGate([], []).Check(request) is not null ? new RuntimeCoverageGate([], []) : throw new InvalidOperationException());
     }
 

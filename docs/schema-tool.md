@@ -1,6 +1,6 @@
 # Schema tooling
 
-`Groundwork.SchemaTool` is the explicit deployment-time entry point for physical-schema work. Runtime admission remains inspect-only unless a host opts into safe startup application.
+`Groundwork.Tool` is the public package and command-line entry point for explicit deployment-time physical-schema work. Its assembly and namespace remain `Groundwork.SchemaTool` for source compatibility. Runtime admission remains inspect-only unless a host opts into safe startup application.
 
 ## CLI
 
