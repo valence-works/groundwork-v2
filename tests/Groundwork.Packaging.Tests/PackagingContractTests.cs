@@ -86,6 +86,8 @@ public sealed class PackagingContractTests
         Assert.Contains("needs: package", workflow, StringComparison.Ordinal);
         Assert.Contains("verify-package-layout.sh", workflow, StringComparison.Ordinal);
         Assert.Contains("release", workflow, StringComparison.Ordinal);
+        Assert.Contains("[0-9a-z.-]+", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("A-Za-z", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("vars.FEEDZ_NUGET_SOURCE", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("NUGET_API_KEY", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("api.nuget.org/v3/index.json", workflow, StringComparison.Ordinal);

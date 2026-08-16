@@ -5,6 +5,8 @@ public preview is `0.1.0-preview.1`; a release tag is `v0.1.0-preview.1` and
 the `v` prefix is not part of the package version. Preview packages are
 published to the public Groundwork Feedz source at
 `https://f.feedz.io/valence-works/groundwork/nuget/index.json`.
+Published version strings use lowercase prerelease identifiers so artifact and
+NuGet cache identities remain identical on every supported platform.
 
 While the major version is zero:
 
