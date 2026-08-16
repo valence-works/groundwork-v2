@@ -384,18 +384,15 @@ public sealed class SchemaGenerator : ISourceGenerator
             builder.Append("namespace ").Append(namespaceName).AppendLine(";");
         builder.Append("public static class ").Append(typeName).AppendLine();
         builder.AppendLine("{");
-        builder.AppendLine("    public static global::Groundwork.Kernel.StorageUnit Definition { get; } = new()");
+        builder.AppendLine("    public static global::Groundwork.Kernel.StorageUnit Definition { get; } = Build();");
+        builder.AppendLine();
+        builder.AppendLine("    private static global::Groundwork.Kernel.StorageUnit Build()");
         builder.AppendLine("    {");
-        builder.Append("        Id = new global::Groundwork.Kernel.StorageUnitId(").Append(Literal(table.Name)).AppendLine("),");
-        builder.Append("        Name = ").Append(Literal(table.Name)).AppendLine(",");
-        builder.AppendLine("        Columns = new global::Groundwork.Kernel.ColumnDefinition[]");
-        builder.AppendLine("        {");
+        builder.Append("        var declaration = global::Groundwork.Kernel.StorageUnit.Declare(")
+            .Append(Literal(table.Name)).Append(", ").Append(Literal(table.Name)).AppendLine(")");
         foreach (var column in table.Columns)
         {
-            builder.AppendLine("            new global::Groundwork.Kernel.ColumnDefinition");
-            builder.AppendLine("            {");
-            builder.Append("                Name = ").Append(Literal(column.Name)).AppendLine(",");
-            builder.Append("                Type = global::Groundwork.Kernel.PortableType.").Append(column.Type switch
+            builder.Append("            .Column(").Append(Literal(column.Name)).Append(", global::Groundwork.Kernel.PortableType.").Append(column.Type switch
             {
                 SchemaValueType.String => "String",
                 SchemaValueType.Int32 => "Int32",
@@ -406,46 +403,41 @@ public sealed class SchemaGenerator : ISourceGenerator
                 SchemaValueType.Guid => "Guid",
                 SchemaValueType.Binary => "Binary",
                 _ => "Json"
-            }).AppendLine(",");
-            builder.Append("                IsNullable = ").Append(column.IsNullable ? "true" : "false").AppendLine(",");
-            if (column.Length.HasValue) builder.Append("                MaxLength = ").Append(column.Length.Value).AppendLine(",");
-            if (column.Precision.HasValue) builder.Append("                Precision = ").Append(column.Precision.Value).AppendLine(",");
-            if (column.Scale.HasValue) builder.Append("                Scale = ").Append(column.Scale.Value).AppendLine(",");
+            }).Append(",");
+            var columnOptions = new List<string>();
+            if (!column.IsNullable)
+                columnOptions.Add("Required()");
+            if (column.Length.HasValue)
+                columnOptions.Add("MaxLength(" + column.Length.Value + ")");
+            if (column.Precision.HasValue && column.Scale.HasValue)
+                columnOptions.Add("Precision(" + column.Precision.Value + ", " + column.Scale.Value + ")");
             if (column.Folding != TextFolding.None)
-            {
-                builder.Append("                Collation = global::Groundwork.Kernel.PortableCollation.").Append(column.Folding == TextFolding.AsciiIgnoreCase ? "OrdinalIgnoreCase" : "UnicodeOrdinalIgnoreCase").AppendLine(",");
-            }
+                columnOptions.Add("Collation(global::Groundwork.Kernel.PortableCollation." +
+                    (column.Folding == TextFolding.AsciiIgnoreCase ? "OrdinalIgnoreCase" : "UnicodeOrdinalIgnoreCase") + ")");
             if (column.Generation == SchemaGeneration.ProviderSequence)
-                builder.AppendLine("                Generation = global::Groundwork.Kernel.ColumnGeneration.ProviderSequence,");
-            builder.AppendLine("            },");
+                columnOptions.Add("ProviderSequence()");
+            if (columnOptions.Count > 0)
+                builder.Append(" column => column.").Append(string.Join(".", columnOptions));
+            builder.AppendLine(")");
         }
-        builder.AppendLine("        },");
-        builder.AppendLine("        Key = new global::Groundwork.Kernel.KeyDefinition");
-        builder.AppendLine("        {");
-        builder.AppendLine("            Columns = new string[]");
-        builder.AppendLine("            {");
+        builder.AppendLine("            .Key(");
+        builder.AppendLine("                new string[]");
+        builder.AppendLine("                {");
         foreach (var key in table.Key)
-            builder.Append("                ").Append(Literal(key)).AppendLine(",");
-        builder.AppendLine("            }");
-        builder.AppendLine("        },");
-        builder.AppendLine("        Indexes = new global::Groundwork.Kernel.IndexDefinition[]");
-        builder.AppendLine("        {");
+            builder.Append("                    ").Append(Literal(key)).AppendLine(",");
+        builder.AppendLine("                })");
         foreach (var index in table.Indexes)
         {
-            builder.AppendLine("            new global::Groundwork.Kernel.IndexDefinition");
-            builder.AppendLine("            {");
-            builder.Append("                Name = ").Append(Literal(index.Name)).AppendLine(",");
-            builder.Append("                IsUnique = ").Append(index.Unique ? "true" : "false").AppendLine(",");
-            builder.Append("                MissingValues = global::Groundwork.Kernel.MissingValueBehavior.").Append(index.IncludeNulls ? "Included" : "Excluded").AppendLine(",");
-            builder.AppendLine("                Columns = new global::Groundwork.Kernel.IndexColumn[]");
-            builder.AppendLine("                {");
+            builder.Append("            .").Append(index.Unique ? "UniqueIndex" : "Index").Append("(").Append(Literal(index.Name)).AppendLine(", index => index");
             foreach (var column in index.Columns)
-                builder.Append("                    new global::Groundwork.Kernel.IndexColumn(").Append(Literal(column.Name)).Append(", global::Groundwork.Kernel.SortDirection.").Append(column.Descending ? "Descending" : "Ascending").AppendLine("),");
-            builder.AppendLine("                }");
-            builder.AppendLine("            },");
+                builder.Append("                .").Append(column.Descending ? "Descending" : "Column").Append("(").Append(Literal(column.Name)).AppendLine(")");
+            if (!index.IncludeNulls)
+                builder.AppendLine("                .ExcludeMissingValues()");
+            builder.AppendLine("            )");
         }
-        builder.AppendLine("        }");
-        builder.AppendLine("    }; ");
+        builder.AppendLine("        ;");
+        builder.AppendLine("        return declaration.Build();");
+        builder.AppendLine("    }");
         builder.AppendLine("}");
         return builder.ToString();
     }

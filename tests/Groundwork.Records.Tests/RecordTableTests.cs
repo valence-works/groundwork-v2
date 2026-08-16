@@ -208,6 +208,35 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Records_storage_wrapper_exposes_sparse_index_authoring()
+    {
+        var definition = Groundwork.Records.StorageUnit
+            .Declare("sparse", "sparse")
+            .String("id", 32, column => column.Required())
+            .String("email", 320)
+            .Key("id")
+            .UniqueIndex("by-email", index => index
+                .Column("email")
+                .ExcludeMissingValues())
+            .Build();
+
+        Assert.Equal(MissingValueBehavior.Excluded, definition.Indexes.Single().MissingValues);
+    }
+
+    [Fact]
+    public void Records_storage_wrapper_refuses_path_like_physical_columns()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
+            .Declare("invalid", "invalid")
+            .String("state.status", 200)
+            .Key("state.status")
+            .Build());
+
+        Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-PORT-010" &&
+            diagnostic.Message.Contains("ASCII letters", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Optimistic_concurrency_is_explicit_and_system_owned()
     {
         var table = CustomerTable();

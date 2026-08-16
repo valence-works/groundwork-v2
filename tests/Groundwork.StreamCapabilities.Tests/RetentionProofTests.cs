@@ -654,7 +654,7 @@ public sealed class RetentionProofTests
         Assert.Equal(2, originalSession.Unit.Retention!.KeepNewest);
 
         var adversarialName = "s3-mongo-parts-" + Guid.NewGuid().ToString("N");
-        var commaPartition = new StorageUnit
+        var combinedPartition = new StorageUnit
         {
             Id = new StorageUnitId(adversarialName),
             Name = adversarialName,
@@ -662,7 +662,7 @@ public sealed class RetentionProofTests
             [
                 new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
                 new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false },
-                new() { Name = "a,b", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "a_b", Type = PortableType.String, MaxLength = 16, IsNullable = false },
                 new() { Name = "a", Type = PortableType.String, MaxLength = 16, IsNullable = false },
                 new() { Name = "b", Type = PortableType.String, MaxLength = 16, IsNullable = false }
             ],
@@ -671,13 +671,13 @@ public sealed class RetentionProofTests
             {
                 KeepNewest = 2,
                 OrderColumn = "ordering",
-                PartitionColumns = ["a,b"]
+                PartitionColumns = ["a_b"]
             }
         };
-        Assert.True(connection.Schema.Apply(commaPartition).Applied);
-        var splitPartitions = commaPartition with
+        Assert.True(connection.Schema.Apply(combinedPartition).Applied);
+        var splitPartitions = combinedPartition with
         {
-            Retention = commaPartition.Retention! with { PartitionColumns = ["a", "b"] }
+            Retention = combinedPartition.Retention! with { PartitionColumns = ["a", "b"] }
         };
         var adversarialDrift = Assert.Throws<MongoSchemaConflictException>(() =>
             connection.Schema.Diff(splitPartitions));

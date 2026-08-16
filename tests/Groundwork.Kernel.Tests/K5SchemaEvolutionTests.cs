@@ -413,10 +413,10 @@ public sealed class K5SchemaEvolutionTests
             [
                 new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
                 new() { Name = "group", Type = PortableType.String },
-                new() { Name = "a:b", Type = PortableType.String },
-                new() { Name = "c", Type = PortableType.String },
+                new() { Name = "ab", Type = PortableType.String },
+                new() { Name = "bc", Type = PortableType.String },
                 new() { Name = "a", Type = PortableType.String },
-                new() { Name = "b:c", Type = PortableType.String }
+                new() { Name = "c", Type = PortableType.String }
             ],
             Key = new KeyDefinition { Columns = ["id"] }
         };
@@ -428,7 +428,7 @@ public sealed class K5SchemaEvolutionTests
                 {
                     Name = "summary",
                     GroupByColumns = ["group"],
-                    Aggregates = [new Aggregate.Min("a:b", "c")]
+                    Aggregates = [new Aggregate.Min("a", "bc")]
                 }
             ]
         });
@@ -440,7 +440,7 @@ public sealed class K5SchemaEvolutionTests
                 {
                     Name = "summary",
                     GroupByColumns = ["group"],
-                    Aggregates = [new Aggregate.Min("a", "b:c")]
+                    Aggregates = [new Aggregate.Min("ab", "c")]
                 }
             ]
         });

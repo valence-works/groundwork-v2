@@ -88,6 +88,7 @@ public static class PortabilityValidator
 
     private const int MinimumPortableDecimalPrecision = 1;
     private const int MaximumPortableDecimalPrecision = 38;
+    private const int MaximumPortableIdentifierLength = 63;
 
     public static PortabilityValidationResult Validate(
         StorageUnit? unit,
@@ -111,6 +112,8 @@ public static class PortabilityValidator
             .GroupBy(column => column.Name, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
 
+        ValidatePhysicalIdentifiers(unit, columns, indexes, diagnostics);
+        ValidateDuplicatePhysicalIndexSignatures(indexes, diagnostics);
         ValidateUniqueNullability(indexes, byName, diagnostics);
         ValidateDecimalShape(columns, diagnostics);
         ValidateBoundedIndexKeys(indexes, byName, diagnostics);
@@ -120,6 +123,36 @@ public static class PortabilityValidator
         ValidateRetention(unit.Retention ?? context.Retention, byName, diagnostics);
         ValidateMongoKeyOrder(unit, context, diagnostics);
 
+        return new(diagnostics);
+    }
+
+    internal static PortabilityValidationResult ValidatePhysicalIdentifiers(StorageUnit? unit)
+    {
+        if (unit is null)
+        {
+            return new([new(
+                "GW-PORT-000",
+                "A storage unit is required for portability validation.",
+                "storageUnit")]);
+        }
+
+        var diagnostics = new List<PortabilityRefusal>();
+        ValidatePhysicalIdentifiers(unit, unit.Columns ?? [], unit.Indexes ?? [], diagnostics);
+        return new(diagnostics);
+    }
+
+    internal static PortabilityValidationResult ValidateDuplicatePhysicalIndexSignatures(StorageUnit? unit)
+    {
+        if (unit is null)
+        {
+            return new([new(
+                "GW-PORT-000",
+                "A storage unit is required for portability validation.",
+                "storageUnit")]);
+        }
+
+        var diagnostics = new List<PortabilityRefusal>();
+        ValidateDuplicatePhysicalIndexSignatures(unit.Indexes ?? [], diagnostics);
         return new(diagnostics);
     }
 
@@ -138,6 +171,195 @@ public static class PortabilityValidator
         var diagnostics = new List<PortabilityRefusal>();
         ValidateRetention(unit.Retention, byName, diagnostics);
         return new(diagnostics);
+    }
+
+    private static void ValidateDuplicatePhysicalIndexSignatures(
+        IReadOnlyList<IndexDefinition> indexes,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        var firstBySignature = new Dictionary<PhysicalIndexSignature, IndexDefinition>();
+        foreach (var index in indexes.Where(index => index is not null))
+        {
+            var signature = new PhysicalIndexSignature(index);
+            if (!firstBySignature.TryGetValue(signature, out var first))
+            {
+                firstBySignature.Add(signature, index);
+                continue;
+            }
+
+            diagnostics.Add(new(
+                "GW-PORT-009",
+                $"Indexes '{first.Name}' and '{index.Name}' have the same physical signature; " +
+                "consolidate their query purposes onto one physical index.",
+                $"indexes.{first.Name}|{index.Name}"));
+        }
+    }
+
+    private static void ValidatePhysicalIdentifiers(
+        StorageUnit unit,
+        IReadOnlyList<ColumnDefinition> columns,
+        IReadOnlyList<IndexDefinition> indexes,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        var declaredPhysicalNames = columns
+            .Where(column => column is not null)
+            .Select(column => column.Name)
+            .Concat((unit.DerivedColumns ?? []).Where(column => column is not null).Select(column => column.Name))
+            .ToHashSet(StringComparer.Ordinal);
+        for (var columnIndex = 0; columnIndex < columns.Count; columnIndex++)
+        {
+            var column = columns[columnIndex];
+            if (column is not null)
+            {
+                ValidateIdentifier(column.Name, $"columns.{column.Name}", diagnostics);
+
+                if (column.Type == PortableType.String && column.Name is { } sourceName &&
+                    !string.IsNullOrWhiteSpace(sourceName) &&
+                    SearchKeyProjection.IsFolded(SearchKeyProjection.LogicalCollation(column)) &&
+                    !declaredPhysicalNames.Contains(SearchKeyProjection.ColumnName(sourceName)))
+                {
+                    var searchKey = SearchKeyProjection.ColumnName(sourceName);
+                    ValidateIdentifier(searchKey, $"derivedColumns.{searchKey}.name", diagnostics);
+                }
+            }
+        }
+
+        var keyColumns = unit.Key?.Columns ?? [];
+        for (var keyIndex = 0; keyIndex < keyColumns.Count; keyIndex++)
+            ValidateIdentifier(keyColumns[keyIndex], $"key.columns[{keyIndex}]", diagnostics);
+
+        foreach (var index in indexes.Where(index => index is not null))
+        {
+            var indexColumns = index.Columns ?? [];
+            for (var columnIndex = 0; columnIndex < indexColumns.Count; columnIndex++)
+            {
+                var column = indexColumns[columnIndex];
+                ValidateIdentifier(
+                    column?.Column,
+                    $"indexes.{index.Name}.columns[{columnIndex}]",
+                    diagnostics);
+            }
+        }
+
+        foreach (var derived in (unit.DerivedColumns ?? []).Where(column => column is not null))
+        {
+            ValidateIdentifier(derived.Name, $"derivedColumns.{derived.Name}.name", diagnostics);
+            ValidateIdentifier(derived.SourceColumn, $"derivedColumns.{derived.Name}.sourceColumn", diagnostics);
+        }
+
+        if (unit.Concurrency?.TokenColumn is { } tokenColumn)
+            ValidateIdentifier(tokenColumn, "concurrency.tokenColumn", diagnostics);
+
+        if (unit.Retention is { } retention)
+        {
+            ValidateIdentifier(retention.OrderColumn, "retention.orderColumn", diagnostics);
+            foreach (var partition in retention.PartitionColumns ?? [])
+                ValidateIdentifier(partition, "retention.partitionColumns", diagnostics);
+        }
+
+        foreach (var profile in (unit.AggregationProfiles ?? []).Where(profile => profile is not null))
+        {
+            var profilePath = "aggregationProfiles." + profile.Name;
+            foreach (var groupBy in profile.GroupByColumns ?? [])
+                ValidateIdentifier(groupBy, profilePath + ".groupByColumns", diagnostics);
+            foreach (var aggregate in (profile.Aggregates ?? []).Where(aggregate => aggregate is not null))
+            {
+                ValidateIdentifier(aggregate.Alias, profilePath + ".aggregates", diagnostics);
+                switch (aggregate)
+                {
+                    case Aggregate.Min min:
+                        ValidateIdentifier(min.Column, profilePath + ".aggregates." + min.Alias, diagnostics);
+                        break;
+                    case Aggregate.Max max:
+                        ValidateIdentifier(max.Column, profilePath + ".aggregates." + max.Alias, diagnostics);
+                        break;
+                    case Aggregate.Sum sum:
+                        ValidateIdentifier(sum.Column, profilePath + ".aggregates." + sum.Alias, diagnostics);
+                        break;
+                    case Aggregate.SetUnion set:
+                        ValidateIdentifier(set.Column, profilePath + ".aggregates." + set.Alias, diagnostics);
+                        break;
+                    case Aggregate.FirstBy first:
+                        ValidateIdentifier(first.Column, profilePath + ".aggregates." + first.Alias, diagnostics);
+                        ValidateIdentifier(first.OrderColumn, profilePath + ".aggregates." + first.Alias, diagnostics);
+                        break;
+                }
+            }
+
+            foreach (var allowance in (profile.AllowedPredicates ?? []).Where(allowance => allowance is not null))
+                ValidateIdentifier(allowance.Alias, profilePath + ".allowedPredicates", diagnostics);
+        }
+    }
+
+    private static void ValidateIdentifier(
+        string? identifier,
+        string path,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        if (IsPortableIdentifier(identifier))
+            return;
+
+        var display = identifier is null ? "<null>" : $"'{identifier}'";
+        diagnostics.Add(new(
+            "GW-PORT-010",
+            $"Physical column identifier {display} is invalid; use ASCII letters, digits, and underscores, " +
+            "starting with a letter or underscore, keep it at most 63 ASCII bytes, and do not use the " +
+            "'__groundwork_' provider-owned prefix; choose a shorter identifier when necessary.",
+            path));
+    }
+
+    private static bool IsPortableIdentifier(string? identifier)
+    {
+        if (string.IsNullOrWhiteSpace(identifier) || identifier.Length > MaximumPortableIdentifierLength ||
+            !IsIdentifierStart(identifier[0]))
+            return false;
+        for (var index = 1; index < identifier.Length; index++)
+        {
+            if (!IsIdentifierPart(identifier[index]))
+                return false;
+        }
+
+        return !identifier.StartsWith("__groundwork_", StringComparison.Ordinal) ||
+            IsKnownProviderOwnedColumn(identifier);
+    }
+
+    private static bool IsIdentifierStart(char value) =>
+        value is '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z');
+
+    private static bool IsIdentifierPart(char value) =>
+        IsIdentifierStart(value) || value is (>= '0' and <= '9');
+
+    private static bool IsKnownProviderOwnedColumn(string identifier) =>
+        ProviderOwnedColumns.IsAllowedPhysicalColumn(identifier);
+
+    private sealed class PhysicalIndexSignature : IEquatable<PhysicalIndexSignature>
+    {
+        public PhysicalIndexSignature(IndexDefinition index)
+        {
+            IsUnique = index.IsUnique;
+            MissingValues = index.MissingValues;
+            Columns = (index.Columns ?? []).ToArray();
+        }
+
+        private bool IsUnique { get; }
+        private MissingValueBehavior MissingValues { get; }
+        private IReadOnlyList<IndexColumn> Columns { get; }
+
+        public bool Equals(PhysicalIndexSignature? other) =>
+            other is not null &&
+            IsUnique == other.IsUnique &&
+            MissingValues == other.MissingValues &&
+            Columns.SequenceEqual(other.Columns);
+
+        public override bool Equals(object? obj) => Equals(obj as PhysicalIndexSignature);
+
+        public override int GetHashCode()
+        {
+            var hash = HashCode.Combine(IsUnique, MissingValues);
+            foreach (var column in Columns)
+                hash = HashCode.Combine(hash, column?.Column, column?.Direction);
+            return hash;
+        }
     }
 
     private static void ValidateUniqueNullability(
