@@ -27,8 +27,8 @@ public static class BuilderCustomerSample
         .Boolean("isActive", c => c.Required().Default(true))
         .Decimal("balance", 19, 4, c => c.Required())
         .Key("id")
-        .UniqueIndex("by-email", "email")
-        .Index("by-created", x => x.Descending("createdAt"))
+        .UniqueIndex("by_email", "email")
+        .Index("by_created", x => x.Descending("createdAt"))
         .Build();
 
     public static readonly RecordTable<BuilderCustomer> Customers = RecordTable.For<BuilderCustomer>("customers")
@@ -36,7 +36,7 @@ public static class BuilderCustomerSample
         .Column(x => x.Name, c => c.MaxLength(200))
         .Column(x => x.Email, c => c.MaxLength(320))
         .Column(x => x.Balance, c => c.Precision(19, 4))
-        .UniqueIndex("by-email", x => x.Email)
-        .Index("by-created", x => x.CreatedAt, SortDirection.Descending)
+        .UniqueIndex("by_email", x => x.Email)
+        .Index("by_created", x => x.CreatedAt, SortDirection.Descending)
         .Build();
 }

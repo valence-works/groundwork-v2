@@ -206,7 +206,7 @@ public sealed class RecordsProviderProofTests
         Assert.Equal(3, upserted.Version);
 
         var query = table.Query.Where(row => row.Email == email).OrderBy(row => row.Name);
-        var result = records.Query(query, RecordQueryOptions.UsingIndex("by-email"));
+        var result = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));
         var match = Assert.Single(result);
         Assert.Equal("Ada Byron", match.Name);
 

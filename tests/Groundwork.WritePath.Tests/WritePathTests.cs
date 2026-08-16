@@ -513,7 +513,7 @@ public sealed class WritePathTests
         ScopePolicy scope = ScopePolicy.Global) => new()
     {
         Id = new StorageUnitId(id + "-" + Guid.NewGuid().ToString("N")),
-        Name = "w1_" + id + "_" + Guid.NewGuid().ToString("N"),
+        Name = PhysicalName("w1_" + id + "_" + Guid.NewGuid().ToString("N")),
         Columns =
         [
             new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 200 },
@@ -619,7 +619,7 @@ public sealed class WritePathTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("mongodb-provider-sequence-" + Guid.NewGuid().ToString("N")),
-            Name = "mongodb-provider-sequence-" + Guid.NewGuid().ToString("N"),
+            Name = "mongodb_provider_sequence_" + Guid.NewGuid().ToString("N"),
             Columns =
             [
                 new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
@@ -627,6 +627,7 @@ public sealed class WritePathTests
             ],
             Key = new KeyDefinition { Columns = ["sequence"] }
         };
+
         connection.Schema.Apply(unit);
         var observer = new WritePathObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
@@ -639,6 +640,14 @@ public sealed class WritePathTests
         Assert.Contains("one-command", exception.Message, StringComparison.Ordinal);
         Assert.Equal(0, observer.RoundTrips);
         Assert.Empty(observer.Commands);
+    }
+
+    private static string PhysicalName(string name)
+    {
+        var normalized = name.Replace('-', '_');
+        return normalized.Length <= PortabilityValidator.MaximumPortableIdentifierLength
+            ? normalized
+            : normalized[..30] + "_" + normalized[^32..];
     }
 
     private sealed class TemporarySqliteStore : IDisposable

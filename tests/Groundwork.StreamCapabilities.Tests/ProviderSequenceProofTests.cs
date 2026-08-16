@@ -99,7 +99,7 @@ public sealed class ProviderSequenceProofTests
 
     private static void AssertSequenceOnlyInsert(IStorageProviderConnection connection, string provider)
     {
-        var name = "stream-sequence-only-" + provider + "-" + Guid.NewGuid().ToString("N");
+        var name = "stream_sequence_only_" + provider + "_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -180,7 +180,7 @@ public sealed class ProviderSequenceProofTests
     private static StorageUnit SequenceUnit(string name) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
@@ -188,4 +188,6 @@ public sealed class ProviderSequenceProofTests
         ],
         Key = new KeyDefinition { Columns = ["sequence"] }
     };
+
+    private static string PhysicalName(string name) => name.Replace('-', '_');
 }

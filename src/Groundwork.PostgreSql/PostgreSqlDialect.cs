@@ -509,7 +509,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     internal static string PhysicalIndexName(string table, string index)
     {
-        var logical = $"{table}__{index}";
+        var logical = $"__groundwork_ix_{table.Length}_{table}_{index.Length}_{index}";
         if (logical.Length <= 63)
             return logical;
 

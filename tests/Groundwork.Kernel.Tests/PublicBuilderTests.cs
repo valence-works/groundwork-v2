@@ -16,7 +16,7 @@ public sealed class PublicBuilderTests
             .Timestamp("occurred", column => column.Required())
             .String("message", 128)
             .Key("id")
-            .Index("by-trace", index => index.Column("trace").Descending("id"))
+            .Index("by_trace", index => index.Column("trace").Descending("id"))
             .Scoped()
             .AppendIdempotency(TimeSpan.FromMinutes(1))
             .KeepNewest(100, "id", RetentionTrigger.OnAppend)

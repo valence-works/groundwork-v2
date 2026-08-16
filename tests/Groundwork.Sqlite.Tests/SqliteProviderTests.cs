@@ -14,6 +14,33 @@ namespace Groundwork.Sqlite.Tests;
 public sealed class SqliteProviderTests
 {
     [Fact]
+    public void Provider_composed_index_names_are_injective_for_underscore_components()
+    {
+        var left = SqliteDialect.PhysicalIndexName("a_", "b");
+        var right = SqliteDialect.PhysicalIndexName("a", "_b");
+
+        Assert.NotEqual(left, right);
+    }
+
+    [Fact]
+    public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-boundary"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    [Fact]
     public void Native_aggregation_predicates_preserve_typed_null_bool_datetime_guid_and_binary_values()
     {
         using var store = TemporaryStore.Create();
@@ -353,7 +380,7 @@ public sealed class SqliteProviderTests
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var unit = SequenceUnit("sqlite-sequence-" + Guid.NewGuid().ToString("N"));
+        var unit = SequenceUnit("sequence-" + Guid.NewGuid().ToString("N"));
 
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -378,7 +405,7 @@ public sealed class SqliteProviderTests
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var unit = SequenceUnit("sqlite-sequence-batch-" + Guid.NewGuid().ToString("N"));
+        var unit = SequenceUnit("sequence-batch-" + Guid.NewGuid().ToString("N"));
         connection.Schema.Apply(unit);
 
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
@@ -396,7 +423,7 @@ public sealed class SqliteProviderTests
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var unit = SequenceUnit("sqlite-scoped-sequence-" + Guid.NewGuid().ToString("N")) with
+        var unit = SequenceUnit("scoped-sequence-" + Guid.NewGuid().ToString("N")) with
         {
             Scope = ScopePolicy.Scoped
         };
@@ -420,11 +447,11 @@ public sealed class SqliteProviderTests
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var name = "sqlite-cross-scope-" + Guid.NewGuid().ToString("N");
+        var name = "cross_scope_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
-            Name = name,
+            Name = name.Replace('-', '_'),
             Columns =
             [
                 new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
@@ -476,11 +503,11 @@ public sealed class SqliteProviderTests
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
-        var name = "sqlite-sequence-only-" + Guid.NewGuid().ToString("N");
+        var name = "sequence_only_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
-            Name = name,
+            Name = name.Replace('-', '_'),
             Columns =
             [
                 new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence }
@@ -509,7 +536,7 @@ public sealed class SqliteProviderTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = new StorageUnit
         {
-            Id = new StorageUnitId("linq-tickets"), Name = "linq-tickets",
+            Id = new StorageUnitId("linq-tickets"), Name = "linq_tickets",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }, new() { Name = "code_col", Type = PortableType.String }],
             Key = new KeyDefinition { Columns = ["Id"] }
         };
@@ -518,7 +545,7 @@ public sealed class SqliteProviderTests
         Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["value_col"] = "hit", ["code_col"] = "C1" })).Status);
 
         var query = new GwQueryDatabase(new SqliteLinqExecutor(session)).Table<LinqTicket>(
-            new GwTableModel<LinqTicket>("linq-tickets", [
+            new GwTableModel<LinqTicket>("linq_tickets", [
                 new GwColumn<LinqTicket>(nameof(LinqTicket.Id), "Id", QueryType.String, false),
                 new GwColumn<LinqTicket>(nameof(LinqTicket.Display), "value_col", QueryType.String),
                 new GwColumn<LinqTicket>(nameof(LinqTicket.Code), "code_col", QueryType.String)
@@ -560,7 +587,7 @@ public sealed class SqliteProviderTests
         Assert.NotNull(read);
         Assert.Equal("keep", read!.Values.Values["value"]);
         Assert.Equal(0, read.Values.Values["priority"]);
-        Assert.Equal(["by-value", "unique-value"], connection.Catalog.ReadIndexes(evolved.Id).Select(index => index.Name).OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Equal(["by_value", "unique_value"], connection.Catalog.ReadIndexes(evolved.Id).Select(index => index.Name).OrderBy(name => name, StringComparer.Ordinal));
         Assert.Equal(WriteOutcomeStatus.UniqueViolation, connection.OpenSession(evolved, StorageAccess.Global).Insert(
             new StorageValues(new Dictionary<string, object?>
             {
@@ -593,7 +620,7 @@ public sealed class SqliteProviderTests
             Columns = [.. original.Columns.Select(column => column.Name == "status"
                 ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
                 : column)],
-            Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+            Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
         };
         Assert.Contains(SearchKeyProjection.Expand(folded).Columns, column => column.Name == "__groundwork_search_status");
         var foldedDiff = connection.Schema.Diff(folded);
@@ -635,9 +662,9 @@ public sealed class SqliteProviderTests
             new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
             [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None),
             new QueryRenderOptions(
-                [new QueryIndexDeclaration("by-status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.Pinned)],
-                selectedIndex: "by-status"));
-        Assert.Equal("by-status", indexed.SelectedIndex);
+                [new QueryIndexDeclaration("by_status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.Pinned)],
+                selectedIndex: "by_status"));
+        Assert.Equal("by_status", indexed.SelectedIndex);
         Assert.Equal([1], indexed.Rows.Select(row => Assert.IsType<int>(row["id"])));
 
         Assert.Equal(WriteOutcomeStatus.Updated, session.Update(new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })).Status);
@@ -844,16 +871,16 @@ public sealed class SqliteProviderTests
         Indexes = includeUniqueIndex
             ?
             [
-                new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] },
-                new IndexDefinition { Name = "unique-value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }
+                new IndexDefinition { Name = "by_value", Columns = [new IndexColumn("value")] },
+                new IndexDefinition { Name = "unique_value", Columns = [new IndexColumn("uniqueValue")], IsUnique = true }
             ]
-            : [new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] }]
+            : [new IndexDefinition { Name = "by_value", Columns = [new IndexColumn("value")] }]
     };
 
     private static StorageUnit SequenceUnit(string name) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = name.Replace('-', '_'),
         Columns =
         [
             new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },

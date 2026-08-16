@@ -364,7 +364,7 @@ public sealed class IdempotencyProofTests
     [Fact]
     public void Ledger_names_cannot_collide_with_units_or_provider_catalogs()
     {
-        var collidingName = "idempotency-ledger-collision-" + Guid.NewGuid().ToString("N");
+        var collidingName = "idempotency_ledger_collision_" + Guid.NewGuid().ToString("N");
         Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(collidingName, ledgerName: collidingName)));
         var foldedCollision = "idempotency-ledger-folded-" + Guid.NewGuid().ToString("N");
         Assert.Throws<ArgumentException>(() => new SchemaSubject(Unit(
@@ -412,7 +412,7 @@ public sealed class IdempotencyProofTests
     private static StorageUnit LifecycleUnitWithRetentionLedger(string name, string ledgerName) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
@@ -697,7 +697,7 @@ public sealed class IdempotencyProofTests
         string? ledgerName = null) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
@@ -715,7 +715,7 @@ public sealed class IdempotencyProofTests
     private static StorageUnit GeneratedUnit(string name) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
@@ -724,6 +724,14 @@ public sealed class IdempotencyProofTests
         Key = new KeyDefinition { Columns = ["sequence"] },
         AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
     };
+
+    private static string PhysicalName(string name)
+    {
+        var normalized = name.Replace('-', '_');
+        return normalized.Length <= PortabilityValidator.MaximumPortableIdentifierLength
+            ? normalized
+            : normalized[..30] + "_" + normalized[^32..];
+    }
 
     private static StorageValues Values(string id) => new(new Dictionary<string, object?>
     {

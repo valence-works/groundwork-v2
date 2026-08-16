@@ -70,6 +70,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
         return new InMemoryStorageSession(database, state, access, liveState: true);
     }
@@ -90,6 +91,11 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
 
+        foreach (var unit in units)
+        {
+            ArgumentNullException.ThrowIfNull(unit);
+            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        }
         var states = units.Select(unit => database.GetState(unit, access)).ToArray();
         if (states.Select(state => state.Unit.Id).Distinct().Count() != states.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));

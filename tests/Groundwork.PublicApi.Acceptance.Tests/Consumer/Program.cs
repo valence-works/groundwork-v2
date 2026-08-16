@@ -166,7 +166,7 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
         .OptimisticConcurrency()
         .Column(customer => customer.Email, column => column.MaxLength(320).Required())
         .Column(customer => customer.Name, column => column.MaxLength(200).Required())
-        .Index("by-email", customer => customer.Email)
+        .Index("by_email", customer => customer.Email)
         .Build();
 
     var applied = connection.Schema.Apply(table.Definition);
@@ -197,11 +197,11 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
     }
 
     var query = table.Query.Where(customer => customer.Email == "ada@example.test");
-    var matches = records.Query(query, RecordQueryOptions.UsingIndex("by-email"));
+    var matches = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));
     Require(matches.Count == 1 && matches[0].Name == "Ada Byron", "The covered typed query did not return the updated customer.");
 
     var uncovered = new RuntimeCoverageGate(
-        [new CoverageIndex("by-email", [new CoverageIndexColumn("email")])],
+        [new CoverageIndex("by_email", [new CoverageIndexColumn("email")])],
         []);
     try
     {
@@ -313,11 +313,55 @@ static void RunAggregationSourcePredicateJourney(IStorageProviderConnection conn
 
 static void RunFailureJourneys(IStorageProviderConnection connection)
 {
+    var overlongName = new string('u', PortabilityValidator.MaximumPortableIdentifierLength + 2);
+    var forgedOverlong = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("logical.id/with spaces and punctuation"),
+        Name = overlongName,
+        Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Guid, IsNullable = false }],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+    var overlongDiagnostic = PortabilityValidator.Validate(forgedOverlong).Refusals.Single(
+        refusal => refusal.Code == "GW-PORT-010");
+    Require(overlongDiagnostic.Path == "name" &&
+            overlongDiagnostic.Message.Contains(overlongName, StringComparison.Ordinal) &&
+            overlongDiagnostic.Message.Contains("at most 63 ASCII bytes", StringComparison.Ordinal) &&
+            overlongDiagnostic.Message.Contains("shorter", StringComparison.OrdinalIgnoreCase),
+        "The packed public API did not expose the stable overlong physical-name diagnostic.");
+    try
+    {
+        connection.Schema.Apply(forgedOverlong);
+        throw new InvalidOperationException("The provider admitted an overlong physical storage-unit name.");
+    }
+    catch (InvalidOperationException exception)
+    {
+        Require(exception.Message.Contains("GW-PORT-010", StringComparison.Ordinal) &&
+                exception.Message.Contains("at name", StringComparison.Ordinal) &&
+                exception.Message.Contains(overlongName, StringComparison.Ordinal) &&
+                exception.Message.Contains("at most 63 ASCII bytes", StringComparison.Ordinal) &&
+                exception.Message.Contains("shorter", StringComparison.OrdinalIgnoreCase),
+            "The provider did not refuse the forged overlong name before schema I/O.");
+    }
+
+    var forgedMalformedIndex = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("logical.index.id/with spaces"),
+        Name = "valid_unit",
+        Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Guid, IsNullable = false }],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by.id", Columns = [new IndexColumn("id")] }]
+    };
+    var malformedIndexDiagnostic = PortabilityValidator.Validate(forgedMalformedIndex).Refusals.Single(
+        refusal => refusal.Code == "GW-PORT-010");
+    Require(malformedIndexDiagnostic.Path == "indexes[0].name" &&
+            malformedIndexDiagnostic.Message.Contains("by.id", StringComparison.Ordinal),
+        "The packed public API did not expose a structural malformed-index diagnostic path.");
+
     try
     {
         _ = RecordTable.For<JsonRecord>("json_failure")
             .Key(row => row.Id)
-            .Index("by-payload", row => row.Payload)
+            .Index("by_payload", row => row.Payload)
             .Build();
         throw new InvalidOperationException("The declaration accepted an index over JSON.");
     }
@@ -348,7 +392,7 @@ static void RunFailureJourneys(IStorageProviderConnection connection)
     var folded = RecordTable.For<FoldedCustomer>("folded_customers")
         .Key(row => row.Id)
         .Column(row => row.Email, column => column.MaxLength(320).Required().Collation(PortableCollation.OrdinalIgnoreCase))
-        .Index("by-email", row => row.Email)
+        .Index("by_email", row => row.Email)
         .Build();
     try
     {

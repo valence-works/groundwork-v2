@@ -323,7 +323,7 @@ internal sealed class SqliteDialect : RelationalDialect
         (MapDefault(column) is { } value ? $" DEFAULT {value}" : string.Empty);
 
     internal static string PhysicalIndexName(string table, string logicalName) =>
-        $"__groundwork_ix_{table}_{logicalName}";
+        $"__groundwork_ix_{table.Length}_{table}_{logicalName.Length}_{logicalName}";
 
     private static void Execute(DbConnection connection, DbTransaction transaction, string sql)
     {

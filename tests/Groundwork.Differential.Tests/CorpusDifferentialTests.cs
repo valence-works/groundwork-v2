@@ -16,13 +16,13 @@ namespace Groundwork.Differential.Tests;
 
 public sealed class CorpusDifferentialTests
 {
-    private static readonly string RunTableName = "g2-edge-row-" + Guid.NewGuid().ToString("N");
-    private static readonly string SparseTableName = "g2-sparse-" + Guid.NewGuid().ToString("N");
-    private static readonly string SemanticEdgeTableName = "g2-semantic-edge-" + Guid.NewGuid().ToString("N");
-    private static readonly string LatestTableName = "g2-latest-" + Guid.NewGuid().ToString("N");
-    private static readonly string ScopedTableName = "g2-scoped-" + Guid.NewGuid().ToString("N");
-    private static readonly string ExplainTableName = "g2-explain-" + Guid.NewGuid().ToString("N");
-    private static readonly string PrefixTableName = "g2-prefix-" + Guid.NewGuid().ToString("N");
+    private static readonly string RunTableName = "g2_edge_row_" + Guid.NewGuid().ToString("N");
+    private static readonly string SparseTableName = "g2_sparse_" + Guid.NewGuid().ToString("N");
+    private static readonly string SemanticEdgeTableName = "g2_semantic_edge_" + Guid.NewGuid().ToString("N");
+    private static readonly string LatestTableName = "g2_latest_" + Guid.NewGuid().ToString("N");
+    private static readonly string ScopedTableName = "g2_scoped_" + Guid.NewGuid().ToString("N");
+    private static readonly string ExplainTableName = "g2_explain_" + Guid.NewGuid().ToString("N");
+    private static readonly string PrefixTableName = "g2_prefix_" + Guid.NewGuid().ToString("N");
 
     [Fact]
     public void Differential_corpus_marks_only_coverage_proven_queries_for_explain_assertion()
@@ -782,9 +782,9 @@ public sealed class CorpusDifferentialTests
         Key = new KeyDefinition { Columns = ["id"] },
         Indexes =
         [
-            new IndexDefinition { Name = "by-folded", Columns = [new IndexColumn("folded")] },
-            new IndexDefinition { Name = "by-ascii", Columns = [new IndexColumn("ascii")] },
-            new IndexDefinition { Name = "by-ordinal", Columns = [new IndexColumn("ordinal")] }
+            new IndexDefinition { Name = "by_folded", Columns = [new IndexColumn("folded")] },
+            new IndexDefinition { Name = "by_ascii", Columns = [new IndexColumn("ascii")] },
+            new IndexDefinition { Name = "by_ordinal", Columns = [new IndexColumn("ordinal")] }
         ]
     };
 

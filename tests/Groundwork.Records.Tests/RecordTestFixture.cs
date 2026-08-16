@@ -19,7 +19,7 @@ internal static class RecordTestFixture
             .Key(customer => customer.Id)
             .Column(customer => customer.Name, column => column.MaxLength(200).Required())
             .Column(customer => customer.Email, column => column.MaxLength(320).Required())
-            .UniqueIndex("by-email", customer => customer.Email);
+            .UniqueIndex("by_email", customer => customer.Email);
         return (optimistic ? builder.OptimisticConcurrency() : builder).Build();
     }
 }

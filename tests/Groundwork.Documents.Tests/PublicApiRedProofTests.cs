@@ -13,7 +13,7 @@ public sealed class PublicApiRedProofTests
             .Id(order => order.Id)
             .Project(order => order.CustomerId, column => column.MaxLength(64))
             .Project(order => order.Status, column => column.MaxLength(32))
-            .Index("by-customer", order => order.CustomerId)
+            .Index("by_customer", order => order.CustomerId)
             .OptimisticConcurrency()
             .Build();
 

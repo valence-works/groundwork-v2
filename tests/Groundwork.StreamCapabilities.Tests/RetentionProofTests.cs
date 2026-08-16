@@ -199,7 +199,7 @@ public sealed class RetentionProofTests
     public void InMemory_retention_partition_identity_is_structural_when_values_contain_the_legacy_delimiter()
     {
         using var connection = new InMemoryProviderFactory().Create("s3-structural-partition-" + Guid.NewGuid().ToString("N"));
-        var name = "s3-structural-partition-" + Guid.NewGuid().ToString("N");
+        var name = "s3_structural_partition_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -248,7 +248,7 @@ public sealed class RetentionProofTests
     public void InMemory_retention_tie_break_identity_is_structural_when_keys_contain_the_legacy_delimiter()
     {
         using var connection = new InMemoryProviderFactory().Create("s3-structural-tie-" + Guid.NewGuid().ToString("N"));
-        var name = "s3-structural-tie-" + Guid.NewGuid().ToString("N");
+        var name = "s3_structural_tie_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -337,7 +337,7 @@ public sealed class RetentionProofTests
         IStorageProviderConnection connection,
         string provider)
     {
-        var name = "s3-idem-" + provider[..Math.Min(provider.Length, 8)] + "-" + Guid.NewGuid().ToString("N");
+        var name = "s3_idem_" + provider[..Math.Min(provider.Length, 8)] + "_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -404,7 +404,7 @@ public sealed class RetentionProofTests
 
     private static void AssertTiedOrderRetention(IStorageProviderConnection connection, string provider)
     {
-        var name = "s3-ties-" + provider[..Math.Min(provider.Length, 8)] + "-" + Guid.NewGuid().ToString("N");
+        var name = "s3_ties_" + provider[..Math.Min(provider.Length, 8)] + "_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -449,7 +449,7 @@ public sealed class RetentionProofTests
         bool concurrent)
     {
         const int writes = 32;
-        var name = "s3-convoy-" + provider + "-" + Guid.NewGuid().ToString("N");
+        var name = "s3_convoy_" + provider + "_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -523,7 +523,7 @@ public sealed class RetentionProofTests
 
     private static void AssertNativeBatchOnAppend(IStorageProviderConnection connection, string provider)
     {
-        var name = "s3-batch-" + provider[..Math.Min(provider.Length, 8)] + "-" + Guid.NewGuid().ToString("N");
+        var name = "s3_batch_" + provider[..Math.Min(provider.Length, 8)] + "_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -580,7 +580,7 @@ public sealed class RetentionProofTests
         IStorageProviderConnection connection,
         string provider)
     {
-        var name = "s3-create-" + provider[..Math.Min(provider.Length, 8)] + "-" + Guid.NewGuid().ToString("N");
+        var name = "s3_create_" + provider[..Math.Min(provider.Length, 8)] + "_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -626,7 +626,7 @@ public sealed class RetentionProofTests
 
     private static void AssertMongoRetentionDriftIsRefused(IStorageProviderConnection connection)
     {
-        var name = "s3-mongo-drift-" + Guid.NewGuid().ToString("N");
+        var name = "s3_mongo_drift_" + Guid.NewGuid().ToString("N");
         var original = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -653,7 +653,7 @@ public sealed class RetentionProofTests
         var originalSession = connection.OpenSession(original, StorageAccess.Global);
         Assert.Equal(2, originalSession.Unit.Retention!.KeepNewest);
 
-        var adversarialName = "s3-mongo-parts-" + Guid.NewGuid().ToString("N");
+        var adversarialName = "s3_mongo_parts_" + Guid.NewGuid().ToString("N");
         var combinedPartition = new StorageUnit
         {
             Id = new StorageUnitId(adversarialName),
@@ -688,7 +688,7 @@ public sealed class RetentionProofTests
     {
         const int rows = 2_000;
         const int batchSize = 37;
-        var name = "s3-mongo-large-" + Guid.NewGuid().ToString("N");
+        var name = "s3_mongo_large_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -748,7 +748,7 @@ public sealed class RetentionProofTests
         IStorageProviderConnection connection,
         string provider)
     {
-        var name = "s3-resume-" + provider[..Math.Min(provider.Length, 8)] + "-" + Guid.NewGuid().ToString("N");
+        var name = "s3_resume_" + provider[..Math.Min(provider.Length, 8)] + "_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -803,7 +803,7 @@ public sealed class RetentionProofTests
     private static StorageUnit RetentionUnit(string name, RetentionTrigger trigger) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns = [
             new() { Name = "id", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
             new() { Name = "partition", Type = PortableType.String, MaxLength = 16, IsNullable = false },
@@ -818,6 +818,8 @@ public sealed class RetentionProofTests
             Trigger = trigger
         }
     };
+
+    private static string PhysicalName(string name) => name.Replace('-', '_');
 
     private static StorageValues Values(string partition) => new(new Dictionary<string, object?>
     {

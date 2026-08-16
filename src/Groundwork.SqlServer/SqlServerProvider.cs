@@ -68,6 +68,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
         schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = CreateIndependentConnection();
@@ -96,9 +97,11 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
         foreach (var unit in units)
+        {
+            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
             SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-        foreach (var unit in units)
             schemaCoordinator.EnsureRuntimeAdmission(unit);
+        }
 
         var connection = CreateIndependentConnection();
         try

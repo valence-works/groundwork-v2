@@ -50,7 +50,7 @@ public sealed class KernelDeclarationTests
     public void Optional_declaration_members_have_contract_defaults()
     {
         var column = new ColumnDefinition { Name = "value", Type = PortableType.String };
-        var index = new IndexDefinition { Name = "by-value", Columns = [new("value")] };
+        var index = new IndexDefinition { Name = "by_value", Columns = [new("value")] };
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("values"),
@@ -82,14 +82,14 @@ public sealed class KernelDeclarationTests
                 new() { Name = "version", Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
-            Indexes = [new IndexDefinition { Name = "by-version", Columns = [new IndexColumn("version")] }],
+            Indexes = [new IndexDefinition { Name = "by_version", Columns = [new IndexColumn("version")] }],
             Concurrency = ConcurrencyDeclaration.Optimistic()
         };
 
         var error = Assert.Throws<ArgumentException>(() =>
             ConcurrencyDeclaration.ValidateDeclaration(unit));
 
-        Assert.Contains("index 'by-version'", error.Message, StringComparison.Ordinal);
+        Assert.Contains("index 'by_version'", error.Message, StringComparison.Ordinal);
         Assert.Contains("system-owned", error.Message, StringComparison.Ordinal);
     }
 
@@ -98,7 +98,7 @@ public sealed class KernelDeclarationTests
     {
         var definition = new DerivedColumnDefinition
         {
-            Name = "name-fold",
+            Name = "name_fold",
             SourceColumn = "name",
             Projection = PortableProjection.UnicodeFold
         };

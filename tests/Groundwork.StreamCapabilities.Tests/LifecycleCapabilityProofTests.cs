@@ -31,7 +31,7 @@ public sealed class LifecycleCapabilityProofTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("lifecycle-inspection-no-sequence-" + Guid.NewGuid().ToString("N")),
-            Name = "lifecycle-inspection-no-sequence-" + Guid.NewGuid().ToString("N"),
+            Name = PhysicalName("lifecycle_inspection_no_sequence_" + Guid.NewGuid().ToString("N")),
             Columns =
             [
                 new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 100 },
@@ -56,11 +56,11 @@ public sealed class LifecycleCapabilityProofTests
     [Fact]
     public void SQL_Server_schema_admission_rejects_retention_idempotency_without_retention_before_provider_io()
     {
-        var name = "lifecycle-retention-idempotency-without-retention-" + Guid.NewGuid().ToString("N");
+        var name = "lifecycle_retention_idempotency_without_retention_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
-            Name = name,
+            Name = PhysicalName(name),
             Columns =
             [
                 new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 100 }
@@ -85,11 +85,11 @@ public sealed class LifecycleCapabilityProofTests
     [Fact]
     public void Inspection_capability_refusal_precedes_unit_shape_validation()
     {
-        var name = "lifecycle-inspection-capability-order-" + Guid.NewGuid().ToString("N");
+        var name = "lifecycle_inspection_capability_order_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
-            Name = name,
+            Name = PhysicalName(name),
             Columns =
             [
                 new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 100 }
@@ -109,11 +109,11 @@ public sealed class LifecycleCapabilityProofTests
     [Fact]
     public void InMemory_rejects_multiple_provider_sequence_columns_without_retention()
     {
-        var name = "lifecycle-multiple-sequences-" + Guid.NewGuid().ToString("N");
+        var name = "lifecycle_multiple_sequences_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
             Id = new StorageUnitId(name),
-            Name = name,
+            Name = PhysicalName(name),
             Columns =
             [
                 new() { Name = "sequence_a", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
@@ -575,7 +575,7 @@ public sealed class LifecycleCapabilityProofTests
         RetentionTrigger trigger = RetentionTrigger.Explicit) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Scope = scope,
         Columns =
         [
@@ -592,6 +592,14 @@ public sealed class LifecycleCapabilityProofTests
             Trigger = trigger
         }
     };
+
+    private static string PhysicalName(string name)
+    {
+        var normalized = name.Replace('-', '_');
+        return normalized.Length <= PortabilityValidator.MaximumPortableIdentifierLength
+            ? normalized
+            : normalized[..30] + "_" + normalized[^32..];
+    }
 
     private static StorageValues Values(string payload) =>
         new(new Dictionary<string, object?> { ["payload"] = payload });

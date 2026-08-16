@@ -71,14 +71,68 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
                 new() { Name = "email", Type = PortableType.String, MaxLength = 320, IsNullable = false }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
-            Indexes = [new IndexDefinition { Name = "by-email", Columns = [new IndexColumn("email")], IsUnique = true }]
+            Indexes = [new IndexDefinition { Name = "by_email", Columns = [new IndexColumn("email")], IsUnique = true }]
         };
 
         Assert.True(connection.Schema.Apply(unit).Applied);
         var indexes = connection.Catalog.ReadIndexes(unit.Id);
-        var email = Assert.Single(indexes, index => index.Name == "by-email");
+        var email = Assert.Single(indexes, index => index.Name == "by_email");
         Assert.True(email.IsUnique);
         Assert.Equal("email", Assert.Single(email.Columns).Column);
+    }
+
+    [Fact]
+    public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.boundary.id"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    [Fact]
+    public void Exact_batch_writes_with_an_unconstrained_logical_id_use_the_validated_physical_type_name()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.id/with spaces/" + new string('x', 80)),
+            Name = "sqlserver_batch_boundary",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 1,
+            ["payload"] = "one"
+        })));
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 2,
+            ["payload"] = "two"
+        })));
+
+        var report = work.CommitWithOutcomes();
+
+        Assert.Equal(2, report.Summary.Succeeded);
+        Assert.All(report.Outcomes, outcome => Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Outcome.Status));
     }
 
     [Fact]
@@ -204,7 +258,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             "Server=invalid-host.invalid,1433;Database=master;User Id=sa;Password=Groundwork!2026;Encrypt=False;TrustServerCertificate=True");
         var unit = new StorageUnit
         {
-            Id = new StorageUnitId("unbounded-key"), Name = "unbounded-key",
+            Id = new StorageUnitId("unbounded-key"), Name = "unbounded_key",
             Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
             Key = new KeyDefinition { Columns = ["id"] }
         };
