@@ -61,18 +61,7 @@ jobs:
       - name: Pack the explicit public package allowlist
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          rm -rf artifacts/packages
-          mkdir -p artifacts/packages
-          while IFS='|' read -r package_id project_path; do
-            [[ -z "${package_id//[[:space:]]/}" || "$package_id" == \#* ]] && continue
-            dotnet pack "$project_path" --configuration Release --no-restore \
-              --output artifacts/packages --nologo --verbosity minimal \
-              -p:PackageVersion="$PACKAGE_VERSION" \
-              -p:ContinuousIntegrationBuild=true \
-              -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
-          done < eng/public-packages.txt
+        run: eng/pack-public-packages.sh artifacts/packages "$PACKAGE_VERSION"
       - name: Validate package contents and allowlist
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
@@ -96,6 +85,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: nuget
     steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
       - uses: actions/download-artifact@v4
         with:
           pattern: groundwork-packages-*
