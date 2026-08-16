@@ -81,10 +81,13 @@ public sealed class UnitOfWorkQueryConformanceTests
             Assert.NotNull(firstRead);
             Assert.Equal(2L, firstRead.Version);
             Assert.Equal("first", firstRead.Values.Values["bucket"]);
+            Assert.Equal(3L, firstRead.Values.Values["amount"]);
 
             var firstPage = firstSession.Query(Page(first));
             Assert.Equal(2L, firstPage.TotalCount);
-            Assert.Equal("a", Assert.Single(firstPage.Rows)["id"]);
+            var firstPageRow = Assert.Single(firstPage.Rows);
+            Assert.Equal("a", firstPageRow["id"]);
+            Assert.Equal(3L, firstPageRow["amount"]);
             Assert.NotNull(firstPage.NextContinuationToken);
 
             var secondPage = firstSession.Query(Page(first, firstPage.NextContinuationToken));

@@ -119,7 +119,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             if (name == "__groundwork_total_count") return value;
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
-        }, activeTransaction ?? transaction);
+        });
         AssertExplainPlan(command, renderOptions);
         var materialized = QueryResultMaterializer.Materialize(
             executionSource,

@@ -122,7 +122,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             if (name == "__groundwork_total_count") return value;
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-        }, activeTransaction ?? transaction);
+        });
         AssertExplainPlan(command, renderOptions);
         var materialized = QueryResultMaterializer.Materialize(
             executionSource,

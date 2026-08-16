@@ -61,7 +61,7 @@ public static class RelationalQueryResultReader
         Read(connection, query, decode, transaction: null);
 
     /// <summary>Reads a rendered query using the caller-owned transaction, when one exists.</summary>
-    public static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
+    internal static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
         DbConnection connection,
         RelationalQueryCommand query,
         Func<string, object?, object?> decode,
