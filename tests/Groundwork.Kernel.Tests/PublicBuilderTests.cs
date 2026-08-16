@@ -36,4 +36,24 @@ public sealed class PublicBuilderTests
         Assert.Equal(["trace"], unit.AggregationProfiles.Single().GroupByColumns);
         Assert.Equal(4, Assert.IsType<Aggregate.SetUnion>(unit.AggregationProfiles.Single().Aggregates[2]).MaxValues);
     }
+
+    [Fact]
+    public void Kernel_builder_declares_closed_time_bucket_groups()
+    {
+        var unit = Groundwork.Kernel.StorageUnit
+            .Declare("time-bucket", "time_buckets")
+            .String("id", 32, column => column.Required())
+            .Timestamp("createdAt")
+            .Key("id")
+            .Aggregate("hourly", aggregate => aggregate
+                .FixedUtcBucket("bucket", "createdAt", TimeSpan.FromHours(1))
+                .Count("count"))
+            .Build();
+
+        var group = Assert.IsType<AggregationGroup.TimeBucket>(unit.AggregationProfiles.Single().GroupByExpressions.Single());
+        Assert.Equal("bucket", group.Alias);
+        Assert.Equal("createdAt", group.SourceColumn);
+        Assert.Equal(AggregationTimeBucketKind.FixedUtc, group.Kind);
+        Assert.Equal(TimeSpan.FromHours(1), group.Width);
+    }
 }

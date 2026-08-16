@@ -81,3 +81,27 @@ round trip.
 
 Profiles are part of the schema subject fingerprint, so changing a reducer, alias, allowance, or
 budget is schema semantic drift and cannot be hidden behind a query.
+
+## Calendar buckets
+
+The closed grouping surface also admits a declared time bucket over a `DateTimeOffset` column:
+
+```csharp
+GroupByExpressions =
+[
+    AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))
+]
+```
+
+`AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")` uses the invocation's named
+IANA zone (`TimeZoneId = "Europe/Amsterdam"`) and returns the UTC instant of local midnight, so
+spring-forward days are 23 hours and fall-back days are 25 hours without collapsing or duplicating
+bucket identities. If a zone advances at local midnight, the bucket is the earliest valid instant
+on that local calendar date; if midnight is ambiguous, the first occurrence is selected. A query
+may add `TimeRange = new AggregationTimeRange(from, to)`; `from` is
+inclusive and `to` is exclusive. Fixed-width requests may set `TimeBucketOrigin` explicitly; when
+omitted, a bounded request anchors at `TimeRange.From`, while an unbounded request uses Unix epoch.
+Null input timestamps are excluded from the derived grouping. The range, width/kind, invocation
+zone/origin, and ordered terms are all part of the query identity, and native providers render the
+grouping in one bounded aggregation operation rather than materializing source rows or generating
+one call per requested bucket.

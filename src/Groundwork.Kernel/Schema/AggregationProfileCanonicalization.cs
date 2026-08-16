@@ -12,7 +12,9 @@ public static class AggregationProfileCanonicalization
         return SchemaFingerprint.Canonicalize(
         [
             profile.Name,
-            SchemaFingerprint.Canonicalize((profile.GroupByColumns ?? []).OrderBy(value => value, StringComparer.Ordinal)),
+            SchemaFingerprint.Canonicalize(profile.GroupByExpressions is { Count: > 0 }
+                ? profile.GroupByExpressions.Select(CanonicalGroup).OrderBy(value => value, StringComparer.Ordinal)
+                : (profile.GroupByColumns ?? []).OrderBy(value => value, StringComparer.Ordinal)),
             SchemaFingerprint.Canonicalize((profile.Aggregates ?? []).Select(CanonicalAggregate).OrderBy(value => value, StringComparer.Ordinal)),
             SchemaFingerprint.Canonicalize((profile.AllowedPredicates ?? []).Select(CanonicalAllowance).OrderBy(value => value, StringComparer.Ordinal)),
             profile.MaxGroups.ToString(CultureInfo.InvariantCulture),
@@ -39,5 +41,14 @@ public static class AggregationProfileCanonicalization
         Aggregate.SetUnion set => SchemaFingerprint.Canonicalize(["setUnion", set.Alias, set.Column, set.MaxValues.ToString(CultureInfo.InvariantCulture)]),
         Aggregate.FirstBy first => SchemaFingerprint.Canonicalize(["firstBy", first.Alias, first.Column, first.OrderColumn, first.Direction.ToString()]),
         _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
+    };
+
+    private static string CanonicalGroup(AggregationGroup group) => group switch
+    {
+        AggregationGroup.Column column => SchemaFingerprint.Canonicalize(["column", column.Alias]),
+        AggregationGroup.TimeBucket bucket => SchemaFingerprint.Canonicalize([
+            "timeBucket", bucket.Alias, bucket.SourceColumn, bucket.Kind.ToString(),
+            bucket.Width.Ticks.ToString(CultureInfo.InvariantCulture)]),
+        _ => throw new ArgumentOutOfRangeException(nameof(group))
     };
 }

@@ -125,6 +125,104 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Native_time_bucket_aggregation_is_one_sql_grouping_with_exact_range_semantics()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-time-bucket"),
+            Name = "s10_time_bucket",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset },
+                new() { Name = "amount", Type = PortableType.Int64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "hourly",
+                    GroupByExpressions = [AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))],
+                    Aggregates = [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")],
+                    MaxInputRows = 20,
+                    MaxGroups = 10
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var from = new DateTimeOffset(2026, 8, 16, 10, 30, 0, TimeSpan.Zero);
+        var to = from.AddHours(2);
+        foreach (var row in new[]
+        {
+            ("first", from, 3L),
+            ("second", from.AddMinutes(15), 4L),
+            ("upper", to, 99L),
+            ("null", (DateTimeOffset?)null, 100L)
+        })
+        {
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = row.Item1, ["createdAt"] = row.Item2, ["amount"] = row.Item3
+            })).Status);
+        }
+
+        var result = session.Aggregate(new AggregationQuery("hourly")
+        {
+            TimeRange = new AggregationTimeRange(from, to)
+        });
+
+        var output = Assert.Single(result.Rows);
+        Assert.Equal(from, output["bucket"]);
+        Assert.Equal(2L, output["count"]);
+        Assert.Equal(7L, output["total"]);
+    }
+
+    [Fact]
+    public void Native_local_calendar_day_bucket_handles_the_spring_forward_boundary()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-local-day"),
+            Name = "s10_local_day",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "daily",
+                    GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+                    Aggregates = [new Aggregate.Count("count")]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var from = new DateTimeOffset(2026, 3, 29, 0, 30, 0, TimeSpan.Zero);
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "before", ["createdAt"] = from }));
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "after", ["createdAt"] = from.AddHours(20) }));
+
+        var output = Assert.Single(session.Aggregate(new AggregationQuery("daily")
+        {
+            TimeRange = new AggregationTimeRange(from, from.AddDays(1)),
+            TimeZoneId = "Europe/Amsterdam"
+        }).Rows);
+
+        Assert.Equal(new DateTimeOffset(2026, 3, 28, 23, 0, 0, TimeSpan.Zero), output["day"]);
+        Assert.Equal(2L, output["count"]);
+    }
+
+    [Fact]
     public void Native_aggregation_preserves_separator_values_and_independent_FirstBy_orders()
     {
         using var store = TemporaryStore.Create();

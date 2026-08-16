@@ -26,6 +26,12 @@ internal static class PublicApiApprovalFixture
         _ = typeof(PortabilityValidator);
         _ = typeof(AggregationOrderTerm);
         _ = typeof(AggregationQuery);
+        _ = typeof(AggregationGroup);
+        _ = typeof(AggregationGroup.Column);
+        _ = typeof(AggregationGroup.TimeBucket);
+        _ = typeof(AggregationTimeBucketKind);
+        _ = typeof(AggregationTimeRange);
+        _ = typeof(AggregationTimeBucketCalculator);
         _ = typeof(AggregationBuilder);
         _ = typeof(Aggregate.Count);
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
@@ -72,6 +78,8 @@ internal static class PublicApiApprovalFixture
         {
             OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending)]
         };
+        _ = AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1));
+        _ = AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt");
         _ = PortabilityValidator.MaximumPortableIdentifierLength;
         _ = new Func<string, string, PortabilityValidationResult>((identifier, path) =>
             PortabilityValidator.ValidatePhysicalIdentifier(identifier, path));

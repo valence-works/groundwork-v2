@@ -328,6 +328,12 @@ public static class PortabilityValidator
             var profilePath = "aggregationProfiles." + profile.Name;
             foreach (var groupBy in profile.GroupByColumns ?? [])
                 ValidateIdentifier(groupBy, profilePath + ".groupByColumns", diagnostics);
+            foreach (var group in profile.GroupByExpressions ?? [])
+            {
+                ValidateIdentifier(group?.Alias, profilePath + ".groupByExpressions", diagnostics);
+                if (group is AggregationGroup.TimeBucket bucket)
+                    ValidateIdentifier(bucket.SourceColumn, profilePath + ".groupByExpressions." + bucket.Alias, diagnostics);
+            }
             foreach (var aggregate in (profile.Aggregates ?? []).Where(aggregate => aggregate is not null))
             {
                 ValidateIdentifier(aggregate.Alias, profilePath + ".aggregates", diagnostics);

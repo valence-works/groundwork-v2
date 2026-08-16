@@ -276,6 +276,7 @@ public sealed class AggregationBuilder
 {
     private readonly string name;
     private readonly List<string> groupBy = [];
+    private readonly List<AggregationGroup> groupByExpressions = [];
     private readonly List<Aggregate> aggregates = [];
 
     internal AggregationBuilder(string name) => this.name = name;
@@ -285,6 +286,19 @@ public sealed class AggregationBuilder
         groupBy.AddRange(columns ?? throw new ArgumentNullException(nameof(columns)));
         return this;
     }
+
+    public AggregationBuilder GroupBy(AggregationGroup expression)
+    {
+        ArgumentNullException.ThrowIfNull(expression);
+        groupByExpressions.Add(expression);
+        return this;
+    }
+
+    public AggregationBuilder FixedUtcBucket(string alias, string column, TimeSpan width) =>
+        GroupBy(AggregationGroup.TimeBucket.FixedUtc(alias, column, width));
+
+    public AggregationBuilder LocalCalendarDayBucket(string alias, string column) =>
+        GroupBy(AggregationGroup.TimeBucket.LocalCalendarDay(alias, column));
 
     public AggregationBuilder Min(string alias, string column)
     {
@@ -330,6 +344,7 @@ public sealed class AggregationBuilder
     {
         Name = RequireName(name, nameof(name)),
         GroupByColumns = Array.AsReadOnly(groupBy.ToArray()),
+        GroupByExpressions = Array.AsReadOnly(groupByExpressions.ToArray()),
         Aggregates = Array.AsReadOnly(aggregates.ToArray()),
         AllowedPredicates = []
     };

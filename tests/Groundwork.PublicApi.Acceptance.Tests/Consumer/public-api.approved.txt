@@ -8,6 +8,12 @@ Groundwork.Kernel.StorageDeclarationBuilder
 Groundwork.Kernel.PortabilityValidator
 Groundwork.Kernel.AggregationOrderTerm
 Groundwork.Kernel.AggregationQuery
+Groundwork.Kernel.AggregationGroup
+Groundwork.Kernel.AggregationGroup.Column
+Groundwork.Kernel.AggregationGroup.TimeBucket
+Groundwork.Kernel.AggregationTimeBucketKind
+Groundwork.Kernel.AggregationTimeRange
+Groundwork.Kernel.AggregationTimeBucketCalculator
 Groundwork.Kernel.AggregationBuilder
 Groundwork.Kernel.Aggregate.Count
 Groundwork.Query.Model.QueryRequest

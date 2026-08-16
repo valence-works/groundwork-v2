@@ -71,6 +71,40 @@ public sealed class PostgreSqlDialectTests
     }
 
     [Fact]
+    public void Renderer_uses_native_utc_and_iana_calendar_bucket_expressions()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-time-bucket-pg"),
+            Name = "aggregation_time_bucket_pg",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "daily",
+            GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var from = new DateTimeOffset(2026, 3, 29, 0, 0, 0, TimeSpan.Zero);
+        var sql = dialect.RenderAggregation(unit, profile, new AggregationQuery("daily")
+        {
+            TimeRange = new AggregationTimeRange(from, from.AddDays(2)),
+            TimeZoneId = "Europe/Amsterdam"
+        }).CommandText;
+
+        Assert.Contains("date_trunc('day'", sql, StringComparison.Ordinal);
+        Assert.Contains("FLOOR", sql, StringComparison.Ordinal);
+        Assert.Contains("Europe/Amsterdam", sql, StringComparison.Ordinal);
+        Assert.Contains("createdAt", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Scoped_native_sql_artifacts_inject_scope_before_grouping_and_budget_probe()
     {
         var unit = AggregationUnit();

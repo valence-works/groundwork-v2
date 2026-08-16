@@ -31,6 +31,7 @@ try
     RunCompareAndDeleteJourney(connection);
     RunLifecycleJourney(connection);
     RunAggregationSourcePredicateJourney(connection);
+    RunTimeBucketJourney(connection);
     RunDocumentsJourney(connection);
     RunFailureJourneys(connection);
     Console.WriteLine("Groundwork public API clean-room journey passed.");
@@ -384,6 +385,44 @@ static void RunAggregationSourcePredicateJourney(IStorageProviderConnection conn
     });
     Require(post.Rows.Count == 1 && Equals(post.Rows[0]["total"], 18L),
         "The packed public API post predicate did not observe the reduced group.");
+}
+
+static void RunTimeBucketJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("public_time_bucket"),
+        Name = "public_time_bucket",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+            new() { Name = "createdAt", Type = PortableType.DateTimeOffset },
+            new() { Name = "amount", Type = PortableType.Int64 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        AggregationProfiles =
+        [
+            new AggregationProfile
+            {
+                Name = "hourly",
+                GroupByExpressions = [AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))],
+                Aggregates = [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")]
+            }
+        ]
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The package-only time-bucket schema did not apply.");
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    var from = new DateTimeOffset(2026, 8, 16, 10, 30, 0, TimeSpan.Zero);
+    Require(session.Insert(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "1", ["createdAt"] = from, ["amount"] = 7L
+    })).Status == WriteOutcomeStatus.Inserted, "The time-bucket source row did not insert.");
+    var result = session.Aggregate(new AggregationQuery("hourly")
+    {
+        TimeRange = new AggregationTimeRange(from, from.AddHours(1))
+    });
+    Require(result.Rows.Count == 1 && Equals(result.Rows[0]["total"], 7L),
+        "The clean-room consumer did not execute the public time-bucket profile.");
 }
 
 static void RunFailureJourneys(IStorageProviderConnection connection)

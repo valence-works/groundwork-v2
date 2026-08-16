@@ -43,6 +43,70 @@ public sealed class AggregationSqlRenderingTests
     }
 
     [Fact]
+    public void Renderer_uses_one_native_time_bucket_expression_and_range_before_grouping()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-time-bucket"),
+            Name = "aggregation_time_bucket",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset },
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "hourly",
+            GroupByExpressions = [AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var from = new DateTimeOffset(2026, 8, 16, 0, 0, 0, TimeSpan.Zero);
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("hourly") { TimeRange = new AggregationTimeRange(from, from.AddDays(31)) }).CommandText;
+
+        Assert.Contains("DATEDIFF_BIG(NANOSECOND", sql, StringComparison.Ordinal);
+        Assert.Contains("[bucket]", sql, StringComparison.Ordinal);
+        Assert.Contains("[createdAt] >=", sql, StringComparison.Ordinal);
+        Assert.Contains("[createdAt] <", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("Query(", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_converts_any_iana_zone_and_uses_at_time_zone_for_local_midnight()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-local-zone"),
+            Name = "aggregation_local_zone",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "daily",
+            GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var instant = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("daily")
+            {
+                TimeRange = new AggregationTimeRange(instant, instant.AddDays(1)),
+                TimeZoneId = "Asia/Kathmandu"
+            }).CommandText;
+
+        Assert.Contains("Nepal Standard Time", sql, StringComparison.Ordinal);
+        Assert.Contains("AT TIME ZONE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SWITCHOFFSET", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Renderer_uses_the_query_guid_order_key_for_aggregation_output()
     {
         var unit = new StorageUnit
