@@ -59,7 +59,7 @@ public sealed class PackagingContractTests
 
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/versioning.md")));
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/support-matrix.md")));
-        Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-nuget.yml")));
+        Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-feedz.yml")));
     }
 
     [Fact]
@@ -79,11 +79,15 @@ public sealed class PackagingContractTests
     public void Publication_workflow_requires_a_release_key_and_never_publishes_unvalidated_packages()
     {
         var root = FindRepositoryRoot();
-        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-nuget.yml"));
-        Assert.Contains("NUGET_API_KEY", workflow, StringComparison.Ordinal);
+        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
+        Assert.Contains("FEEDZ_API_KEY", workflow, StringComparison.Ordinal);
+        Assert.Contains("https://f.feedz.io/valence-works/groundwork/nuget/index.json", workflow, StringComparison.Ordinal);
+        Assert.Contains("environment: feedz", workflow, StringComparison.Ordinal);
         Assert.Contains("needs: package", workflow, StringComparison.Ordinal);
         Assert.Contains("verify-package-layout.sh", workflow, StringComparison.Ordinal);
         Assert.Contains("release", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("NUGET_API_KEY", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("api.nuget.org/v3/index.json", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("find src/Groundwork", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("Groundwork.SchemaTool --version", workflow, StringComparison.Ordinal);
     }
@@ -92,7 +96,7 @@ public sealed class PackagingContractTests
     public void Publication_workflow_runs_the_exact_clean_room_proof_after_layout_validation()
     {
         var root = FindRepositoryRoot();
-        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-nuget.yml"));
+        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
         var layout = workflow.IndexOf("eng/verify-package-layout.sh", StringComparison.Ordinal);
         var cleanRoom = workflow.IndexOf("tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh", StringComparison.Ordinal);
         var upload = workflow.IndexOf("actions/upload-artifact@v4", StringComparison.Ordinal);
@@ -102,6 +106,23 @@ public sealed class PackagingContractTests
         Assert.True(upload > cleanRoom);
         Assert.Contains("GROUNDWORK_PUBLIC_API_PACKAGES: artifacts/packages", workflow, StringComparison.Ordinal);
         Assert.Contains("GROUNDWORK_PUBLIC_API_VERSION: ${{ steps.version.outputs.version }}", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Publication_workflow_verifies_the_exact_version_from_feedz_after_push()
+    {
+        var root = FindRepositoryRoot();
+        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
+        var push = workflow.IndexOf("dotnet nuget push", StringComparison.Ordinal);
+        var verifyJob = workflow.IndexOf("verify-feed:", StringComparison.Ordinal);
+        var remoteProof = workflow.IndexOf("eng/verify-published-packages.sh", StringComparison.Ordinal);
+
+        Assert.True(push >= 0);
+        Assert.True(verifyJob > push);
+        Assert.True(remoteProof > verifyJob);
+        Assert.Contains("needs: publish", workflow, StringComparison.Ordinal);
+        Assert.Contains("needs.publish.outputs.version", workflow, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(root, "eng", "verify-published-packages.sh")));
     }
 
     private static string FindRepositoryRoot()

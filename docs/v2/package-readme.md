@@ -19,6 +19,10 @@ All v2 packages are pre-1.0 previews. Read the [versioning policy](https://githu
 and [support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
 before adopting a provider in production.
 
+Previews are published through the public
+[Groundwork Feedz source](https://f.feedz.io/valence-works/groundwork/nuget/index.json).
+Configure that source for `Groundwork.*` packages before restoring a preview.
+
 Scoped recovery and administration use the explicit, query-only
 [`StorageAccess.PrivilegedAcrossScopes`](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/privileged-cross-scope.md)
 contract; ordinary scoped sessions remain tenant-isolated.
