@@ -69,3 +69,10 @@ entry remains replayable through status-only `Append`; exact replay refuses it
 with `GW-APPEND-002` because no generated values were persisted. Providers that
 cannot guarantee the required transaction semantics omit the exact capability
 and the extension reports `GW-APPEND-003` before attempting a write.
+
+The current encoding is strict about text: malformed UTF-16 is refused before
+the ledger is consulted. Declared decimals use numeric value rather than scale,
+and JSON object properties are sorted while numeric lexemes such as `1`, `1.0`,
+and `1e0` are normalized without converting through a lossy floating-point
+representation. These rules make equivalent portable values replay while a
+changed value still produces `GW-APPEND-001`.

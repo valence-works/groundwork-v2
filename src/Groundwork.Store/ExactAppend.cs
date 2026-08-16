@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections;
 using System.Globalization;
+using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -76,6 +77,7 @@ public sealed class AppendIdempotencyConflictException : InvalidOperationExcepti
 internal static class ExactAppendCodec
 {
     private const byte Version = 1;
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     internal static string Fingerprint(StorageUnit unit, IReadOnlyList<StorageValues> values)
     {
@@ -175,7 +177,7 @@ internal static class ExactAppendCodec
                     return;
                 case PortableType.Decimal when value is decimal or byte or sbyte or short or ushort or int or uint or long or ulong:
                     writer.WriteByte(14);
-                    foreach (var part in decimal.GetBits(Convert.ToDecimal(value, CultureInfo.InvariantCulture)))
+                    foreach (var part in decimal.GetBits(CanonicalDecimal(Convert.ToDecimal(value, CultureInfo.InvariantCulture))))
                         writer.WriteInt32(part);
                     return;
                 case PortableType.Boolean when value is bool boolean:
@@ -256,7 +258,7 @@ internal static class ExactAppendCodec
                 return;
             case decimal number:
                 writer.WriteByte(14);
-                foreach (var part in decimal.GetBits(number))
+                foreach (var part in decimal.GetBits(CanonicalDecimal(number)))
                     writer.WriteInt32(part);
                 return;
             case char character:
@@ -366,14 +368,14 @@ internal static class ExactAppendCodec
         JsonValueKind.Null => "null",
         JsonValueKind.True => "true",
         JsonValueKind.False => "false",
-        JsonValueKind.String => JsonSerializer.Serialize(element.GetString()),
-        JsonValueKind.Number => element.GetRawText(),
+        JsonValueKind.String => SerializeJsonString(element.GetString()!),
+        JsonValueKind.Number => CanonicalJsonNumber(element.GetRawText()),
         JsonValueKind.Array => "[" + string.Join(",", element.EnumerateArray().Select(CanonicalJson)) + "]",
         JsonValueKind.Object => "{" + string.Join(",", element.EnumerateObject()
             .Select((property, index) => (property, index))
             .OrderBy(item => item.property.Name, StringComparer.Ordinal)
             .ThenBy(item => item.index)
-            .Select(item => JsonSerializer.Serialize(item.property.Name) + ":" + CanonicalJson(item.property.Value))) + "}",
+            .Select(item => SerializeJsonString(item.property.Name) + ":" + CanonicalJson(item.property.Value))) + "}",
         _ => throw new ArgumentOutOfRangeException(nameof(element))
     };
 
@@ -399,6 +401,64 @@ internal static class ExactAppendCodec
 
         using var parsed = JsonDocument.Parse(JsonSerializer.Serialize(value));
         return CanonicalJson(parsed.RootElement);
+    }
+
+    private static string SerializeJsonString(string value)
+    {
+        StrictUtf8.GetBytes(value);
+        return JsonSerializer.Serialize(value);
+    }
+
+    private static decimal CanonicalDecimal(decimal value)
+    {
+        var bits = decimal.GetBits(value);
+        var coefficient = (BigInteger)(uint)bits[0]
+            | ((BigInteger)(uint)bits[1] << 32)
+            | ((BigInteger)(uint)bits[2] << 64);
+        var scale = (bits[3] >> 16) & 0x7F;
+        while (scale > 0 && coefficient % 10 == 0)
+        {
+            coefficient /= 10;
+            scale--;
+        }
+
+        return new decimal(
+            (int)(uint)(coefficient & uint.MaxValue),
+            (int)(uint)((coefficient >> 32) & uint.MaxValue),
+            (int)(uint)((coefficient >> 64) & uint.MaxValue),
+            bits[3] < 0 && coefficient != 0,
+            (byte)scale);
+    }
+
+    private static string CanonicalJsonNumber(string raw)
+    {
+        var signOffset = raw.Length > 0 && raw[0] == '-' ? 1 : 0;
+        var exponentMarker = raw.IndexOf('e', signOffset);
+        if (exponentMarker < 0)
+            exponentMarker = raw.IndexOf('E', signOffset);
+        var mantissaEnd = exponentMarker < 0 ? raw.Length : exponentMarker;
+        var decimalPoint = raw.IndexOf('.', signOffset, mantissaEnd - signOffset);
+        var fractionDigits = decimalPoint < 0 ? 0 : mantissaEnd - decimalPoint - 1;
+        var digits = raw[signOffset..mantissaEnd].Replace(".", string.Empty, StringComparison.Ordinal);
+        var firstNonZero = 0;
+        while (firstNonZero < digits.Length && digits[firstNonZero] == '0')
+            firstNonZero++;
+        if (firstNonZero == digits.Length)
+            return "0";
+
+        digits = digits[firstNonZero..];
+        var trailingZeros = digits.Length - 1;
+        while (trailingZeros > 0 && digits[trailingZeros] == '0')
+            trailingZeros--;
+        var removedTrailingZeros = digits.Length - 1 - trailingZeros;
+        digits = digits[..(trailingZeros + 1)];
+
+        var exponent = exponentMarker < 0
+            ? BigInteger.Zero
+            : BigInteger.Parse(raw[(exponentMarker + 1)..], CultureInfo.InvariantCulture);
+        var scientificExponent = exponent - fractionDigits + removedTrailingZeros + digits.Length - 1;
+        var mantissa = digits.Length == 1 ? digits : digits[0] + "." + digits[1..];
+        return (signOffset == 1 ? "-" : string.Empty) + mantissa + "e" + scientificExponent.ToString(CultureInfo.InvariantCulture);
     }
 
     private sealed class BufferWriter
@@ -432,7 +492,7 @@ internal static class ExactAppendCodec
 
         internal void WriteString(string value)
         {
-            var bytes = Encoding.UTF8.GetBytes(value);
+            var bytes = StrictUtf8.GetBytes(value);
             WriteInt32(bytes.Length);
             stream.Write(bytes);
         }
@@ -499,7 +559,7 @@ internal static class ExactAppendCodec
         internal string ReadString()
         {
             var bytes = ReadBytes();
-            return Encoding.UTF8.GetString(bytes);
+            return StrictUtf8.GetString(bytes);
         }
 
         internal byte[] ReadBytes()

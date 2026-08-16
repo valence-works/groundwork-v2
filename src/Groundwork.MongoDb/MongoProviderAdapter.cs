@@ -24,7 +24,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
             var descriptors = BatchWriteCapabilities.ForProvider(
                 "MongoDB", nativeBatch: true,
                 exactOutcomeCost: "one FindOneAndUpdate per coalesced row",
-                batchCost: "uses unordered BulkWrite for aggregate commits");
+                batchCost: "uses unordered BulkWrite for aggregate commits",
+                exactAppendOutcomes: true);
             return descriptors
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)

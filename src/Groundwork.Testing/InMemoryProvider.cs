@@ -59,7 +59,8 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
     public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
         "the in-memory provider", nativeBatch: false,
         exactOutcomeCost: "one provider operation per coalesced row",
-        batchCost: "uses provider-neutral per-row operations inside the transaction");
+        batchCost: "uses provider-neutral per-row operations inside the transaction",
+        exactAppendOutcomes: true);
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
     {

@@ -40,7 +40,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
     public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
         "PostgreSQL", nativeBatch: true,
         exactOutcomeCost: "one RETURNING result per native batch",
-        batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback");
+        batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback",
+        exactAppendOutcomes: true);
 
     internal string ConnectionString => connectionString;
 

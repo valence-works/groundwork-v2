@@ -311,6 +311,32 @@ jobs:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p1ci?replicaSet=p1rs&directConnection=true
         run: dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-restore --configuration Release
 
+  mongo-standalone-exact-append:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7.0.24
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore Groundwork.slnx
+      - name: Run standalone MongoDB exact-append capability refusal
+        env:
+          GROUNDWORK_MONGO_STANDALONE_CONNECTION: mongodb://localhost:27017/s6standalone
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release
+          --filter FullyQualifiedName~MongoDB_without_transaction_fit_refuses_exact_append_before_dispatch
+
   concurrency-conformance:
     runs-on: ubuntu-latest
     services:
