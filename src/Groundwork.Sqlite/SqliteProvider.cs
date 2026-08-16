@@ -55,7 +55,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
     public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
         "SQLite", nativeBatch: true,
         exactOutcomeCost: "one RETURNING result per native batch",
-        batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback");
+        batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback",
+        exactAppendOutcomes: true);
 
     internal object Gate => gate;
 

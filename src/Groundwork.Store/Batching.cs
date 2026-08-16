@@ -22,6 +22,8 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId AppendIdempotency { get; } = new("groundwork.storage.append-idempotency");
 
+    public static CapabilityId ExactAppendOutcomes { get; } = new("groundwork.storage.exact-append-outcomes");
+
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
@@ -42,16 +44,34 @@ public static class BatchWriteCapabilities
         "Idempotent append",
         "Records caller-supplied append operation nonces in a kernel-owned durable ledger and commits the ledger entry with the payload atomically.");
 
+    public static CapabilityDescriptor ExactAppendOutcomesDescriptor { get; } = new(
+        ExactAppendOutcomes,
+        "Replay-stable exact append outcomes",
+        "Returns ordered per-row generated values and persists the canonical payload fingerprint plus exact result for replay.");
+
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
         bool nativeBatch,
         string exactOutcomeCost,
-        string batchCost) =>
-        Array.AsReadOnly(
-        [
+        string batchCost) => ForProvider(
+            provider,
+            nativeBatch,
+            exactOutcomeCost,
+            batchCost,
+            exactAppendOutcomes: false);
+
+    public static IReadOnlyList<CapabilityDescriptor> ForProvider(
+        string provider,
+        bool nativeBatch,
+        string exactOutcomeCost,
+        string batchCost,
+        bool exactAppendOutcomes)
+    {
+        var descriptors = new List<CapabilityDescriptor>
+        {
             ProviderSequenceDescriptor with
             {
                 Description = $"{provider} monotonically allocates a durable Int64 key in the insert command; concurrent commit order may differ and no additional provider command is required."
@@ -68,8 +88,16 @@ public static class BatchWriteCapabilities
             {
                 Description = $"Provides durable idempotent appends on {provider}; ledger and payload are committed atomically."
             },
-            ..(nativeBatch ? [NativeBatchDescriptor] : Array.Empty<CapabilityDescriptor>())
-        ]);
+        };
+        if (exactAppendOutcomes)
+            descriptors.Add(ExactAppendOutcomesDescriptor with
+            {
+                Description = $"Returns replay-stable exact generated outcomes on {provider}; result evidence is stored in the idempotency ledger."
+            });
+        if (nativeBatch)
+            descriptors.Add(NativeBatchDescriptor);
+        return Array.AsReadOnly(descriptors.ToArray());
+    }
 }
 
 /// <summary>Determines the provider path selected for a unit of work at begin time.</summary>
@@ -609,7 +637,7 @@ internal sealed class BatchContext
 }
 
 /// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
-internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
+internal sealed class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly IStorageSession inner;
     private readonly BatchContext context;
@@ -664,6 +692,11 @@ internal sealed class BatchStorageSession : IStorageSession, IConcurrencyStorage
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) =>
         inner.Append(operationId, values);
+
+    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
+        inner is IExactAppendStorageSession exact
+            ? exact.AppendWithOutcomes(operationId, values)
+            : throw new NotSupportedException("GW-APPEND-003: this provider session does not advertise exact append outcomes.");
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
         inner is IConcurrencyStorageSession concurrency

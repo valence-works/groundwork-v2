@@ -830,7 +830,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatchedStorageSession, IRetentionStorageSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly MongoProviderState state;
     private readonly MongoAppliedUnit applied;
@@ -1398,7 +1398,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         {
             try
             {
-                outcome = ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration));
+                outcome = ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration, exactOutcomes: false).ToStatusOutcome());
                 break;
             }
             catch (MongoLedgerConflictException) when (attempt == 0)
@@ -1424,13 +1424,64 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
         return outcome;
     }
 
-    private MongoWriteOutcome AppendCore(
+    public MongoAppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
+    {
+        ThrowIfDisposed();
+        var declaration = Unit.AppendIdempotency ?? throw new InvalidOperationException(
+            $"Storage unit '{Unit.Name}' does not declare append idempotency.");
+        declaration.Validate(Unit);
+        if (string.IsNullOrWhiteSpace(operationId.Nonce))
+            throw new ArgumentException("An operation id requires a non-empty nonce.", nameof(operationId));
+        if (operationId.Nonce.Length > 256)
+            throw new ArgumentException("An operation nonce cannot exceed 256 UTF-16 code units.", nameof(operationId));
+        ArgumentNullException.ThrowIfNull(values);
+        if (values.Count == 0 || values.Any(value => value is null))
+            throw new ArgumentException("An append batch must contain at least one non-null row.", nameof(values));
+        IdempotencyRules.ValidateOperation(
+            Unit,
+            operationId,
+            values.Select(value => new StorageValues(value.Values)).ToArray());
+        foreach (var value in values)
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+
+        MongoAppendOutcomeReport report;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                report = ExecuteWithTransactionIfNeeded(
+                    transactional => transactional.AppendCore(operationId, values, declaration, exactOutcomes: true).ToReport());
+                break;
+            }
+            catch (MongoLedgerConflictException) when (attempt == 0)
+            {
+                if (transactionSession is not null)
+                {
+                    try { transactionSession.AbortTransaction(); }
+                    catch (MongoException) { }
+                    unitOfWork?.Poison();
+                    throw new MongoUnitOfWorkConflictException(
+                        "A concurrent idempotency nonce conflict aborted the whole MongoDB unit of work; retry the complete unit of work.");
+                }
+            }
+        }
+        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
+            report.Status is MongoWriteOutcomeStatus.Inserted or MongoWriteOutcomeStatus.Replayed)
+            ApplyOnAppendRetention(observer: null);
+        return report;
+    }
+
+    private MongoAppendExecution AppendCore(
         OperationId operationId,
         IReadOnlyList<MongoStorageValues> values,
-        AppendIdempotencyDeclaration declaration)
+        AppendIdempotencyDeclaration declaration,
+        bool exactOutcomes)
     {
         var scope = Access.Scope?.Value ?? string.Empty;
         var ledger = state.Operations(declaration.LedgerName);
+        var fingerprint = ExactAppendCodec.Fingerprint(
+            Unit,
+            values.Select(value => new StorageValues(value.Values)).ToArray());
         var cutoffExpression = new BsonDocument("$dateSubtract", new BsonDocument
         {
             ["startDate"] = "$$NOW",
@@ -1472,7 +1523,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
             ? ledger.Find(validIdentity).FirstOrDefault()
             : ledger.Find(transactionSession, validIdentity).FirstOrDefault();
         if (existing is not null)
-            return new MongoWriteOutcome(MongoWriteOutcomeStatus.Replayed);
+            return ReadExistingAppend(existing, operationId, scope, fingerprint, exactOutcomes);
 
         var expiredExisting = transactionSession is null
             ? ledger.Find(new BsonDocument("_id", identity)).FirstOrDefault()
@@ -1485,31 +1536,28 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
                 ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
         }
 
+        // The pipeline keeps provider time (rather than client clock) as the
+        // ledger timestamp. The initial identity lookup returns committed legacy
+        // rows before this upsert, while $cond makes concurrent insert races
+        // initialize only missing fields. Literal wrapping prevents a caller's
+        // nonce/scope beginning with '$' from becoming an aggregation path.
         var ledgerSet = new BsonDocument
         {
-            ["unit"] = new BsonDocument("$cond", new BsonArray
-            {
-                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$unit"), "missing" }),
-                Unit.Id.Value,
-                "$unit"
-            }),
-            ["scope"] = new BsonDocument("$cond", new BsonArray
-            {
-                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$scope"), "missing" }),
-                scope,
-                "$scope"
-            }),
-            ["nonce"] = new BsonDocument("$cond", new BsonArray
-            {
-                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$nonce"), "missing" }),
-                operationId.Nonce,
-                "$nonce"
-            }),
+            ["unit"] = MissingOrLiteral("unit", Unit.Id.Value),
+            ["scope"] = MissingOrLiteral("scope", scope),
+            ["nonce"] = MissingOrLiteral("nonce", operationId.Nonce),
             ["committed_at"] = new BsonDocument("$cond", new BsonArray
             {
                 new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$committed_at"), "missing" }),
                 "$$NOW",
                 "$committed_at"
+            }),
+            ["input_fingerprint"] = MissingOrLiteral("input_fingerprint", fingerprint),
+            ["exact_result"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$exact_result"), "missing" }),
+                BsonNull.Value,
+                "$exact_result"
             })
         };
         var ledgerUpdate = Builders<BsonDocument>.Update.Pipeline(
@@ -1540,15 +1588,84 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IBatch
             throw new MongoLedgerConflictException();
         }
         if (previous is not null)
-            return new MongoWriteOutcome(MongoWriteOutcomeStatus.Replayed);
+            return ReadExistingAppend(previous, operationId, scope, fingerprint, exactOutcomes);
 
+        var outcomes = new List<MongoWriteOutcome>(values.Count);
         foreach (var value in values)
         {
             var outcome = MutateCore(value, MongoWriteOptions.Unconditional, MutationKind.Insert);
             if (!outcome.Succeeded)
                 throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
+            outcomes.Add(outcome);
         }
-        return new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted);
+        var serializedResult = ExactAppendCodec.SerializeOutcomes(
+            outcomes.Select(outcome => new WriteOutcome(
+                (WriteOutcomeStatus)outcome.Status,
+                outcome.Version,
+                generatedValues: outcome.GeneratedValues)).ToArray());
+        var completed = Builders<BsonDocument>.Update.Set("exact_result", serializedResult);
+        if (transactionSession is null)
+            ledger.UpdateOne(new BsonDocument("_id", identity), completed);
+        else
+            ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
+        return new MongoAppendExecution(MongoWriteOutcomeStatus.Inserted, outcomes);
+    }
+
+    private static BsonDocument MissingOrLiteral(string field, string value) =>
+        new("$cond", new BsonArray
+        {
+            new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$" + field), "missing" }),
+            new BsonDocument("$literal", value),
+            "$" + field
+        });
+
+    private MongoAppendExecution ReadExistingAppend(
+        BsonDocument existing,
+        OperationId operationId,
+        string scope,
+        string fingerprint,
+        bool exactOutcomes)
+    {
+        var storedFingerprint = existing.TryGetValue("input_fingerprint", out var storedValue) &&
+                                !storedValue.IsBsonNull && storedValue.IsString
+            ? storedValue.AsString
+            : null;
+        if (storedFingerprint is null)
+        {
+            if (exactOutcomes)
+                throw new InvalidOperationException(
+                    "GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
+            return new MongoAppendExecution(MongoWriteOutcomeStatus.Replayed, null);
+        }
+        if (!exactOutcomes)
+            return new MongoAppendExecution(MongoWriteOutcomeStatus.Replayed, null);
+        if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
+            throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
+        if (!existing.TryGetValue("exact_result", out var resultValue) || resultValue.IsBsonNull || !resultValue.IsString)
+            throw new InvalidOperationException(
+                "GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
+        var decoded = ExactAppendCodec.DeserializeOutcomes(resultValue.AsString)
+            .Select(outcome => new MongoWriteOutcome(
+                (MongoWriteOutcomeStatus)outcome.Status,
+                outcome.Version,
+                generatedValues: outcome.GeneratedValues))
+            .ToArray();
+        return new MongoAppendExecution(MongoWriteOutcomeStatus.Replayed, decoded);
+    }
+
+    private sealed record MongoAppendExecution(
+        MongoWriteOutcomeStatus Status,
+        IReadOnlyList<MongoWriteOutcome>? Outcomes)
+    {
+        internal MongoWriteOutcome ToStatusOutcome() => new(Status);
+
+        internal MongoAppendOutcomeReport ToReport()
+        {
+            if (Outcomes is null || Outcomes.Count == 0)
+                throw new InvalidOperationException(
+                    "GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
+            return new MongoAppendOutcomeReport(Status, Outcomes);
+        }
     }
 
     private static WriteOptions? ToStoreOptions(MongoWriteOptions? options) => options is null

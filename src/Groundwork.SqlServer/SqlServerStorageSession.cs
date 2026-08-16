@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -294,10 +294,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
-        WriteOutcome outcome;
+        AppendExecution execution;
         try
         {
-            outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration));
+            execution = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: false));
         }
         catch
         {
@@ -306,19 +306,43 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         }
         CompleteOnAppend(
             registration,
-            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
             observer: null);
+        return new WriteOutcome(execution.Status);
+    }
+
+    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        var declaration = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        foreach (var value in values)
+            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        AppendOutcomeReport outcome;
+        try
+        {
+            outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: true).ToReport());
+        }
+        catch
+        {
+            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            throw;
+        }
+        CompleteOnAppend(registration, onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed, observer: null);
         return outcome;
     }
 
-    private WriteOutcome AppendCore(
+    private AppendExecution AppendCore(
         OperationId operationId,
         IReadOnlyList<StorageValues> values,
-        AppendIdempotencyDeclaration declaration)
+        AppendIdempotencyDeclaration declaration,
+        bool exactOutcomes)
     {
         EnsureLedgerTable(declaration.LedgerName);
         var providerNow = ProviderNow();
         var scope = Access.Scope?.Value ?? string.Empty;
+        var fingerprint = ExactAppendCodec.Fingerprint(Unit, values);
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
         using (var reclaim = Command($"WITH expired AS (SELECT TOP (128) * FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff) DELETE FROM expired;"))
         {
@@ -328,7 +352,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
         }
 
         var expiredExisting = false;
-        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
+        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
         {
             AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
             using var reader = existing.ExecuteReader();
@@ -336,7 +360,21 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             {
                 var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
                 if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-                    return new WriteOutcome(WriteOutcomeStatus.Replayed);
+                {
+                    var storedFingerprint = reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture);
+                    var storedResult = reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture);
+                    if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
+                    {
+                        if (!exactOutcomes)
+                            return new AppendExecution(WriteOutcomeStatus.Replayed, null);
+                        throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
+                    }
+                    if (!exactOutcomes)
+                        return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
+                    if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
+                        throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
+                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
+                }
                 expiredExisting = true;
             }
         }
@@ -347,12 +385,30 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             deleteExpired.ExecuteNonQuery();
         }
 
-        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}) SELECT @unit, @scope, @nonce, @committed_at WHERE NOT EXISTS (SELECT 1 FROM {Quote(declaration.LedgerName)} WITH (UPDLOCK, HOLDLOCK) WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce);"))
+        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) SELECT @unit, @scope, @nonce, @committed_at, @fingerprint, @result WHERE NOT EXISTS (SELECT 1 FROM {Quote(declaration.LedgerName)} WITH (UPDLOCK, HOLDLOCK) WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce);"))
         {
             AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
             AddLedgerParameter(insertLedger, "committed_at", FormatLedgerTime(providerNow));
+            AddLedgerParameter(insertLedger, "fingerprint", fingerprint);
+            AddLedgerParameter(insertLedger, "result", string.Empty);
             if (insertLedger.ExecuteNonQuery() == 0)
-                return new WriteOutcome(WriteOutcomeStatus.Replayed);
+            {
+                using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+                AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
+                using var reader = replay.ExecuteReader();
+                if (!reader.Read() || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
+                {
+                    if (!exactOutcomes)
+                        return new AppendExecution(WriteOutcomeStatus.Replayed, null);
+                    throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
+                }
+                var storedFingerprint = Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!;
+                if (!exactOutcomes)
+                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
+                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
+                return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
+            }
         }
 
         var logicalUnit = IdempotencyRules.LogicalUnit(Unit, SqlServerSchemaCoordinator.ScopeColumn);
@@ -364,7 +420,14 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             : ApplyBatchCore(writes);
         if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
             throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
-        return new WriteOutcome(WriteOutcomeStatus.Inserted);
+        var report = new AppendExecution(WriteOutcomeStatus.Inserted, outcomes.Select(outcome => outcome.Outcome).ToArray());
+        using (var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
+        {
+            AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
+            AddLedgerParameter(complete, "result", ExactAppendCodec.SerializeOutcomes(report.Outcomes!));
+            complete.ExecuteNonQuery();
+        }
+        return report;
     }
 
     private RowWriteOutcome InsertAppendSequence(RowWrite write)
@@ -381,14 +444,34 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
             $"{Quote(LedgerScope)} nvarchar(128) NOT NULL, " +
             $"{Quote(LedgerNonce)} nvarchar(256) NOT NULL, " +
             $"{Quote(LedgerCommittedAt)} nvarchar(64) NOT NULL, " +
+            $"{Quote(LedgerFingerprint)} nvarchar(128) NULL, " +
+            $"{Quote(LedgerResult)} nvarchar(max) NULL, " +
             // The tuple is 1,668 bytes at its declared maxima. A clustered key is capped at
             // 900 bytes, while SQL Server's nonclustered key budget is 1,700 bytes.
             $"PRIMARY KEY NONCLUSTERED ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)})); END; END TRY BEGIN CATCH IF ERROR_NUMBER() <> 2714 THROW; END CATCH;");
         command.ExecuteNonQuery();
 
+        EnsureLedgerColumn(table, LedgerFingerprint, "nvarchar(128)");
+        EnsureLedgerColumn(table, LedgerResult, "nvarchar(max)");
+
         using var cleanupIndex = Command($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{IdempotencyRules.CleanupIndexName(table)}' AND object_id = OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}')) " +
             $"CREATE INDEX {Quote(IdempotencyRules.CleanupIndexName(table))} ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
         cleanupIndex.ExecuteNonQuery();
+    }
+
+    private void EnsureLedgerColumn(string table, string column, string type)
+    {
+        var escapedTable = table.Replace("'", "''", StringComparison.Ordinal);
+        using var alter = Command($"IF COL_LENGTH(N'{escapedTable}', N'{column}') IS NULL ALTER TABLE {Quote(table)} ADD {Quote(column)} {type} NULL;");
+        try
+        {
+            alter.ExecuteNonQuery();
+        }
+        catch (SqlException exception) when (exception.Number == 2705)
+        {
+            // Another session may have passed the COL_LENGTH check concurrently.
+            // Duplicate-column means the additive upgrade is already complete.
+        }
     }
 
     private static void AddLedgerParameters(SqlCommand command, string unit, string scope, string nonce)
@@ -1232,6 +1315,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     private const string LedgerScope = "scope";
     private const string LedgerNonce = "nonce";
     private const string LedgerCommittedAt = "committed_at";
+    private const string LedgerFingerprint = "input_fingerprint";
+    private const string LedgerResult = "exact_result";
     private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
     private static string Quote(string value) => SqlServerProviderConnection.QuoteIdentifier(value);
 
@@ -1258,4 +1343,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IConcurrencySto
     }
 
     private enum Mutation { Insert, Update, Upsert, Delete }
+
+    private sealed record AppendExecution(WriteOutcomeStatus Status, IReadOnlyList<WriteOutcome>? Outcomes)
+    {
+        internal AppendOutcomeReport ToReport() =>
+            new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
+    }
 }

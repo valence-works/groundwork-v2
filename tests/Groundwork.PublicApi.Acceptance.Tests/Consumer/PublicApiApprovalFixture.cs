@@ -26,6 +26,9 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RecordWriteOptions);
         _ = typeof(BatchWriteOptions);
         _ = typeof(RowWrite);
+        _ = typeof(AppendOutcomeReport);
+        _ = typeof(IExactAppendStorageSession);
+        _ = typeof(AppendIdempotencyConflictException);
         _ = typeof(StorageAccess);
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
@@ -36,6 +39,8 @@ internal static class PublicApiApprovalFixture
     {
         _ = new Func<string, IStorageProviderConnection>(connectionString => new SqliteProviderFactory().Create(connectionString));
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
+        _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
+            (session, operation, values) => session.AppendWithOutcomes(operation, values));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableStoreUnitOfWork<ApprovalRecord>>((table, connection) => table.BeginUnitOfWork(connection, BatchWriteOptions.Exact));
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));
