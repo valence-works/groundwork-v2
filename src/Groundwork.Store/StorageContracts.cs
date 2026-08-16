@@ -511,7 +511,6 @@ public static class StorageInspectionSessionExtensions
     public static StorageInspection Inspect(this IStorageSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        EnsureProviderSequence(session.Unit);
         if (session is not IStorageInspectionSession inspection)
         {
             throw new NotSupportedException(
@@ -519,6 +518,7 @@ public static class StorageInspectionSessionExtensions
                 "inspect IStorageInspectionSession before using Inspect.");
         }
 
+        EnsureProviderSequence(session.Unit);
         return inspection.Inspect();
     }
 

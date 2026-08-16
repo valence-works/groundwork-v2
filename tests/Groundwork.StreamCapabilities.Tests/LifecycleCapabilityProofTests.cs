@@ -1,3 +1,4 @@
+using Microsoft.Data.SqlClient;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.MongoDb;
@@ -50,6 +51,30 @@ public sealed class LifecycleCapabilityProofTests
         var sqliteRefusal = Assert.Throws<NotSupportedException>(() =>
             sqlite.OpenSession(unit, StorageAccess.Global).Inspect());
         Assert.StartsWith("GW-INSPECT-002", sqliteRefusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Inspection_capability_refusal_precedes_unit_shape_validation()
+    {
+        var name = "lifecycle-inspection-capability-order-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 100 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        using var connection = new InMemoryProviderFactory().Create(name);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = new CapabilityHidingSession(connection.OpenSession(unit, StorageAccess.Global));
+
+        var refusal = Assert.Throws<NotSupportedException>(() => session.Inspect());
+
+        Assert.StartsWith("GW-INSPECT-001", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -155,10 +180,55 @@ public sealed class LifecycleCapabilityProofTests
     }
 
     [Fact]
+    public void InMemory_exact_retention_with_zero_keep_deletes_all_rows_and_replays()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-delete-all-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-delete-all-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global, keepNewest: 0);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Values("first"));
+        session.Insert(Values("second"));
+        session.Insert(Values("third"));
+        var before = session.Inspect().LifetimeCommittedSequenceHighWater;
+
+        var operation = new OperationId(DateTimeOffset.UtcNow, "retention-delete-all");
+        var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+
+        Assert.Equal(3L, before);
+        Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        Assert.Equal(3, executed.DeletedRows);
+        Assert.Equal(3, executed.Batches);
+        Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(executed with { Status = RetentionOperationStatus.Replayed }, replayed);
+        var conflict = Assert.Throws<RetentionIdempotencyConflictException>(() => session.ApplyRetention(
+            operation,
+            new RetentionExecutionOptions { MaxRowsPerBatch = 2 }));
+        Assert.StartsWith(RetentionIdempotencyConflictException.DiagnosticCode, conflict.Message, StringComparison.Ordinal);
+        Assert.Equal(before, session.Inspect().LifetimeCommittedSequenceHighWater);
+        Assert.Empty(session.Query(All(unit)).Rows);
+    }
+
+    [Fact]
+    public void InMemory_on_append_zero_keep_deletes_all_rows_automatically()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-on-append-delete-all-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-on-append-delete-all-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global, keepNewest: 0, trigger: RetentionTrigger.OnAppend);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        session.Insert(Values("first"));
+        session.Insert(Values("second"));
+
+        Assert.Empty(session.Query(All(unit)).Rows);
+        Assert.Equal(2L, session.Inspect().LifetimeCommittedSequenceHighWater);
+    }
+
+    [Fact]
     public void Exact_retention_is_atomic_when_cancellation_arrives_after_a_delete_batch()
     {
         using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-atomic-" + Guid.NewGuid().ToString("N"));
-        var unit = LifecycleUnit("lifecycle-retention-atomic-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        var unit = LifecycleUnit("lifecycle-retention-atomic-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global, keepNewest: 0);
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
         for (var index = 0; index < 5; index++)
@@ -177,6 +247,7 @@ public sealed class LifecycleCapabilityProofTests
 
         var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
         Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        Assert.Equal(5, executed.DeletedRows);
         var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
         Assert.Equal(executed.DeletedRows, replayed.DeletedRows);
         Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
@@ -254,6 +325,7 @@ public sealed class LifecycleCapabilityProofTests
                 Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
                 Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
                 Assert.Equal(executed.DeletedRows, replayed.DeletedRows);
+                AssertDeleteAllLifecycle(connection, "sqlite");
             }
 
             using var restarted = new SqliteProviderFactory().Create($"Data Source={path}");
@@ -281,7 +353,9 @@ public sealed class LifecycleCapabilityProofTests
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server lifecycle proof.");
-        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        using var database = SqlServerDatabaseLease.Create(connectionString!);
+        AssertSqlServerLegacyLifecycleRefusal(database.ConnectionString);
+        using var connection = new SqlServerProviderFactory().Create(database.ConnectionString);
         AssertNativeLifecycle(connection, "sqlserver");
     }
 
@@ -386,7 +460,11 @@ public sealed class LifecycleCapabilityProofTests
         Assert.Contains("retention idempotency", conflict.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static StorageUnit LifecycleUnit(string name, ScopePolicy scope) => new()
+    private static StorageUnit LifecycleUnit(
+        string name,
+        ScopePolicy scope,
+        int keepNewest = 1,
+        RetentionTrigger trigger = RetentionTrigger.Explicit) => new()
     {
         Id = new StorageUnitId(name),
         Name = name,
@@ -401,9 +479,9 @@ public sealed class LifecycleCapabilityProofTests
         RetentionIdempotency = new RetentionIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) },
         Retention = new RetentionDeclaration
         {
-            KeepNewest = 1,
+            KeepNewest = keepNewest,
             OrderColumn = "sequence",
-            Trigger = RetentionTrigger.Explicit
+            Trigger = trigger
         }
     };
 
@@ -435,6 +513,151 @@ public sealed class LifecycleCapabilityProofTests
         Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
         Assert.Equal(executed.DeletedRows, replayed.DeletedRows);
         Assert.Single(session.Query(All(unit)).Rows);
+        AssertDeleteAllLifecycle(connection, provider);
+    }
+
+    private static void AssertDeleteAllLifecycle(IStorageProviderConnection connection, string provider)
+    {
+        var unit = LifecycleUnit($"s7-{provider}-delete-all-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global, keepNewest: 0);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Values("first"));
+        session.Insert(Values("second"));
+        session.Insert(Values("third"));
+        var highWater = session.Inspect().LifetimeCommittedSequenceHighWater;
+
+        var operation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-retention-delete-all");
+        var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+
+        Assert.Equal(3L, highWater);
+        Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        Assert.Equal(3, executed.DeletedRows);
+        Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(executed with { Status = RetentionOperationStatus.Replayed }, replayed);
+        Assert.Throws<RetentionIdempotencyConflictException>(() => session.ApplyRetention(
+            operation,
+            new RetentionExecutionOptions { MaxRowsPerBatch = 2 }));
+        Assert.Equal(highWater, session.Inspect().LifetimeCommittedSequenceHighWater);
+        Assert.Empty(session.Query(All(unit)).Rows);
+
+        var cancellationUnit = LifecycleUnit($"s7-{provider}-cancel-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global, keepNewest: 0);
+        Assert.True(connection.Schema.Apply(cancellationUnit).Applied);
+        var cancellationSession = connection.OpenSession(cancellationUnit, StorageAccess.Global);
+        for (var index = 0; index < 5; index++)
+            cancellationSession.Insert(Values($"cancel-{index}"));
+        using var cancellation = new CancellationTokenSource();
+        var observer = new CancelAfterFirstRetentionBatch(cancellation);
+        var cancellationOperation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-retention-cancel");
+        Assert.Throws<OperationCanceledException>(() => cancellationSession.ApplyRetention(
+            cancellationOperation,
+            new RetentionExecutionOptions
+            {
+                MaxRowsPerBatch = 1,
+                CancellationToken = cancellation.Token,
+                Observer = observer
+            }));
+        Assert.Equal(5, cancellationSession.Query(All(cancellationUnit)).Rows.Count);
+        var resumed = cancellationSession.ApplyRetention(
+            cancellationOperation,
+            new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        var resumedReplay = cancellationSession.ApplyRetention(
+            cancellationOperation,
+            new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        Assert.Equal(5, resumed.DeletedRows);
+        Assert.Equal(RetentionOperationStatus.Replayed, resumedReplay.Status);
+        Assert.Equal(resumed.DeletedRows, resumedReplay.DeletedRows);
+        Assert.Empty(cancellationSession.Query(All(cancellationUnit)).Rows);
+    }
+
+    private static void AssertSqlServerLegacyLifecycleRefusal(string connectionString)
+    {
+        using var connection = new SqlConnection(connectionString);
+        connection.Open();
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE [__groundwork_sequence_high_waters]
+                (
+                    [unit] nvarchar(450) NOT NULL,
+                    [scope] nvarchar(128) NOT NULL,
+                    [lifetime_sequence_high_water] bigint NOT NULL,
+                    PRIMARY KEY NONCLUSTERED ([unit], [scope])
+                );
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var unit = LifecycleUnit("lifecycle-sqlserver-legacy-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        using (var provider = new SqlServerProviderFactory().Create(connectionString))
+        {
+            Assert.True(provider.Schema.Apply(unit).Applied);
+            var refusal = Assert.Throws<InvalidOperationException>(() =>
+                provider.OpenSession(unit, StorageAccess.Global).Inspect());
+            Assert.StartsWith("GW-SQLSERVER-LIFECYCLE-001", refusal.Message, StringComparison.Ordinal);
+        }
+
+        using var drop = connection.CreateCommand();
+        drop.CommandText = "DROP TABLE [__groundwork_sequence_high_waters];";
+        drop.ExecuteNonQuery();
+    }
+
+    private sealed class SqlServerDatabaseLease : IDisposable
+    {
+        private readonly string masterConnectionString;
+        private bool disposed;
+
+        private SqlServerDatabaseLease(string connectionString, string masterConnectionString, string name)
+        {
+            ConnectionString = connectionString;
+            this.masterConnectionString = masterConnectionString;
+            Name = name;
+        }
+
+        public string ConnectionString { get; }
+
+        private string Name { get; }
+
+        public static SqlServerDatabaseLease Create(string baseConnectionString)
+        {
+            var name = "groundwork_s7_" + Guid.NewGuid().ToString("N");
+            var master = new SqlConnectionStringBuilder(baseConnectionString)
+            {
+                InitialCatalog = "master"
+            };
+            using (var connection = new SqlConnection(master.ConnectionString))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = $"CREATE DATABASE [{name}];";
+                command.ExecuteNonQuery();
+            }
+
+            var database = new SqlConnectionStringBuilder(baseConnectionString)
+            {
+                InitialCatalog = name
+            };
+            return new SqlServerDatabaseLease(database.ConnectionString, master.ConnectionString, name);
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            try
+            {
+                using var connection = new SqlConnection(masterConnectionString);
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = $"ALTER DATABASE [{Name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{Name}];";
+                command.ExecuteNonQuery();
+            }
+            catch (SqlException)
+            {
+                // The live service may reclaim an isolated database during teardown.
+            }
+        }
     }
 
     private sealed class CancelAfterFirstRetentionBatch(CancellationTokenSource cancellation) : IWritePathObserver
@@ -447,5 +670,19 @@ public sealed class LifecycleCapabilityProofTests
                 Interlocked.Increment(ref batches) == 1)
                 cancellation.Cancel();
         }
+    }
+
+    private sealed class CapabilityHidingSession(IStorageSession inner) : IStorageSession
+    {
+        public StorageUnit Unit => inner.Unit;
+        public StorageAccess Access => inner.Access;
+        public StoredEntry? Read(StorageKey key) => inner.Read(key);
+        public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => inner.Query(request, options);
+        public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);
+        public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
+        public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => inner.Update(values, options);
+        public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
+        public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
+        public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) => inner.Append(operationId, values);
     }
 }

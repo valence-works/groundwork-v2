@@ -240,9 +240,11 @@ public sealed class SqlServerFixture : IAsyncLifetime
             DECLARE @sql nvarchar(max) = N'';
             SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
             FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
-            WHERE t.name IN (N'conformance-global',N'conformance-scoped',N'__groundwork_schema_history',N'__groundwork_schema_fences')
+            WHERE t.name IN (N'conformance-global',N'conformance-scoped',N'__groundwork_schema_history',N'__groundwork_schema_fences',N'__groundwork_sequence_high_waters',N'__groundwork_operations',N'__groundwork_retention_operations')
                OR t.name LIKE N'customer[_]%'
-               OR t.name LIKE N'w2_sqlserver[_]%';
+               OR t.name LIKE N'w2_sqlserver[_]%'
+               OR t.name LIKE N's7_sqlserver[_]%'
+               OR t.name LIKE N's7_legacy_retention[_]%';
             IF @sql <> N'' EXEC sys.sp_executesql @sql;
             """;
         command.ExecuteNonQuery();
