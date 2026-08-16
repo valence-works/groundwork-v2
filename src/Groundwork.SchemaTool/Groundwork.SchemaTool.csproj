@@ -7,13 +7,15 @@
     <IsPackable>true</IsPackable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>groundwork</ToolCommandName>
-    <PackageId>Groundwork.SchemaTool</PackageId>
+    <PackageId>Groundwork.Tool</PackageId>
     <Description>Explicit deployment-time schema planning, validation, application, and emission for Groundwork.</Description>
+    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
     <ProjectReference Include="../Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
     <ProjectReference Include="../Groundwork.Schema/Groundwork.Schema.csproj" />
+    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
   </ItemGroup>
 </Project>

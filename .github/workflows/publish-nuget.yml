@@ -1,0 +1,132 @@
+name: Publish NuGet packages
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional exact SemVer package version (for a controlled dry run or release)
+        required: false
+        type: string
+      publish:
+        description: Push the validated packages to nuget.org
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Resolve package version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == release ]]; then
+            version="${RELEASE_TAG#v}"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            version="$INPUT_VERSION"
+          else
+            version="0.1.0-preview.${GITHUB_RUN_NUMBER}"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "Invalid NuGet version: $version" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building Groundwork v2 packages at $version"
+      - name: Restore the full solution
+        run: dotnet restore Groundwork.slnx --nologo
+      - name: Run the full test suite
+        run: dotnet test Groundwork.slnx --configuration Release --no-restore --nologo
+      - name: Run packaging contract tests
+        run: dotnet test tests/Groundwork.Packaging.Tests/Groundwork.Packaging.Tests.csproj --configuration Release --no-restore --nologo
+      - name: Pack the explicit public package allowlist
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/packages
+          mkdir -p artifacts/packages
+          while IFS='|' read -r package_id project_path; do
+            [[ -z "${package_id//[[:space:]]/}" || "$package_id" == \#* ]] && continue
+            dotnet pack "$project_path" --configuration Release --no-restore \
+              --output artifacts/packages --nologo --verbosity minimal \
+              -p:PackageVersion="$PACKAGE_VERSION" \
+              -p:ContinuousIntegrationBuild=true \
+              -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
+          done < eng/public-packages.txt
+      - name: Validate package contents and allowlist
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: eng/verify-package-layout.sh artifacts/packages "$PACKAGE_VERSION"
+      - name: Run the clean-room public API and tool proof from these artifacts
+        env:
+          GROUNDWORK_PUBLIC_API_PACKAGES: artifacts/packages
+          GROUNDWORK_PUBLIC_API_VERSION: ${{ steps.version.outputs.version }}
+        run: tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: groundwork-packages-${{ steps.version.outputs.version }}
+          path: artifacts/packages
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    if: >-
+      (github.event_name == 'release' && github.event.action == 'published') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+    runs-on: ubuntu-latest
+    environment: nuget
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: groundwork-packages-*
+          merge-multiple: true
+          path: artifacts/packages
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == release ]]; then
+            version="${RELEASE_TAG#v}"
+          else
+            version="$INPUT_VERSION"
+            [[ -n "$version" ]] || version="0.1.0-preview.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Require the NuGet credential
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: test -n "$NUGET_API_KEY"
+      - name: Push packages and symbols to nuget.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          NUGET_SOURCE: https://api.nuget.org/v3/index.json
+        run: |
+          set -euo pipefail
+          for package in artifacts/packages/*."$PACKAGE_VERSION".nupkg artifacts/packages/*."$PACKAGE_VERSION".snupkg; do
+            test -f "$package"
+            dotnet nuget push "$package" --api-key "$NUGET_API_KEY" --source "$NUGET_SOURCE" --skip-duplicate
+          done

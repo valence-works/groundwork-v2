@@ -14,17 +14,26 @@ test -d "$feed" || {
   exit 1
 }
 
+version="${GROUNDWORK_PUBLIC_API_VERSION:-}"
+if [[ -z "$version" ]]; then
+  version="$(find "$feed" -maxdepth 1 -name 'Groundwork.Documents.*.nupkg' -print -quit | sed -E 's#^.*/Groundwork\.Documents\.([0-9][^/]*)\.nupkg$#\1#')"
+fi
+test -n "$version" || {
+  echo "Could not determine the package version in '$feed'." >&2
+  exit 1
+}
+
 for required in \
   Groundwork.Kernel Groundwork.Query.Model Groundwork.Query.Linq Groundwork.Query.Planning \
   Groundwork.Records Groundwork.Store Groundwork.Records.Store Groundwork.Diagnostics \
-  Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.Documents; do
-  test -f "$feed/$required.1.0.0.nupkg" || {
-    echo "The local feed is missing $required." >&2
+  Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.Documents Groundwork.Testing; do
+  test -f "$feed/$required.$version.nupkg" || {
+    echo "The local feed is missing $required.$version." >&2
     exit 1
   }
 done
 
-if grep -REn '<ProjectReference|Groundwork\.Testing|TestingAdapter|InternalsVisibleTo|System\.Reflection|\.\./.*src' "$consumer_root" --include='*.cs' --include='*.csproj'; then
+if grep -REn '<ProjectReference|TestingAdapter|InternalsVisibleTo|System\.Reflection|\.\./.*src' "$consumer_root" --include='*.cs' --include='*.csproj'; then
   echo "The clean-room consumer contains a forbidden internal or source dependency." >&2
   exit 1
 fi
@@ -49,7 +58,7 @@ run_external_consumer() {
   cp "$consumer_root/NuGet.Config" "$external_root/"
   cp "$feed"/Groundwork.*.nupkg "$external_root/feed/"
 
-  if grep -En '<ProjectReference|Groundwork\.Testing|TestingAdapter|InternalsVisibleTo|\.\./.*src' "$external_root" --include='*.cs' --include='*.csproj'; then
+  if grep -En '<ProjectReference|TestingAdapter|InternalsVisibleTo|\.\./.*src' "$external_root" --include='*.cs' --include='*.csproj'; then
     echo "The copied consumer contains a forbidden dependency." >&2
     exit 1
   fi
@@ -65,11 +74,18 @@ run_external_consumer() {
   NUGET_PACKAGES="$package_cache" dotnet restore "$external_root/Groundwork.PublicApi.Consumer.csproj" \
     --force --force-evaluate --packages "$package_cache" --nologo \
     -p:RestoreConfigFile="$external_root/NuGet.Config" \
+    -p:GroundworkVersion="$version" \
     "${isolation_args[@]}" -m:1 -v:q
   NUGET_PACKAGES="$package_cache" dotnet build "$external_root/Groundwork.PublicApi.Consumer.csproj" \
-    -c Release --no-restore --nologo "${isolation_args[@]}" -m:1 -v:q
+    -c Release --no-restore --nologo -p:GroundworkVersion="$version" "${isolation_args[@]}" -m:1 -v:q
   NUGET_PACKAGES="$package_cache" dotnet run --project "$external_root/Groundwork.PublicApi.Consumer.csproj" \
-    -c Release --no-build --no-restore --nologo "${isolation_args[@]}"
+    -c Release --no-build --no-restore --nologo -p:GroundworkVersion="$version" "${isolation_args[@]}"
+
+  tool_root="$external_root/tool"
+  mkdir -p "$tool_root"
+  NUGET_PACKAGES="$package_cache" dotnet tool install Groundwork.Tool --version "$version" \
+    --tool-path "$tool_root" --configfile "$external_root/NuGet.Config" --no-cache --verbosity quiet
+  "$tool_root/groundwork" --version | grep -Eq '^Groundwork\.Tool '
 }
 
 run_external_consumer 1

@@ -6,12 +6,18 @@ using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
 using Groundwork.Sqlite;
+using Groundwork.Testing;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 using Groundwork.PublicApi.Consumer;
 
 PublicApiApprovalFixture.Touch();
 PublicApiApprovalFixture.CompileCallableSurface();
+
+using (var externalProvider = new InMemoryProviderFactory().Create("external-provider-author-proof"))
+{
+    Require(externalProvider.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.ExactAppendOutcomes), "Groundwork.Testing did not expose the reference provider capability contract.");
+}
 
 var databasePath = Path.Combine(Path.GetTempPath(), "groundwork-public-api-" + Guid.NewGuid().ToString("N") + ".db");
 try

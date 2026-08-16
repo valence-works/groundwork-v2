@@ -4,6 +4,7 @@
     <RootNamespace>Groundwork.Analyzers</RootNamespace>
     <AssemblyName>Groundwork.Analyzers</AssemblyName>
     <IsPackable>true</IsPackable>
+    <Description>Roslyn analyzer package for Groundwork schema portability and query coverage diagnostics.</Description>
     <IsRoslynComponent>true</IsRoslynComponent>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
@@ -20,6 +21,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="$(TargetPath)" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.Analyzers.pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="$(TargetDir)Groundwork.Query.Planning.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="$(TargetDir)Groundwork.Query.Model.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="$(TargetDir)Groundwork.Schema.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />

@@ -1,0 +1,23 @@
+# Public v2 package allowlist. Keep this explicit: samples and benchmarks are not release artifacts.
+Groundwork.Analyzers|src/Groundwork.Analyzers/Groundwork.Analyzers.csproj
+Groundwork.Diagnostics|src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj
+Groundwork.Documents|src/Groundwork.Documents/Groundwork.Documents.csproj
+Groundwork.Kernel|src/Groundwork.Kernel/Groundwork.Kernel.csproj
+Groundwork.MongoDb|src/Groundwork.MongoDb/Groundwork.MongoDb.csproj
+Groundwork.PostgreSql|src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj
+Groundwork.Query.Linq|src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj
+Groundwork.Query.Linq.Sqlite|src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj
+Groundwork.Query.Model|src/Groundwork.Query.Model/Groundwork.Query.Model.csproj
+Groundwork.Query.Planning|src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj
+Groundwork.Records|src/Groundwork.Records/Groundwork.Records.csproj
+Groundwork.Records.Store|src/Groundwork.Records.Store/Groundwork.Records.Store.csproj
+Groundwork.Schema|src/Groundwork.Schema/Groundwork.Schema.csproj
+Groundwork.Schema.Generator|src/Groundwork.Schema.Generator/Groundwork.Schema.Generator.csproj
+Groundwork.Tool|src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj
+Groundwork.SchemaTool.MSBuild|src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj
+Groundwork.SqlServer|src/Groundwork.SqlServer/Groundwork.SqlServer.csproj
+Groundwork.Sqlite|src/Groundwork.Sqlite/Groundwork.Sqlite.csproj
+Groundwork.Store|src/Groundwork.Store/Groundwork.Store.csproj
+Groundwork.Substrate.Mongo|src/Groundwork.Substrate.Mongo/Groundwork.Substrate.Mongo.csproj
+Groundwork.Substrate.Relational|src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj
+Groundwork.Testing|src/Groundwork.Testing/Groundwork.Testing.csproj
