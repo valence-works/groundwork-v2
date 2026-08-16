@@ -24,6 +24,10 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId ExactAppendOutcomes { get; } = new("groundwork.storage.exact-append-outcomes");
 
+    public static CapabilityId DurableHighWaterInspection { get; } = new("groundwork.storage.durable-high-water-inspection");
+
+    public static CapabilityId ExactRetention { get; } = new("groundwork.storage.exact-retention");
+
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
@@ -49,8 +53,18 @@ public static class BatchWriteCapabilities
         "Replay-stable exact append outcomes",
         "Returns ordered per-row generated values and persists the canonical payload fingerprint plus exact result for replay.");
 
+    public static CapabilityDescriptor DurableHighWaterInspectionDescriptor { get; } = new(
+        DurableHighWaterInspection,
+        "Durable scoped sequence high-water inspection",
+        "Returns the committed ProviderSequence high-water for the current scope, including rows later removed by retention, across provider/session restart.");
+
+    public static CapabilityDescriptor ExactRetentionDescriptor { get; } = new(
+        ExactRetention,
+        "Replay-stable exact retention",
+        "Records a caller operation identity and immutable retention result so acknowledgement-loss retries replay without deleting again.");
+
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -69,6 +83,16 @@ public static class BatchWriteCapabilities
         string exactOutcomeCost,
         string batchCost,
         bool exactAppendOutcomes)
+        => ForProvider(provider, nativeBatch, exactOutcomeCost, batchCost, exactAppendOutcomes, durableHighWaterInspection: false, exactRetention: false);
+
+    public static IReadOnlyList<CapabilityDescriptor> ForProvider(
+        string provider,
+        bool nativeBatch,
+        string exactOutcomeCost,
+        string batchCost,
+        bool exactAppendOutcomes,
+        bool durableHighWaterInspection,
+        bool exactRetention)
     {
         var descriptors = new List<CapabilityDescriptor>
         {
@@ -93,6 +117,16 @@ public static class BatchWriteCapabilities
             descriptors.Add(ExactAppendOutcomesDescriptor with
             {
                 Description = $"Returns replay-stable exact generated outcomes on {provider}; result evidence is stored in the idempotency ledger."
+            });
+        if (durableHighWaterInspection)
+            descriptors.Add(DurableHighWaterInspectionDescriptor with
+            {
+                Description = $"Returns the committed scoped ProviderSequence high-water on {provider}; the value survives retention and provider/session restart."
+            });
+        if (exactRetention)
+            descriptors.Add(ExactRetentionDescriptor with
+            {
+                Description = $"Replays operation-identified retention results on {provider}; the operation ledger and cleanup are durable."
             });
         if (nativeBatch)
             descriptors.Add(NativeBatchDescriptor);

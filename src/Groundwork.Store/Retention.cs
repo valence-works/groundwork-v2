@@ -39,7 +39,7 @@ public static class RetentionSessionExtensions
     {
         ArgumentNullException.ThrowIfNull(session);
         options ??= new RetentionExecutionOptions();
-        ValidateOptions(options);
+        ValidateExecutionOptions(options);
         return session is IRetentionStorageSession native
             ? native.ApplyRetention(options)
             : ApplyReference(session, options);
@@ -99,7 +99,7 @@ public static class RetentionSessionExtensions
         return new RetentionResult(deleted, batches);
     }
 
-    private static void ValidateOptions(RetentionExecutionOptions options)
+    internal static void ValidateExecutionOptions(RetentionExecutionOptions options)
     {
         if (options.MaxRowsPerBatch <= 0)
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));

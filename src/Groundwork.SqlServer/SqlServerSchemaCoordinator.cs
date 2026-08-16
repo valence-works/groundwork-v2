@@ -166,6 +166,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
             AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
             Scope = source.Scope,
             AppendIdempotency = source.AppendIdempotency,
+            RetentionIdempotency = source.RetentionIdempotency,
             Concurrency = source.Concurrency,
             Timestamps = source.Timestamps,
             Retention = source.Retention,

@@ -105,6 +105,13 @@ public sealed class StorageDeclarationBuilder
 
     public StorageDeclarationBuilder Retain(RetentionDeclaration declaration) => Retention(declaration);
 
+    /// <summary>Opts the unit into replay-stable operation-identified retention.</summary>
+    public StorageDeclarationBuilder RetentionIdempotency(TimeSpan window, string ledgerName = "__groundwork_retention_operations")
+    {
+        state.SetRetentionIdempotency(new RetentionIdempotencyDeclaration { Window = window, LedgerName = ledgerName });
+        return this;
+    }
+
     public StorageDeclarationBuilder Scoped()
     {
         state.SetScope(ScopePolicy.Scoped);
@@ -330,6 +337,7 @@ internal sealed class StorageDeclarationState
     private ScopePolicy scope = ScopePolicy.Global;
     private RetentionDeclaration? retention;
     private AppendIdempotencyDeclaration? appendIdempotency;
+    private RetentionIdempotencyDeclaration? retentionIdempotency;
 
     public StorageDeclarationState(string id, string name)
     {
@@ -401,6 +409,9 @@ internal sealed class StorageDeclarationState
     public void SetAppendIdempotency(AppendIdempotencyDeclaration declaration) =>
         appendIdempotency = declaration ?? throw new ArgumentNullException(nameof(declaration));
 
+    public void SetRetentionIdempotency(RetentionIdempotencyDeclaration declaration) =>
+        retentionIdempotency = declaration ?? throw new ArgumentNullException(nameof(declaration));
+
     public StorageUnit Build(PortabilityValidationContext? context)
     {
         var unit = new StorageUnit
@@ -414,6 +425,7 @@ internal sealed class StorageDeclarationState
             Scope = scope,
             Concurrency = concurrency,
             AppendIdempotency = appendIdempotency,
+            RetentionIdempotency = retentionIdempotency,
             Retention = retention
         };
 

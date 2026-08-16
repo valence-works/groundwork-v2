@@ -496,6 +496,32 @@ public interface IStorageSession
         Append(operationId, values);
 }
 
+/// <summary>Durable lifecycle evidence for the current storage unit and access scope.</summary>
+public sealed record StorageInspection(long? LifetimeCommittedSequenceHighWater);
+
+/// <summary>Optional provider capability for durable scoped ProviderSequence inspection.</summary>
+public interface IStorageInspectionSession
+{
+    StorageInspection Inspect();
+}
+
+/// <summary>Public durable inspection entry point that refuses before provider work when unsupported.</summary>
+public static class StorageInspectionSessionExtensions
+{
+    public static StorageInspection Inspect(this IStorageSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (session is not IStorageInspectionSession inspection)
+        {
+            throw new NotSupportedException(
+                "GW-INSPECT-001: this provider session does not advertise durable sequence inspection; " +
+                "inspect IStorageInspectionSession before using Inspect.");
+        }
+
+        return inspection.Inspect();
+    }
+}
+
 /// <summary>Optional provider capability for replay-stable per-row append outcomes.</summary>
 public interface IExactAppendStorageSession
 {
