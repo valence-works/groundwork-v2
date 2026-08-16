@@ -2,7 +2,11 @@
 
 Groundwork v2 packages use SemVer-compatible pre-1.0 versions. The first
 public preview is `0.1.0-preview.1`; a release tag is `v0.1.0-preview.1` and
-the `v` prefix is not part of the NuGet version.
+the `v` prefix is not part of the package version. Preview packages are
+published to the public Groundwork Feedz source at
+`https://f.feedz.io/valence-works/groundwork/nuget/index.json`.
+Published version strings use lowercase prerelease identifiers so artifact and
+NuGet cache identities remain identical on every supported platform.
 
 While the major version is zero:
 
@@ -25,4 +29,6 @@ version before removal.
 
 Every release is built from a tagged commit, packs the explicit public-project
 allowlist, emits SourceLink and symbol packages, and passes the clean-room
-package consumer before publication.
+package consumer before publication. Publication is accepted only after every
+package in that allowlist and `Groundwork.Tool` restore at the exact version
+from Feedz.

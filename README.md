@@ -13,6 +13,39 @@ The first public packages are pre-1.0 previews. See the [v2 versioning
 policy](docs/v2/versioning.md) and [provider support
 matrix](docs/v2/support-matrix.md) before consuming a preview package.
 
+## Consume preview packages
+
+Groundwork previews are published to the public Feedz source:
+
+```text
+https://f.feedz.io/valence-works/groundwork/nuget/index.json
+```
+
+Map `Groundwork.*` exclusively to that source and keep nuget.org for third-party
+dependencies. For example:
+
+```xml
+<packageSources>
+  <clear />
+  <add key="Groundwork Preview" value="https://f.feedz.io/valence-works/groundwork/nuget/index.json" />
+  <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+</packageSources>
+<packageSourceMapping>
+  <packageSource key="Groundwork Preview">
+    <package pattern="Groundwork.*" />
+  </packageSource>
+  <packageSource key="nuget.org">
+    <package pattern="*" />
+  </packageSource>
+</packageSourceMapping>
+```
+
+Then install the exact preview required by the application:
+
+```shell
+dotnet add package Groundwork.Sqlite --version 0.1.0-preview.1
+```
+
 ## Build
 
 ```shell
