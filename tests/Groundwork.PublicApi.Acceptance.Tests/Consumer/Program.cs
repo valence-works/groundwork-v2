@@ -23,7 +23,10 @@ var databasePath = Path.Combine(Path.GetTempPath(), "groundwork-public-api-" + G
 try
 {
     using var connection = new SqliteProviderFactory().Create("Data Source=" + databasePath);
+    Require(connection.Capabilities.Any(capability => capability.Id == WellKnownCapabilities.AtomicCommit),
+        "The package-only SQLite provider did not advertise cross-unit atomic commit.");
     RunRecordsJourney(connection);
+    RunPrivilegedCrossScopeJourney(connection);
     RunExactAppendJourney(connection);
     RunLifecycleJourney(connection);
     RunAggregationSourcePredicateJourney(connection);
@@ -35,6 +38,69 @@ finally
 {
     if (File.Exists(databasePath))
         File.Delete(databasePath);
+}
+
+static void RunPrivilegedCrossScopeJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("cross_scope_records"),
+        Name = "cross_scope_records",
+        Scope = ScopePolicy.Scoped,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+    Require(connection.Schema.Apply(unit).Applied,
+        "The package-only cross-scope schema did not apply.");
+    foreach (var scope in new[] { "tenant-a", "tenant-b" })
+    {
+        var session = connection.OpenSession(unit,
+            StorageAccess.Scoped(new StorageScope(scope)));
+        Require(session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "same",
+            ["value"] = scope
+        })).Status == WriteOutcomeStatus.Inserted,
+            "The package-only scoped source row did not insert.");
+    }
+
+    var observer = new PublicAccessObserver();
+    var privileged = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
+        new StorageAccessAudit(
+            "public-api-consumer",
+            "recover-stalled-workflows",
+            observer)));
+    var result = privileged.QueryAcrossScopes(new QueryRequest(
+        new TableId(unit.Name),
+        Predicate.AlwaysTrue.Instance,
+        [],
+        Projection.All,
+        Paging.Keyset(1),
+        ResultShape.TotalCount.Instance));
+
+    Require(result.TotalCount == 2 && result.Rows.Count == 1 &&
+            result.NextContinuationToken is not null,
+        "The package-only privileged query did not preserve counted paging.");
+    Require(result.Rows[0].Values.ContainsKey("id") &&
+            !result.Rows[0].Values.Keys.Any(key => key.StartsWith("__groundwork_", StringComparison.Ordinal)),
+        "The package-only privileged query leaked provider-owned columns.");
+    Require(observer.Events.Count == 1 &&
+            observer.Events[0].Purpose == "recover-stalled-workflows",
+        "The package-only privileged query did not emit audit evidence.");
+    try
+    {
+        privileged.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "same" }));
+        throw new InvalidOperationException("Privileged access accepted an ambiguous point read.");
+    }
+    catch (InvalidOperationException exception)
+    {
+        Require(exception.Message.Contains("GW-ACCESS-003", StringComparison.Ordinal),
+            "The privileged point-read refusal did not expose its stable access code.");
+    }
 }
 
 static void RunExactAppendJourney(IStorageProviderConnection connection)
@@ -306,3 +372,10 @@ public sealed record Note(Guid Id, string CustomerId, string Body);
 public sealed record PlainCustomer(Guid Id, string Email);
 public sealed record FoldedCustomer(Guid Id, string Email);
 public sealed record JsonRecord(Guid Id, object Payload);
+
+public sealed class PublicAccessObserver : IStorageAccessObserver
+{
+    public List<StorageAccessEvent> Events { get; } = [];
+
+    public void Observe(StorageAccessEvent accessEvent) => Events.Add(accessEvent);
+}

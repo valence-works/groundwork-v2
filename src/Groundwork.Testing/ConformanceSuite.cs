@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Testing;
 
@@ -55,8 +56,8 @@ public static class ConformanceSuite
                 RequireThrows<InvalidOperationException>(
                     () => connection.OpenSession(global, StorageAccess.Scoped(new StorageScope("scope-a"))));
 
-                var first = connection.OpenSession(scoped, StorageAccess.Scoped(new StorageScope("scope-a")));
-                var second = connection.OpenSession(scoped, StorageAccess.Scoped(new StorageScope("scope-b")));
+                var first = connection.OpenSession(scoped, StorageAccess.Scoped(new StorageScope("scope-\U00010000")));
+                var second = connection.OpenSession(scoped, StorageAccess.Scoped(new StorageScope("scope-\uE000")));
                 var firstValues = scenario.Values("same", "a", null);
                 var firstOutcome = first.Insert(firstValues);
                 Require(firstOutcome.Status == WriteOutcomeStatus.Inserted,
@@ -69,6 +70,105 @@ public static class ConformanceSuite
                     "the first scope could not read its own value");
                 Require(second.Read(scenario.Key("same", secondOutcome))?.Values.Values[scenario.ValueColumn] as string == "b",
                     "the second scope could not read its own value");
+            });
+
+            RunCheck(checks, "audited privileged cross-scope query", () =>
+            {
+                var access = StorageAccess.PrivilegedAcrossScopes(
+                    new StorageAccessAudit("conformance-suite", "verify-cross-scope-recovery"));
+                var session = connection.OpenSession(scoped, access);
+                var table = new TableId(scoped.Name);
+                var request = new QueryRequest(
+                    table,
+                    Predicate.AlwaysTrue.Instance,
+                    [],
+                    Projection.All,
+                    Paging.Keyset(1),
+                    ResultShape.TotalCount.Instance);
+
+                RequireThrows<InvalidOperationException>(() => session.Query(request));
+                RequireThrows<InvalidOperationException>(() => session.Read(scenario.MissingKey("same")));
+                RequireThrows<InvalidOperationException>(() => session.Insert(scenario.Values("refused", "write", null)));
+                RequireThrows<InvalidOperationException>(() =>
+                    connection.BeginUnitOfWork(access, scoped));
+
+                var first = session.QueryAcrossScopes(request);
+                Require(first.TotalCount == 2, "the privileged query did not count both scopes");
+                Require(first.Rows.Count == 1, "the first privileged page did not contain one row");
+                Require(first.NextContinuationToken is not null,
+                    "the first privileged page did not return a continuation token");
+                var second = session.QueryAcrossScopes(new QueryRequest(
+                    table,
+                    request.Where,
+                    request.Order,
+                    request.Projection,
+                    Paging.Continuation(first.NextContinuationToken!, 1),
+                    request.Result));
+                Require(second.Rows.Count == 1, "the second privileged page did not contain one row");
+                Require(first.Rows[0].Scope != second.Rows[0].Scope,
+                    "the privileged pages did not preserve distinct row scopes");
+                Require(first.Rows.Concat(second.Rows).All(row =>
+                        row.Values.ContainsKey(scenario.ValueColumn)),
+                    "the privileged query did not preserve public row values");
+            });
+
+            RunCheck(checks, "cross-scope latest remains partitioned by scope", () =>
+            {
+                var name = "conformance-cross-scope-latest-" + Guid.NewGuid().ToString("N");
+                var latestUnit = new StorageUnit
+                {
+                    Id = new StorageUnitId(name),
+                    Name = name,
+                    Scope = ScopePolicy.Scoped,
+                    Columns =
+                    [
+                        new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+                        new ColumnDefinition { Name = "group", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+                        new ColumnDefinition { Name = "observed_at", Type = PortableType.DateTimeOffset, IsNullable = false },
+                        new ColumnDefinition { Name = "value", Type = PortableType.String, IsNullable = false, MaxLength = 64 }
+                    ],
+                    Key = new KeyDefinition { Columns = ["id"] }
+                };
+                connection.Schema.Apply(latestUnit);
+                var first = connection.OpenSession(latestUnit,
+                    StorageAccess.Scoped(new StorageScope("latest-a")));
+                var second = connection.OpenSession(latestUnit,
+                    StorageAccess.Scoped(new StorageScope("latest-b")));
+                var earlier = DateTimeOffset.Parse("2026-01-01T00:00:00Z", null,
+                    System.Globalization.DateTimeStyles.RoundtripKind);
+                var later = earlier.AddMinutes(1);
+                StorageValues Values(string id, string value, DateTimeOffset observedAt) => new(
+                    new Dictionary<string, object?>
+                    {
+                        ["id"] = id,
+                        ["group"] = "shared",
+                        ["observed_at"] = observedAt,
+                        ["value"] = value
+                    });
+                first.Insert(Values("a-old", "a-old", earlier));
+                first.Insert(Values("a-new", "a-new", later));
+                second.Insert(Values("b-old", "b-old", earlier));
+                second.Insert(Values("b-new", "b-new", later));
+
+                var table = new TableId(name);
+                var group = new ColumnRef(table, "group", QueryType.String, isNullable: false);
+                var timestamp = new ColumnRef(table, "observed_at", QueryType.DateTimeOffset, isNullable: false);
+                var result = connection.OpenSession(latestUnit, StorageAccess.PrivilegedAcrossScopes(
+                        new StorageAccessAudit("conformance-suite", "verify-latest-scope-partition")))
+                    .QueryAcrossScopes(new QueryRequest(
+                        table,
+                        Predicate.AlwaysTrue.Instance,
+                        [],
+                        Projection.All,
+                        Paging.None,
+                        new LatestPerKey(group, timestamp)));
+
+                Require(result.Rows.Count == 2,
+                    "LatestPerKey collapsed equal logical keys from different scopes");
+                Require(result.Rows.Select(row => row.Values["value"] as string)
+                        .Order(StringComparer.Ordinal)
+                        .SequenceEqual(new[] { "a-new", "b-new" }),
+                    "LatestPerKey did not retain the newest row inside each scope");
             });
 
             RunCheck(checks, "CRUD outcomes and uniqueness", () =>
@@ -116,6 +216,9 @@ public static class ConformanceSuite
 
             RunCheck(checks, "unit-of-work commit and rollback", () =>
             {
+                Require(connection.Capabilities.Any(capability =>
+                        capability.Id == WellKnownCapabilities.AtomicCommit),
+                    "the provider did not advertise its cross-unit atomic commit transaction");
                 var session = connection.OpenSession(global, StorageAccess.Global);
                 var committedValues = scenario.Values("committed", "yes", null);
                 var committedWrite = RowWrite.Insert(global, committedValues);

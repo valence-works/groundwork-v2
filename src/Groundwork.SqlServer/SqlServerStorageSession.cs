@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -37,6 +37,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
     {
         ArgumentNullException.ThrowIfNull(request);
+        StorageAccessValidation.EnsureOrdinaryQuery(Access);
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
@@ -65,9 +66,79 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             sourceIncludesContinuation: true);
     });
 
+    public CrossScopeQueryResult QueryAcrossScopes(
+        QueryRequest request,
+        QueryRenderOptions? options = null) => Execute(() =>
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!Access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
+                nameof(request));
+        StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
+
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var scopeToken = new ColumnRef(
+            new TableId(Unit.Name),
+            CrossScopeQueryMaterializer.ScopeTokenColumn,
+            QueryType.String,
+            isNullable: false);
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
+            new[] { scopeToken }
+                .Concat(Unit.Key.Columns
+                    .Where(name => name != SqlServerSchemaCoordinator.ScopeColumn)
+                    .Select(QueryColumn)
+                    .Where(column => column is not null)
+                    .Select(column => column!))) with
+        {
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(
+                    column => column.Name,
+                    column => QueryTypeOf(column.Type),
+                    StringComparer.Ordinal)))
+                .ToImmutableArray(),
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(
+                index => index.Name,
+                index => SqlServerDialect.PhysicalIndexName(Unit.Name, index.Name),
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+            LatestPartitionColumns = [scopeToken]
+        };
+        var executionSource = QueryRequestExecution.WithProviderPredicate(
+            request,
+            request.Where,
+            CrossScopeQueryMaterializer.BindingDiscriminator(Access));
+        var executionRequest = EnsureScopeProjection(
+            QueryRequestExecution.ForPage(executionSource, renderOptions));
+        var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
+        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
+        {
+            if (name == "__groundwork_total_count") return value;
+            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+            return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
+        });
+        AssertExplainPlan(command, renderOptions);
+        var materialized = QueryResultMaterializer.Materialize(
+            executionSource,
+            renderOptions,
+            rows,
+            command.SelectedIndex,
+            command.IndexHintApplied,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+        return CrossScopeQueryMaterializer.FromNativePage(
+            materialized,
+            rows,
+            SqlServerSchemaCoordinator.ScopeColumn);
+    });
+
     public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
     {
         ArgumentNullException.ThrowIfNull(query);
+        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         if (Unit.Scope != ScopePolicy.Global)
             return AggregationSessionExecutor.Execute(this, query);
         return RelationalAggregationExecutor.Execute(
@@ -135,7 +206,26 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqlServerSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key) => Execute(() => PublicEntry(ReadCore(key)));
+    public StoredEntry? Read(StorageKey key)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "read");
+        return Execute(() => PublicEntry(ReadCore(key)));
+    }
+
+    private QueryRequest EnsureScopeProjection(QueryRequest request)
+    {
+        if (request.Projection.AllColumns || request.Projection.Columns.Any(column =>
+                string.Equals(column.Name, SqlServerSchemaCoordinator.ScopeColumn, StringComparison.Ordinal)))
+            return request;
+        var scope = new ColumnRef(
+            new TableId(Unit.Name),
+            SqlServerSchemaCoordinator.ScopeColumn,
+            QueryType.String,
+            isNullable: false);
+        return QueryRequestExecution.WithProjection(
+            request,
+            Projection.ColumnsOnly([.. request.Projection.Columns, scope]));
+    }
 
     private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
         ? null
@@ -289,6 +379,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     public StorageInspection Inspect() => Execute(() =>
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         EnsureHighWaterTable();
         using var command = Command($"SELECT {Quote(HighWaterValue)} FROM {Quote(HighWaterTable)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope;");
@@ -955,10 +1046,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         return outcome;
     }
 
-    private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible) =>
-        eligible && transaction is null
+    private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
+        return eligible && transaction is null
             ? OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value)
             : null;
+    }
 
     private void CompleteOnAppend(
         OnAppendRetentionCoordinator.AppendRegistration? registration,
@@ -1438,6 +1532,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     private T ExecuteWrite<T>(Func<T> operation)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         if (transaction is not null) return Translate(operation);
         lock (owner.Gate)
         {

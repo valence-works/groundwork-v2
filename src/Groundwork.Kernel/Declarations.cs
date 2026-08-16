@@ -131,6 +131,24 @@ public sealed record ConcurrencyDeclaration
     }
 }
 
+/// <summary>Provider-owned logical column names reserved by the public storage contract.</summary>
+public static class ProviderOwnedColumns
+{
+    public const string Scope = "__groundwork_scope";
+    public const string ScopeToken = "__groundwork_scope_token";
+
+    /// <summary>Refuses application declarations that collide with provider-owned query fields.</summary>
+    public static void ValidateLogicalDeclaration(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        if ((unit.Columns ?? []).FirstOrDefault(column => column?.Name is Scope or ScopeToken) is { } reserved)
+        {
+            throw new ArgumentException(
+                $"Column '{reserved.Name}' is provider-owned and cannot be declared by an application.", nameof(unit));
+        }
+    }
+}
+
 public enum TimestampDeclaration
 {
     None

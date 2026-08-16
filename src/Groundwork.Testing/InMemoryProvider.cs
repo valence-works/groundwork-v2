@@ -62,7 +62,8 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         batchCost: "uses provider-neutral per-row operations inside the transaction",
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
-        exactRetention: true);
+        exactRetention: true,
+        atomicCommit: true);
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
     {
@@ -85,6 +86,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
+        StorageAccessValidation.EnsureUnitOfWork(access);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
 
@@ -232,6 +234,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         ValidatePortability(desired);
         desired.AppendIdempotency?.Validate(desired);
@@ -249,6 +252,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         ValidatePortability(desired);
         desired.AppendIdempotency?.Validate(desired);
@@ -567,7 +571,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -605,6 +609,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public StoredEntry? Read(StorageKey key)
     {
         ArgumentNullException.ThrowIfNull(key);
+        RefusePrivilegedPointOperation("read");
         lock (database.Gate)
         {
             ThrowIfDisposed();
@@ -618,6 +623,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(request);
+        StorageAccessValidation.EnsureOrdinaryQuery(Access);
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
@@ -644,7 +650,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
                 : new List<IReadOnlyDictionary<string, object?>>();
 
             if (executionRequest.LatestPerKey is not null)
-                rows = LatestPerKeyRows(rows, executionRequest.LatestPerKey, renderOptions.TieBreakColumns);
+                rows = LatestPerKeyRows(rows, executionRequest.LatestPerKey,
+                    renderOptions.TieBreakColumns, renderOptions.LatestPartitionColumns);
 
             var order = renderOptions.GetEffectiveOrder(executionRequest);
             if (order.Length != 0)
@@ -684,8 +691,94 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         }
     }
 
-    public AggregationResult Aggregate(AggregationQuery query) =>
-        AggregationSessionExecutor.Execute(this, query);
+    public CrossScopeQueryResult QueryAcrossScopes(
+        QueryRequest request,
+        QueryRenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!Access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
+                nameof(request));
+        StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
+
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, SearchKeyQueryMappings.For(Unit));
+        var table = new TableId(Unit.Name);
+        var scopeToken = new ColumnRef(
+            table,
+            CrossScopeQueryMaterializer.ScopeTokenColumn,
+            QueryType.String,
+            isNullable: false);
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
+            new[] { scopeToken }
+                .Concat(Unit.Key.Columns
+                    .Select(QueryColumn)
+                    .Where(column => column is not null)
+                    .Select(column => column!))) with
+        {
+            LatestPartitionColumns = [scopeToken]
+        };
+        var validation = PortableQuerySemantics.Validate(executionRequest);
+        if (!validation.IsPortable)
+        {
+            var refusal = validation.Refusals[0];
+            throw new QueryRenderException(
+                refusal.Code,
+                refusal.Message + " (" + refusal.Path + ").");
+        }
+        ValidateInBudget(executionRequest.Where, suppliedOptions.InValueLimit, request.Table.Value);
+
+        lock (database.Gate)
+        {
+            ThrowIfDisposed();
+            var values = CurrentState().Partitions
+                .SelectMany(partition => partition.Value.Values
+                    .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
+                    .Select(entry =>
+                    {
+                        var row = new Dictionary<string, object?>(entry.Values, StringComparer.Ordinal)
+                        {
+                            [CrossScopeQueryMaterializer.RawScopeColumn] = partition.Key,
+                            [CrossScopeQueryMaterializer.ScopeTokenColumn] =
+                                CrossScopeQueryMaterializer.ScopeToken(new StorageScope(partition.Key))
+                        };
+                        return (IReadOnlyDictionary<string, object?>)row;
+                    }))
+                .ToList();
+
+            if (executionRequest.LatestPerKey is not null)
+                values = LatestPerKeyRows(values, executionRequest.LatestPerKey,
+                    renderOptions.TieBreakColumns, renderOptions.LatestPartitionColumns);
+
+            var order = renderOptions.GetEffectiveOrder(executionRequest);
+            if (order.Length != 0)
+                values.Sort(new MemoryRowComparer(order));
+
+            var rows = values.Select(row => new CrossScopeQueryRow(
+                new StorageScope((string)row[CrossScopeQueryMaterializer.RawScopeColumn]!),
+                row)).ToArray();
+
+            var boundRequest = QueryRequestExecution.WithProviderPredicate(
+                executionRequest,
+                executionRequest.Where,
+                CrossScopeQueryMaterializer.BindingDiscriminator(Access));
+            return CrossScopeQueryMaterializer.Materialize(
+                boundRequest,
+                renderOptions,
+                rows,
+                renderOptions.FindPinnedIndex()?.Name);
+        }
+    }
+
+    public AggregationResult Aggregate(AggregationQuery query)
+    {
+        RefusePrivilegedPointOperation("aggregate");
+        return AggregationSessionExecutor.Execute(this, query);
+    }
 
     private ColumnRef? QueryColumn(string name)
     {
@@ -732,16 +825,29 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     private static List<IReadOnlyDictionary<string, object?>> LatestPerKeyRows(
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
         LatestPerKey latest,
-        IReadOnlyList<ColumnRef> tieBreakColumns)
+        IReadOnlyList<ColumnRef> tieBreakColumns,
+        IReadOnlyList<ColumnRef> partitionColumns)
     {
+        var groups = new[] { latest.Key }.Concat(partitionColumns)
+            .GroupBy(column => column.Name, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToArray();
         return rows
             .Where(row => row.TryGetValue(latest.Timestamp.Name, out var timestamp) && timestamp is DateTimeOffset)
-            .GroupBy(row => ValueIdentity(row.TryGetValue(latest.Key.Name, out var key) ? key : null), StringComparer.Ordinal)
+            .GroupBy(row => CompositeIdentity(row, groups), StringComparer.Ordinal)
             .Select(group => group
                 .OrderByDescending(row => ((DateTimeOffset)row[latest.Timestamp.Name]!).UtcTicks)
                 .Aggregate((best, candidate) => CompareTie(candidate, best, tieBreakColumns) < 0 ? candidate : best))
             .ToList();
     }
+
+    private static string CompositeIdentity(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<ColumnRef> columns) => string.Concat(columns.Select(column =>
+    {
+        var identity = ValueIdentity(row.TryGetValue(column.Name, out var value) ? value : null);
+        return identity.Length.ToString(CultureInfo.InvariantCulture) + ":" + identity;
+    }));
 
     private static int CompareTie(
         IReadOnlyDictionary<string, object?> left,
@@ -827,10 +933,16 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     private static string ValueIdentity(object? value) => value switch
     {
-        null => "null",
+        null => "n:",
+        string text => "s:" + text,
+        int number => "i32:" + number.ToString(CultureInfo.InvariantCulture),
+        long number => "i64:" + number.ToString(CultureInfo.InvariantCulture),
+        decimal number => "d:" + number.ToString(CultureInfo.InvariantCulture),
+        bool flag => flag ? "bool:1" : "bool:0",
+        Guid guid => "g:" + guid.ToString("D"),
         byte[] bytes => "b:" + Convert.ToBase64String(bytes),
         DateTimeOffset instant => "t:" + instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
-        _ => value.ToString() ?? string.Empty
+        _ => value.GetType().FullName + ":" + (value.ToString() ?? string.Empty)
     };
 
     private static byte[] GuidBytes(Guid value)
@@ -854,6 +966,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
+        RefusePrivilegedPointOperation("insert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
         return Mutate(values, options, MutationKind.Insert);
@@ -861,6 +974,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
+        RefusePrivilegedPointOperation("update");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
         return Mutate(values, options, MutationKind.Update);
@@ -868,6 +982,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
+        RefusePrivilegedPointOperation("upsert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
         return Mutate(values, options, MutationKind.Upsert, preserveCreatedAt: true);
@@ -875,6 +990,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
+        RefusePrivilegedPointOperation("conditional upsert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         options?.Observer?.Observe(new WritePathEvent("in-memory.conditional-upsert", null, IsProbe: false));
@@ -883,6 +999,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
+        RefusePrivilegedPointOperation("delete");
         ArgumentNullException.ThrowIfNull(key);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
         lock (database.Gate)
@@ -894,6 +1011,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public StorageInspection Inspect()
     {
+        RefusePrivilegedPointOperation("inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         lock (database.Gate)
         {
@@ -905,6 +1023,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
     {
+        RefusePrivilegedPointOperation("retention");
         var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
         options ??= new RetentionExecutionOptions();
@@ -960,6 +1079,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
+        RefusePrivilegedPointOperation("retention");
         options ??= new RetentionExecutionOptions();
         RetentionSessionExtensions.ValidateExecutionOptions(options);
         return ApplyRetentionCore(options);
@@ -1027,6 +1147,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
+        RefusePrivilegedPointOperation("append");
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         AppendOutcomeReport outcome;
@@ -1043,6 +1164,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
+        RefusePrivilegedPointOperation("append with outcomes");
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         AppendOutcomeReport outcome;
@@ -1056,6 +1178,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ApplyOnAppendRetention(observer: null);
         return outcome;
     }
+
+    private void RefusePrivilegedPointOperation(string operation)
+        => StorageAccessValidation.EnsurePointOperation(Access, operation);
 
     private AppendOutcomeReport AppendCore(
         OperationId operationId,

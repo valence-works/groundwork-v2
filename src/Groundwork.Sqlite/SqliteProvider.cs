@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Store;
 using Groundwork.Diagnostics;
+using System.Text;
 
 namespace Groundwork.Sqlite;
 
@@ -58,7 +59,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback",
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
-        exactRetention: true);
+        exactRetention: true,
+        atomicCommit: true);
 
     internal object Gate => gate;
 
@@ -107,6 +109,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
+        StorageAccessValidation.EnsureUnitOfWork(access);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
@@ -201,6 +204,10 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         {
             connection.Open();
             connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", static (left, right) => string.CompareOrdinal(left, right));
+            connection.CreateFunction<string, string>(
+                "groundwork_scope_token",
+                static scope => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scope))),
+                isDeterministic: true);
             connection.CreateCollation("GROUNDWORK_DECIMAL_18_4", static (left, right) =>
             {
                 if (decimal.TryParse(left, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var leftNumber) &&

@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -42,6 +42,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
     {
         ArgumentNullException.ThrowIfNull(request);
+        StorageAccessValidation.EnsureOrdinaryQuery(Access);
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
@@ -70,9 +71,79 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             sourceIncludesContinuation: true);
     });
 
+    public CrossScopeQueryResult QueryAcrossScopes(
+        QueryRequest request,
+        QueryRenderOptions? options = null) => Execute(() =>
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!Access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
+                nameof(request));
+        StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
+
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        var scopeToken = new ColumnRef(
+            new TableId(Unit.Name),
+            CrossScopeQueryMaterializer.ScopeTokenColumn,
+            QueryType.String,
+            isNullable: false);
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
+            new[] { scopeToken }
+                .Concat(Unit.Key.Columns
+                    .Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn)
+                    .Select(QueryColumn)
+                    .Where(column => column is not null)
+                    .Select(column => column!))) with
+        {
+            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
+                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(
+                    column => column.Name,
+                    column => QueryTypeOf(column.Type),
+                    StringComparer.Ordinal)))
+                .ToImmutableArray(),
+            PhysicalIndexNames = Unit.Indexes.ToDictionary(
+                index => index.Name,
+                index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
+                StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+            LatestPartitionColumns = [scopeToken]
+        };
+        var executionSource = QueryRequestExecution.WithProviderPredicate(
+            request,
+            request.Where,
+            CrossScopeQueryMaterializer.BindingDiscriminator(Access));
+        var executionRequest = EnsureScopeProjection(
+            QueryRequestExecution.ForPage(executionSource, renderOptions));
+        var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
+        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
+        {
+            if (name == "__groundwork_total_count") return value;
+            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
+        });
+        AssertExplainPlan(command, renderOptions);
+        var materialized = QueryResultMaterializer.Materialize(
+            executionSource,
+            renderOptions,
+            rows,
+            command.SelectedIndex,
+            command.IndexHintApplied,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+        return CrossScopeQueryMaterializer.FromNativePage(
+            materialized,
+            rows,
+            PostgreSqlSchemaCoordinator.ScopeColumn);
+    });
+
     public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
     {
         ArgumentNullException.ThrowIfNull(query);
+        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         if (Unit.Scope != ScopePolicy.Global)
             return AggregationSessionExecutor.Execute(this, query);
         return RelationalAggregationExecutor.Execute(
@@ -110,7 +181,26 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key) => Execute(() => PublicEntry(ReadCore(key)));
+    public StoredEntry? Read(StorageKey key)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "read");
+        return Execute(() => PublicEntry(ReadCore(key)));
+    }
+
+    private QueryRequest EnsureScopeProjection(QueryRequest request)
+    {
+        if (request.Projection.AllColumns || request.Projection.Columns.Any(column =>
+                string.Equals(column.Name, PostgreSqlSchemaCoordinator.ScopeColumn, StringComparison.Ordinal)))
+            return request;
+        var scope = new ColumnRef(
+            new TableId(Unit.Name),
+            PostgreSqlSchemaCoordinator.ScopeColumn,
+            QueryType.String,
+            isNullable: false);
+        return QueryRequestExecution.WithProjection(
+            request,
+            Projection.ColumnsOnly([.. request.Projection.Columns, scope]));
+    }
 
     private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
         ? null
@@ -139,6 +229,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         var outcome = Execute(() => ConditionalUpsertCore(values, options));
@@ -241,6 +332,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     public StorageInspection Inspect() => Execute(() =>
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         EnsureHighWaterTable();
         using var command = Command($"SELECT {Quote(HighWaterValue)} FROM {Quote(HighWaterTable)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope;");
@@ -1165,6 +1257,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     private T ExecuteWrite<T>(Func<T> operation)
     {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
         ThrowIfClosed();
         if (transaction is not null)
             return Translate(operation);

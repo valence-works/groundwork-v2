@@ -46,7 +46,12 @@ public static class QuerySearchKeyRewriter
         return ReferenceEquals(where, request.Where)
             ? request
             : new QueryRequest(request.Table, where, request.Order, request.Projection, request.Paging,
-                request.Result, request.LatestPerKey, request.AcceptedScan);
+                request.Result, request.LatestPerKey, request.AcceptedScan)
+            {
+                CanonicalPredicate = request.CanonicalPredicate,
+                ContinuationFingerprint = request.ContinuationFingerprint,
+                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+            };
     }
 
     private static Predicate RewritePredicate(
