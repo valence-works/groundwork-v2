@@ -10,7 +10,15 @@ public static class AggregationSessionExecutor
     public static AggregationResult Execute(IStorageSession session, AggregationQuery query)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return Execute(session.Unit, request => session.Query(request), query);
+        var result = Execute(session.Unit, request => session.Query(request), query);
+        if (session.Access.Scope is not StorageScope scope)
+            return result;
+
+        var profile = AggregationProfileValidator.ResolveOrThrow(session.Unit, query.ProfileName);
+        return new AggregationResult(
+            result.Rows,
+            result.ShapeFingerprint,
+            AggregationQueryFingerprint.Create(session.Unit, profile, query, scope));
     }
 
     /// <summary>Adapter overload for provider-native session contracts.</summary>
@@ -36,6 +44,7 @@ public static class AggregationSessionExecutor
                 Aggregate.Sum sum => [sum.Column],
                 Aggregate.SetUnion set => [set.Column],
                 Aggregate.FirstBy first => [first.Column, first.OrderColumn],
+                Aggregate.Count => Array.Empty<string>(),
                 _ => Array.Empty<string>()
             }))
             .Concat(unit.Key.Columns)

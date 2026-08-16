@@ -298,6 +298,12 @@ public sealed class AggregationBuilder
         return this;
     }
 
+    public AggregationBuilder Count(string alias)
+    {
+        aggregates.Add(new Aggregate.Count(alias));
+        return this;
+    }
+
     public AggregationBuilder Sum(string alias, string column)
     {
         aggregates.Add(new Aggregate.Sum(alias, column));

@@ -12,6 +12,16 @@ namespace Groundwork.Sqlite;
 internal sealed class SqliteDialect : RelationalDialect
 {
     public override string ProviderName => "SQLite";
+
+    protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        if (type != PortableType.String)
+            return base.RenderAggregationOrder(expression, type, direction);
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        var ordinal = expression + " COLLATE GROUNDWORK_UTF16_ORDINAL";
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {ordinal} {order}";
+    }
     public override RelationalQueryRenderer CreateQueryRenderer() => new SqliteQueryRenderer();
     public override bool CreateTableIncludesColumns => true;
 

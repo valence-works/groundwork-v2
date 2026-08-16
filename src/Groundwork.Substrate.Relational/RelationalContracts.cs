@@ -56,6 +56,14 @@ public abstract class RelationalDialect
         _ => throw new AggregationValidationException([new("GW-AGG-PRED-011", $"The predicate value is not compatible with {type}.", "postPredicate.values")])
     };
 
+    /// <summary>Renders one portable null-aware output ordering term for grouped aggregation.</summary>
+    protected internal virtual string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {expression} {order}";
+    }
+
     public abstract string QuoteIdentifier(string identifier);
 
     public abstract string MapType(ColumnDefinition definition);

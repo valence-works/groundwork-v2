@@ -16,6 +16,16 @@ public sealed class PostgreSqlDialect : RelationalDialect
 {
     public override string ProviderName => "PostgreSQL";
 
+    protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        if (type != PortableType.String)
+            return base.RenderAggregationOrder(expression, type, direction);
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        var key = PostgreSqlQueryRenderer.RenderOrdinalKey(expression);
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {key} {order}";
+    }
+
     public override RelationalQueryRenderer CreateQueryRenderer() => new PostgreSqlQueryRenderer();
 
     public override string RenderAggregationContains(string expression, string literal) =>

@@ -284,6 +284,99 @@ public sealed class AggregationProfileTests
     }
 
     [Fact]
+    public void Count_and_order_terms_produce_deterministic_top_n_results()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 });
+        var profile = Profile(new Aggregate.Count("count"), new Aggregate.Sum("total", "amount"));
+        var rows = new IReadOnlyDictionary<string, object?>[]
+        {
+            new Dictionary<string, object?> { ["group"] = "b", ["amount"] = 1L },
+            new Dictionary<string, object?> { ["group"] = "a", ["amount"] = 1L },
+            new Dictionary<string, object?> { ["group"] = "b", ["amount"] = 1L }
+        };
+
+        var result = AggregationExecutor.Execute(unit, profile, rows, new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)
+            ],
+            Take = 5
+        });
+
+        Assert.Equal(["b", "a"], result.Rows.Select(row => row["group"]));
+        Assert.Equal([2L, 1L], result.Rows.Select(row => row["count"]));
+    }
+
+    [Fact]
+    public void Aggregation_order_terms_refuse_duplicate_aliases_and_invalid_directions()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 });
+        var profile = Profile(new Aggregate.Count("count"));
+
+        var duplicate = Assert.Throws<AggregationValidationException>(() => AggregationExecutor.ValidateQuery(
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [new AggregationOrderTerm("count"), new AggregationOrderTerm("count")]
+            }));
+        Assert.Contains(duplicate.Errors, error => error.Code == "GW-AGG-QUERY-007" && error.Path == "orderByTerms");
+
+        var invalidDirection = Assert.Throws<AggregationValidationException>(() => AggregationExecutor.ValidateQuery(
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [new AggregationOrderTerm("count", (SortDirection)99)]
+            }));
+        Assert.Contains(invalidDirection.Errors, error => error.Code == "GW-AGG-QUERY-008");
+    }
+
+    [Fact]
+    public void Aggregation_fingerprints_bind_order_terms_and_scope_values()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 });
+        var profile = Profile(new Aggregate.Count("count"), new Aggregate.Sum("total", "amount"));
+        var first = new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)]
+        };
+        var second = first with
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("group", SortDirection.Ascending),
+                new AggregationOrderTerm("count", SortDirection.Descending)]
+        };
+        var directionChanged = first with
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Ascending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)]
+        };
+        var scopedA = new StorageScope("tenant-a");
+        var scopedB = new StorageScope("tenant-b");
+
+        Assert.NotEqual(
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, first),
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, second));
+        Assert.NotEqual(
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, first),
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, directionChanged));
+        Assert.NotEqual(
+            AggregationQueryFingerprint.Create(unit, profile, first, scopedA),
+            AggregationQueryFingerprint.Create(unit, profile, first, scopedB));
+    }
+
+    [Fact]
     public void Captured_profiles_cannot_be_mutated_through_read_only_interfaces()
     {
         var source = Profile(new Aggregate.SetUnion("labels", "label", 2)) with

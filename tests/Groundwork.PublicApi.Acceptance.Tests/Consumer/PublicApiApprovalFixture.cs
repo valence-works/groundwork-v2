@@ -24,6 +24,10 @@ internal static class PublicApiApprovalFixture
         _ = typeof(IndexBuilder);
         _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
         _ = typeof(PortabilityValidator);
+        _ = typeof(AggregationOrderTerm);
+        _ = typeof(AggregationQuery);
+        _ = typeof(AggregationBuilder);
+        _ = typeof(Aggregate.Count);
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
@@ -62,6 +66,12 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
+        _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
+            builder.Aggregate("summary", aggregation => aggregation.GroupBy("group").Count("count")));
+        _ = new AggregationQuery("summary")
+        {
+            OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending)]
+        };
         _ = PortabilityValidator.MaximumPortableIdentifierLength;
         _ = new Func<string, string, PortabilityValidationResult>((identifier, path) =>
             PortabilityValidator.ValidatePhysicalIdentifier(identifier, path));

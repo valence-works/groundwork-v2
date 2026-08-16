@@ -227,7 +227,7 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     protected override string RenderContains(string expression, string parameter) =>
         "(DATALENGTH(@" + parameter + ") = 0 OR CHARINDEX(@" + parameter + ", " + expression + ") > 0)";
 
-    private static string RenderGuidOrderKey(string expression) =>
+    internal static string RenderGuidOrderKey(string expression) =>
         "CONVERT(char(36), " + expression + ") COLLATE Latin1_General_100_BIN2";
 
     protected override string RenderEndsWith(string expression, string parameter) =>

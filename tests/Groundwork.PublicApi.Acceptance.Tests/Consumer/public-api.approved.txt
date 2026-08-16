@@ -6,6 +6,10 @@ Groundwork.Kernel.MissingValueBehavior
 Groundwork.Kernel.IndexBuilder
 Groundwork.Kernel.StorageDeclarationBuilder
 Groundwork.Kernel.PortabilityValidator
+Groundwork.Kernel.AggregationOrderTerm
+Groundwork.Kernel.AggregationQuery
+Groundwork.Kernel.AggregationBuilder
+Groundwork.Kernel.Aggregate.Count
 Groundwork.Query.Model.QueryRequest
 Groundwork.Query.Planning.QueryCoverageException
 Groundwork.Records.RecordTable

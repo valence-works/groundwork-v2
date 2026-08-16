@@ -15,6 +15,7 @@ namespace Groundwork.Kernel;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "$type")]
 [JsonDerivedType(typeof(Aggregate.Min), "min")]
 [JsonDerivedType(typeof(Aggregate.Max), "max")]
+[JsonDerivedType(typeof(Aggregate.Count), "count")]
 [JsonDerivedType(typeof(Aggregate.Sum), "sum")]
 [JsonDerivedType(typeof(Aggregate.SetUnion), "setUnion")]
 [JsonDerivedType(typeof(Aggregate.FirstBy), "firstBy")]
@@ -23,6 +24,9 @@ public abstract record Aggregate(string Alias)
     public sealed record Min(string Alias, string Column) : Aggregate(Alias);
 
     public sealed record Max(string Alias, string Column) : Aggregate(Alias);
+
+    /// <summary>Counts source rows in each declared group and returns an Int64.</summary>
+    public sealed record Count(string Alias) : Aggregate(Alias);
 
     public sealed record Sum(string Alias, string Column) : Aggregate(Alias);
 
@@ -90,12 +94,16 @@ public static class AggregationProfileSnapshot
     {
         Aggregate.Min min => new Aggregate.Min(min.Alias, min.Column),
         Aggregate.Max max => new Aggregate.Max(max.Alias, max.Column),
+        Aggregate.Count count => new Aggregate.Count(count.Alias),
         Aggregate.Sum sum => new Aggregate.Sum(sum.Alias, sum.Column),
         Aggregate.SetUnion set => new Aggregate.SetUnion(set.Alias, set.Column, set.MaxValues),
         Aggregate.FirstBy first => new Aggregate.FirstBy(first.Alias, first.Column, first.OrderColumn, first.Direction),
         _ => throw new ArgumentOutOfRangeException(nameof(aggregate))
     };
 }
+
+/// <summary>One validated output alias and direction in an aggregation result order.</summary>
+public sealed record AggregationOrderTerm(string Alias, SortDirection Direction = SortDirection.Ascending);
 
 /// <summary>One post-reduction predicate tree.  Values are captured by the executor.</summary>
 public abstract record AggregationPredicate
@@ -145,6 +153,12 @@ public sealed record AggregationQuery
 
     public SortDirection OrderDirection { get; init; } = SortDirection.Ascending;
 
+    /// <summary>
+    /// Optional ordered output terms. Every term must be a declared group-by column or aggregate
+    /// alias. Missing group-by columns are appended as ordinal ascending tie-breakers.
+    /// </summary>
+    public IReadOnlyList<AggregationOrderTerm> OrderByTerms { get; init; } = [];
+
     /// <summary>Optional caller-requested page size; it never changes profile budgets.</summary>
     public int? Take { get; init; }
 
@@ -157,6 +171,16 @@ public sealed record AggregationQuery
 public static class AggregationQueryFingerprint
 {
     public static string Create(StorageUnit unit, AggregationProfile profile, AggregationQuery query, bool includeValues = true)
+        => CreateCore(unit, profile, query, includeValues, null);
+
+    /// <summary>Creates an aggregation fingerprint bound to an ordinary scoped session.</summary>
+    internal static string Create(StorageUnit unit, AggregationProfile profile, AggregationQuery query, StorageScope scope, bool includeValues = true)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        return CreateCore(unit, profile, query, includeValues, scope.Value);
+    }
+
+    private static string CreateCore(StorageUnit unit, AggregationProfile profile, AggregationQuery query, bool includeValues, string? scope)
     {
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(profile);
@@ -165,6 +189,8 @@ public static class AggregationQueryFingerprint
         builder.Append("aggregation-query-v1|unit=").Append(Escape(unit.Name));
         builder.Append("|profile=").Append(Escape(profile.Name));
         builder.Append("|profile-shape=").Append(Schema.AggregationProfileCanonicalization.Canonicalize(profile));
+        if (includeValues && scope is not null)
+            builder.Append("|scope=").Append(Escape(scope));
         var sourcePredicate = query.SourcePredicate ?? Predicate.AlwaysTrue.Instance;
         builder.Append("|source=").Append(includeValues
             ? PredicateCanonicalizer.ToCanonicalString(sourcePredicate)
@@ -172,6 +198,8 @@ public static class AggregationQueryFingerprint
         builder.Append("|post=").Append(CanonicalPost(query.PostPredicate, includeValues));
         builder.Append("|order=").Append(Escape(query.OrderBy ?? ""));
         builder.Append('|').Append(query.OrderDirection);
+        builder.Append("|order-terms=").Append(string.Join(',', EffectiveOrderTerms(query, profile).Select(term =>
+            Escape(term.Alias) + ":" + term.Direction)));
         builder.Append("|take=").Append(query.Take?.ToString(CultureInfo.InvariantCulture) ?? "none");
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
     }
@@ -209,6 +237,27 @@ public static class AggregationQueryFingerprint
         foreach (var character in value)
             builder.Append(((int)character).ToString("X4", CultureInfo.InvariantCulture));
         return builder.ToString();
+    }
+
+    internal static IReadOnlyList<AggregationOrderTerm> EffectiveOrderTerms(AggregationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (query.OrderByTerms is { Count: > 0 })
+            return query.OrderByTerms;
+        return query.OrderBy is null
+            ? []
+            : [new AggregationOrderTerm(query.OrderBy, query.OrderDirection)];
+    }
+
+    internal static IReadOnlyList<AggregationOrderTerm> EffectiveOrderTerms(
+        AggregationQuery query,
+        AggregationProfile profile)
+    {
+        var terms = EffectiveOrderTerms(query).ToList();
+        foreach (var column in profile.GroupByColumns)
+            if (!terms.Any(term => string.Equals(term.Alias, column, StringComparison.Ordinal)))
+                terms.Add(new AggregationOrderTerm(column));
+        return terms;
     }
 }
 
@@ -372,6 +421,8 @@ public static class AggregationProfileValidator
                             sumColumn.Type is not (PortableType.Int32 or PortableType.Int64 or PortableType.Decimal))
                             Add("GW-AGG-TYPE-001", $"Sum '{sum.Alias}' requires an Int32, Int64, or Decimal column.", paths + ".aggregates." + sum.Alias);
                         break;
+                    case Aggregate.Count:
+                        break;
                     case Aggregate.SetUnion set:
                         if (!columns.TryGetValue(set.Column, out var setColumn) || setColumn.Type != PortableType.String)
                             Add("GW-AGG-TYPE-002", $"SetUnion '{set.Alias}' requires a String column.", paths + ".aggregates." + set.Alias);
@@ -502,13 +553,9 @@ public static class AggregationExecutor
 
         var output = groups.Values.Select(group => Reduce(unit, profile, group.Rows)).ToList();
         ApplyPostPredicate(profile, query, output);
-        if (query.OrderBy is not null)
-        {
-            if (!IsDeclaredOutput(profile, query.OrderBy))
-                throw new AggregationValidationException([new("GW-AGG-QUERY-002", $"Order alias '{query.OrderBy}' is not declared by profile '{profile.Name}'.", "orderBy")]);
-            output.Sort((left, right) => Compare(left.Values.TryGetValue(query.OrderBy, out var l) ? l : null,
-                right.Values.TryGetValue(query.OrderBy, out var r) ? r : null, query.OrderDirection));
-        }
+        var orderTerms = AggregationQueryFingerprint.EffectiveOrderTerms(query, profile);
+        if (orderTerms.Count != 0)
+            output.Sort((left, right) => CompareOutput(left, right, orderTerms));
         else
         {
             output.Sort((left, right) => CompareGroupRows(left, right, profile.GroupByColumns));
@@ -538,6 +585,7 @@ public static class AggregationExecutor
             {
                 Aggregate.Min min => ReduceMin(rows, min.Column),
                 Aggregate.Max max => ReduceMax(rows, max.Column),
+                Aggregate.Count => (long)rows.Count,
                 Aggregate.Sum sum => ReduceSum(rows, unit.Columns.Single(column => column.Name == sum.Column)),
                 Aggregate.SetUnion set => ReduceSetUnion(rows, set.Column, set.MaxValues, set.Alias),
                 Aggregate.FirstBy first => ReduceFirstBy(rows, first, unit.Key.Columns),
@@ -642,13 +690,22 @@ public static class AggregationExecutor
         if (query.SourcePredicate is not null)
             ValidateSourcePredicate(unit, query.SourcePredicate);
 
-        if (query.OrderBy is not null)
+        if (query.OrderBy is not null && query.OrderByTerms is { Count: > 0 })
+            throw new AggregationValidationException([new("GW-AGG-QUERY-006", "Use either the simple OrderBy authoring path or OrderByTerms, not both.", "orderBy")]);
+        var seenOrderAliases = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var term in AggregationQueryFingerprint.EffectiveOrderTerms(query))
         {
-            var aggregate = profile.Aggregates.FirstOrDefault(candidate => candidate.Alias == query.OrderBy);
+            if (term is null || string.IsNullOrWhiteSpace(term.Alias))
+                throw new AggregationValidationException([new("GW-AGG-QUERY-002", "Aggregation order aliases are required.", "orderByTerms")]);
+            if (!seenOrderAliases.Add(term.Alias))
+                throw new AggregationValidationException([new("GW-AGG-QUERY-007", $"Order alias '{term.Alias}' is declared more than once.", "orderByTerms")]);
+            if (term.Direction is not (SortDirection.Ascending or SortDirection.Descending))
+                throw new AggregationValidationException([new("GW-AGG-QUERY-008", $"Order direction for alias '{term.Alias}' is not supported.", "orderByTerms")]);
+            var aggregate = profile.Aggregates.FirstOrDefault(candidate => candidate.Alias == term.Alias);
             if (aggregate is Aggregate.SetUnion)
-                throw new AggregationValidationException([new("GW-AGG-QUERY-005", $"SetUnion output '{query.OrderBy}' cannot be used as an order key.", "orderBy")]);
-            if (!IsDeclaredOutput(profile, query.OrderBy))
-                throw new AggregationValidationException([new("GW-AGG-QUERY-002", $"Order alias '{query.OrderBy}' is not declared by profile '{profile.Name}'.", "orderBy")]);
+                throw new AggregationValidationException([new("GW-AGG-QUERY-005", $"SetUnion output '{term.Alias}' cannot be used as an order key.", "orderByTerms")]);
+            if (!IsDeclaredOutput(profile, term.Alias))
+                throw new AggregationValidationException([new("GW-AGG-QUERY-002", $"Order alias '{term.Alias}' is not declared by profile '{profile.Name}'.", "orderByTerms")]);
         }
         if (query.PostPredicate is not null)
         {
@@ -711,6 +768,7 @@ public static class AggregationExecutor
     {
         Aggregate.Sum sum when unit.Columns.Single(column => column.Name == sum.Column).Type is PortableType.Int32 or PortableType.Int64 => PortableType.Int64,
         Aggregate.Sum sum => unit.Columns.Single(column => column.Name == sum.Column).Type,
+        Aggregate.Count => PortableType.Int64,
         Aggregate.Min min => unit.Columns.Single(column => column.Name == min.Column).Type,
         Aggregate.Max max => unit.Columns.Single(column => column.Name == max.Column).Type,
         Aggregate.FirstBy first => unit.Columns.Single(column => column.Name == first.Column).Type,
@@ -805,6 +863,20 @@ public static class AggregationExecutor
 
     private static bool IsDeclaredOutput(AggregationProfile profile, string alias) =>
         profile.GroupByColumns.Contains(alias, StringComparer.Ordinal) || profile.Aggregates.Any(aggregate => aggregate.Alias == alias);
+
+    private static int CompareOutput(
+        AggregationRow left,
+        AggregationRow right,
+        IReadOnlyList<AggregationOrderTerm> terms)
+    {
+        foreach (var term in terms)
+        {
+            var comparison = Compare(left[term.Alias], right[term.Alias], term.Direction);
+            if (comparison != 0)
+                return comparison;
+        }
+        return 0;
+    }
 
     private static void ValidateSourcePredicate(StorageUnit unit, Predicate predicate)
     {

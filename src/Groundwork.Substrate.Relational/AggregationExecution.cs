@@ -2,6 +2,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Substrate.Relational;
 
@@ -15,11 +16,47 @@ public static class RelationalAggregationExecutor
         StorageUnit unit,
         AggregationProfile profile,
         AggregationQuery query,
-        Func<string, object?, object?> decode)
+        Func<string, object?, object?> decode) =>
+        ExecuteWithHandling(connection, transaction, dialect, unit, profile, query, decode, null, null);
+
+    internal static AggregationResult ExecuteScoped(
+        DbConnection connection,
+        DbTransaction? transaction,
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery query,
+        Func<string, object?, object?> decode,
+        string scopeColumn,
+        StorageScope scope)
+    {
+        var scopeRef = new ColumnRef(new TableId(unit.Name), scopeColumn, QueryType.String, isNullable: false);
+        return ExecuteWithHandling(
+            connection,
+            transaction,
+            dialect,
+            unit,
+            profile,
+            query,
+            decode,
+            new Predicate.Equal(scopeRef, QueryConstant.Of(scopeRef, scope.Value)),
+            scope);
+    }
+
+    private static AggregationResult ExecuteWithHandling(
+        DbConnection connection,
+        DbTransaction? transaction,
+        RelationalDialect dialect,
+        StorageUnit unit,
+        AggregationProfile profile,
+        AggregationQuery query,
+        Func<string, object?, object?> decode,
+        Predicate? providerPredicate,
+        StorageScope? scope)
     {
         try
         {
-            return ExecuteCore(connection, transaction, dialect, unit, profile, query, decode);
+            return ExecuteCore(connection, transaction, dialect, unit, profile, query, decode, providerPredicate, scope);
         }
         catch (AggregationBudgetExceededException)
         {
@@ -45,7 +82,9 @@ public static class RelationalAggregationExecutor
         StorageUnit unit,
         AggregationProfile profile,
         AggregationQuery query,
-        Func<string, object?, object?> decode)
+        Func<string, object?, object?> decode,
+        Predicate? providerPredicate,
+        StorageScope? scope)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(dialect);
@@ -53,8 +92,10 @@ public static class RelationalAggregationExecutor
         ArgumentNullException.ThrowIfNull(profile);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(decode);
-        VerifyBudgets(connection, transaction, dialect, unit, profile, query);
-        var command = dialect.RenderAggregation(unit, profile, query);
+        VerifyBudgets(connection, transaction, dialect, unit, profile, query, providerPredicate);
+        var command = providerPredicate is null
+            ? RelationalAggregationRenderer.Render(dialect, unit, profile, query)
+            : RelationalAggregationRenderer.RenderWithProviderPredicate(dialect, unit, profile, query, providerPredicate);
         using var native = connection.CreateCommand();
         native.Transaction = transaction;
         native.CommandText = command.CommandText;
@@ -94,7 +135,9 @@ public static class RelationalAggregationExecutor
         return new AggregationResult(
             rows,
             AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, query),
-            AggregationQueryFingerprint.Create(unit, profile, query));
+            scope is null
+                ? AggregationQueryFingerprint.Create(unit, profile, query)
+                : AggregationQueryFingerprint.Create(unit, profile, query, scope));
     }
 
     private static AggregationBudgetExceededException SumOverflow(
@@ -112,9 +155,12 @@ public static class RelationalAggregationExecutor
         RelationalDialect dialect,
         StorageUnit unit,
         AggregationProfile profile,
-        AggregationQuery query)
+        AggregationQuery query,
+        Predicate? providerPredicate)
     {
-        var probe = RelationalAggregationRenderer.RenderBudgetProbe(dialect, unit, profile, query);
+        var probe = providerPredicate is null
+            ? RelationalAggregationRenderer.RenderBudgetProbe(dialect, unit, profile, query)
+            : RelationalAggregationRenderer.RenderBudgetProbeWithProviderPredicate(dialect, unit, profile, query, providerPredicate);
         using var native = connection.CreateCommand();
         native.Transaction = transaction;
         native.CommandText = probe.CommandText;
@@ -143,10 +189,13 @@ public static class RelationalAggregationExecutor
         Func<string, object?, object?> decode)
     {
         if (value is null) return null;
+        if (aggregate is Aggregate.Count)
+            return Convert.ToInt64(value, CultureInfo.InvariantCulture);
         var column = aggregate switch
         {
             Aggregate.Min min => min.Column,
             Aggregate.Max max => max.Column,
+            Aggregate.Count => null,
             Aggregate.Sum sum => sum.Column,
             Aggregate.FirstBy first => first.Column,
             _ => null

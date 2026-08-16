@@ -7,6 +7,7 @@ using Groundwork.Sqlite;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq.Sqlite;
+using Groundwork.Substrate.Relational;
 using Xunit;
 
 namespace Groundwork.Sqlite.Tests;
@@ -168,6 +169,85 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Native_aggregation_orders_string_group_and_aggregate_aliases_by_utf16_ordinal()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit(
+            "aggregation-string-order",
+            [new Aggregate.Count("count"), new Aggregate.Min("minimum", "label")]);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var supplementary = char.ConvertFromUtf32(0x10000);
+        var privateUse = "\uE000";
+        InsertAggregationRow(session, "1", "z", 0, 0m, supplementary, 1, 1);
+        InsertAggregationRow(session, "2", "a", 0, 0m, privateUse, 2, 2);
+
+        var rows = session.Aggregate(new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("minimum", SortDirection.Ascending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)]
+        }).Rows;
+
+        Assert.Equal(["z", "a"], rows.Select(row => row["group"]));
+        Assert.Equal([supplementary, privateUse], rows.Select(row => row["minimum"]));
+    }
+
+    [Fact]
+    public void Native_aggregation_count_alias_reusing_string_source_orders_as_Int64()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit(
+            "aggregation-count-source-alias",
+            [new Aggregate.Count("label")]);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        InsertAggregationRow(session, "a-1", "a", 0, 0m, "first", 1, 1);
+        InsertAggregationRow(session, "a-2", "a", 0, 0m, "second", 2, 2);
+        InsertAggregationRow(session, "b-1", "b", 0, 0m, "third", 3, 3);
+
+        var rows = session.Aggregate(new AggregationQuery("summary")
+        {
+            OrderByTerms =
+            [
+                new AggregationOrderTerm("label", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)
+            ]
+        }).Rows;
+
+        Assert.Equal(["a", "b"], rows.Select(row => row["group"]));
+        Assert.Equal([2L, 1L], rows.Select(row => Assert.IsType<long>(row["label"])));
+    }
+
+    [Fact]
+    public void Renderer_resolves_count_alias_before_string_source_column_for_order_type()
+    {
+        var unit = AggregationUnit(
+            "aggregation-count-source-alias-render",
+            [new Aggregate.Count("label")]) with
+        {
+            Columns = AggregationUnit("aggregation-count-source-alias-render-group", [])
+                .Columns.Select(column => column.Name == "group"
+                    ? column with { Type = PortableType.Int64 }
+                    : column).ToArray()
+        };
+        var profile = unit.AggregationProfiles.Single();
+        var sql = RelationalAggregationRenderer.Render(
+            new SqliteDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [new AggregationOrderTerm("label", SortDirection.Ascending)]
+            }).CommandText;
+
+        Assert.Contains("CASE WHEN \"label\" IS NULL THEN 0 ELSE 1 END, \"label\" ASC", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUNDWORK_UTF16_ORDINAL", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Native_decimal_sum_reports_the_portable_overflow_refusal()
     {
         using var store = TemporaryStore.Create();
@@ -325,6 +405,104 @@ public sealed class SqliteProviderTests
         Assert.Equal("y", a["first"]);
         var c = Assert.Single(result.Rows, item => Equals(item["group"], "c"));
         Assert.Null(c["total"]);
+    }
+
+    [Fact]
+    public void Scoped_aggregation_is_native_and_isolated_before_grouping()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit("aggregation-scoped-native", [
+            new Aggregate.Count("count"),
+            new Aggregate.Sum("total", "integerAmount")]);
+        unit = unit with
+        {
+            Scope = ScopePolicy.Scoped,
+            AggregationProfiles = [unit.AggregationProfiles.Single() with
+            {
+                AllowedPredicates = [new AggregationPredicateAllowance
+                {
+                    Alias = "count",
+                    SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                    {
+                        AggregationPredicateOperator.Equal
+                    }
+                }]
+            }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-b")));
+        InsertAggregationRow(first, "same-key", "same-group", 2, 0m, "a", 1, 1);
+        InsertAggregationRow(first, "only-a", "same-group", 3, 0m, "b", 2, 2);
+        InsertAggregationRow(second, "same-key", "same-group", 11, 0m, "c", 1, 1);
+
+        var scopedQuery = new AggregationQuery("summary")
+        {
+            OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending), new AggregationOrderTerm("group", SortDirection.Ascending)]
+        };
+        var aResult = first.Aggregate(scopedQuery);
+        var bResult = second.Aggregate(scopedQuery);
+        var countFiltered = first.Aggregate(scopedQuery with
+        {
+            PostPredicate = new AggregationPredicate.Comparison("count", AggregationPredicateOperator.Equal, [2L])
+        });
+        var a = Assert.Single(aResult.Rows);
+        var b = Assert.Single(bResult.Rows);
+
+        Assert.Equal("same-group", a["group"]);
+        Assert.Equal(2L, a["count"]);
+        Assert.Equal(5L, a["total"]);
+        Assert.Equal(1L, b["count"]);
+        Assert.Equal(11L, b["total"]);
+        Assert.Equal(2L, Assert.Single(countFiltered.Rows)["count"]);
+        var aFingerprint = first.Aggregate(new AggregationQuery("summary")).ValueFingerprint;
+        var bFingerprint = second.Aggregate(new AggregationQuery("summary")).ValueFingerprint;
+        Assert.NotEqual(aFingerprint, bFingerprint);
+        Assert.Equal(aResult.ShapeFingerprint, bResult.ShapeFingerprint);
+    }
+
+    [Fact]
+    public void Scoped_native_sql_artifacts_inject_scope_before_grouping_and_budget_probe()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-scoped-artifact"),
+            Name = "aggregation_scoped_artifact",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")],
+            AllowedPredicates = []
+        };
+        var scope = new ColumnRef(new TableId(unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String, isNullable: false);
+        var providerPredicate = new Predicate.Equal(scope, QueryConstant.Of(scope, "tenant-a"));
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)],
+            Take = 5
+        };
+
+        var command = RelationalAggregationRenderer.RenderWithProviderPredicate(new SqliteDialect(), unit, profile, query, providerPredicate).CommandText;
+        var probe = RelationalAggregationRenderer.RenderBudgetProbeWithProviderPredicate(new SqliteDialect(), unit, profile, query, providerPredicate).CommandText;
+
+        Assert.StartsWith("WITH ", command, StringComparison.Ordinal);
+        Assert.Contains(SqliteSchemaCoordinator.ScopeColumn, command, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS \"count\"", command, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", command, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 5", command, StringComparison.Ordinal);
+        Assert.Contains(SqliteSchemaCoordinator.ScopeColumn, probe, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", probe, StringComparison.Ordinal);
     }
 
     private static StorageUnit AggregationUnit(string identity, IReadOnlyList<Aggregate> aggregates) => new()
