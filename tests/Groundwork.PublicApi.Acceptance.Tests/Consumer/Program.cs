@@ -26,6 +26,7 @@ try
     RunRecordsJourney(connection);
     RunExactAppendJourney(connection);
     RunLifecycleJourney(connection);
+    RunAggregationSourcePredicateJourney(connection);
     RunDocumentsJourney(connection);
     RunFailureJourneys(connection);
     Console.WriteLine("Groundwork public API clean-room journey passed.");
@@ -167,6 +168,69 @@ static void RunDocumentsJourney(IStorageProviderConnection connection)
     Require(persisted is not null, "The inserted document could not be read through the public Store session.");
     var materialized = unit.Read(new RowValues(persisted!.Values.Values), persisted.Version);
     Require(materialized.Value == note && materialized.Version == outcome.Version, "The Documents read did not preserve the typed value and version.");
+}
+
+static void RunAggregationSourcePredicateJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("aggregation_source_predicate"),
+        Name = "aggregation_source_predicate",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+            new() { Name = "group", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+            new() { Name = "amount", Type = PortableType.Int32 },
+            new() { Name = "lowOrder", Type = PortableType.Int64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        AggregationProfiles =
+        [
+            new AggregationProfile
+            {
+                Name = "summary",
+                GroupByColumns = ["group"],
+                Aggregates = [new Aggregate.Sum("total", "amount")],
+                AllowedPredicates =
+                [
+                    new AggregationPredicateAllowance
+                    {
+                        Alias = "total",
+                        SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                        {
+                            AggregationPredicateOperator.Equal
+                        }
+                    }
+                ]
+            }
+        ]
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The package-only aggregation schema did not apply.");
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    Require(session.Insert(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "1", ["group"] = "a", ["amount"] = 7, ["lowOrder"] = 2L
+    })).Status == WriteOutcomeStatus.Inserted, "The package-only aggregation source row did not insert.");
+    Require(session.Insert(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "2", ["group"] = "a", ["amount"] = 11, ["lowOrder"] = 1L
+    })).Status == WriteOutcomeStatus.Inserted, "The package-only aggregation post row did not insert.");
+
+    var lowOrder = new ColumnRef(new TableId(unit.Name), "lowOrder", QueryType.Int64, isNullable: false);
+    var source = session.Aggregate(new AggregationQuery("summary")
+    {
+        SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
+    });
+    Require(source.Rows.Count == 1 && Equals(source.Rows[0]["total"], 7L),
+        "The packed public API did not filter source rows before reduction.");
+
+    var post = session.Aggregate(new AggregationQuery("summary")
+    {
+        PostPredicate = new AggregationPredicate.Comparison(
+            "total", AggregationPredicateOperator.Equal, [18L])
+    });
+    Require(post.Rows.Count == 1 && Equals(post.Rows[0]["total"], 18L),
+        "The packed public API post predicate did not observe the reduced group.");
 }
 
 static void RunFailureJourneys(IStorageProviderConnection connection)

@@ -1,6 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
+using Groundwork.Query.Model;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
@@ -87,6 +88,102 @@ public sealed class AggregationConformanceTests
         Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-PRED-007");
     }
 
+    [Fact]
+    public void Source_predicate_admission_precedes_the_provider_scan()
+    {
+        using var connection = new InMemoryProviderFactory().Create("aggregation-source-admission-" + Guid.NewGuid().ToString("N"));
+        var unit = FixtureUnit("aggregation_source_admission");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+
+        var exception = Assert.Throws<AggregationValidationException>(() => connection.OpenSession(unit, StorageAccess.Global).Aggregate(
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.StartsWith(label, "plain")
+            }));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-SOURCE-007");
+    }
+
+    [Fact]
+    public void Source_predicate_is_applied_before_reduction_and_differs_from_post_predicate()
+    {
+        using var connection = new InMemoryProviderFactory().Create("aggregation-source-predicate-" + Guid.NewGuid().ToString("N"));
+        var unit = FixtureUnit("aggregation_source_predicate");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var values in FixtureRows())
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(values)).Status);
+
+        var lowOrder = new ColumnRef(new TableId(unit.Name), "lowOrder", QueryType.Int64, isNullable: false);
+        var sourceQuery = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
+        };
+        var source = session.Aggregate(sourceQuery);
+
+        var sourceRow = Assert.Single(source.Rows);
+        Assert.Equal("a", sourceRow["group"]);
+        Assert.Equal(2_000_000_000L, sourceRow["integerTotal"]);
+        Assert.Equal(2_000_000_000, sourceRow["minimum"]);
+        Assert.Equal(2_000_000_000, sourceRow["maximum"]);
+        Assert.Equal("a\u001fb", Assert.Single((IEnumerable<string>)sourceRow["labels"]!));
+        Assert.Equal("a\u001fb", sourceRow["firstLow"]);
+        Assert.Equal(
+            AggregationQueryFingerprint.Create(unit, unit.AggregationProfiles.Single(), sourceQuery),
+            source.ValueFingerprint);
+        Assert.Equal(
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, unit.AggregationProfiles.Single(), sourceQuery),
+            source.ShapeFingerprint);
+
+        var combined = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L)),
+            PostPredicate = new AggregationPredicate.Comparison(
+                "integerTotal", AggregationPredicateOperator.Equal, [2_000_000_000L])
+        });
+        Assert.Equal(2_000_000_000L, Assert.Single(combined.Rows)["integerTotal"]);
+
+        var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+        var substring = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Substring(label, "plain", Anchor.Contains)
+        });
+        var substringRow = Assert.Single(substring.Rows);
+        Assert.Equal("a", substringRow["group"]);
+        Assert.Equal(2_000_000_000L, substringRow["integerTotal"]);
+        Assert.Equal("plain", substringRow["firstLow"]);
+
+        var suffix = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Substring(label, "plain", Anchor.EndsWith)
+        });
+        Assert.Equal("a", Assert.Single(suffix.Rows)["group"]);
+
+        var exactLabel = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(label, QueryConstant.Of(label, "plain"))
+        });
+        Assert.Equal(2_000_000_000L, Assert.Single(exactLabel.Rows)["integerTotal"]);
+
+        var identity = new ColumnRef(new TableId(unit.Name), "identity", QueryType.Guid, isNullable: false);
+        var exactIdentity = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(
+                identity,
+                QueryConstant.Of(identity, Guid.Parse("00000000-0000-0000-0000-000000000001")))
+        });
+        Assert.Equal(2_000_000_000L, Assert.Single(exactIdentity.Rows)["integerTotal"]);
+
+        var postQuery = new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison(
+                "integerTotal", AggregationPredicateOperator.Equal, [4_000_000_000L])
+        };
+        var post = session.Aggregate(postQuery);
+        Assert.Equal(4_000_000_000L, Assert.Single(post.Rows)["integerTotal"]);
+    }
+
     private static void AssertProvider(
         IStorageProviderFactory factory,
         string connectionString,
@@ -122,6 +219,48 @@ public sealed class AggregationConformanceTests
         var actualContains = Canonical(session.Aggregate(containsQuery));
 
         Assert.Equal(expectedContains, actualContains);
+
+        var lowOrder = new ColumnRef(new TableId(unit.Name), "lowOrder", QueryType.Int64, isNullable: false);
+        var sourceQuery = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
+        };
+        var source = session.Aggregate(sourceQuery);
+        var sourceRow = Assert.Single(source.Rows);
+        Assert.Equal("a", sourceRow["group"]);
+        Assert.Equal(2_000_000_000L, sourceRow["integerTotal"]);
+        Assert.Equal("a\u001fb", sourceRow["firstLow"]);
+
+        var combined = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L)),
+            PostPredicate = new AggregationPredicate.Comparison(
+                "integerTotal", AggregationPredicateOperator.Equal, [2_000_000_000L])
+        });
+        Assert.Equal(2_000_000_000L, Assert.Single(combined.Rows)["integerTotal"]);
+
+        var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+        var substring = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Substring(label, "plain", Anchor.Contains)
+        });
+        var substringRow = Assert.Single(substring.Rows);
+        Assert.Equal("a", substringRow["group"]);
+        Assert.Equal(2_000_000_000L, substringRow["integerTotal"]);
+        Assert.Equal("plain", substringRow["firstLow"]);
+
+        var suffix = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Substring(label, "plain", Anchor.EndsWith)
+        });
+        Assert.Equal("a", Assert.Single(suffix.Rows)["group"]);
+
+        var postFourBillion = new AggregationQuery("summary")
+        {
+            PostPredicate = new AggregationPredicate.Comparison(
+                "integerTotal", AggregationPredicateOperator.Equal, [4_000_000_000L])
+        };
+        Assert.Equal(4_000_000_000L, Assert.Single(session.Aggregate(postFourBillion).Rows)["integerTotal"]);
     }
 
     private static StorageUnit FixtureUnit(string identity) => new()
@@ -135,6 +274,7 @@ public sealed class AggregationConformanceTests
             new() { Name = "integerAmount", Type = PortableType.Int32 },
             new() { Name = "decimalAmount", Type = PortableType.Decimal, Precision = 28, Scale = 4 },
             new() { Name = "label", Type = PortableType.String, MaxLength = 256 },
+            new() { Name = "identity", Type = PortableType.Guid, IsNullable = false },
             new() { Name = "lowOrder", Type = PortableType.Int64, IsNullable = false },
             new() { Name = "highOrder", Type = PortableType.Int64, IsNullable = false }
         ],
@@ -187,18 +327,22 @@ public sealed class AggregationConformanceTests
         {
             ["id"] = "1", ["group"] = "a", ["integerAmount"] = 2_000_000_000,
             ["decimalAmount"] = 12_345_678_901_234_567_890.1234m,
-            ["label"] = "a\u001fb", ["lowOrder"] = 2L, ["highOrder"] = 1L
+            ["label"] = "a\u001fb", ["identity"] = Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            ["lowOrder"] = 2L, ["highOrder"] = 1L
         },
         new Dictionary<string, object?>
         {
             ["id"] = "2", ["group"] = "a", ["integerAmount"] = 2_000_000_000,
             ["decimalAmount"] = 0.0001m,
-            ["label"] = "plain", ["lowOrder"] = 1L, ["highOrder"] = 3L
+            ["label"] = "plain", ["identity"] = Guid.Parse("00000000-0000-0000-0000-000000000002"),
+            ["lowOrder"] = 1L, ["highOrder"] = 3L
         },
         new Dictionary<string, object?>
         {
             ["id"] = "3", ["group"] = "b", ["integerAmount"] = null,
-            ["decimalAmount"] = null, ["label"] = null, ["lowOrder"] = 3L, ["highOrder"] = 2L
+            ["decimalAmount"] = null, ["label"] = null,
+            ["identity"] = Guid.Parse("00000000-0000-0000-0000-000000000003"),
+            ["lowOrder"] = 3L, ["highOrder"] = 2L
         }
     ];
 

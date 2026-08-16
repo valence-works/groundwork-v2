@@ -16,6 +16,12 @@ internal sealed class SqlServerDialect : RelationalDialect
     public override string RenderAggregationContains(string expression, string literal) =>
         $"EXISTS (SELECT 1 FROM OPENJSON({expression}) AS aggregation_value WHERE aggregation_value.[value] = {literal} COLLATE Latin1_General_100_BIN2)";
 
+    public override string RenderAggregationSourceContains(string expression, string literal) =>
+        $"(DATALENGTH({literal}) = 0 OR CHARINDEX({literal}, {expression}) > 0)";
+
+    public override string RenderAggregationSourceEndsWith(string expression, string literal) =>
+        $"(DATALENGTH({literal}) = 0 OR (DATALENGTH(RIGHT({expression}, DATALENGTH({literal}) / 2)) = DATALENGTH({literal}) AND RIGHT({expression}, DATALENGTH({literal}) / 2) = {literal}))";
+
     public override string RenderAggregationLiteral(object? value, PortableType type) => value switch
     {
         Guid guid => $"CAST('{guid:D}' AS uniqueidentifier)",

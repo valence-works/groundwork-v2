@@ -17,6 +17,12 @@ internal sealed class SqliteDialect : RelationalDialect
     public override string RenderAggregationContains(string expression, string literal) =>
         $"EXISTS (SELECT 1 FROM json_each({expression}) WHERE value = {literal} COLLATE BINARY)";
 
+    public override string RenderAggregationSourceContains(string expression, string literal) =>
+        $"(length({literal}) = 0 OR instr({expression} COLLATE GROUNDWORK_UTF16_ORDINAL, {literal}) > 0)";
+
+    public override string RenderAggregationSourceEndsWith(string expression, string literal) =>
+        $"(length({literal}) = 0 OR substr({expression} COLLATE GROUNDWORK_UTF16_ORDINAL, -length({literal})) = {literal})";
+
     public override string QuoteIdentifier(string identifier) => SqliteProviderConnection.QuoteIdentifier(identifier);
 
     public override string MapType(ColumnDefinition definition) => definition.Type switch

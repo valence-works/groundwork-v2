@@ -1,8 +1,10 @@
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Kernel;
 
@@ -127,6 +129,23 @@ public sealed record AggregationQuery
 
     public AggregationPredicate? PostPredicate { get; init; }
 
+    /// <summary>
+    /// Optional predicate evaluated against source rows before grouping and reduction. It uses the
+    /// same portable predicate AST as ordinary v2 queries; <see cref="PostPredicate"/> remains
+    /// reserved for reduced output aliases.
+    /// </summary>
+    public Predicate? SourcePredicate
+    {
+        get => sourcePredicate;
+        init => sourcePredicate = value is null ? null : PredicateNormalizer.Normalize(value);
+    }
+
+    /// <summary>Canonical source predicate including bound literal values.</summary>
+    public string SourcePredicateCanonical => PredicateCanonicalizer.ToCanonicalString(SourcePredicate ?? Predicate.AlwaysTrue.Instance);
+
+    /// <summary>Canonical source predicate shape with literal values elided.</summary>
+    public string SourcePredicateShape => PredicateCanonicalizer.ToShapeString(SourcePredicate ?? Predicate.AlwaysTrue.Instance);
+
     /// <summary>Optional output order.  It must be a group-by column or aggregate alias.</summary>
     public string? OrderBy { get; init; }
 
@@ -136,6 +155,64 @@ public sealed record AggregationQuery
     public int? Take { get; init; }
 
     public static AggregationQuery For(string profileName) => new(profileName);
+
+    private Predicate? sourcePredicate;
+}
+
+/// <summary>Stable fingerprints for one admitted aggregation query and its source values.</summary>
+public static class AggregationQueryFingerprint
+{
+    public static string Create(StorageUnit unit, AggregationProfile profile, AggregationQuery query, bool includeValues = true)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(query);
+        var builder = new StringBuilder();
+        builder.Append("aggregation-query-v1|unit=").Append(Escape(unit.Name));
+        builder.Append("|profile=").Append(Escape(profile.Name));
+        builder.Append("|profile-shape=").Append(Schema.AggregationProfileCanonicalization.Canonicalize(profile));
+        builder.Append("|source=").Append(includeValues ? query.SourcePredicateCanonical : query.SourcePredicateShape);
+        builder.Append("|post=").Append(CanonicalPost(query.PostPredicate, includeValues));
+        builder.Append("|order=").Append(Escape(query.OrderBy ?? ""));
+        builder.Append('|').Append(query.OrderDirection);
+        builder.Append("|take=").Append(query.Take?.ToString(CultureInfo.InvariantCulture) ?? "none");
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
+    public static string CreateShapeFingerprint(StorageUnit unit, AggregationProfile profile, AggregationQuery query) =>
+        Create(unit, profile, query, includeValues: false);
+
+    private static string CanonicalPost(AggregationPredicate? predicate, bool includeValues) => predicate switch
+    {
+        null => "none",
+        AggregationPredicate.All all => "all(" + string.Join(',', all.Predicates.Select(item => CanonicalPost(item, includeValues))) + ")",
+        AggregationPredicate.Any any => "any(" + string.Join(',', any.Predicates.Select(item => CanonicalPost(item, includeValues))) + ")",
+        AggregationPredicate.Comparison comparison => "comparison(" + Escape(comparison.Alias) + "," + comparison.Operator + "," +
+            string.Join(',', comparison.Values.Select(value => CanonicalValue(value, includeValues))) + ")",
+        _ => throw new ArgumentOutOfRangeException(nameof(predicate))
+    };
+
+    private static string CanonicalValue(object? value, bool includeValues) => value switch
+    {
+        null => "null",
+        string text when includeValues => "s:" + Escape(text),
+        string => "s<?>",
+        DateTimeOffset instant when includeValues => "t:" + instant.ToUniversalTime().UtcTicks.ToString(CultureInfo.InvariantCulture),
+        DateTimeOffset => "t<?>",
+        byte[] bytes when includeValues => "b:" + Convert.ToHexString(bytes),
+        byte[] => "b<?>",
+        IFormattable formattable when includeValues => value.GetType().Name + ":" + formattable.ToString(null, CultureInfo.InvariantCulture),
+        _ when includeValues => value.ToString() ?? "",
+        _ => value.GetType().Name
+    };
+
+    private static string Escape(string value)
+    {
+        var builder = new StringBuilder(value.Length * 2);
+        foreach (var character in value)
+            builder.Append(((int)character).ToString("X4", CultureInfo.InvariantCulture));
+        return builder.ToString();
+    }
 }
 
 /// <summary>A materialized row from a declared aggregation profile.</summary>
@@ -172,13 +249,29 @@ public sealed class AggregationRow
 public sealed class AggregationResult
 {
     public AggregationResult(IReadOnlyList<AggregationRow> rows)
+        : this(rows, null, null)
+    {
+    }
+
+    public AggregationResult(
+        IReadOnlyList<AggregationRow> rows,
+        string? shapeFingerprint,
+        string? valueFingerprint)
     {
         ArgumentNullException.ThrowIfNull(rows);
         Rows = Array.AsReadOnly(rows.Select(row => row ?? throw new ArgumentException(
             "Aggregation rows cannot contain null references.", nameof(rows))).ToArray());
+        ShapeFingerprint = shapeFingerprint;
+        ValueFingerprint = valueFingerprint;
     }
 
     public IReadOnlyList<AggregationRow> Rows { get; }
+
+    /// <summary>Stable query shape identity, with source and post literal values elided.</summary>
+    public string? ShapeFingerprint { get; }
+
+    /// <summary>Stable query identity including bound source and post literal values.</summary>
+    public string? ValueFingerprint { get; }
 }
 
 public sealed record AggregationValidationError(string Code, string Message, string Path);
@@ -384,6 +477,8 @@ public static class AggregationExecutor
         {
             if (row is null)
                 throw new ArgumentException("Aggregation input rows cannot contain null references.", nameof(rows));
+            if (query.SourcePredicate is not null && !PortableQuerySemantics.Evaluate(query.SourcePredicate, row))
+                continue;
             input.Add(row);
             if (input.Count > profile.MaxInputRows)
                 throw new AggregationBudgetExceededException("GW-AGG-BOUND-004", $"Aggregation profile '{profile.Name}' refused more than MaxInputRows={profile.MaxInputRows}; input was not truncated.");
@@ -424,7 +519,10 @@ public static class AggregationExecutor
             throw new AggregationBudgetExceededException("GW-AGG-BOUND-006", $"Aggregation Take={take} exceeds MaxGroups={profile.MaxGroups}.");
         if (query.Take is int pageSize)
             output = output.Take(pageSize).ToList();
-        return new AggregationResult(output);
+        return new AggregationResult(
+            output,
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, query),
+            AggregationQueryFingerprint.Create(unit, profile, query));
     }
 
     private static AggregationRow Reduce(StorageUnit unit, AggregationProfile profile, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
@@ -539,6 +637,9 @@ public static class AggregationExecutor
         AggregationProfileValidator.Validate(unit, profile);
         if (!string.Equals(query.ProfileName, profile.Name, StringComparison.Ordinal))
             throw new AggregationValidationException([new("GW-AGG-QUERY-001", $"Profile '{query.ProfileName}' is not the selected declaration.", "profileName")]);
+
+        if (query.SourcePredicate is not null)
+            ValidateSourcePredicate(unit, query.SourcePredicate);
 
         if (query.OrderBy is not null)
         {
@@ -703,6 +804,112 @@ public static class AggregationExecutor
 
     private static bool IsDeclaredOutput(AggregationProfile profile, string alias) =>
         profile.GroupByColumns.Contains(alias, StringComparer.Ordinal) || profile.Aggregates.Any(aggregate => aggregate.Alias == alias);
+
+    private static void ValidateSourcePredicate(StorageUnit unit, Predicate predicate)
+    {
+        var portability = PortableQuerySemantics.Validate(predicate);
+        if (!portability.IsPortable)
+        {
+            var refusal = portability.Refusals[0];
+            throw new AggregationValidationException([new(refusal.Code, refusal.Message, "sourcePredicate." + refusal.Path)]);
+        }
+
+        var nodeCount = 0;
+        var valueCount = 0;
+        Visit(predicate);
+
+        void Visit(Predicate current)
+        {
+            if (++nodeCount > 256)
+                throw new AggregationBudgetExceededException("GW-AGG-BOUND-008", "SourcePredicate exceeds the maximum portable predicate node budget of 256.");
+            switch (current)
+            {
+                case Predicate.AlwaysTrue:
+                case Predicate.AlwaysFalse:
+                    return;
+                case Predicate.Equal equal:
+                    ValidateSourceColumn(equal.Column);
+                    valueCount++;
+                    break;
+                case Predicate.In membership:
+                    ValidateSourceColumn(membership.Column);
+                    valueCount += membership.Values.Length;
+                    if (valueCount > 1_000)
+                        throw new AggregationBudgetExceededException("GW-AGG-BOUND-008", "SourcePredicate exceeds the maximum portable literal budget of 1,000 values.");
+                    break;
+                case Predicate.Range range:
+                    ValidateSourceColumn(range.Column);
+                    valueCount += (range.Lower is null ? 0 : 1) + (range.Upper is null ? 0 : 1);
+                    break;
+                case Predicate.StartsWith starts:
+                    ValidateSourceColumn(starts.Column);
+                    throw new AggregationValidationException([new(
+                        "GW-AGG-SOURCE-007",
+                        "StartsWith source predicates require a persisted provider-independent search projection and are not admitted by aggregation profiles.",
+                        "sourcePredicate")]);
+                case Predicate.Substring substring:
+                    ValidateSourceColumn(substring.Column);
+                    valueCount++;
+                    break;
+                case Predicate.ColumnCompare compare:
+                    ValidateSourceColumn(compare.Left);
+                    ValidateSourceColumn(compare.Right);
+                    break;
+                case Predicate.Not not:
+                    Visit(not.Inner);
+                    break;
+                case Predicate.And and:
+                    foreach (var term in and.Terms) Visit(term);
+                    break;
+                case Predicate.Or or:
+                    foreach (var term in or.Terms) Visit(term);
+                    break;
+                case Predicate.ElementOf:
+                    throw new AggregationValidationException([new(
+                        "GW-AGG-SOURCE-005",
+                        "Element-set source predicates require a declared portable set column and are not admitted by aggregation profiles.",
+                        "sourcePredicate")]);
+                default:
+                    throw new AggregationValidationException([new(
+                        "GW-AGG-SOURCE-006",
+                        "The source predicate node is outside the closed aggregation surface.",
+                        "sourcePredicate")]);
+            }
+            if (valueCount > 1_000)
+                throw new AggregationBudgetExceededException("GW-AGG-BOUND-008", "SourcePredicate exceeds the maximum portable literal budget of 1,000 values.");
+        }
+
+        void ValidateSourceColumn(ColumnRef column)
+        {
+            if (column.Table.Value.Length != 0 && !string.Equals(column.Table.Value, unit.Name, StringComparison.Ordinal))
+                throw new AggregationValidationException([new(
+                    "GW-AGG-SOURCE-002",
+                    $"Source predicate column '{column}' belongs to a different table than storage unit '{unit.Name}'.",
+                    "sourcePredicate")]);
+            var declared = unit.Columns.FirstOrDefault(candidate => string.Equals(candidate.Name, column.Name, StringComparison.Ordinal));
+            if (declared is null)
+                throw new AggregationValidationException([new(
+                    "GW-AGG-SOURCE-001",
+                    $"Source predicate column '{column.Name}' is not declared by storage unit '{unit.Name}'.",
+                    "sourcePredicate")]);
+            if (declared.Type switch
+                {
+                PortableType.Boolean => QueryType.Boolean,
+                PortableType.Int32 => QueryType.Int32,
+                PortableType.Int64 => QueryType.Int64,
+                PortableType.Decimal => QueryType.Decimal,
+                PortableType.String => QueryType.String,
+                PortableType.DateTimeOffset => QueryType.DateTimeOffset,
+                PortableType.Guid => QueryType.Guid,
+                PortableType.Binary => QueryType.Binary,
+                _ => (QueryType?)null
+            } != column.Type)
+                throw new AggregationValidationException([new(
+                    "GW-AGG-SOURCE-003",
+                    $"Source predicate column '{column.Name}' does not use the declared portable type.",
+                    "sourcePredicate")]);
+        }
+    }
 
     private static bool EqualsPortable(object? left, object? right) =>
         left is byte[] leftBytes && right is byte[] rightBytes ? leftBytes.SequenceEqual(rightBytes) : Equals(left, right);

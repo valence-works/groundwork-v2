@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
 using Xunit;
 
@@ -160,5 +161,36 @@ public sealed class AggregationSqlRenderingTests
             }).CommandText;
         Assert.Contains("OPENJSON([labels])", predicateSql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSTR(", predicateSql, StringComparison.Ordinal);
+
+        var lowOrder = new ColumnRef(new TableId(unit.Name), "lowOrder", QueryType.Int64, isNullable: false);
+        var sourcePredicateSql = RelationalAggregationRenderer.Render(
+            new SqlServerDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
+            }).CommandText;
+        var sourceProbeSql = RelationalAggregationRenderer.RenderBudgetProbe(
+            new SqlServerDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
+            }).CommandText;
+        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = 2)", sourcePredicateSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = 2)", sourceProbeSql, StringComparison.Ordinal);
+
+        var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+        var substringSql = RelationalAggregationRenderer.Render(
+            new SqlServerDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Substring(label, "plain", Anchor.Contains)
+            }).CommandText;
+        Assert.Contains("CHARINDEX(N'plain', [label]) > 0", substringSql, StringComparison.Ordinal);
     }
 }

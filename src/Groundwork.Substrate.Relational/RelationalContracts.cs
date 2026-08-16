@@ -31,6 +31,14 @@ public abstract class RelationalDialect
     public virtual string RenderAggregationContains(string expression, string literal) =>
         throw new NotSupportedException("A relational dialect must define exact SetUnion membership rendering.");
 
+    /// <summary>Renders an ordinal source-string containment operation for aggregation input.</summary>
+    public virtual string RenderAggregationSourceContains(string expression, string literal) =>
+        throw new NotSupportedException("A relational dialect must define ordinal aggregation source containment rendering.");
+
+    /// <summary>Renders an ordinal source-string suffix operation for aggregation input.</summary>
+    public virtual string RenderAggregationSourceEndsWith(string expression, string literal) =>
+        throw new NotSupportedException("A relational dialect must define ordinal aggregation source suffix rendering.");
+
     /// <summary>Renders a typed literal for a post-reduction aggregation predicate.</summary>
     public virtual string RenderAggregationLiteral(object? value, PortableType type) => value switch
     {

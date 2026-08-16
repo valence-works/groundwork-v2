@@ -19,6 +19,12 @@ public sealed class PostgreSqlDialect : RelationalDialect
     public override string RenderAggregationContains(string expression, string literal) =>
         $"{literal} = ANY({expression})";
 
+    public override string RenderAggregationSourceContains(string expression, string literal) =>
+        $"(length({literal}) = 0 OR POSITION({literal} IN {expression}) > 0)";
+
+    public override string RenderAggregationSourceEndsWith(string expression, string literal) =>
+        $"(length({literal}) = 0 OR RIGHT({expression}, length({literal})) = {literal})";
+
     public override string RenderAggregationLiteral(object? value, PortableType type) => value switch
     {
         bool boolean => boolean ? "TRUE" : "FALSE",

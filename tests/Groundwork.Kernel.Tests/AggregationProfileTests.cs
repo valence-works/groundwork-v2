@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Xunit;
 
 namespace Groundwork.Kernel.Tests;
@@ -162,6 +163,91 @@ public sealed class AggregationProfileTests
             new AggregationQuery("summary") { OrderBy = "labels" }));
 
         Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-QUERY-005");
+    }
+
+    [Fact]
+    public void Source_predicate_admission_binds_to_declared_columns_and_portability()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 });
+        var profile = Profile(new Aggregate.Sum("total", "amount"));
+        var amount = new ColumnRef(new TableId(unit.Name), "amount", QueryType.String);
+
+        var exception = Assert.Throws<AggregationValidationException>(() => AggregationExecutor.ValidateQuery(
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Equal(amount, QueryConstant.Of(amount, "wrong"))
+            }));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-SOURCE-003");
+    }
+
+    [Fact]
+    public void Aggregation_query_fingerprints_bind_source_values_without_changing_shape()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 });
+        var profile = Profile(new Aggregate.Sum("total", "amount"));
+        var amount = new ColumnRef(new TableId(unit.Name), "amount", QueryType.Int64);
+        var first = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(amount, QueryConstant.Of(amount, 7L))
+        };
+        var second = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(amount, QueryConstant.Of(amount, 11L))
+        };
+
+        Assert.Equal(
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, first),
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, profile, second));
+        Assert.NotEqual(
+            AggregationQueryFingerprint.Create(unit, profile, first),
+            AggregationQueryFingerprint.Create(unit, profile, second));
+        Assert.Contains("int64", first.SourcePredicateCanonical, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Source_predicate_literal_budget_is_refused_before_execution()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 });
+        var profile = Profile(new Aggregate.Sum("total", "amount"));
+        var amount = new ColumnRef(new TableId(unit.Name), "amount", QueryType.Int64);
+        var values = Enumerable.Range(0, 1_001).Select(value => QueryConstant.Of(amount, (long)value));
+        var query = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.In(amount, values)
+        };
+
+        var exception = Assert.Throws<AggregationBudgetExceededException>(() => AggregationExecutor.ValidateQuery(unit, profile, query));
+
+        Assert.Equal("GW-AGG-BOUND-008", exception.Code);
+    }
+
+    [Fact]
+    public void StartsWith_source_predicates_are_refused_until_a_persisted_search_projection_exists()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "label", Type = PortableType.String });
+        var profile = Profile(new Aggregate.SetUnion("labels", "label", 2));
+        var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+
+        var exception = Assert.Throws<AggregationValidationException>(() => AggregationExecutor.ValidateQuery(
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.StartsWith(label, "pre")
+            }));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-SOURCE-007");
     }
 
     [Fact]

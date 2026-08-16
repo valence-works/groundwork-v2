@@ -53,18 +53,19 @@ public sealed class KernelBoundaryTests
     }
 
     [Fact]
-    public void Groundwork_kernel_references_only_bcl_assemblies()
+    public void Groundwork_kernel_references_only_bcl_and_provider_neutral_query_assemblies()
     {
         using var universe = AssemblyUniverse.Load();
         var violations = universe.Assemblies
             .Where(assembly => IsKernelAssembly(assembly.GetName().Name))
             .SelectMany(assembly => universe.NonBclReferenceClosure(assembly)
+                .Where(reference => !string.Equals(reference.Name, "Groundwork.Query.Model", StringComparison.Ordinal))
                 .Select(reference => reference.Path))
             .OrderBy(violation => violation, StringComparer.Ordinal)
             .ToArray();
 
         Assert.True(violations.Length == 0,
-            "Groundwork.Kernel assemblies may reference only the BCL:" + Environment.NewLine +
+            "Groundwork.Kernel assemblies may reference only the BCL and provider-neutral query model:" + Environment.NewLine +
             string.Join(Environment.NewLine, violations));
     }
 

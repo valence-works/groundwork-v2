@@ -97,6 +97,14 @@ public sealed class MongoQueryRenderer
             expectedIndex?.Name);
     }
 
+    internal BsonDocument RenderAggregationSourcePredicate(Predicate predicate, string table, int inValueLimit = 1_000)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        if (inValueLimit <= 0)
+            throw new ArgumentOutOfRangeException(nameof(inValueLimit));
+        return RenderPredicate(predicate, new QueryRenderOptions { InValueLimit = inValueLimit }, table);
+    }
+
     private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>
         options.GetEffectiveOrder(request);
 

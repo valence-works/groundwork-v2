@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Groundwork.Substrate.Mongo;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -45,11 +46,14 @@ internal sealed partial class MongoStorageSession
         AggregationQuery query)
     {
         AggregationExecutor.ValidateQuery(Unit, profile, query);
-        VerifyNativeAggregationBudgets(profile);
-        var stages = new List<BsonDocument>
-        {
-            new("$limit", (long)profile.MaxInputRows + 1L)
-        };
+        var sourceFilter = query.SourcePredicate is null
+            ? null
+            : new MongoQueryRenderer().RenderAggregationSourcePredicate(query.SourcePredicate, Unit.Name);
+        VerifyNativeAggregationBudgets(profile, sourceFilter);
+        var stages = new List<BsonDocument>();
+        if (sourceFilter is not null)
+            stages.Add(new BsonDocument("$match", sourceFilter));
+        stages.Add(new BsonDocument("$limit", (long)profile.MaxInputRows + 1L));
 
         var setStage = new BsonDocument();
         foreach (var aggregate in profile.Aggregates)
@@ -213,16 +217,20 @@ internal sealed partial class MongoStorageSession
             throw new AggregationBudgetExceededException("GW-AGG-BOUND-006", $"Aggregation Take={take} exceeds MaxGroups={profile.MaxGroups}.");
         if (query.Take is int pageSize)
             rows = rows.Take(pageSize).ToList();
-        return new AggregationResult(rows);
+        return new AggregationResult(
+            rows,
+            AggregationQueryFingerprint.CreateShapeFingerprint(Unit, profile, query),
+            AggregationQueryFingerprint.Create(Unit, profile, query));
     }
 
-    private void VerifyNativeAggregationBudgets(AggregationProfile profile)
+    private void VerifyNativeAggregationBudgets(AggregationProfile profile, BsonDocument? sourceFilter)
     {
-        var inputEvidence = RunAggregationPipeline(
-        [
-            new BsonDocument("$limit", (long)profile.MaxInputRows + 1L),
-            new BsonDocument("$count", "count")
-        ]).SingleOrDefault();
+        var inputStages = new List<BsonDocument>();
+        if (sourceFilter is not null)
+            inputStages.Add(new BsonDocument("$match", sourceFilter));
+        inputStages.Add(new BsonDocument("$limit", (long)profile.MaxInputRows + 1L));
+        inputStages.Add(new BsonDocument("$count", "count"));
+        var inputEvidence = RunAggregationPipeline(inputStages).SingleOrDefault();
         if (inputEvidence?.GetValue("count", 0).ToInt64() > profile.MaxInputRows)
             throw new AggregationBudgetExceededException(
                 "GW-AGG-BOUND-004",
@@ -231,12 +239,13 @@ internal sealed partial class MongoStorageSession
         var groupIdentity = new BsonDocument();
         foreach (var column in profile.GroupByColumns)
             groupIdentity[column] = Field(column);
-        var groups = RunAggregationPipeline(
-        [
-            new BsonDocument("$limit", (long)profile.MaxInputRows + 1L),
-            new BsonDocument("$group", new BsonDocument { ["_id"] = groupIdentity }),
-            new BsonDocument("$limit", (long)profile.MaxGroups + 1L)
-        ]);
+        var groupStages = new List<BsonDocument>();
+        if (sourceFilter is not null)
+            groupStages.Add(new BsonDocument("$match", sourceFilter));
+        groupStages.Add(new BsonDocument("$limit", (long)profile.MaxInputRows + 1L));
+        groupStages.Add(new BsonDocument("$group", new BsonDocument { ["_id"] = groupIdentity }));
+        groupStages.Add(new BsonDocument("$limit", (long)profile.MaxGroups + 1L));
+        var groups = RunAggregationPipeline(groupStages);
         if (groups.Count > profile.MaxGroups)
             throw new AggregationBudgetExceededException(
                 "GW-AGG-BOUND-005",
@@ -244,7 +253,7 @@ internal sealed partial class MongoStorageSession
 
         foreach (var set in profile.Aggregates.OfType<Aggregate.SetUnion>())
         {
-            var evidence = RunAggregationPipeline(RenderSetBudgetProbe(profile, set));
+            var evidence = RunAggregationPipeline(RenderSetBudgetProbe(profile, set, sourceFilter));
             if (evidence.Count != 0)
                 throw new AggregationBudgetExceededException(
                     "GW-AGG-BOUND-007",
@@ -254,7 +263,8 @@ internal sealed partial class MongoStorageSession
 
     internal static IReadOnlyList<BsonDocument> RenderSetBudgetProbe(
         AggregationProfile profile,
-        Aggregate.SetUnion set)
+        Aggregate.SetUnion set,
+        BsonDocument? sourceFilter = null)
     {
         var distinctIdentity = new BsonDocument();
         foreach (var column in profile.GroupByColumns)
@@ -264,21 +274,27 @@ internal sealed partial class MongoStorageSession
         var groupByDistinct = new BsonDocument();
         foreach (var column in profile.GroupByColumns)
             groupByDistinct[column] = new BsonString("$_id." + column);
-        return
-        [
-            new BsonDocument("$limit", (long)profile.MaxInputRows + 1L),
-            new BsonDocument("$match", new BsonDocument(set.Column,
-                new BsonDocument("$ne", BsonNull.Value))),
-            new BsonDocument("$group", new BsonDocument { ["_id"] = distinctIdentity }),
-            new BsonDocument("$group", new BsonDocument
+        var stages = new List<BsonDocument>();
+        if (sourceFilter is not null)
+            stages.Add(new BsonDocument("$match", sourceFilter));
+        stages.Add(new BsonDocument("$limit", (long)profile.MaxInputRows + 1L));
+        stages.Add(new BsonDocument
+        {
+            ["$match"] = new BsonDocument
             {
-                ["_id"] = groupByDistinct,
-                [SetProbeCountField] = new BsonDocument("$sum", 1)
-            }),
-            new BsonDocument("$match", new BsonDocument(SetProbeCountField,
-                new BsonDocument("$gt", set.MaxValues))),
-            new BsonDocument("$limit", 1L)
-        ];
+                [set.Column] = new BsonDocument("$ne", BsonNull.Value)
+            }
+        });
+        stages.Add(new BsonDocument("$group", new BsonDocument { ["_id"] = distinctIdentity }));
+        stages.Add(new BsonDocument("$group", new BsonDocument
+        {
+            ["_id"] = groupByDistinct,
+            [SetProbeCountField] = new BsonDocument("$sum", 1)
+        }));
+        stages.Add(new BsonDocument("$match", new BsonDocument(SetProbeCountField,
+            new BsonDocument("$gt", set.MaxValues))));
+        stages.Add(new BsonDocument("$limit", 1L));
+        return stages;
     }
 
     private List<BsonDocument> RunAggregationPipeline(IEnumerable<BsonDocument> stages)

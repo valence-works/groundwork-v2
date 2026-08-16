@@ -6,7 +6,8 @@ public static class PredicateCanonicalizer
 {
     public static string ToCanonicalString(Predicate predicate) => ToCanonicalString(predicate, includeValues: true);
 
-    internal static string ToShapeString(Predicate predicate) => ToCanonicalString(predicate, includeValues: false);
+    /// <summary>Returns a stable predicate shape with literal values elided.</summary>
+    public static string ToShapeString(Predicate predicate) => ToCanonicalString(predicate, includeValues: false);
 
     internal static string ToCanonicalString(Predicate predicate, bool includeValues)
     {
