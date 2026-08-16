@@ -36,7 +36,7 @@ internal sealed class SqlServerUnitOfWork : IUnitOfWork
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
         var session = new SqlServerStorageSession(owner, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, transaction);
         sessions.Add(session);
-        var batched = new BatchStorageSession(session, batch);
+        var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);
         return batched;
     }

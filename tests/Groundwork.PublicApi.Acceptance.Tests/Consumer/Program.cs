@@ -28,6 +28,7 @@ try
     RunRecordsJourney(connection);
     RunPrivilegedCrossScopeJourney(connection);
     RunExactAppendJourney(connection);
+    RunCompareAndDeleteJourney(connection);
     RunLifecycleJourney(connection);
     RunAggregationSourcePredicateJourney(connection);
     RunDocumentsJourney(connection);
@@ -129,6 +130,80 @@ static void RunExactAppendJourney(IStorageProviderConnection connection)
     var replayed = session.AppendWithOutcomes(operation, values);
     Require(replayed.Status == WriteOutcomeStatus.Replayed, "The package-only exact append did not replay.");
     Require(replayed.Outcomes[0].GeneratedValue<long>("sequence") == 1, "The package-only replay did not preserve its generated sequence.");
+}
+
+static void RunCompareAndDeleteJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("compare_delete_records"),
+        Name = "compare_delete_records",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "owner", Type = PortableType.String, MaxLength = 64 },
+            new() { Name = "fence", Type = PortableType.Int64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Concurrency = ConcurrencyDeclaration.Optimistic()
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The package-only compare-and-delete schema did not apply.");
+    Require(connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.CompareAndDelete),
+        "The package-only provider did not advertise atomic compare-and-delete.");
+
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    Require(session is ICompareAndDeleteStorageSession,
+        "The package-only session did not expose the advertised compare-and-delete capability.");
+    var inserted = session.Insert(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "claim", ["owner"] = "worker-a", ["fence"] = 7L
+    }));
+    Require(inserted.Status == WriteOutcomeStatus.Inserted && inserted.Version == 1,
+        "The package-only compare-and-delete setup did not insert version 1.");
+
+    var mismatch = session.CompareAndDelete(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L });
+    Require(mismatch.Status == WriteOutcomeStatus.ComparisonMismatch && session.Read(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" })) is not null,
+        "The package-only compare-and-delete did not preserve a mismatched claim.");
+
+    var renewed = session.Update(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "claim", ["owner"] = "worker-a", ["fence"] = 7L
+    }), WriteOptions.IfVersion(1));
+    Require(renewed.Status == WriteOutcomeStatus.Updated && renewed.Version == 2,
+        "The package-only claim renewal did not advance its revision.");
+    var deleted = session.CompareAndDelete(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
+    Require(deleted.Status == WriteOutcomeStatus.Deleted,
+        "The package-only compare-and-delete did not delete the renewed claim without a stale CAS token.");
+    Require(session.CompareAndDelete(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-a" }).Status == WriteOutcomeStatus.NotFound,
+        "The package-only compare-and-delete did not distinguish an absent claim.");
+
+    session.Insert(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "claim-exact", ["owner"] = "worker-a", ["fence"] = 9L
+    }));
+    var staged = RowWrite.CompareAndDelete(unit,
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-exact" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 9L });
+    using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+    work.Stage(staged);
+    var report = work.CommitWithOutcomes();
+    var stagedOutcome = AssertSingle(report.Outcomes);
+    Require(ReferenceEquals(stagedOutcome.Write, staged) &&
+            stagedOutcome.Outcome.Status == WriteOutcomeStatus.Deleted,
+        "The package-only exact batch did not attribute the staged compare-and-delete outcome.");
+}
+
+static T AssertSingle<T>(IReadOnlyList<T> items)
+{
+    Require(items.Count == 1, "The package-only exact batch returned an unexpected outcome count.");
+    return items[0];
 }
 
 static void RunLifecycleJourney(IStorageProviderConnection connection)

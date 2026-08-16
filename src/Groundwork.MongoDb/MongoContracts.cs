@@ -130,7 +130,8 @@ public enum MongoWriteOutcomeStatus
     Replayed,
     NotFound,
     UniqueViolation,
-    ConcurrencyConflict
+    ConcurrencyConflict,
+    ComparisonMismatch
 }
 
 public sealed record MongoWriteOutcome
@@ -333,6 +334,14 @@ public interface IMongoStorageSession
 
     MongoWriteOutcome Append(OperationId operationId, params MongoStorageValues[] values) =>
         Append(operationId, (IReadOnlyList<MongoStorageValues>)values);
+}
+
+internal interface IMongoCompareAndDeleteStorageSession
+{
+    MongoWriteOutcome CompareAndDelete(
+        MongoStorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        MongoWriteOptions? options = null);
 }
 
 /// <summary>Internal bridge for the provider-neutral exact append capability.</summary>

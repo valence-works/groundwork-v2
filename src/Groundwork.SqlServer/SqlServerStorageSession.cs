@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -324,6 +324,77 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
         });
     }
+
+    public WriteOutcome CompareAndDelete(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null)
+    {
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var expected = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
+        return ExecuteWrite(() =>
+        {
+            var (where, parameters) = KeyPredicate(canonicalKey.Values, exactStringKeys: true);
+            foreach (var pair in expected)
+            {
+                if (pair.Value is null)
+                {
+                    where += $" AND {Quote(pair.Key)} IS NULL";
+                }
+                else
+                {
+                    var parameter = "@compare_" + pair.Key;
+                    var columnPredicate = $"{Quote(pair.Key)}={parameter}";
+                    if (Column(pair.Key).Type == PortableType.String)
+                    {
+                        columnPredicate = $"DATALENGTH({Quote(pair.Key)})=DATALENGTH({parameter}) AND {columnPredicate}";
+                    }
+                    where += $" AND {columnPredicate}";
+                    parameters[parameter] = (pair.Value, Column(pair.Key));
+                }
+            }
+            if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+            {
+                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+                parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
+            }
+
+            var output = VersionColumnDefinition is null ? string.Empty : $" OUTPUT deleted.{Quote(VersionColumnDefinition.Name)}";
+            using var command = Command($"DELETE FROM {Quote(Unit.Name)}{output} WHERE {where};");
+            AddParameters(command, parameters);
+            options?.Observer?.Observe(new WritePathEvent("sqlserver.compare-and-delete", command.CommandText, IsProbe: false));
+            if (VersionColumnDefinition is not null)
+            {
+                using (var reader = command.ExecuteReader())
+                {
+                    if (reader.Read())
+                        return new WriteOutcome(WriteOutcomeStatus.Deleted, Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture));
+                }
+            }
+            else if (command.ExecuteNonQuery() != 0)
+            {
+                return new WriteOutcome(WriteOutcomeStatus.Deleted);
+            }
+
+            var existing = ReadCore(canonicalKey, options?.Observer, "sqlserver.compare-and-delete-read", exactStringKeys: true);
+            if (existing is null)
+                return new WriteOutcome(WriteOutcomeStatus.NotFound);
+            if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
+                options.Precondition.Version != existing.Version)
+                return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            return MatchesExpected(existing, expected)
+                ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
+                : new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
+        });
+    }
+
+    private bool MatchesExpected(StoredEntry existing, IReadOnlyDictionary<string, object?> expected) =>
+        expected.All(pair =>
+        {
+            var definition = Column(pair.Key);
+            return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
+                CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
+        });
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
@@ -988,6 +1059,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
             RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
             RowWriteMode.Delete => Delete(write.Key!, write.Options),
+            RowWriteMode.CompareAndDelete => CompareAndDelete(write.Key!, write.ExpectedValues, write.Options),
             _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
         })).ToArray();
 
@@ -1423,13 +1495,17 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                     : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
             });
 
-    private StoredEntry? ReadCore(StorageKey key, IWritePathObserver? observer = null)
+    private StoredEntry? ReadCore(
+        StorageKey key,
+        IWritePathObserver? observer = null,
+        string? observerOperation = null,
+        bool exactStringKeys = false)
     {
-        var (where, parameters) = KeyPredicate(key.Values);
+        var (where, parameters) = KeyPredicate(key.Values, exactStringKeys);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
-        observer?.Observe(new WritePathEvent("sqlserver.write-probe", command.CommandText, IsProbe: true));
+        observer?.Observe(new WritePathEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, IsProbe: true));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -1480,7 +1556,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             throw new ConcurrencyConflictException(existing?.Version);
     }
 
-    private (string Predicate, Dictionary<string, (object? Value, ColumnDefinition Definition)> Parameters) KeyPredicate(IReadOnlyDictionary<string, object?> values)
+    private (string Predicate, Dictionary<string, (object? Value, ColumnDefinition Definition)> Parameters) KeyPredicate(
+        IReadOnlyDictionary<string, object?> values,
+        bool exactStringKeys = false)
     {
         var clauses = new List<string>();
         var parameters = new Dictionary<string, (object?, ColumnDefinition)>(StringComparer.Ordinal);
@@ -1488,8 +1566,12 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             if (!values.TryGetValue(column, out var value)) throw new ArgumentException($"Key column '{column}' is required.", nameof(values));
             var parameter = "@key_" + column;
-            clauses.Add($"{Quote(column)}={parameter}");
-            parameters[parameter] = (value, Column(column));
+            var definition = Column(column);
+            var predicate = $"{Quote(column)}={parameter}";
+            if (exactStringKeys && definition.Type == PortableType.String)
+                predicate = $"DATALENGTH({Quote(column)})=DATALENGTH({parameter}) AND {predicate}";
+            clauses.Add(predicate);
+            parameters[parameter] = (value, definition);
         }
         if (ScopeColumnDefinition is not null)
         {

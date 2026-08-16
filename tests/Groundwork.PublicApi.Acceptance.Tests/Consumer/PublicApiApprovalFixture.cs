@@ -35,6 +35,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RowWrite);
         _ = typeof(AppendOutcomeReport);
         _ = typeof(IExactAppendStorageSession);
+        _ = typeof(ICompareAndDeleteStorageSession);
         _ = typeof(AppendIdempotencyConflictException);
         _ = typeof(RetentionIdempotencyDeclaration);
         _ = typeof(RetentionOperationResult);
@@ -69,6 +70,8 @@ internal static class PublicApiApprovalFixture
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
             (session, operation, values) => session.AppendWithOutcomes(operation, values));
+        _ = new Func<IStorageSession, StorageKey, IReadOnlyDictionary<string, object?>, WriteOutcome>(
+            (session, key, expected) => session.CompareAndDelete(key, expected));
         _ = new Func<IStorageSession, OperationId, RetentionExecutionOptions, RetentionOperationResult>(
             (session, operation, options) => session.ApplyRetention(operation, options));
         _ = new RetentionExecutionOptions { KeepNewestOverride = 0 };

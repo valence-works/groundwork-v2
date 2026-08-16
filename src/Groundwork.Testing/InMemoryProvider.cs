@@ -63,7 +63,8 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
         exactRetention: true,
-        atomicCommit: true);
+        atomicCommit: true,
+        compareAndDelete: true);
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
     {
@@ -577,7 +578,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -1015,6 +1016,22 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         }
     }
 
+    public WriteOutcome CompareAndDelete(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null)
+    {
+        RefusePrivilegedPointOperation("compare-and-delete");
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
+        options?.Observer?.Observe(new WritePathEvent("in-memory.compare-and-delete", null, IsProbe: false));
+        lock (database.Gate)
+        {
+            ThrowIfDisposed();
+            return Mutation.CompareAndDelete(CurrentState(), partition, canonicalKey, validated, options);
+        }
+    }
+
     public StorageInspection Inspect()
     {
         RefusePrivilegedPointOperation("inspect");
@@ -1372,7 +1389,7 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
 
         var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged, stagedRetentionLedger: stagedRetentionLedger);
         sessions.Add(session);
-        var batched = new BatchStorageSession(session, batch);
+        var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);
         return batched;
     }
@@ -1615,6 +1632,37 @@ internal static class Mutation
             state.Unit.Concurrency.IsOptimistic ? existing.Version : null);
     }
 
+    internal static WriteOutcome CompareAndDelete(
+        InMemoryUnitState state,
+        string partition,
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options)
+    {
+        var identity = Key(state.Unit, key.Values);
+        var entries = GetEntries(state, partition);
+        if (!entries.TryGetValue(identity, out var existing))
+            return new WriteOutcome(WriteOutcomeStatus.NotFound);
+
+        if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
+            options.Precondition.Version != existing.Version)
+            return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+
+        foreach (var pair in expectedValues)
+        {
+            var definition = state.Unit.Columns.Single(column => column.Name == pair.Key);
+            var actual = existing.Values.GetValueOrDefault(pair.Key);
+            if (!CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type))
+                return new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
+        }
+
+        entries.Remove(identity);
+        state.Revision = checked(state.Revision + 1);
+        return new WriteOutcome(
+            WriteOutcomeStatus.Deleted,
+            state.Unit.Concurrency.IsOptimistic ? existing.Version : null);
+    }
+
     private static Dictionary<string, InMemoryEntry> GetEntries(
         InMemoryUnitState state,
         string partition)
@@ -1677,7 +1725,8 @@ internal static class Mutation
         {
             if (!values.TryGetValue(column, out var value))
                 throw new ArgumentException($"Key column '{column}' is required.", nameof(values));
-            return ValueCanonicalizer.Canonical(value);
+            var definition = unit.Columns.Single(candidate => candidate.Name == column);
+            return ValueCanonicalizer.Canonical(value, definition.Type);
         });
         return string.Join("|", parts);
     }
@@ -1713,6 +1762,15 @@ internal static class Mutation
 
 internal static class ValueCanonicalizer
 {
+    internal static string Canonical(object? value, PortableType type) => type switch
+    {
+        PortableType.Int64 when value is int or long => Canonical(Convert.ToInt64(value, CultureInfo.InvariantCulture)),
+        PortableType.Decimal when value is byte or sbyte or short or ushort or int or uint or long or ulong or decimal =>
+            Canonical(Convert.ToDecimal(value, CultureInfo.InvariantCulture)),
+        PortableType.DateTimeOffset when value is DateTimeOffset timestamp => Canonical(timestamp.ToUniversalTime()),
+        _ => Canonical(value)
+    };
+
     internal static string Canonical(object? value) => value switch
     {
         null => "null",
