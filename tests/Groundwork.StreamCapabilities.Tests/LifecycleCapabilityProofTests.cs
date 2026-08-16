@@ -260,6 +260,20 @@ public sealed class LifecycleCapabilityProofTests
         Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.ExactRetention);
     }
 
+    [Fact]
+    public void Retention_idempotency_window_and_ledger_are_schema_identity()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-drift-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-drift-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var changed = unit with
+        {
+            RetentionIdempotency = unit.RetentionIdempotency! with { Window = TimeSpan.FromHours(2), LedgerName = "retention_other" }
+        };
+        var conflict = Assert.Throws<SchemaConflictException>(() => connection.Schema.Apply(changed));
+        Assert.Contains("retention idempotency", conflict.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static StorageUnit LifecycleUnit(string name, ScopePolicy scope) => new()
     {
         Id = new StorageUnitId(name),
