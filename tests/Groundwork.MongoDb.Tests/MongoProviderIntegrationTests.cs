@@ -260,7 +260,7 @@ public sealed class MongoProviderIntegrationTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("mongo-aggregation-profile-drift-" + Guid.NewGuid().ToString("N")),
-            Name = "mongo_aggregation_profile_drift_" + Guid.NewGuid().ToString("N"),
+            Name = "mongo_aggregation_drift_" + Guid.NewGuid().ToString("N"),
             Columns =
             [
                 new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
