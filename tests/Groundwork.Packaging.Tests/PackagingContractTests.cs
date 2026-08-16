@@ -88,6 +88,22 @@ public sealed class PackagingContractTests
         Assert.DoesNotContain("Groundwork.SchemaTool --version", workflow, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Publication_workflow_runs_the_exact_clean_room_proof_after_layout_validation()
+    {
+        var root = FindRepositoryRoot();
+        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-nuget.yml"));
+        var layout = workflow.IndexOf("eng/verify-package-layout.sh", StringComparison.Ordinal);
+        var cleanRoom = workflow.IndexOf("tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh", StringComparison.Ordinal);
+        var upload = workflow.IndexOf("actions/upload-artifact@v4", StringComparison.Ordinal);
+
+        Assert.True(layout >= 0);
+        Assert.True(cleanRoom > layout);
+        Assert.True(upload > cleanRoom);
+        Assert.Contains("GROUNDWORK_PUBLIC_API_PACKAGES: artifacts/packages", workflow, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_PUBLIC_API_VERSION: ${{ steps.version.outputs.version }}", workflow, StringComparison.Ordinal);
+    }
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

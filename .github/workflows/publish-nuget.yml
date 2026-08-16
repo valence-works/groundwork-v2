@@ -77,6 +77,11 @@ jobs:
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
         run: eng/verify-package-layout.sh artifacts/packages "$PACKAGE_VERSION"
+      - name: Run the clean-room public API and tool proof from these artifacts
+        env:
+          GROUNDWORK_PUBLIC_API_PACKAGES: artifacts/packages
+          GROUNDWORK_PUBLIC_API_VERSION: ${{ steps.version.outputs.version }}
+        run: tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh
       - uses: actions/upload-artifact@v4
         with:
           name: groundwork-packages-${{ steps.version.outputs.version }}

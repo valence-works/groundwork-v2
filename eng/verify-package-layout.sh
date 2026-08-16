@@ -96,4 +96,23 @@ for nupkg in "$packages_dir"/*.nupkg; do
   }
 done
 
+for snupkg in "$packages_dir"/*.snupkg; do
+  [[ -e "$snupkg" ]] || continue
+  filename="${snupkg##*/}"
+  suffix=".$version.snupkg"
+  [[ "$filename" == *"$suffix" ]] || {
+    echo "Symbol package has an unexpected versioned filename: $filename" >&2
+    exit 1
+  }
+  package_id="${filename%$suffix}"
+  contains_expected_id "$package_id" || {
+    echo "Unexpected symbol package in release output: $filename" >&2
+    exit 1
+  }
+  test -f "$packages_dir/$package_id.$version.nupkg" || {
+    echo "Symbol package has no matching package: $filename" >&2
+    exit 1
+  }
+done
+
 echo "Validated ${#expected_ids[@]} public packages and symbol packages at version $version."

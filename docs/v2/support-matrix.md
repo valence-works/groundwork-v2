@@ -6,11 +6,11 @@ operational guidance, and an owner for provider-specific incidents.
 
 | Component/provider | Status in the first preview | Required topology and evidence |
 | --- | --- | --- |
-| SQLite | Production-supported | File-backed or in-memory SQLite with the documented connection lifetime. |
-| PostgreSQL | Production-supported | PostgreSQL 17-compatible deployment; run the PostgreSQL conformance suite. |
+| SQLite | Conformance-passing / preview | File-backed or in-memory SQLite with the documented connection lifetime; production support requires an operational pilot and runbook. |
+| PostgreSQL | Conformance-passing / preview | PostgreSQL 17-compatible deployment; production support requires an operational pilot and runbook. |
 | SQL Server | Conformance-passing / preview | SQL Server 2022-compatible deployment; production support follows an operational pilot. |
 | MongoDB | Conformance-passing / preview | Replica-set or sharded deployment for transactional and exact-append behavior. |
-| `Groundwork.Testing` | Production package for provider authors | Public conformance contracts and deterministic reference provider; not an application database. |
+| `Groundwork.Testing` | Public provider-author package | Public conformance contracts and deterministic reference provider; not an application database. |
 | `Groundwork.Tool` | Preview | Deployment-time schema planning and explicit authorization only. |
 
 MongoDB standalone deployments are intentionally not represented as
