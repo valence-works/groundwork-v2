@@ -8,6 +8,23 @@ namespace Groundwork.Testing.SelfTests;
 public sealed class InMemoryProviderTests
 {
     [Fact]
+    public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://physical-name-boundary");
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.boundary.id"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    [Fact]
     public void Aggregation_profile_only_drift_is_reported_and_retained()
     {
         var initial = AggregationUnit(1_000);
@@ -169,7 +186,7 @@ public sealed class InMemoryProviderTests
                 }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
-            Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+            Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
         };
         using var connection = new InMemoryProviderFactory().Create("memory://q9-required-folded-partial");
         connection.Schema.Apply(unit);
@@ -264,8 +281,8 @@ public sealed class InMemoryProviderTests
 
         Assert.False(first.IsNoOp);
         Assert.True(second.IsNoOp);
-        Assert.Equal(["by-value", "unique-value"], indexes.Select(index => index.Name));
-        Assert.Contains(indexes, index => index.IsUnique && index.Name == "unique-value");
+        Assert.Equal(["by_value", "unique_value"], indexes.Select(index => index.Name));
+        Assert.Contains(indexes, index => index.IsUnique && index.Name == "unique_value");
     }
 
     [Fact]
@@ -280,14 +297,14 @@ public sealed class InMemoryProviderTests
             Columns = [.. initial.Columns, new ColumnDefinition { Name = "added", Type = PortableType.Int32 }],
             Indexes = [.. initial.Indexes, new IndexDefinition
             {
-                Name = "by-added",
+                Name = "by_added",
                 Columns = [new IndexColumn("added")]
             }]
         };
 
         var diff = connection.Schema.Diff(additive);
         Assert.Contains(diff.Changes, change => change.Kind == SchemaChangeKind.AddColumn && change.Identity == "added");
-        Assert.Contains(diff.Changes, change => change.Kind == SchemaChangeKind.CreateIndex && change.Identity == "by-added");
+        Assert.Contains(diff.Changes, change => change.Kind == SchemaChangeKind.CreateIndex && change.Identity == "by_added");
         connection.Schema.Apply(additive);
         Assert.True(connection.Schema.Diff(additive).IsEmpty);
 
@@ -299,7 +316,7 @@ public sealed class InMemoryProviderTests
     public void Schema_apply_refuses_retention_partition_layout_drift()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://retention-partition-drift");
-        var name = "retention-partition-drift";
+        var name = "retention_partition_drift";
         var initial = new StorageUnit
         {
             Id = new StorageUnitId(name),
@@ -358,7 +375,7 @@ public sealed class InMemoryProviderTests
         var changedIndex = initial with
         {
             Indexes = initial.Indexes
-                .Select(index => index.Name == "by-value" ? index with { SchemaVersion = 2 } : index)
+                .Select(index => index.Name == "by_value" ? index with { SchemaVersion = 2 } : index)
                 .ToArray()
         };
         Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedIndex));

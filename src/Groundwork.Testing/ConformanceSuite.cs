@@ -114,7 +114,7 @@ public static class ConformanceSuite
 
             RunCheck(checks, "cross-scope latest remains partitioned by scope", () =>
             {
-                var name = "conformance-cross-scope-latest-" + Guid.NewGuid().ToString("N");
+                var name = "conformance_cross_scope_latest_" + Guid.NewGuid().ToString("N");
                 var latestUnit = new StorageUnit
                 {
                     Id = new StorageUnitId(name),

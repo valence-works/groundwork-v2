@@ -59,10 +59,14 @@ internal static class PublicApiApprovalFixture
         _ = new Func<string, IStorageProviderConnection>(connectionString => new SqliteProviderFactory().Create(connectionString));
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
-            builder.UniqueIndex("by-sparse", index => index.Column("nullable").ExcludeMissingValues()));
+            builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
+        _ = PortabilityValidator.MaximumPortableIdentifierLength;
+        _ = new Func<string, string, PortabilityValidationResult>((identifier, path) =>
+            PortabilityValidator.ValidatePhysicalIdentifier(identifier, path));
+        _ = new Action<Groundwork.Kernel.StorageUnit>(PortabilityValidator.EnsurePhysicalIdentifiers);
         _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
-            builder.UniqueIndex("by-sparse", index => index.Column("nullable").ExcludeMissingValues()));
+            builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
             (session, operation, values) => session.AppendWithOutcomes(operation, values));
         _ = new Func<IStorageSession, OperationId, RetentionExecutionOptions, RetentionOperationResult>(

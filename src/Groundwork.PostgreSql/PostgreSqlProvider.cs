@@ -64,6 +64,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
         schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = OpenConnection();
@@ -91,6 +92,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         foreach (var unit in units)
         {
             ArgumentNullException.ThrowIfNull(unit);
+            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
             PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
             schemaCoordinator.EnsureRuntimeAdmission(unit);
         }
@@ -236,6 +238,8 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        PortabilityValidator.EnsurePhysicalIdentifiers(source);
+        EnsurePhysicalIndexNames(source);
         ProviderOwnedColumns.ValidateLogicalDeclaration(source);
         ConcurrencyDeclaration.ValidateDeclaration(source);
         if (source.Retention is not null)
@@ -297,6 +301,27 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
             Retention = source.Retention,
             SchemaVersion = source.SchemaVersion
         };
+    }
+
+    private static void EnsurePhysicalIndexNames(StorageUnit source)
+    {
+        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var index in source.Indexes)
+        {
+            var physicalName = PostgreSqlDialect.PhysicalIndexName(source.Name, index.Name);
+            var path = $"indexes.{index.Name}.physicalName";
+            PortabilityValidator.EnsurePhysicalIdentifier(
+                physicalName,
+                path,
+                allowProviderOwnedPrefix: true);
+            if (seen.TryGetValue(physicalName, out var previous))
+            {
+                throw new InvalidOperationException(
+                    $"GW-PORT-011 at {path}: Provider-generated physical index name '{physicalName}' " +
+                    $"collides with index '{previous}'; choose identifiers whose composed names remain unique.");
+            }
+            seen.Add(physicalName, index.Name);
+        }
     }
 
     private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)

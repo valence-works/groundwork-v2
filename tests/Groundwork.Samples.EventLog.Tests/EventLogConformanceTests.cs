@@ -21,7 +21,7 @@ public sealed class EventLogConformanceTests
     public void InMemory_event_log_runs_schema_sequence_idempotency_retention_aggregation_and_scope_contracts()
     {
         AssertShippedConformance(new InMemoryProviderFactory(), "memory://event-log-conformance-" + Guid.NewGuid().ToString("N"));
-        AssertEventLog(new InMemoryProviderFactory(), "event-log-inmemory");
+        AssertEventLog(new InMemoryProviderFactory(), "event_log_inmemory");
     }
 
     [Fact]
@@ -80,7 +80,7 @@ public sealed class EventLogConformanceTests
         var indexes = template.Indexes
             .Append(new IndexDefinition
             {
-                Name = "conformance-unique-level",
+                Name = "conformance_unique_level",
                 Columns = [new IndexColumn("level")],
                 IsUnique = true
             })

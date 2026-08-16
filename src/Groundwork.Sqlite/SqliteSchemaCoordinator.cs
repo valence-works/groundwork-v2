@@ -92,6 +92,8 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        PortabilityValidator.EnsurePhysicalIdentifiers(source);
+        EnsurePhysicalIndexNames(source);
         ProviderOwnedColumns.ValidateLogicalDeclaration(source);
         ConcurrencyDeclaration.ValidateDeclaration(source);
         if (source.Retention is not null)
@@ -159,6 +161,28 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
             Retention = source.Retention,
             SchemaVersion = source.SchemaVersion
         };
+    }
+
+    private static void EnsurePhysicalIndexNames(StorageUnit source)
+    {
+        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var index in source.Indexes)
+        {
+            var physicalName = SqliteDialect.PhysicalIndexName(source.Name, index.Name);
+            var path = $"indexes.{index.Name}.physicalName";
+            PortabilityValidator.EnsurePhysicalIdentifier(
+                physicalName,
+                path,
+                maximumByteLength: 255,
+                allowProviderOwnedPrefix: true);
+            if (seen.TryGetValue(physicalName, out var previous))
+            {
+                throw new InvalidOperationException(
+                    $"GW-PORT-011 at {path}: Provider-generated physical index name '{physicalName}' " +
+                    $"collides with index '{previous}'; choose identifiers whose composed names remain unique.");
+            }
+            seen.Add(physicalName, index.Name);
+        }
     }
 
     private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)

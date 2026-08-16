@@ -112,14 +112,14 @@ public sealed class RecordTableTests
         var indexThenOptimistic = Assert.Throws<StorageDeclarationException>(() =>
             RecordTable.For<VersionedCustomer>("bad_version_index_first")
                 .Key(row => row.Id)
-                .Index("by-version", row => row.Version)
+                .Index("by_version", row => row.Version)
                 .OptimisticConcurrency()
                 .Build());
         var optimisticThenIndex = Assert.Throws<StorageDeclarationException>(() =>
             RecordTable.For<VersionedCustomer>("bad_optimistic_first")
                 .Key(row => row.Id)
                 .OptimisticConcurrency()
-                .Index("by-version", row => row.Version)
+                .Index("by_version", row => row.Version)
                 .Build());
 
         Assert.All(
@@ -127,7 +127,7 @@ public sealed class RecordTableTests
             error => Assert.Contains(error.Diagnostics, diagnostic =>
                 diagnostic.Code == "GW-DECL-CONCURRENCY-001" &&
                 diagnostic.Path == "concurrency" &&
-                diagnostic.Message.Contains("index 'by-version'", StringComparison.Ordinal)));
+                diagnostic.Message.Contains("index 'by_version'", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -136,18 +136,18 @@ public sealed class RecordTableTests
         var regular = Assert.Throws<StorageDeclarationException>(() =>
             RecordTable.For<JsonCustomer>("bad_json_index")
                 .Key(row => row.Id)
-                .Index("by-payload", row => row.Payload)
+                .Index("by_payload", row => row.Payload)
                 .Build());
         var unique = Assert.Throws<StorageDeclarationException>(() =>
             RecordTable.For<JsonCustomer>("bad_unique_json_index")
                 .Key(row => row.Id)
-                .UniqueIndex("by-payload", row => row.Payload)
+                .UniqueIndex("by_payload", row => row.Payload)
                 .Build());
 
         Assert.All(new[] { regular, unique }, error => Assert.Contains(
             error.Diagnostics,
             diagnostic => diagnostic.Code == "GW-DECL-INDEX-003" &&
-                diagnostic.Path == "indexes.by-payload.columns[0]" &&
+                diagnostic.Path == "indexes.by_payload.columns[0]" &&
                 diagnostic.Message.Contains("JSON", StringComparison.Ordinal)));
     }
 
@@ -199,11 +199,11 @@ public sealed class RecordTableTests
 
         _ = records.Query(
             table.Query.Where(row => row.Email == "ada@example.test"),
-            RecordQueryOptions.UsingIndex("by-email"));
+            RecordQueryOptions.UsingIndex("by_email"));
 
-        Assert.Equal("by-email", store.Options?.SelectedIndex);
+        Assert.Equal("by_email", store.Options?.SelectedIndex);
         var index = Assert.Single(store.Options!.Indexes);
-        Assert.Equal("by-email", index.Name);
+        Assert.Equal("by_email", index.Name);
         Assert.Equal<string>(["email"], index.Columns);
     }
 
@@ -215,7 +215,7 @@ public sealed class RecordTableTests
             .String("id", 32, column => column.Required())
             .String("email", 320)
             .Key("id")
-            .UniqueIndex("by-email", index => index
+            .UniqueIndex("by_email", index => index
                 .Column("email")
                 .ExcludeMissingValues())
             .Build();

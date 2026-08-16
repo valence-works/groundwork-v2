@@ -166,7 +166,7 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
         .OptimisticConcurrency()
         .Column(customer => customer.Email, column => column.MaxLength(320).Required())
         .Column(customer => customer.Name, column => column.MaxLength(200).Required())
-        .Index("by-email", customer => customer.Email)
+        .Index("by_email", customer => customer.Email)
         .Build();
 
     var applied = connection.Schema.Apply(table.Definition);
@@ -197,11 +197,11 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
     }
 
     var query = table.Query.Where(customer => customer.Email == "ada@example.test");
-    var matches = records.Query(query, RecordQueryOptions.UsingIndex("by-email"));
+    var matches = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));
     Require(matches.Count == 1 && matches[0].Name == "Ada Byron", "The covered typed query did not return the updated customer.");
 
     var uncovered = new RuntimeCoverageGate(
-        [new CoverageIndex("by-email", [new CoverageIndexColumn("email")])],
+        [new CoverageIndex("by_email", [new CoverageIndexColumn("email")])],
         []);
     try
     {
@@ -317,7 +317,7 @@ static void RunFailureJourneys(IStorageProviderConnection connection)
     {
         _ = RecordTable.For<JsonRecord>("json_failure")
             .Key(row => row.Id)
-            .Index("by-payload", row => row.Payload)
+            .Index("by_payload", row => row.Payload)
             .Build();
         throw new InvalidOperationException("The declaration accepted an index over JSON.");
     }
@@ -348,7 +348,7 @@ static void RunFailureJourneys(IStorageProviderConnection connection)
     var folded = RecordTable.For<FoldedCustomer>("folded_customers")
         .Key(row => row.Id)
         .Column(row => row.Email, column => column.MaxLength(320).Required().Collation(PortableCollation.OrdinalIgnoreCase))
-        .Index("by-email", row => row.Email)
+        .Index("by_email", row => row.Email)
         .Build();
     try
     {

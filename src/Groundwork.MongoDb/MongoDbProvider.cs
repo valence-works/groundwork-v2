@@ -151,6 +151,7 @@ internal sealed class MongoProviderState
     internal MongoAppliedUnit Resolve(StorageUnit declaration, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(declaration);
+        PortabilityValidator.EnsurePhysicalIdentifiers(declaration);
         ProviderOwnedColumns.ValidateLogicalDeclaration(declaration);
         declaration = SearchKeyProjection.Expand(declaration);
         AggregationProfileValidator.ValidateUnit(declaration);
@@ -164,6 +165,8 @@ internal sealed class MongoProviderState
             }
         }
 
+        var applied = new MongoAppliedUnit(MongoDeclarationSnapshot.Clone(declaration), declaration.Name);
+        _ = MongoSchemaCoordinator.CollectionName(applied, access);
         if (!CollectionExists(declaration.Name))
         {
             throw new InvalidOperationException(
@@ -179,7 +182,6 @@ internal sealed class MongoProviderState
                 $"Storage unit '{declaration.Name}' differs from the applied MongoDB schema, including its folded search-key algorithm identity. Apply the exact schema and rebuild the derived search-key column before opening a session.");
         }
 
-        var applied = new MongoAppliedUnit(MongoDeclarationSnapshot.Clone(declaration), declaration.Name);
         lock (gate)
         {
             if (units.TryGetValue(declaration.Id, out var raced))
@@ -666,7 +668,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         var scope = access.Scope?.Value ?? throw new InvalidOperationException(
             "A scoped storage unit requires a scope value.");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope)));
-        return applied.CollectionName + "__scope__" + hash;
+        var collectionName = applied.CollectionName + "__scope__" + hash;
+        PortabilityValidator.EnsurePhysicalIdentifier(
+            collectionName,
+            "scopedCollection.name",
+            maximumByteLength: 255);
+        return collectionName;
     }
 
     private static IReadOnlyList<MongoSchemaChange> BuildChanges(

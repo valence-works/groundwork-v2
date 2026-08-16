@@ -57,8 +57,8 @@ public sealed class ConformanceScenario
 
     private static ConformanceScenario CreateDefault()
     {
-        var global = CreateUnit("conformance-global", ScopePolicy.Global, ConcurrencyDeclaration.None);
-        var scoped = CreateUnit("conformance-scoped", ScopePolicy.Scoped, ConcurrencyDeclaration.Optimistic());
+        var global = CreateUnit("conformance_global", ScopePolicy.Global, ConcurrencyDeclaration.None);
+        var scoped = CreateUnit("conformance_scoped", ScopePolicy.Scoped, ConcurrencyDeclaration.Optimistic());
         return new ConformanceScenario(
             global,
             scoped,
@@ -94,10 +94,10 @@ public sealed class ConformanceScenario
         Concurrency = concurrency,
         Indexes =
         [
-            new IndexDefinition { Name = "by-value", Columns = [new IndexColumn("value")] },
+            new IndexDefinition { Name = "by_value", Columns = [new IndexColumn("value")] },
             new IndexDefinition
             {
-                Name = "unique-value",
+                Name = "unique_value",
                 Columns = [new IndexColumn("uniqueValue")],
                 IsUnique = true,
                 MissingValues = MissingValueBehavior.Excluded

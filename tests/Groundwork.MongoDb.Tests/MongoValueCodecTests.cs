@@ -14,7 +14,7 @@ public sealed class MongoValueCodecTests
     {
         var definition = new IndexDefinition
         {
-            Name = "unique-email-name",
+            Name = "unique_email_name",
             Columns = [new IndexColumn("email"), new IndexColumn("name", SortDirection.Descending)],
             IsUnique = true,
             MissingValues = MissingValueBehavior.Excluded
@@ -126,7 +126,7 @@ internal static class TestUnits
         [
             new IndexDefinition
             {
-                Name = "unique-email",
+                Name = "unique_email",
                 Columns = [new IndexColumn("email")],
                 IsUnique = true,
                 MissingValues = MissingValueBehavior.Excluded

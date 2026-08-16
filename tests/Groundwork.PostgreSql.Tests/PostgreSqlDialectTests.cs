@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
@@ -156,7 +157,7 @@ public sealed class PostgreSqlDialectTests
     {
         var index = new IndexDefinition
         {
-            Name = "by-name",
+            Name = "by_name",
             Columns =
             [
                 new IndexColumn("name", SortDirection.Ascending),
@@ -169,6 +170,43 @@ public sealed class PostgreSqlDialectTests
         Assert.Contains("\"name\" ASC NULLS FIRST", sql, StringComparison.Ordinal);
         Assert.Contains("\"createdAt\" DESC NULLS LAST", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INDEXED BY", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Composed_index_names_are_hashed_to_the_63_byte_postgreSQL_budget()
+    {
+        var table = new string('t', PortabilityValidator.MaximumPortableIdentifierLength);
+        var index = new IndexDefinition
+        {
+            Name = "i",
+            Columns = [new IndexColumn("value")]
+        };
+
+        var logical = $"__groundwork_ix_{table.Length}_{table}_{index.Name.Length}_{index.Name}";
+        var hash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(logical)))[..10].ToLowerInvariant();
+        var expected = logical[..(PortabilityValidator.MaximumPortableIdentifierLength - hash.Length - 1)] + "_" + hash;
+        var sql = dialect.CreateIndexSql(table, index, null);
+
+        Assert.Contains($"\"{expected}\"", sql, StringComparison.Ordinal);
+        Assert.Equal(PortabilityValidator.MaximumPortableIdentifierLength, expected.Length);
+    }
+
+    [SkippableFact]
+    public void Provider_applies_a_63_byte_storage_unit_name_without_rewriting()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.boundary.id"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
     [Fact]
@@ -238,7 +276,7 @@ public sealed class PostgreSqlDialectTests
               AND index_class.relname=@index;
             """;
         command.Parameters.AddWithValue("table", unit.Name);
-        command.Parameters.AddWithValue("index", unit.Name + "__by-name");
+        command.Parameters.AddWithValue("index", PhysicalIndexName(unit.Name, "by_name"));
         using var reader = command.ExecuteReader();
         Assert.True(reader.Read());
         Assert.Equal((short)2, reader.GetInt16(0)); // ASC NULLS FIRST
@@ -257,12 +295,13 @@ public sealed class PostgreSqlDialectTests
         {
             raw.Open();
             using var command = raw.CreateCommand();
-            command.CommandText = $"DROP INDEX \"{unit.Name}__by-name\"; CREATE INDEX \"{unit.Name}__by-name\" ON \"{unit.Name}\" (\"value\");";
+            var physicalIndexName = PhysicalIndexName(unit.Name, "by_name");
+            command.CommandText = $"DROP INDEX \"{physicalIndexName}\"; CREATE INDEX \"{physicalIndexName}\" ON \"{unit.Name}\" (\"value\");";
             command.ExecuteNonQuery();
         }
 
         var exception = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
-        Assert.Contains("by-name", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("by_name", exception.Message, StringComparison.Ordinal);
     }
 
     [SkippableFact]
@@ -326,7 +365,7 @@ public sealed class PostgreSqlDialectTests
             [
                 new IndexDefinition
                 {
-                    Name = "unique-email-present",
+                    Name = "unique_email_present",
                     Columns = [new IndexColumn("email")],
                     IsUnique = true,
                     MissingValues = MissingValueBehavior.Excluded
@@ -520,7 +559,7 @@ public sealed class PostgreSqlDialectTests
         [
             new IndexDefinition
             {
-                Name = "by-name",
+                Name = "by_name",
                 Columns =
                 [
                     new IndexColumn("value", SortDirection.Ascending),
@@ -529,4 +568,7 @@ public sealed class PostgreSqlDialectTests
             }
         ]
     };
+
+    private static string PhysicalIndexName(string table, string index) =>
+        $"__groundwork_ix_{table.Length}_{table}_{index.Length}_{index}";
 }

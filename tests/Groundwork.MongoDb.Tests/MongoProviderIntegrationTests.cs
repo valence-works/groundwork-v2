@@ -12,6 +12,23 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
+    public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
+    {
+        using var connection = OpenConnection();
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.boundary.id"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    [SkippableFact]
     public void Schema_admission_refuses_invalid_aggregation_before_persistence()
     {
         using var connection = OpenConnection();
@@ -329,10 +346,10 @@ public sealed class MongoProviderIntegrationTests
 
         Assert.False(first.IsNoOp);
         Assert.True(second.IsNoOp);
-        Assert.Contains(indexes, index => index.Name == "unique-email" &&
+        Assert.Contains(indexes, index => index.Name == "unique_email" &&
             index.IsUnique && index.MissingValues == MissingValueBehavior.Excluded);
-        Assert.Contains(reopenedIndexes, index => index.Name == "unique-email");
-        Assert.Contains("unique-email", indexNames);
+        Assert.Contains(reopenedIndexes, index => index.Name == "unique_email");
+        Assert.Contains("unique_email", indexNames);
 
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         var values = CustomerValues("one", "one@example.test");
@@ -455,13 +472,13 @@ public sealed class MongoProviderIntegrationTests
         connection.Schema.Apply(unit);
         var native = Assert.IsType<MongoDbProviderConnection>(connection).Database
             .GetCollection<BsonDocument>(unit.Name);
-        native.Indexes.DropOne("unique-email");
+        native.Indexes.DropOne("unique_email");
 
         var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
 
         Assert.True(report.IsProcessReady);
         Assert.Contains(report.IndexDrift, refusal => refusal.Code == "GW-RUNTIME-002" &&
-            refusal.Path == "indexes.unique-email");
+            refusal.Path == "indexes.unique_email");
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         Assert.NotNull(session);
     }
@@ -493,7 +510,7 @@ public sealed class MongoProviderIntegrationTests
             Columns = [.. original.Columns.Select(column => column.Name == "status"
                 ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
                 : column)],
-            Indexes = [new IndexDefinition { Name = "unique-status", Columns = [new IndexColumn("status")], IsUnique = true }]
+            Indexes = [new IndexDefinition { Name = "unique_status", Columns = [new IndexColumn("status")], IsUnique = true }]
         };
 
         var exception = Assert.Throws<MongoCommandException>(() => connection.Schema.Apply(folded));
@@ -525,7 +542,7 @@ public sealed class MongoProviderIntegrationTests
             Columns = [.. original.Columns.Select(column => column.Name == "status"
                 ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
                 : column)],
-            Indexes = [new IndexDefinition { Name = "unique-status", Columns = [new IndexColumn("status")], IsUnique = true }]
+            Indexes = [new IndexDefinition { Name = "unique_status", Columns = [new IndexColumn("status")], IsUnique = true }]
         };
 
         var applied = connection.Schema.Apply(folded);
@@ -725,7 +742,7 @@ public sealed class MongoProviderIntegrationTests
                     new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false, Collation = PortableCollation.OrdinalIgnoreCase }
                 ],
                 Key = new KeyDefinition { Columns = ["id"] },
-                Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+                Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
             };
             connection.Schema.Apply(unit);
             var session = connection.OpenSession(unit, MongoStorageAccess.Global);
@@ -742,12 +759,12 @@ public sealed class MongoProviderIntegrationTests
             var status = new ColumnRef(table, "status", QueryType.String, false, 32,
                 stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
             var options = new QueryRenderOptions(
-                [new QueryIndexDeclaration("by-status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.ProviderDefault)],
-                selectedIndex: "by-status");
+                [new QueryIndexDeclaration("by_status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.ProviderDefault)],
+                selectedIndex: "by_status");
             var result = session.Query(new QueryRequest(table,
                 new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None), options);
 
-            Assert.Equal("by-status", result.SelectedIndex);
+            Assert.Equal("by_status", result.SelectedIndex);
             Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
             var artifact = Assert.Single(Directory.GetFiles(artifactDirectory, "*.json"));
             Assert.Contains("optimizer-selected", Path.GetFileName(artifact), StringComparison.Ordinal);
@@ -1078,7 +1095,7 @@ public sealed class MongoProviderIntegrationTests
             [
                 new IndexDefinition
                 {
-                    Name = uniqueStatus ? "unique-status" : "by-status",
+                    Name = uniqueStatus ? "unique_status" : "by_status",
                     Columns = [new IndexColumn("status")],
                     IsUnique = uniqueStatus
                 }

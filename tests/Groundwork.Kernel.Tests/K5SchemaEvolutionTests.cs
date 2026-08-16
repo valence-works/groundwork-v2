@@ -56,7 +56,7 @@ public sealed class K5SchemaEvolutionTests
         var add = Assert.Single(operations.OfType<AddColumnOperation>(), operation => operation.Column.Name == "priority");
         var backfill = Assert.Single(operations.OfType<BackfillColumnOperation>(), operation => operation.Column.Name == "priority");
         var finalize = Assert.Single(operations.OfType<FinalizeColumnOperation>(), operation => operation.Column.Name == "priority");
-        var index = Assert.Single(operations.OfType<CreatePhysicalIndexOperation>(), operation => operation.Index.Name == "by-priority");
+        var index = Assert.Single(operations.OfType<CreatePhysicalIndexOperation>(), operation => operation.Index.Name == "by_priority");
 
         Assert.True(Array.IndexOf(operations, add) < Array.IndexOf(operations, backfill));
         Assert.True(Array.IndexOf(operations, backfill) < Array.IndexOf(operations, finalize));
@@ -102,7 +102,7 @@ public sealed class K5SchemaEvolutionTests
 
         Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
         Assert.Contains(plan.Operations, operation => operation is AddColumnOperation column && column.Column.Name == "priority");
-        Assert.Contains(plan.Operations, operation => operation is CreatePhysicalIndexOperation index && index.Index.Name == "by-priority");
+        Assert.Contains(plan.Operations, operation => operation is CreatePhysicalIndexOperation index && index.Index.Name == "by_priority");
         Assert.DoesNotContain(plan.Operations, operation => operation is CreatePrimaryStorageOperation);
     }
 
@@ -168,7 +168,7 @@ public sealed class K5SchemaEvolutionTests
 
         Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
         var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
-        Assert.Equal("by-category", rebuild.SubjectIdentity);
+        Assert.Equal("by_category", rebuild.SubjectIdentity);
         Assert.Contains(rebuild.Identity, PhysicalSchemaPlanProtection.Inspect(plan.Operations).DestructiveOperationIdentities);
     }
 
@@ -276,7 +276,7 @@ public sealed class K5SchemaEvolutionTests
         {
             Indexes = [new IndexDefinition
             {
-                Name = "by-name",
+                Name = "by_name",
                 Columns = [new IndexColumn("name")]
             }]
         };
@@ -297,7 +297,7 @@ public sealed class K5SchemaEvolutionTests
 
         Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
         var backfill = Assert.Single(plan.Operations.OfType<BackfillColumnOperation>(), operation => operation.Derived is not null);
-        var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>(), operation => operation.Index.Name == "by-name");
+        var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>(), operation => operation.Index.Name == "by_name");
         Assert.True(Array.IndexOf(plan.Operations.ToArray(), backfill) < Array.IndexOf(plan.Operations.ToArray(), rebuild));
         Assert.DoesNotContain(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-003");
     }
@@ -598,7 +598,7 @@ public sealed class K5SchemaEvolutionTests
         ],
         Key = new KeyDefinition { Columns = ["id"] },
         Indexes = includePriority
-            ? [new IndexDefinition { Name = "by-priority", Columns = [new IndexColumn("priority")] }]
+            ? [new IndexDefinition { Name = "by_priority", Columns = [new IndexColumn("priority")] }]
             : []
     };
 
@@ -629,7 +629,7 @@ public sealed class K5SchemaEvolutionTests
         [
             new IndexDefinition
             {
-                Name = "by-category",
+                Name = "by_category",
                 Columns = [new IndexColumn("category")],
                 MissingValues = missingValues
             }
@@ -649,7 +649,7 @@ public sealed class K5SchemaEvolutionTests
         [
             new IndexDefinition
             {
-                Name = "by-id",
+                Name = "by_id",
                 Columns = [new IndexColumn("id")],
                 MissingValues = missingValues
             }

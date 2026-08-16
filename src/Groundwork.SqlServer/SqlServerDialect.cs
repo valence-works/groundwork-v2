@@ -429,7 +429,8 @@ internal sealed class SqlServerDialect : RelationalDialect
         SqlServerIndexKeyBudgetValidator.Validate(target.Subject.Definition);
 
     internal static string PhysicalIndexName(string table, string logicalName) =>
-        SqlServerPhysicalName.Normalize("__groundwork_ix_" + table + "_" + logicalName);
+        SqlServerPhysicalName.Normalize(
+            $"__groundwork_ix_{table.Length}_{table}_{logicalName.Length}_{logicalName}");
 
     private string ColumnDefinitionTail(ColumnDefinition definition) =>
         $"{MapType(definition)}" +

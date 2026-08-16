@@ -11,7 +11,7 @@ public sealed class SqlServerKeyBudgetTests
     {
         SqlServerIndexKeyBudgetValidator.Validate(Unit(
             Column("value", PortableType.String, maxLength: 850),
-            Index("by-value", "value")));
+            Index("by_value", "value")));
     }
 
     [Fact]
@@ -21,9 +21,9 @@ public sealed class SqlServerKeyBudgetTests
             SqlServerIndexKeyBudgetValidator.Validate(Unit(
                 Column("id", PortableType.Int32, nullable: false),
                 Column("email", PortableType.String, maxLength: 851),
-                Index("ux-email", "email"))));
+                Index("ux_email", "email"))));
 
-        Assert.Equal("ux-email", exception.IndexName);
+        Assert.Equal("ux_email", exception.IndexName);
         Assert.Equal(1702, exception.RequiredBytes);
         Assert.Contains("email=851*2", exception.Message, StringComparison.Ordinal);
         Assert.Contains("1702", exception.Message, StringComparison.Ordinal);
@@ -61,7 +61,7 @@ public sealed class SqlServerKeyBudgetTests
         SqlServerIndexKeyBudgetValidator.Validate(Unit(
             column,
             Column("padding", PortableType.String, nullable: false, maxLength: paddingLength),
-            Index("by-amount", "amount", "padding")));
+            Index("by_amount", "amount", "padding")));
     }
 
     [Theory]
@@ -73,7 +73,7 @@ public sealed class SqlServerKeyBudgetTests
         int expectedBytes)
     {
         var policy = (SqlServerSearchKeyExpansionPolicy)policyValue;
-        var unit = Unit(Column("name", PortableType.String, nullable: false, maxLength: sourceLength), Index("by-name", "name"));
+        var unit = Unit(Column("name", PortableType.String, nullable: false, maxLength: sourceLength), Index("by_name", "name"));
 
         SqlServerIndexKeyBudgetValidator.Validate(unit, new Dictionary<string, SqlServerSearchKeyExpansionPolicy>
         {
@@ -95,7 +95,7 @@ public sealed class SqlServerKeyBudgetTests
         var policy = (SqlServerSearchKeyExpansionPolicy)policyValue;
         var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
             SqlServerIndexKeyBudgetValidator.Validate(
-                Unit(Column("id", PortableType.Int32, nullable: false), Column("name", PortableType.String, nullable: false, maxLength: sourceLength), Index("by-name", "name")),
+                Unit(Column("id", PortableType.Int32, nullable: false), Column("name", PortableType.String, nullable: false, maxLength: sourceLength), Index("by_name", "name")),
                 new Dictionary<string, SqlServerSearchKeyExpansionPolicy> { ["name"] = policy }));
 
         Assert.Contains("name=", exception.Message, StringComparison.Ordinal);
@@ -117,14 +117,14 @@ public sealed class SqlServerKeyBudgetTests
                 new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 243, Collation = PortableCollation.UnicodeOrdinalIgnoreCase }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
-            Indexes = [new IndexDefinition { Name = "by-name", Columns = [new IndexColumn("name")] }]
+            Indexes = [new IndexDefinition { Name = "by_name", Columns = [new IndexColumn("name")] }]
         };
 
         var physical = SqlServerSchemaCoordinator.Physicalize(logical);
         var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
             SqlServerIndexKeyBudgetValidator.Validate(physical));
 
-        Assert.Equal("by-name", exception.IndexName);
+        Assert.Equal("by_name", exception.IndexName);
         Assert.Equal(1_701, exception.RequiredBytes);
         Assert.Contains("name=243*7", exception.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("__groundwork_search_name=1701*1", exception.Message, StringComparison.Ordinal);

@@ -20,7 +20,7 @@ public sealed class PortabilityTests
             Column("name", PortableType.String),
             Column("payload", PortableType.Binary)
         ],
-            indexes: [Index("by-values", "name", "payload")]));
+            indexes: [Index("by_values", "name", "payload")]));
 
         Assert.Contains(result.Refusals, diagnostic =>
             diagnostic.Code == "GW-PORT-003" && diagnostic.Message.Contains("name", StringComparison.Ordinal));
@@ -34,17 +34,17 @@ public sealed class PortabilityTests
         var atLimit = Validate(Unit([
             Column("value", PortableType.String, maxLength: 850)
         ],
-            indexes: [Index("by-value", "value")]));
+            indexes: [Index("by_value", "value")]));
         var overLimit = Validate(Unit([
             Column("value", PortableType.String, maxLength: 851)
         ],
-            indexes: [Index("by-value", "value")]));
+            indexes: [Index("by_value", "value")]));
 
         Assert.DoesNotContain(atLimit.Refusals, diagnostic => diagnostic.Code == "GW-PORT-004");
         var diagnostic = Assert.Single(overLimit.Refusals, item => item.Code == "GW-PORT-004");
         Assert.Contains("1702", diagnostic.Message, StringComparison.Ordinal);
         Assert.Contains("1700", diagnostic.Message, StringComparison.Ordinal);
-        Assert.Contains("by-value", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("by_value", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -62,11 +62,11 @@ public sealed class PortabilityTests
         var atLimit = Validate(Unit([
             Column("amount", PortableType.Decimal, nullable: false, precision: precision, scale: 0),
             Column("padding", PortableType.String, nullable: false, maxLength: maxLengthAtLimit)
-        ], indexes: [Index("by-amount", "amount", "padding")]));
+        ], indexes: [Index("by_amount", "amount", "padding")]));
         var overLimit = Validate(Unit([
             Column("amount", PortableType.Decimal, nullable: false, precision: precision, scale: 0),
             Column("padding", PortableType.String, nullable: false, maxLength: maxLengthAtLimit + 1)
-        ], indexes: [Index("by-amount", "amount", "padding")]));
+        ], indexes: [Index("by_amount", "amount", "padding")]));
 
         Assert.DoesNotContain(atLimit.Refusals, refusal => refusal.Code == "GW-PORT-004");
         Assert.Contains(overLimit.Refusals, refusal => refusal.Code == "GW-PORT-004" &&
@@ -81,7 +81,7 @@ public sealed class PortabilityTests
     {
         var result = Validate(Unit([
             Column("amount", PortableType.Decimal, nullable: false, precision: precision, scale: 0)
-        ], indexes: [Index("by-amount", "amount")]));
+        ], indexes: [Index("by_amount", "amount")]));
 
         var diagnostic = Assert.Single(result.Refusals, refusal => refusal.Code == "GW-PORT-004");
         Assert.Contains("amount", diagnostic.Message, StringComparison.Ordinal);
@@ -95,7 +95,7 @@ public sealed class PortabilityTests
         var result = Validate(Unit([
             Column("name", PortableType.String, nullable: false),
             Column("amount", PortableType.Decimal, nullable: false, precision: 39, scale: 0)
-        ], indexes: [Index("ix-name-amount", "name", "amount")]));
+        ], indexes: [Index("ix_name_amount", "name", "amount")]));
 
         Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-PORT-003" &&
             refusal.Message.Contains("name", StringComparison.Ordinal));
@@ -110,9 +110,9 @@ public sealed class PortabilityTests
         var result = Validate(Unit([
             Column("email", PortableType.String, maxLength: 320)
         ],
-            indexes: [Index("ux-email", "email", unique: true)]));
+            indexes: [Index("ux_email", "email", unique: true)]));
 
-        AssertCode(result, "GW-PORT-001", "ux-email");
+        AssertCode(result, "GW-PORT-001", "ux_email");
         Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-PORT-001" && refusal.Message.Contains("email", StringComparison.Ordinal));
     }
 
@@ -125,8 +125,8 @@ public sealed class PortabilityTests
         ],
             indexes:
             [
-                Index("ux-id", "id", unique: true),
-                Index("ux-id-email", "id", "email", unique: true)
+                Index("ux_id", "id", unique: true),
+                Index("ux_id_email", "id", "email", unique: true)
             ]));
 
         Assert.DoesNotContain(result.Refusals, diagnostic => diagnostic.Code == "GW-PORT-001");
@@ -141,12 +141,12 @@ public sealed class PortabilityTests
         ],
             indexes:
             [
-                Index("ux-tenant", "tenant", unique: true),
-                Index("ux-tenant-email", "tenant", "email", unique: true)
+                Index("ux_tenant", "tenant", unique: true),
+                Index("ux_tenant_email", "tenant", "email", unique: true)
             ]));
 
         var diagnostic = Assert.Single(result.Refusals, refusal => refusal.Code == "GW-PORT-001");
-        Assert.Equal("indexes.ux-tenant", diagnostic.Path);
+        Assert.Equal("indexes.ux_tenant", diagnostic.Path);
     }
 
     [Fact]
@@ -158,15 +158,15 @@ public sealed class PortabilityTests
         ],
             indexes:
             [
-                Index("by-tenant-primary", "tenant", unique: true),
-                Index("by-tenant-alias", "tenant", unique: true)
+                Index("by_tenant_primary", "tenant", unique: true),
+                Index("by_tenant_alias", "tenant", unique: true)
             ],
             key: ["id"]));
 
         var refusal = Assert.Single(result.Refusals, item => item.Code == "GW-PORT-009");
-        Assert.Equal("indexes.by-tenant-primary|by-tenant-alias", refusal.Path);
-        Assert.Contains("by-tenant-primary", refusal.Message, StringComparison.Ordinal);
-        Assert.Contains("by-tenant-alias", refusal.Message, StringComparison.Ordinal);
+        Assert.Equal("indexes.by_tenant_primary|by_tenant_alias", refusal.Path);
+        Assert.Contains("by_tenant_primary", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("by_tenant_alias", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("consolidate", refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -179,19 +179,19 @@ public sealed class PortabilityTests
         ],
             indexes:
             [
-                Index("by-tenant-ascending", "tenant", unique: false),
+                Index("by_tenant_ascending", "tenant", unique: false),
                 new IndexDefinition
                 {
-                    Name = "by-tenant-descending",
+                    Name = "by_tenant_descending",
                     Columns = [new IndexColumn("tenant", SortDirection.Descending)]
                 },
                 new IndexDefinition
                 {
-                    Name = "by-tenant-sparse",
+                    Name = "by_tenant_sparse",
                     Columns = [new IndexColumn("tenant")],
                     MissingValues = MissingValueBehavior.Excluded
                 },
-                Index("by-tenant-unique", "tenant", unique: true)
+                Index("by_tenant_unique", "tenant", unique: true)
             ],
             key: ["id"]);
 
@@ -206,12 +206,131 @@ public sealed class PortabilityTests
             .Guid("id", column => column.Required())
             .String("tenant", 64, column => column.Required())
             .Key("id")
-            .UniqueIndex("by-tenant-primary", index => index.Column("tenant"))
-            .UniqueIndex("by-tenant-alias", index => index.Column("tenant"))
+            .UniqueIndex("by_tenant_primary", index => index.Column("tenant"))
+            .UniqueIndex("by_tenant_alias", index => index.Column("tenant"))
             .Build());
 
         Assert.Contains(exception.Findings, item => item.Code == "GW-PORT-009" &&
-            item.Path == "indexes.by-tenant-primary|by-tenant-alias");
+            item.Path == "indexes.by_tenant_primary|by_tenant_alias");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("state.status")]
+    [InlineData("1st_table")]
+    [InlineData("__groundwork_user_table")]
+    [InlineData("table name")]
+    public void Rendered_storage_unit_names_use_the_portable_identifier_contract(string name)
+    {
+        var result = Validate(Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: name,
+            key: ["id"]));
+
+        var diagnostic = Assert.Single(result.Refusals, item => item.Code == "GW-PORT-010");
+        Assert.Equal("name", diagnostic.Path);
+        Assert.Contains(name.Length == 0 ? "<empty>" : name, diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Rendered_storage_unit_names_are_capped_at_63_ascii_bytes()
+    {
+        var atLimit = Validate(Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: new string('u', 63),
+            key: ["id"]));
+        var overLimit = Validate(Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: new string('u', 65),
+            key: ["id"]));
+
+        Assert.DoesNotContain(atLimit.Refusals, item => item.Code == "GW-PORT-010");
+        var diagnostic = Assert.Single(overLimit.Refusals, item => item.Code == "GW-PORT-010");
+        Assert.Equal("name", diagnostic.Path);
+        Assert.Contains(new string('u', 65), diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("at most 63 ASCII bytes", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("shorter", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Rendered_index_names_use_the_same_portable_identifier_contract()
+    {
+        var unit = Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: "valid_unit",
+            indexes: [Index("by.id", "id")],
+            key: ["id"]);
+
+        var diagnostic = Assert.Single(Validate(unit).Refusals, item => item.Code == "GW-PORT-010");
+        Assert.Equal("indexes.by.id.name", diagnostic.Path);
+        Assert.Contains("by.id", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Duplicate_rendered_index_names_are_refused()
+    {
+        var unit = Unit(
+            [Column("id", PortableType.Guid, nullable: false), Column("value", PortableType.String)],
+            name: "valid_unit",
+            indexes:
+            [
+                Index("by_value", "id"),
+                Index("by_value", "value")
+            ],
+            key: ["id"]);
+
+        var diagnostic = Assert.Single(Validate(unit).Refusals, item => item.Code == "GW-PORT-011");
+        Assert.Equal("indexes.by_value.name", diagnostic.Path);
+        Assert.Contains("more than once", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fluent_builder_refuses_rendered_unit_and_index_names_before_provider_io()
+    {
+        var unitException = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("logical.id/with no physical constraints", "state.status")
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build());
+        var indexException = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("valid_logical_id", "valid_unit")
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Index("by.id", "id")
+            .Build());
+
+        Assert.Contains(unitException.Findings, item => item.Code == "GW-PORT-010" && item.Path == "name");
+        Assert.Contains(indexException.Findings, item => item.Code == "GW-PORT-010" && item.Path == "indexes.by.id.name");
+    }
+
+    [Fact]
+    public void Forged_rendered_names_are_refused_at_the_schema_subject_boundary()
+    {
+        var unit = Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: "state.status",
+            indexes: [Index("by.id", "id")],
+            key: ["id"]);
+
+        var exception = Assert.Throws<ArgumentException>(() => new Groundwork.Kernel.Schema.SchemaSubject(unit));
+
+        Assert.Contains("GW-PORT-010", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("name", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Logical_storage_unit_ids_are_not_rendered_identifier_contracts()
+    {
+        var unit = Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: "valid_unit",
+            key: ["id"]) with
+        {
+            Id = new StorageUnitId("logical.id/with a space and a name longer than 63 bytes that remains logical")
+        };
+
+        Assert.DoesNotContain(Validate(unit).Refusals, item => item.Code == "GW-PORT-010");
+        _ = new Groundwork.Kernel.Schema.SchemaSubject(unit);
     }
 
     [Fact]
@@ -223,16 +342,16 @@ public sealed class PortabilityTests
         ],
             indexes:
             [
-                Index("by-tenant-primary", "tenant", unique: true),
-                Index("by-tenant-alias", "tenant", unique: true)
+                Index("by_tenant_primary", "tenant", unique: true),
+                Index("by_tenant_alias", "tenant", unique: true)
             ],
             key: ["id"]);
 
         var exception = Assert.Throws<ArgumentException>(() => new Groundwork.Kernel.Schema.SchemaSubject(unit));
 
         Assert.Contains("GW-PORT-009", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("by-tenant-primary", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("by-tenant-alias", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("by_tenant_primary", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("by_tenant_alias", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -326,7 +445,7 @@ public sealed class PortabilityTests
                 key: ["id.dot"]),
             ["indexes"] = Unit(
                 [Column("id", PortableType.Guid, nullable: false)],
-                indexes: [new IndexDefinition { Name = "by-id", Columns = [new IndexColumn("id.dot")] }]),
+                indexes: [new IndexDefinition { Name = "by_id", Columns = [new IndexColumn("id.dot")] }]),
             ["derived"] = Unit(
                 [Column("id", PortableType.Guid, nullable: false)],
                 key: ["id"]) with
@@ -393,7 +512,7 @@ public sealed class PortabilityTests
         var result = Validate(new StorageUnit
         {
             Id = new StorageUnitId("overlong-hidden"),
-            Name = "overlong-hidden",
+            Name = "overlong_hidden",
             Columns =
             [
                 new() { Name = ProviderOwnedColumns.Scope, Type = PortableType.String, IsNullable = false, MaxLength = 128 },
@@ -545,18 +664,18 @@ public sealed class PortabilityTests
             Unit([
                 Column("id", PortableType.Guid, nullable: false),
                 Column("email", PortableType.String, maxLength: 320)
-            ], indexes: [Index("ux-email", "email", unique: true)])),
+            ], indexes: [Index("ux_email", "email", unique: true)])),
         new(
             "GW-PORT-002",
             Unit([Column("amount", PortableType.Decimal)])),
         new(
             "GW-PORT-003",
-            Unit([Column("name", PortableType.String)], indexes: [Index("ix-name", "name")])),
+            Unit([Column("name", PortableType.String)], indexes: [Index("ix_name", "name")])),
         new(
             "GW-PORT-004",
             Unit(
                 [Column("name", PortableType.String, nullable: false, maxLength: 851)],
-                indexes: [Index("ix-name", "name")])),
+                indexes: [Index("ix_name", "name")])),
         new(
             "GW-PORT-005",
             Unit([Column("sequence", PortableType.Int32, generation: ColumnGeneration.ProviderSequence)])),
@@ -587,8 +706,8 @@ public sealed class PortabilityTests
                 ],
                 indexes:
                 [
-                    Index("by-tenant-primary", "tenant", unique: true),
-                    Index("by-tenant-alias", "tenant", unique: true)
+                    Index("by_tenant_primary", "tenant", unique: true),
+                    Index("by_tenant_alias", "tenant", unique: true)
                 ],
                 key: ["id"])),
         new(
@@ -616,10 +735,11 @@ public sealed class PortabilityTests
     private static StorageUnit Unit(
         ColumnDefinition[] columns,
         IndexDefinition[]? indexes = null,
-        string[]? key = null) => new()
+        string[]? key = null,
+        string name = "Portability") => new()
         {
             Id = new StorageUnitId("portability"),
-            Name = "Portability",
+            Name = name,
             Columns = columns,
             Key = new KeyDefinition { Columns = key ?? [columns[0].Name] },
             Indexes = indexes ?? []
