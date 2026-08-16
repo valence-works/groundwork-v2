@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>Groundwork.Analyzers</RootNamespace>
+    <AssemblyName>Groundwork.Analyzers</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <Description>Roslyn analyzer package for Groundwork schema portability and query coverage diagnostics.</Description>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);NU5128;RS1036;RS1042;RS1032;RS1038;RS2008;1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" PrivateAssets="all" />
+    <ProjectReference Include="../Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" PrivateAssets="all" TreatAsPackageReference="false" />
+    <ProjectReference Include="../Groundwork.Schema/Groundwork.Schema.csproj" PrivateAssets="all" TreatAsPackageReference="false" />
+    <ProjectReference Include="../Groundwork.Schema.Generator/Groundwork.Schema.Generator.csproj" PrivateAssets="all" TreatAsPackageReference="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="$(TargetPath)" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.Analyzers.pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.Query.Planning.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.Query.Model.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.Schema.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.Schema.Generator.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="../../docs/query-coverage-analyzer.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+</Project>

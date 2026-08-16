@@ -1,4 +1,151 @@
 <Solution>
-  <Folder Name="/src/" />
+  <Folder Name="/src/">
+    <Project Path="src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
+    <Project Path="src/Groundwork.Records.Store/Groundwork.Records.Store.csproj" />
+    <Project Path="src/Groundwork.Store/Groundwork.Store.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Kernel/">
+    <Project Path="src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Records/">
+    <Project Path="src/Groundwork.Records/Groundwork.Records.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Documents/">
+    <Project Path="src/Groundwork.Documents/Groundwork.Documents.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Testing/">
+    <Project Path="src/Groundwork.Testing/Groundwork.Testing.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.SchemaTool/">
+    <Project Path="src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.SchemaTool.MSBuild/">
+    <Project Path="src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Substrate.Mongo/">
+    <Project Path="src/Groundwork.Substrate.Mongo/Groundwork.Substrate.Mongo.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.MongoDb/">
+    <Project Path="src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Query.Model/">
+    <Project Path="src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Query.Linq/">
+    <Project Path="src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Query.Linq.Sqlite/">
+    <Project Path="src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Schema/">
+    <Project Path="src/Groundwork.Schema/Groundwork.Schema.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Schema.Generator/">
+    <Project Path="src/Groundwork.Schema.Generator/Groundwork.Schema.Generator.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Query.Planning/">
+    <Project Path="src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Substrate.Relational/">
+    <Project Path="src/Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Sqlite/">
+    <Project Path="src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.SqlServer/">
+    <Project Path="src/Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.PostgreSql/">
+    <Project Path="src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Analyzers/">
+    <Project Path="src/Groundwork.Analyzers/Groundwork.Analyzers.csproj" />
+  </Folder>
+  <Folder Name="/samples/" />
+  <Folder Name="/samples/Groundwork.Samples.EventLog/">
+    <Project Path="samples/Groundwork.Samples.EventLog/Groundwork.Samples.EventLog.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/" />
+  <Folder Name="/benchmarks/Groundwork.Benchmarks/">
+    <Project Path="benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/tests/" />
+  <Folder Name="/tests/Groundwork.Packaging.Tests/">
+    <Project Path="tests/Groundwork.Packaging.Tests/Groundwork.Packaging.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Testing.SelfTests/">
+    <Project Path="tests/Groundwork.Testing.SelfTests/Groundwork.Testing.SelfTests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.MongoDb.Tests/">
+    <Project Path="tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Concurrency.Tests/">
+    <Project Path="tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.PostgreSql.Tests/">
+    <Project Path="tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Kernel.Schema.Tests/">
+    <Project Path="tests/Groundwork.Kernel.Schema.Tests/Groundwork.Kernel.Schema.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Architecture.Tests/">
+    <Project Path="tests/Groundwork.Architecture.Tests/Groundwork.Architecture.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Kernel.ExternalModule/">
+    <Project Path="tests/Groundwork.Kernel.ExternalModule/Groundwork.Kernel.ExternalModule.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Kernel.Tests/">
+    <Project Path="tests/Groundwork.Kernel.Tests/Groundwork.Kernel.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Model.Tests/">
+    <Project Path="tests/Groundwork.Query.Model.Tests/Groundwork.Query.Model.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Linq.Tests/">
+    <Project Path="tests/Groundwork.Query.Linq.Tests/Groundwork.Query.Linq.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Linq.Fragments/">
+    <Project Path="tests/Groundwork.Query.Linq.Fragments/Groundwork.Query.Linq.Fragments.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Schema.Generator.Tests/">
+    <Project Path="tests/Groundwork.Schema.Generator.Tests/Groundwork.Schema.Generator.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.SchemaTool.Tests/">
+    <Project Path="tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Query.Planning.Tests/">
+    <Project Path="tests/Groundwork.Query.Planning.Tests/Groundwork.Query.Planning.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Differential.Tests/">
+    <Project Path="tests/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Substrate.Relational.Tests/">
+    <Project Path="tests/Groundwork.Substrate.Relational.Tests/Groundwork.Substrate.Relational.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Sqlite.Tests/">
+    <Project Path="tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.SqlServer.Tests/">
+    <Project Path="tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Analyzers.Tests/">
+    <Project Path="tests/Groundwork.Analyzers.Tests/Groundwork.Analyzers.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Runtime.Tests/">
+    <Project Path="tests/Groundwork.Runtime.Tests/Groundwork.Runtime.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.WritePath.Tests/">
+    <Project Path="tests/Groundwork.WritePath.Tests/Groundwork.WritePath.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.StreamCapabilities.Tests/">
+    <Project Path="tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Samples.EventLog.Tests/">
+    <Project Path="tests/Groundwork.Samples.EventLog.Tests/Groundwork.Samples.EventLog.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Records.Tests/">
+    <Project Path="tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Documents.Tests/">
+    <Project Path="tests/Groundwork.Documents.Tests/Groundwork.Documents.Tests.csproj" />
+  </Folder>
 </Solution>

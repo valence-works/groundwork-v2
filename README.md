@@ -9,6 +9,10 @@ This repository is the greenfield implementation of the
 Program issues and delivery status remain in
 [`valence-works/Groundwork`](https://github.com/valence-works/Groundwork/issues).
 
+The first public packages are pre-1.0 previews. See the [v2 versioning
+policy](docs/v2/versioning.md) and [provider support
+matrix](docs/v2/support-matrix.md) before consuming a preview package.
+
 ## Build
 
 ```shell

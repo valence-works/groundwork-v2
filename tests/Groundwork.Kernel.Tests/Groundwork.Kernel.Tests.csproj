@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="K5SchemaEvolutionTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Records/Groundwork.Records.csproj" />
+    <ProjectReference Include="../Groundwork.Kernel.ExternalModule/Groundwork.Kernel.ExternalModule.csproj" />
+  </ItemGroup>
+
+</Project>

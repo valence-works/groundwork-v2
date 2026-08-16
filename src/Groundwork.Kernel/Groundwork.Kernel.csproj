@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>Groundwork.Kernel</PackageId>
+    <Description>Provider-neutral storage declarations, write semantics, and durable operation contracts for Groundwork.</Description>
+    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj" />
+  </ItemGroup>
+</Project>

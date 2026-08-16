@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>Groundwork.Substrate.Mongo</PackageId>
+    <Description>MongoDB client, session, index, and BSON mapping substrate for Groundwork providers.</Description>
+    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MongoDB.Driver" />
+    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <PackageId>Groundwork.SchemaTool.MSBuild</PackageId>
+    <Description>MSBuild portability and query-coverage verification for Groundwork schemas.</Description>
+    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Framework" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Utilities.Core" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="build/Groundwork.SchemaTool.MSBuild.targets" Pack="true" PackagePath="build/" />
+    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
+    <None Include="$(TargetPath)" Pack="true" PackagePath="tools/net10.0/" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.SchemaTool.MSBuild.pdb" Pack="true" PackagePath="tools/net10.0/" Visible="false" />
+    <None Include="$(TargetDir)Groundwork.SchemaTool.dll;$(TargetDir)Groundwork.Kernel.dll;$(TargetDir)Groundwork.Schema.dll;$(TargetDir)Groundwork.Query.Model.dll;$(TargetDir)Groundwork.Query.Planning.dll"
+          Pack="true" PackagePath="tools/net10.0/" Visible="false" />
+  </ItemGroup>
+</Project>

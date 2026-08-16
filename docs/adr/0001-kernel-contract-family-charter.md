@@ -27,8 +27,12 @@ family may model events, queues, ledgers, or graphs. These concerns do not enter
 the kernel merely because one family needs them.
 
 Dependencies point inward: provider adapters and contract families depend on
-the kernel. The kernel never references a provider, contract family, I/O API,
-or runtime implementation.
+the kernel. The two innermost kernel assemblies are `Groundwork.Query.Model`
+(BCL-only portable query semantics) and `Groundwork.Kernel` (which may reference
+that one query-model assembly because its public aggregation contract reuses the
+predicate AST). Neither kernel assembly references a provider, contract family,
+Store, I/O API, or runtime implementation, and `Groundwork.Kernel` has no other
+non-BCL dependency.
 
 ## Consequences
 

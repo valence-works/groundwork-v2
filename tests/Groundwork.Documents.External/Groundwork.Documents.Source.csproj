@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Groundwork.Documents.Source</AssemblyName>
+    <RootNamespace>Groundwork.Documents</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Source/AssemblyInfo.cs" Link="AssemblyInfo.cs" />
+    <Compile Include="Source/DocumentUnit.cs" Link="DocumentUnit.cs" />
+    <Compile Include="Source/Serialization/*.cs" LinkBase="Serialization" />
+    <PackageReference Include="Groundwork.Kernel" Version="1.0.0" />
+    <PackageReference Include="Groundwork.Query.Model" Version="1.0.0" />
+    <PackageReference Include="Groundwork.Query.Linq" Version="1.0.0" />
+    <PackageReference Include="Groundwork.Records" Version="1.0.0" />
+    <PackageReference Include="Groundwork.Store" Version="1.0.0" />
+  </ItemGroup>
+</Project>
