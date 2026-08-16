@@ -133,6 +133,54 @@ public sealed class LifecycleCapabilityProofTests
     }
 
     [Fact]
+    public void Exact_retention_composes_with_a_batched_unit_of_work()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-uow-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-uow-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var session = work.OpenSession(unit);
+        session.Insert(Values("first"));
+        session.Insert(Values("second"));
+        var operation = new OperationId(DateTimeOffset.UtcNow, "retention-uow");
+        var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        work.Commit();
+        // The unit-of-work assertion above proves the wrapper dispatches exact retention inside
+        // the transaction; direct replay is covered by the provider restart proof.
+        Assert.Equal(1, executed.DeletedRows);
+    }
+
+    [Fact]
+    public void Exact_retention_is_atomic_across_multiple_units_in_a_unit_of_work()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-multi-uow-" + Guid.NewGuid().ToString("N"));
+        var first = LifecycleUnit("lifecycle-retention-multi-a-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        var second = LifecycleUnit("lifecycle-retention-multi-b-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(first).Applied);
+        Assert.True(connection.Schema.Apply(second).Applied);
+
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, first, second))
+        {
+            var firstSession = work.OpenSession(first);
+            var secondSession = work.OpenSession(second);
+            firstSession.Insert(Values("a-1"));
+            firstSession.Insert(Values("a-2"));
+            secondSession.Insert(Values("b-1"));
+            secondSession.Insert(Values("b-2"));
+            Assert.Equal(RetentionOperationStatus.Executed, firstSession.ApplyRetention(
+                new OperationId(DateTimeOffset.UtcNow, "multi-a"), new RetentionExecutionOptions { MaxRowsPerBatch = 1 }).Status);
+            Assert.Equal(RetentionOperationStatus.Executed, secondSession.ApplyRetention(
+                new OperationId(DateTimeOffset.UtcNow, "multi-b"), new RetentionExecutionOptions { MaxRowsPerBatch = 1 }).Status);
+            work.Commit();
+        }
+
+        Assert.Single(connection.OpenSession(first, StorageAccess.Global).Query(All(first)).Rows);
+        Assert.Single(connection.OpenSession(second, StorageAccess.Global).Query(All(second)).Rows);
+    }
+
+    [Fact]
     public void SQLite_lifecycle_capabilities_preserve_high_water_and_exact_retention_across_restart()
     {
         var path = Path.Combine(Path.GetTempPath(), "groundwork-lifecycle-" + Guid.NewGuid().ToString("N") + ".db");
