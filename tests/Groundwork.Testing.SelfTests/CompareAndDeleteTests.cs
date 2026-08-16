@@ -200,6 +200,49 @@ public sealed class CompareAndDeleteTests
             new Dictionary<string, object?> { ["owner"] = "worker-a" }).Status);
     }
 
+    [Fact]
+    public void Batched_capability_validates_before_flush_and_matches_typed_key_aliases()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("compare-delete-batch-int64-key"),
+            Name = "compare_delete_batch_int64_key",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new ColumnDefinition { Name = "owner", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://compare-delete-batch-int64-key");
+        connection.Schema.Apply(unit);
+        var direct = connection.OpenSession(unit, StorageAccess.Global);
+        direct.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["owner"] = "worker-a" }));
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var stagedObserver = new WritePathObserver();
+        work.Stage(RowWrite.CompareAndDelete(
+            unit,
+            new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a" },
+            new WriteOptions { Observer = stagedObserver }));
+        var capability = Assert.IsAssignableFrom<ICompareAndDeleteStorageSession>(work.OpenSession(unit));
+
+        Assert.Throws<ArgumentException>(() => capability.CompareAndDelete(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
+            new Dictionary<string, object?> { ["missing"] = "value" }));
+        Assert.Empty(stagedObserver.Commands);
+
+        var result = capability.CompareAndDelete(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a" });
+
+        Assert.Equal(WriteOutcomeStatus.NotFound, result.Status);
+        Assert.NotEmpty(stagedObserver.Commands);
+        Assert.Equal(WriteOutcomeStatus.Deleted, Assert.Single(work.CommitWithOutcomes().Outcomes).Outcome.Status);
+        Assert.Null(direct.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = 1L })));
+    }
+
     [Theory]
     [InlineData("7.004")]
     [InlineData("12345678901")]

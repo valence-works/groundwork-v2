@@ -1024,6 +1024,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("compare-and-delete");
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
         var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
+        options?.Observer?.Observe(new WritePathEvent("in-memory.compare-and-delete", null, IsProbe: false));
         lock (database.Gate)
         {
             ThrowIfDisposed();

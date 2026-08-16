@@ -357,7 +357,8 @@ public sealed class RowWrite
         IReadOnlyDictionary<string, object?> keyValues) => string.Concat(
         unit.Key.Columns.Select(column =>
         {
-            var value = Canonical(keyValues[column]);
+            var definition = unit.Columns.Single(candidate => candidate.Name == column);
+            var value = Canonical(keyValues[column], definition.Type);
             return $"{value.Length}:{value}";
         }));
 
@@ -368,7 +369,8 @@ public sealed class RowWrite
             .Where(values.ContainsKey)
             .Select(column =>
             {
-                var value = Canonical(values[column]);
+                var definition = unit.Columns.Single(candidate => candidate.Name == column);
+                var value = Canonical(values[column], definition.Type);
                 return $"{column.Length}:{column}{value.Length}:{value}";
             }));
 
@@ -381,16 +383,22 @@ public sealed class RowWrite
         {
             if (!KeyValues.TryGetValue(column, out var left) ||
                 !key.Values.TryGetValue(column, out var right) ||
-                !EqualValue(left, right))
+                !CompareAndDeleteValidation.ValuesEqual(
+                    left,
+                    right,
+                    Unit.Columns.Single(candidate => candidate.Name == column).Type))
                 return false;
         }
         return true;
     }
 
-    private static bool EqualValue(object? left, object? right) => left switch
+    private static string Canonical(object? value, PortableType type) => type switch
     {
-        byte[] leftBytes when right is byte[] rightBytes => leftBytes.SequenceEqual(rightBytes),
-        _ => Equals(left, right)
+        PortableType.Int64 when value is int or long => Canonical(Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture)),
+        PortableType.Decimal when value is byte or sbyte or short or ushort or int or uint or long or ulong or decimal =>
+            Canonical(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture)),
+        PortableType.DateTimeOffset when value is DateTimeOffset timestamp => Canonical(timestamp.ToUniversalTime()),
+        _ => Canonical(value)
     };
 
     private static string Canonical(object? value) => value switch
@@ -874,7 +882,9 @@ internal sealed class BatchCompareAndDeleteStorageSession : BatchStorageSession,
             throw new NotSupportedException(
                 "GW-COMPARE-DELETE-001: this provider does not advertise atomic compare-and-delete.");
 
-        context.FlushFor(Unit, key);
-        return compareAndDelete.CompareAndDelete(key, expectedValues, options);
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
+        context.FlushFor(Unit, canonicalKey);
+        return compareAndDelete.CompareAndDelete(canonicalKey, validated, options);
     }
 }
