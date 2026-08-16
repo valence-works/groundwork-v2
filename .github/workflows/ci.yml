@@ -335,7 +335,7 @@ jobs:
         run: >-
           dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
           --no-restore --configuration Release
-          --filter FullyQualifiedName~MongoDB_without_transaction_fit_refuses_exact_append_before_dispatch
+          --filter FullyQualifiedName~MongoDB_without_transaction_fit_refuses
 
   concurrency-conformance:
     runs-on: ubuntu-latest
@@ -419,6 +419,12 @@ jobs:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
         run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter ExactAppend
+      - name: Run S7 durable lifecycle capabilities across all transaction-capable providers
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s7ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Lifecycle
       - name: Run S4 native aggregation proof across all providers
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s4ci?replicaSet=w2rs&directConnection=true

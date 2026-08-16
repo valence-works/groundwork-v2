@@ -246,6 +246,48 @@ public sealed class LifecycleCapabilityProofTests
         AssertNativeLifecycle(connection, "mongodb");
     }
 
+    [SkippableFact]
+    public void MongoDB_without_transaction_fit_refuses_lifecycle_capabilities_before_dispatch()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_STANDALONE_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_STANDALONE_CONNECTION to run the MongoDB lifecycle capability refusal proof.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        Skip.If(connection.Capabilities.Any(capability =>
+                capability.Id == BatchWriteCapabilities.DurableHighWaterInspection ||
+                capability.Id == BatchWriteCapabilities.ExactRetention),
+            "The configured MongoDB deployment supports transaction-backed lifecycle capabilities; this proof targets standalone refusal.");
+
+        var unit = LifecycleUnit("lifecycle-mongo-unsupported-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global) with
+        {
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 200 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 1,
+                OrderColumn = "id",
+                Trigger = RetentionTrigger.Explicit
+            }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.False(session is IStorageInspectionSession);
+        Assert.False(session is IExactRetentionStorageSession);
+
+        var inspectionRefusal = Assert.Throws<NotSupportedException>(() => session.Inspect());
+        Assert.StartsWith("GW-INSPECT-001", inspectionRefusal.Message, StringComparison.Ordinal);
+
+        var retentionRefusal = Assert.Throws<NotSupportedException>(() => session.ApplyRetention(
+            new OperationId(DateTimeOffset.UtcNow, "unsupported-lifecycle"),
+            new RetentionExecutionOptions()));
+        Assert.StartsWith("GW-RETENTION-003", retentionRefusal.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Lifecycle_capabilities_are_advertised_as_distinct_optional_contracts()
     {
