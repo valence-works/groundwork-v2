@@ -11,6 +11,12 @@ using Xunit;
 
 namespace Groundwork.Differential.Tests;
 
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class ScopedAggregationDifferentialCollection
+{
+    public const string Name = "Scoped aggregation live providers";
+}
+
 /// <summary>
 /// Differential acceptance proof for the native, scoped aggregation contract in #292.
 ///
@@ -18,6 +24,7 @@ namespace Groundwork.Differential.Tests;
 /// artifact fact additionally proves the provider-owned scope command/pipeline shape without
 /// widening the public API or claiming an ordinary Query observer.
 /// </summary>
+[Collection(ScopedAggregationDifferentialCollection.Name)]
 public sealed class ScopedAggregationDifferentialTests
 {
     [Fact]
