@@ -13,6 +13,8 @@ internal sealed class SqlServerDialect : RelationalDialect
 {
     public override string ProviderName => "SQLServer";
 
+    public override RelationalQueryRenderer CreateQueryRenderer() => new SqlServerQueryRenderer();
+
     public override string RenderAggregationContains(string expression, string literal) =>
         $"EXISTS (SELECT 1 FROM OPENJSON({expression}) AS aggregation_value WHERE aggregation_value.[value] = {literal} COLLATE Latin1_General_100_BIN2)";
 

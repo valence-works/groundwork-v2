@@ -187,7 +187,7 @@ public sealed class MongoQueryRenderer
             case Predicate.Substring substring when substring.Anchor is Anchor.Contains or Anchor.EndsWith:
                 return new BsonDocument(substring.Column.Name,
                     new BsonRegularExpression(
-                        Regex.Escape(substring.Needle) + (substring.Anchor == Anchor.EndsWith ? "$" : string.Empty),
+                        Regex.Escape(substring.Needle) + (substring.Anchor == Anchor.EndsWith ? "\\z" : string.Empty),
                         string.Empty));
             case Predicate.Not not:
                 return new BsonDocument("$nor", new BsonArray { RenderPredicate(not.Inner, options, table) });

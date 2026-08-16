@@ -16,6 +16,8 @@ public sealed class PostgreSqlDialect : RelationalDialect
 {
     public override string ProviderName => "PostgreSQL";
 
+    public override RelationalQueryRenderer CreateQueryRenderer() => new PostgreSqlQueryRenderer();
+
     public override string RenderAggregationContains(string expression, string literal) =>
         $"{literal} = ANY({expression})";
 

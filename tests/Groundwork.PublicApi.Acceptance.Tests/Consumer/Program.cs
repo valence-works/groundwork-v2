@@ -217,12 +217,24 @@ static void RunAggregationSourcePredicateJourney(IStorageProviderConnection conn
     })).Status == WriteOutcomeStatus.Inserted, "The package-only aggregation post row did not insert.");
 
     var lowOrder = new ColumnRef(new TableId(unit.Name), "lowOrder", QueryType.Int64, isNullable: false);
-    var source = session.Aggregate(new AggregationQuery("summary")
+    var sourceQuery = new AggregationQuery("summary")
     {
         SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
-    });
+    };
+    var source = session.Aggregate(sourceQuery);
     Require(source.Rows.Count == 1 && Equals(source.Rows[0]["total"], 7L),
         "The packed public API did not filter source rows before reduction.");
+    Require(!string.IsNullOrWhiteSpace(source.ShapeFingerprint) && !string.IsNullOrWhiteSpace(source.ValueFingerprint),
+        "The packed public API did not expose aggregation fingerprints.");
+
+    var changedSource = session.Aggregate(new AggregationQuery("summary")
+    {
+        SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 1L))
+    });
+    Require(source.ShapeFingerprint == changedSource.ShapeFingerprint,
+        "The packed public API changed aggregation shape identity when only a source literal changed.");
+    Require(source.ValueFingerprint != changedSource.ValueFingerprint,
+        "The packed public API did not bind source literal values into aggregation identity.");
 
     var post = session.Aggregate(new AggregationQuery("summary")
     {

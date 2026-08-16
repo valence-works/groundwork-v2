@@ -17,6 +17,10 @@ public abstract class RelationalDialect
 
     public abstract string ProviderName { get; }
 
+    /// <summary>Creates the provider's ordinary query renderer for shared predicate fragments.</summary>
+    public virtual RelationalQueryRenderer CreateQueryRenderer() =>
+        throw new NotSupportedException($"Relational dialect '{ProviderName}' does not expose a query renderer.");
+
     /// <summary>Whether CreateTableSql materializes the complete column set in one statement.</summary>
     public virtual bool CreateTableIncludesColumns => false;
 

@@ -163,34 +163,39 @@ public sealed class AggregationSqlRenderingTests
         Assert.DoesNotContain("INSTR(", predicateSql, StringComparison.Ordinal);
 
         var lowOrder = new ColumnRef(new TableId(unit.Name), "lowOrder", QueryType.Int64, isNullable: false);
-        var sourcePredicateSql = RelationalAggregationRenderer.Render(
+        var sourcePredicateCommand = RelationalAggregationRenderer.Render(
             new SqlServerDialect(),
             unit,
             profile,
             new AggregationQuery("summary")
             {
                 SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
-            }).CommandText;
-        var sourceProbeSql = RelationalAggregationRenderer.RenderBudgetProbe(
+            });
+        var sourceProbeCommand = RelationalAggregationRenderer.RenderBudgetProbe(
             new SqlServerDialect(),
             unit,
             profile,
             new AggregationQuery("summary")
             {
                 SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L))
-            }).CommandText;
-        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = 2)", sourcePredicateSql, StringComparison.Ordinal);
-        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = 2)", sourceProbeSql, StringComparison.Ordinal);
+            });
+        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = @p0)", sourcePredicateCommand.CommandText, StringComparison.Ordinal);
+        Assert.Contains("WHERE ([lowOrder] IS NOT NULL AND [lowOrder] = @p0)", sourceProbeCommand.CommandText, StringComparison.Ordinal);
+        var sourceParameter = Assert.Single(sourcePredicateCommand.Parameters);
+        var probeParameter = Assert.Single(sourceProbeCommand.Parameters);
+        Assert.Equal(sourceParameter.Type, probeParameter.Type);
+        Assert.Equal(sourceParameter.Value, probeParameter.Value);
 
         var label = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
-        var substringSql = RelationalAggregationRenderer.Render(
+        var substringCommand = RelationalAggregationRenderer.Render(
             new SqlServerDialect(),
             unit,
             profile,
             new AggregationQuery("summary")
             {
                 SourcePredicate = new Predicate.Substring(label, "plain", Anchor.Contains)
-            }).CommandText;
-        Assert.Contains("CHARINDEX(N'plain', [label]) > 0", substringSql, StringComparison.Ordinal);
+            });
+        Assert.Contains("CHARINDEX(@p0, [label] COLLATE Latin1_General_100_BIN2) > 0", substringCommand.CommandText, StringComparison.Ordinal);
+        Assert.Equal("plain", substringCommand.Parameters.Single().Value);
     }
 }

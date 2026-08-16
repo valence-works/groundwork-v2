@@ -58,6 +58,7 @@ public static class RelationalAggregationExecutor
         using var native = connection.CreateCommand();
         native.Transaction = transaction;
         native.CommandText = command.CommandText;
+        RelationalQueryResultReader.AddParameters(native, command);
         using var reader = native.ExecuteReader();
         var rows = new List<AggregationRow>();
         while (reader.Read())
@@ -117,6 +118,7 @@ public static class RelationalAggregationExecutor
         using var native = connection.CreateCommand();
         native.Transaction = transaction;
         native.CommandText = probe.CommandText;
+        RelationalQueryResultReader.AddParameters(native, probe);
         using var reader = native.ExecuteReader();
         var groups = 0;
         while (reader.Read())

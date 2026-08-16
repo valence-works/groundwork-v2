@@ -140,12 +140,6 @@ public sealed record AggregationQuery
         init => sourcePredicate = value is null ? null : PredicateNormalizer.Normalize(value);
     }
 
-    /// <summary>Canonical source predicate including bound literal values.</summary>
-    public string SourcePredicateCanonical => PredicateCanonicalizer.ToCanonicalString(SourcePredicate ?? Predicate.AlwaysTrue.Instance);
-
-    /// <summary>Canonical source predicate shape with literal values elided.</summary>
-    public string SourcePredicateShape => PredicateCanonicalizer.ToShapeString(SourcePredicate ?? Predicate.AlwaysTrue.Instance);
-
     /// <summary>Optional output order.  It must be a group-by column or aggregate alias.</summary>
     public string? OrderBy { get; init; }
 
@@ -171,7 +165,10 @@ public static class AggregationQueryFingerprint
         builder.Append("aggregation-query-v1|unit=").Append(Escape(unit.Name));
         builder.Append("|profile=").Append(Escape(profile.Name));
         builder.Append("|profile-shape=").Append(Schema.AggregationProfileCanonicalization.Canonicalize(profile));
-        builder.Append("|source=").Append(includeValues ? query.SourcePredicateCanonical : query.SourcePredicateShape);
+        var sourcePredicate = query.SourcePredicate ?? Predicate.AlwaysTrue.Instance;
+        builder.Append("|source=").Append(includeValues
+            ? PredicateCanonicalizer.ToCanonicalString(sourcePredicate)
+            : PredicateCanonicalizer.ToShapeString(sourcePredicate));
         builder.Append("|post=").Append(CanonicalPost(query.PostPredicate, includeValues));
         builder.Append("|order=").Append(Escape(query.OrderBy ?? ""));
         builder.Append('|').Append(query.OrderDirection);
@@ -248,6 +245,10 @@ public sealed class AggregationRow
 /// <summary>Provider-neutral output of a declared aggregation query.</summary>
 public sealed class AggregationResult
 {
+    /// <summary>
+    /// Creates a result without execution identity. This legacy constructor is retained for
+    /// external providers; native and reference executions populate both fingerprint properties.
+    /// </summary>
     public AggregationResult(IReadOnlyList<AggregationRow> rows)
         : this(rows, null, null)
     {

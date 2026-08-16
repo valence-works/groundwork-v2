@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.Immutable;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
@@ -8,13 +9,25 @@ namespace Groundwork.Substrate.Relational;
 public sealed class RelationalAggregationCommand
 {
     public RelationalAggregationCommand(string commandText, AggregationProfile profile)
+        : this(commandText, profile, [])
+    {
+    }
+
+    public RelationalAggregationCommand(
+        string commandText,
+        AggregationProfile profile,
+        IEnumerable<QueryRenderParameter> parameters)
     {
         CommandText = commandText ?? throw new ArgumentNullException(nameof(commandText));
         Profile = profile ?? throw new ArgumentNullException(nameof(profile));
+        Parameters = (parameters ?? throw new ArgumentNullException(nameof(parameters))).ToImmutableArray();
+        if (Parameters.Any(parameter => parameter is null))
+            throw new ArgumentException("Aggregation parameters cannot contain null references.", nameof(parameters));
     }
 
     public string CommandText { get; }
     public AggregationProfile Profile { get; }
+    public ImmutableArray<QueryRenderParameter> Parameters { get; }
 }
 
 /// <summary>
@@ -56,10 +69,8 @@ public static class RelationalAggregationRenderer
             _ => Array.Empty<string>()
         }).Concat(unit.Key.Columns).Distinct(StringComparer.Ordinal).Select(quote).ToArray();
         var source = string.Join(", ", groups.Concat(sourceColumns).Distinct(StringComparer.Ordinal));
-        var sourcePredicate = query.SourcePredicate is null
-            ? null
-            : RenderSourcePredicate(dialect, unit, query.SourcePredicate, quote);
-        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: true, sourcePredicate);
+        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate);
+        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: true, sourceFragment?.CommandText);
 
         var selections = new List<string>(groups);
         const string groupedAlias = "__groundwork_aggregation_grouped";
@@ -83,7 +94,7 @@ public static class RelationalAggregationRenderer
         sql += IsSqlServer(dialect)
             ? $" OFFSET 0 ROWS FETCH NEXT {outputLimit.ToString(CultureInfo.InvariantCulture)} ROWS ONLY"
             : $" LIMIT {outputLimit.ToString(CultureInfo.InvariantCulture)}";
-        return new RelationalAggregationCommand(sql + ";", profile);
+        return new RelationalAggregationCommand(sql + ";", profile, sourceFragment?.Parameters ?? []);
     }
 
     /// <summary>
@@ -108,10 +119,8 @@ public static class RelationalAggregationRenderer
         var setColumns = profile.Aggregates.OfType<Aggregate.SetUnion>()
             .Select(set => quote(set.Column));
         var source = string.Join(", ", groups.Concat(setColumns).Distinct(StringComparer.Ordinal));
-        var sourcePredicate = query.SourcePredicate is null
-            ? null
-            : RenderSourcePredicate(dialect, unit, query.SourcePredicate, quote);
-        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: false, sourcePredicate);
+        var sourceFragment = RenderSourceFragment(dialect, unit, query.SourcePredicate);
+        var ctes = RenderBoundedInputCtes(dialect, unit, profile, source, groups, includeFirstRanks: false, sourceFragment?.CommandText);
         var selections = new List<string>(groups)
         {
             $"MAX({quote(InputCount)}) AS {quote(InputCount)}"
@@ -122,8 +131,15 @@ public static class RelationalAggregationRenderer
         var select = IsSqlServer(dialect)
             ? $"SELECT TOP ({groupProbe}) {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)}"
             : $"SELECT {string.Join(", ", selections)} FROM __groundwork_aggregation_input GROUP BY {string.Join(", ", groups)} LIMIT {groupProbe}";
-        return new RelationalAggregationCommand($"WITH {ctes} {select};", profile);
+        return new RelationalAggregationCommand($"WITH {ctes} {select};", profile, sourceFragment?.Parameters ?? []);
     }
+
+    private static RelationalPredicateFragment? RenderSourceFragment(
+        RelationalDialect dialect,
+        StorageUnit unit,
+        Groundwork.Query.Model.Predicate? predicate) => predicate is null
+            ? null
+            : dialect.CreateQueryRenderer().RenderPredicateFragment(predicate, unit.Name);
 
     private static string RenderBoundedInputCtes(
         RelationalDialect dialect,
@@ -271,113 +287,6 @@ public static class RelationalAggregationRenderer
             dialect.RenderAggregationContains(quote(comparison.Alias), Literal(dialect, unit, profile, comparison.Alias, comparison.Values.Single())),
         _ => throw new AggregationValidationException([new("GW-AGG-PRED-009", "The post-reduction predicate is not renderable.", "postPredicate")])
     };
-
-    private static string RenderSourcePredicate(
-        RelationalDialect dialect,
-        StorageUnit unit,
-        Predicate predicate,
-        Func<string, string> quote) => predicate switch
-    {
-        Predicate.AlwaysTrue => "1 = 1",
-        Predicate.AlwaysFalse => "1 = 0",
-        Predicate.Equal equal => RenderSourceEqual(dialect, unit, equal, quote),
-        Predicate.In membership => RenderSourceIn(dialect, unit, membership, quote),
-        Predicate.Range range => RenderSourceRange(dialect, unit, range, quote),
-        Predicate.Substring substring when substring.Anchor == Anchor.Contains =>
-            RenderSourceSubstring(dialect, unit, substring, quote, contains: true),
-        Predicate.Substring substring when substring.Anchor == Anchor.EndsWith =>
-            RenderSourceSubstring(dialect, unit, substring, quote, contains: false),
-        Predicate.ColumnCompare compare => RenderSourceColumnCompare(compare, quote),
-        Predicate.Not not => "(CASE WHEN (" + RenderSourcePredicate(dialect, unit, not.Inner, quote) + ") THEN 0 ELSE 1 END = 1)",
-        Predicate.And and => and.Terms.Length == 0
-            ? "1 = 1"
-            : "(" + string.Join(" AND ", and.Terms.Select(term => RenderSourcePredicate(dialect, unit, term, quote))) + ")",
-        Predicate.Or or => or.Terms.Length == 0
-            ? "1 = 0"
-            : "(" + string.Join(" OR ", or.Terms.Select(term => RenderSourcePredicate(dialect, unit, term, quote))) + ")",
-        _ => throw new AggregationValidationException([new("GW-AGG-SOURCE-007", "The source predicate is not renderable by the relational aggregation surface.", "sourcePredicate")])
-    };
-
-    private static string RenderSourceEqual(
-        RelationalDialect dialect,
-        StorageUnit unit,
-        Predicate.Equal equal,
-        Func<string, string> quote)
-    {
-        var expression = quote(equal.Column.Name);
-        return equal.Value.Kind == QueryConstantKind.Null
-            ? expression + " IS NULL"
-            : "(" + expression + " IS NOT NULL AND " + expression + " = " + SourceLiteral(dialect, unit, equal.Column, equal.Value.Value) + ")";
-    }
-
-    private static string RenderSourceIn(
-        RelationalDialect dialect,
-        StorageUnit unit,
-        Predicate.In membership,
-        Func<string, string> quote)
-    {
-        if (membership.Values.Length == 0)
-            return "1 = 0";
-        var expression = quote(membership.Column.Name);
-        var nonNull = membership.Values.Where(value => value.Kind != QueryConstantKind.Null).ToArray();
-        var terms = new List<string>();
-        if (nonNull.Length != 0)
-            terms.Add("(" + expression + " IS NOT NULL AND " + expression + " IN (" +
-                string.Join(", ", nonNull.Select(value => SourceLiteral(dialect, unit, membership.Column, value.Value))) + "))");
-        if (membership.Values.Any(value => value.Kind == QueryConstantKind.Null))
-            terms.Add(expression + " IS NULL");
-        return terms.Count == 1 ? terms[0] : "(" + string.Join(" OR ", terms) + ")";
-    }
-
-    private static string RenderSourceRange(
-        RelationalDialect dialect,
-        StorageUnit unit,
-        Predicate.Range range,
-        Func<string, string> quote)
-    {
-        var expression = quote(range.Column.Name);
-        var terms = new List<string> { expression + " IS NOT NULL" };
-        if (range.Lower is { } lower)
-            terms.Add(expression + (lower.IsInclusive ? " >= " : " > ") + SourceLiteral(dialect, unit, range.Column, lower.Value.Value));
-        if (range.Upper is { } upper)
-            terms.Add(expression + (upper.IsInclusive ? " <= " : " < ") + SourceLiteral(dialect, unit, range.Column, upper.Value.Value));
-        return "(" + string.Join(" AND ", terms) + ")";
-    }
-
-    private static string RenderSourceColumnCompare(Predicate.ColumnCompare compare, Func<string, string> quote)
-    {
-        var left = quote(compare.Left.Name);
-        var right = quote(compare.Right.Name);
-        var op = compare.Op switch
-        {
-            CompareOp.Equal => "=",
-            CompareOp.NotEqual => "<>",
-            CompareOp.LessThan => "<",
-            CompareOp.LessThanOrEqual => "<=",
-            CompareOp.GreaterThan => ">",
-            CompareOp.GreaterThanOrEqual => ">=",
-            _ => throw new ArgumentOutOfRangeException(nameof(compare.Op), compare.Op, null)
-        };
-        return "(" + left + " IS NOT NULL AND " + right + " IS NOT NULL AND " + left + " " + op + " " + right + ")";
-    }
-
-    private static string RenderSourceSubstring(
-        RelationalDialect dialect,
-        StorageUnit unit,
-        Predicate.Substring substring,
-        Func<string, string> quote,
-        bool contains)
-    {
-        var expression = quote(substring.Column.Name);
-        var literal = SourceLiteral(dialect, unit, substring.Column, substring.Needle);
-        var operation = contains
-            ? dialect.RenderAggregationSourceContains(expression, literal)
-            : dialect.RenderAggregationSourceEndsWith(expression, literal);
-        return "(" + expression + " IS NOT NULL AND " + operation + ")";
-    }
-
-    private static string SourceLiteral(RelationalDialect dialect, StorageUnit unit, ColumnRef column, object? value) =>
-        dialect.RenderAggregationLiteral(value, unit.Columns.Single(item => item.Name == column.Name).Type);
 
     private static string RenderEqual(
         RelationalDialect dialect,

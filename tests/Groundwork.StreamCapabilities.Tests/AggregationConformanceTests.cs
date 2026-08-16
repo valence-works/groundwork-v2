@@ -105,6 +105,82 @@ public sealed class AggregationConformanceTests
         Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-SOURCE-007");
     }
 
+    [SkippableFact]
+    public void SQLServer_native_guid_source_ranges_and_column_comparisons_match_the_portable_oracle()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server GUID aggregation conformance.");
+
+        var less = Guid.Parse("00000000-0000-0000-0000-ffffffffffff");
+        var greater = Guid.Parse("ffffffff-ffff-ffff-ffff-000000000000");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation_sqlserver_guid_" + Guid.NewGuid().ToString("N")),
+            Name = "aggregation_sqlserver_guid_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false },
+                new() { Name = "amount", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "leftGuid", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "rightGuid", Type = PortableType.Guid, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Sum("total", "amount")]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var rows = new[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["id"] = "range-less", ["group"] = "range", ["amount"] = 1L,
+                ["leftGuid"] = less, ["rightGuid"] = greater
+            },
+            new Dictionary<string, object?>
+            {
+                ["id"] = "range-greater", ["group"] = "range", ["amount"] = 2L,
+                ["leftGuid"] = greater, ["rightGuid"] = less
+            },
+            new Dictionary<string, object?>
+            {
+                ["id"] = "compare-true", ["group"] = "compare", ["amount"] = 4L,
+                ["leftGuid"] = less, ["rightGuid"] = greater
+            },
+            new Dictionary<string, object?>
+            {
+                ["id"] = "compare-false", ["group"] = "compare", ["amount"] = 8L,
+                ["leftGuid"] = greater, ["rightGuid"] = less
+            }
+        };
+        foreach (var row in rows)
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(row)).Status);
+
+        var left = new ColumnRef(new TableId(unit.Name), "leftGuid", QueryType.Guid, isNullable: false);
+        var right = new ColumnRef(new TableId(unit.Name), "rightGuid", QueryType.Guid, isNullable: false);
+        var rangeQuery = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Range(left, Bound.Inclusive(QueryConstant.Of(left, greater)), null)
+        };
+        var compareQuery = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.ColumnCompare(left, CompareOp.LessThan, right)
+        };
+
+        Assert.Equal(2L, Assert.Single(session.Aggregate(rangeQuery).Rows, row => Equals(row["group"], "range"))["total"]);
+        Assert.Equal(4L, Assert.Single(session.Aggregate(compareQuery).Rows, row => Equals(row["group"], "compare"))["total"]);
+    }
+
     [Fact]
     public void Source_predicate_is_applied_before_reduction_and_differs_from_post_predicate()
     {
@@ -202,9 +278,18 @@ public sealed class AggregationConformanceTests
             unit,
             unit.AggregationProfiles.Single(),
             FixtureRows()));
-        var actual = Canonical(session.Aggregate(new AggregationQuery("summary")));
+        var actualResult = session.Aggregate(new AggregationQuery("summary"));
+        var actual = Canonical(actualResult);
 
         Assert.Equal(expected, actual);
+        Assert.NotNull(actualResult.ShapeFingerprint);
+        Assert.NotNull(actualResult.ValueFingerprint);
+        Assert.Equal(
+            AggregationQueryFingerprint.CreateShapeFingerprint(unit, unit.AggregationProfiles.Single(), new AggregationQuery("summary")),
+            actualResult.ShapeFingerprint);
+        Assert.Equal(
+            AggregationQueryFingerprint.Create(unit, unit.AggregationProfiles.Single(), new AggregationQuery("summary")),
+            actualResult.ValueFingerprint);
 
         var containsQuery = new AggregationQuery("summary")
         {
@@ -230,6 +315,34 @@ public sealed class AggregationConformanceTests
         Assert.Equal("a", sourceRow["group"]);
         Assert.Equal(2_000_000_000L, sourceRow["integerTotal"]);
         Assert.Equal("a\u001fb", sourceRow["firstLow"]);
+
+        var changedLiteral = session.Aggregate(new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 1L))
+        });
+        Assert.NotNull(source.ShapeFingerprint);
+        Assert.NotNull(source.ValueFingerprint);
+        Assert.NotNull(changedLiteral.ShapeFingerprint);
+        Assert.NotNull(changedLiteral.ValueFingerprint);
+        Assert.Equal(source.ShapeFingerprint, changedLiteral.ShapeFingerprint);
+        Assert.NotEqual(source.ValueFingerprint, changedLiteral.ValueFingerprint);
+
+        var nullableLabel = new ColumnRef(new TableId(unit.Name), "label", QueryType.String);
+        var logicQuery = new AggregationQuery("summary")
+        {
+            SourcePredicate = new Predicate.Or([
+                new Predicate.And([
+                    new Predicate.Equal(lowOrder, QueryConstant.Of(lowOrder, 2L)),
+                    new Predicate.Not(new Predicate.Equal(nullableLabel, QueryConstant.Of(nullableLabel, "not-present")))
+                ]),
+                new Predicate.Equal(nullableLabel, QueryConstant.Of(nullableLabel, null))
+            ])
+        };
+        var logic = session.Aggregate(logicQuery);
+        var logicA = Assert.Single(logic.Rows, row => Equals(row["group"], "a"));
+        Assert.Equal(2_000_000_000L, logicA["integerTotal"]);
+        var logicB = Assert.Single(logic.Rows, row => Equals(row["group"], "b"));
+        Assert.Null(logicB["integerTotal"]);
 
         var combined = session.Aggregate(new AggregationQuery("summary")
         {

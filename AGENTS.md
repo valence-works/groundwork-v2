@@ -12,7 +12,11 @@
 
 ## Architecture
 
-- Keep `Groundwork.Kernel` provider-neutral, synchronous, and BCL-only.
+- Keep the innermost `Groundwork.Query.Model` assembly BCL-only and provider-neutral. It owns the
+  portable predicate/query semantics. `Groundwork.Kernel` is the second innermost kernel assembly;
+  its sole non-BCL reference is `Groundwork.Query.Model`, because the public kernel aggregation
+  contract reuses that predicate AST. No other provider, contract-family, Store, I/O, or runtime
+  dependency is permitted in either kernel assembly.
 - Contract families, provider adapters, and runtime facilities depend inward;
   kernel declarations never depend outward.
 - Read and respect the ADRs under `docs/adr/` before changing public contracts.

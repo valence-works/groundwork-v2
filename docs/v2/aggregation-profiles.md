@@ -29,11 +29,12 @@ older row with `service = "orders"`, `duration = 7`, and a newer row with `servi
 returns `duration = 7`. A post predicate on the reduced `duration` sees the sum of both rows
 (`18`) and cannot reproduce the source-filtered result. SQL providers emit the source predicate in
 the base `WHERE`, MongoDB emits `$match` before `$group`, and the reference provider filters its
-input before reduction. Query shape and bound values are included in
-The result exposes both `ShapeFingerprint` (literal values elided) and `ValueFingerprint` (all
-bound values included), so equivalent shapes with different source literals do not share an
-execution identity; the same identities are available through `AggregationQueryFingerprint` for
-admission or cache diagnostics.
+input before reduction. Query shape and bound values are included in the operation identity. The
+result exposes both `ShapeFingerprint` (literal values elided) and `ValueFingerprint` (all bound
+values included), so equivalent shapes with different source literals do not share an execution
+identity; the same identities are available through `AggregationQueryFingerprint` for admission or
+cache diagnostics. The legacy rows-only `AggregationResult` constructor leaves these nullable
+fingerprints unset.
 
 ## Portable reducers
 

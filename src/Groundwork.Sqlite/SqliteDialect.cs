@@ -12,6 +12,7 @@ namespace Groundwork.Sqlite;
 internal sealed class SqliteDialect : RelationalDialect
 {
     public override string ProviderName => "SQLite";
+    public override RelationalQueryRenderer CreateQueryRenderer() => new SqliteQueryRenderer();
     public override bool CreateTableIncludesColumns => true;
 
     public override string RenderAggregationContains(string expression, string literal) =>

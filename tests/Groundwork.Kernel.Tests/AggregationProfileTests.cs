@@ -183,6 +183,39 @@ public sealed class AggregationProfileTests
             }));
 
         Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-SOURCE-003");
+
+        var wrongTable = new ColumnRef(new TableId("other_table"), "amount", QueryType.Int64);
+        var tableException = Assert.Throws<AggregationValidationException>(() => AggregationExecutor.ValidateQuery(
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.Equal(wrongTable, QueryConstant.Of(wrongTable, 7L))
+            }));
+
+        Assert.Contains(tableException.Errors, error => error.Code == "GW-AGG-SOURCE-002");
+    }
+
+    [Fact]
+    public void Source_predicate_admission_refuses_element_sets_as_a_closed_surface()
+    {
+        var unit = Unit(
+            new ColumnDefinition { Name = "group", Type = PortableType.String },
+            new ColumnDefinition { Name = "amount", Type = PortableType.Int64 });
+        var profile = Profile(new Aggregate.Sum("total", "amount"));
+
+        var exception = Assert.Throws<AggregationValidationException>(() => AggregationExecutor.ValidateQuery(
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                SourcePredicate = new Predicate.ElementOf(
+                    new ElementSetRef("labels", QueryType.String),
+                    [QueryConstant.Of("plain")],
+                    SetQuantifier.Any)
+            }));
+
+        Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-SOURCE-005");
     }
 
     [Fact]
@@ -208,7 +241,7 @@ public sealed class AggregationProfileTests
         Assert.NotEqual(
             AggregationQueryFingerprint.Create(unit, profile, first),
             AggregationQueryFingerprint.Create(unit, profile, second));
-        Assert.Contains("int64", first.SourcePredicateCanonical, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("int64", PredicateCanonicalizer.ToCanonicalString(first.SourcePredicate!), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
