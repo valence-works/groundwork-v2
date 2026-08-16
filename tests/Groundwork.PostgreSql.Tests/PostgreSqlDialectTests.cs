@@ -188,6 +188,35 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
+    public async Task Live_concurrent_schema_admission_serializes_infrastructure_creation()
+    {
+        var baseConnection = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(baseConnection),
+            "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL integration tests.");
+
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        const int workerCount = 24;
+        using var ready = new Barrier(workerCount);
+        var tasks = Enumerable.Range(0, workerCount).Select(index => Task.Run(() =>
+        {
+            ready.SignalAndWait(TimeSpan.FromSeconds(30));
+            var name = $"pg_infrastructure_race_{index}_{Guid.NewGuid():N}";
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId(name),
+                Name = name,
+                Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+                Key = new KeyDefinition { Columns = ["id"] }
+            };
+
+            using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        })).ToArray();
+
+        await Task.WhenAll(tasks);
+    }
+
+    [SkippableFact]
     public void Live_catalog_records_the_explicit_null_ordering_bits()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();
