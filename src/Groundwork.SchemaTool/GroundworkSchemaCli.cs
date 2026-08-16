@@ -101,7 +101,7 @@ public static class GroundworkSchemaCli
             var version = typeof(GroundworkSchemaCli).Assembly
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
                 .InformationalVersion.Split('+', 2)[0] ?? "unknown";
-            await output.WriteLineAsync($"Groundwork.SchemaTool {version}");
+            await output.WriteLineAsync($"Groundwork.Tool {version}");
             return SchemaToolExitCodes.Success;
         }
 

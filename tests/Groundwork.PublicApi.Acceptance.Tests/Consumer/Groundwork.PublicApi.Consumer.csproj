@@ -8,17 +8,19 @@
     <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>
     <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <GroundworkVersion Condition="'$(GroundworkVersion)' == ''">0.1.0-preview.1</GroundworkVersion>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="PublicApiApprovalFixture.cs" />
-    <PackageReference Include="Groundwork.Kernel" Version="1.0.0" />
-    <PackageReference Include="Groundwork.Store" Version="1.0.0" />
-    <PackageReference Include="Groundwork.Records" Version="1.0.0" />
-    <PackageReference Include="Groundwork.Records.Store" Version="1.0.0" />
-    <PackageReference Include="Groundwork.Query.Planning" Version="1.0.0" />
-    <PackageReference Include="Groundwork.Sqlite" Version="1.0.0" />
-    <PackageReference Include="Groundwork.Documents" Version="1.0.0" />
+    <PackageReference Include="Groundwork.Kernel" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Store" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Records" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Records.Store" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Query.Planning" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Sqlite" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Documents" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Testing" Version="$(GroundworkVersion)" />
   </ItemGroup>
 </Project>

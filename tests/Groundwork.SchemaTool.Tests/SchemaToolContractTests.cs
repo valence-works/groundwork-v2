@@ -21,7 +21,7 @@ public sealed class SchemaToolContractTests
         Assert.Contains("Usage: groundwork", output.ToString(), StringComparison.Ordinal);
 
         Assert.Equal(SchemaToolExitCodes.Success, await RunAsync(["--version"]));
-        Assert.StartsWith("Groundwork.SchemaTool ", output.ToString(), StringComparison.Ordinal);
+        Assert.StartsWith("Groundwork.Tool ", output.ToString(), StringComparison.Ordinal);
 
         Assert.Equal(SchemaToolExitCodes.InvalidInvocation, await RunAsync(["unknown", "--output", "json"]));
         using var report = JsonDocument.Parse(output.ToString());
