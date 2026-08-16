@@ -85,7 +85,7 @@ run_external_consumer() {
   mkdir -p "$tool_root"
   NUGET_PACKAGES="$package_cache" dotnet tool install Groundwork.Tool --version "$version" \
     --tool-path "$tool_root" --configfile "$external_root/NuGet.Config" --no-cache --verbosity quiet
-  "$tool_root/groundwork" --version | grep -Eq '^Groundwork\.Tool '
+  test "$("$tool_root/groundwork" --version)" = "Groundwork.Tool $version"
 }
 
 run_external_consumer 1
