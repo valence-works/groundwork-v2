@@ -19,7 +19,10 @@ pack_options=(
 )
 
 if [[ -n "$package_version" ]]; then
-  pack_options+=("-p:PackageVersion=$package_version")
+  # PackageVersion controls the .nupkg identity, while Version also flows into
+  # AssemblyInformationalVersion (used by Groundwork.Tool --version). Keep both
+  # identities aligned for controlled preview releases.
+  pack_options+=("-p:PackageVersion=$package_version" "-p:Version=$package_version")
 fi
 
 while IFS='|' read -r package_id project_path; do

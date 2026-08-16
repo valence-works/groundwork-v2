@@ -132,6 +132,13 @@ public sealed class PackagingContractTests
         var remoteVerifier = File.ReadAllText(Path.Combine(root, "eng", "verify-published-packages.sh"));
         Assert.Contains(".nupkg.sha512", remoteVerifier, StringComparison.Ordinal);
         Assert.Contains("Artifact hash mismatch", remoteVerifier, StringComparison.Ordinal);
+
+        var packer = File.ReadAllText(Path.Combine(root, "eng", "pack-public-packages.sh"));
+        Assert.Contains("-p:PackageVersion=$package_version", packer, StringComparison.Ordinal);
+        Assert.Contains("-p:Version=$package_version", packer, StringComparison.Ordinal);
+
+        var cleanRoomVerifier = File.ReadAllText(Path.Combine(root, "tests", "Groundwork.PublicApi.Acceptance.Tests", "verify-clean-room.sh"));
+        Assert.Contains("Groundwork.Tool $version", cleanRoomVerifier, StringComparison.Ordinal);
     }
 
     private static string FindRepositoryRoot()
