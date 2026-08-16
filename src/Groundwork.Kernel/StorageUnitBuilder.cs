@@ -451,6 +451,17 @@ internal sealed class StorageDeclarationState
         var declarationFindings = ValidateReferences(unit, key is null).ToList();
         try
         {
+            ProviderOwnedColumns.ValidateLogicalDeclaration(unit);
+        }
+        catch (ArgumentException exception)
+        {
+            declarationFindings.Add(new DeclarationFinding(
+                "GW-DECL-COLUMN-001",
+                exception.Message,
+                "columns"));
+        }
+        try
+        {
             ConcurrencyDeclaration.ValidateDeclaration(unit);
         }
         catch (ArgumentException exception)

@@ -236,6 +236,178 @@ public sealed class PortabilityTests
     }
 
     [Fact]
+    public void Dotted_physical_column_name_is_refused_at_the_fluent_boundary()
+    {
+        var exception = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("invalid", "invalid")
+            .String("state.interruptedExecution.status", 200)
+            .Key("state.interruptedExecution.status")
+            .Build());
+
+        Assert.Contains(exception.Findings, finding => finding.Code == "GW-PORT-010" &&
+            finding.Path == "columns.state.interruptedExecution.status" &&
+            finding.Message.Contains("ASCII letters", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Physical_identifiers_are_capped_at_63_ascii_bytes()
+    {
+        var atLimit = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column(new string('a', 63), PortableType.String)
+        ], key: ["id"]));
+        var overLimit = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column(new string('b', 64), PortableType.String)
+        ], key: ["id"]));
+
+        Assert.DoesNotContain(atLimit.Refusals, refusal => refusal.Code == "GW-PORT-010");
+        var diagnostic = Assert.Single(overLimit.Refusals, refusal => refusal.Code == "GW-PORT-010");
+        Assert.Contains("at most 63 ASCII bytes", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("shorter", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Overlong_identifiers_are_refused_at_builder_and_schema_subject_boundaries()
+    {
+        var name = new string('x', 64);
+        var builderException = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("overlong", "overlong")
+            .String(name, 64)
+            .Key(name)
+            .Build());
+        var schemaException = Assert.Throws<ArgumentException>(() => new Groundwork.Kernel.Schema.SchemaSubject(
+            Unit([Column(name, PortableType.String, maxLength: 64)], key: [name])));
+
+        Assert.Contains(builderException.Findings, finding => finding.Code == "GW-PORT-010" &&
+            finding.Message.Contains("at most 63 ASCII bytes", StringComparison.Ordinal));
+        Assert.Contains("GW-PORT-010", schemaException.Message, StringComparison.Ordinal);
+        Assert.Contains("at most 63 ASCII bytes", schemaException.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Search_key_expansion_refuses_a_hidden_name_over_63_bytes_before_provider_io()
+    {
+        var sourceName = new string('s', 63 - SearchKeyProjection.Prefix.Length + 1);
+        var unit = Unit([
+            Column(sourceName, PortableType.String, maxLength: 64, collation: PortableCollation.OrdinalIgnoreCase)
+        ]);
+        var expanded = SearchKeyProjection.Expand(unit);
+        var result = Validate(unit);
+        var builderException = Assert.Throws<DeclarationBuildException>(() => Groundwork.Kernel.StorageUnit
+            .Declare("overlong-search-key", "overlong-search-key")
+            .String(sourceName, 64, column => column.Collation(PortableCollation.OrdinalIgnoreCase))
+            .Key(sourceName)
+            .Build());
+        var schemaException = Assert.Throws<ArgumentException>(() => new Groundwork.Kernel.Schema.SchemaSubject(unit));
+
+        var hiddenName = SearchKeyProjection.ColumnName(sourceName);
+        Assert.True(expanded.Columns.Single(column => column.Name == hiddenName).Name.Length > 63);
+        var diagnostic = Assert.Single(result.Refusals, refusal => refusal.Code == "GW-PORT-010");
+        Assert.Equal($"derivedColumns.{hiddenName}.name", diagnostic.Path);
+        Assert.Contains(hiddenName, diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("at most 63 ASCII bytes", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains(builderException.Findings, finding => finding.Code == "GW-PORT-010" &&
+            finding.Path == $"derivedColumns.{hiddenName}.name");
+        Assert.Contains("GW-PORT-010", schemaException.Message, StringComparison.Ordinal);
+        Assert.Contains(hiddenName, schemaException.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Forged_physical_references_are_refused_independently_of_the_builder()
+    {
+        var cases = new Dictionary<string, StorageUnit>(StringComparer.Ordinal)
+        {
+            ["columns"] = Unit(
+                [Column("state.status", PortableType.String, nullable: false, maxLength: 64)],
+                key: ["state.status"]),
+            ["key"] = Unit(
+                [Column("id", PortableType.Guid, nullable: false)],
+                key: ["id.dot"]),
+            ["indexes"] = Unit(
+                [Column("id", PortableType.Guid, nullable: false)],
+                indexes: [new IndexDefinition { Name = "by-id", Columns = [new IndexColumn("id.dot")] }]),
+            ["derived"] = Unit(
+                [Column("id", PortableType.Guid, nullable: false)],
+                key: ["id"]) with
+            {
+                DerivedColumns = [new DerivedColumnDefinition
+                {
+                    Name = "state.folded",
+                    SourceColumn = "id",
+                    Projection = PortableProjection.UnicodeFold
+                }]
+            },
+            ["concurrency"] = Unit(
+                [Column("id", PortableType.Guid, nullable: false)],
+                key: ["id"]) with
+            {
+                Concurrency = ConcurrencyDeclaration.Optimistic("version.dot")
+            },
+            ["aggregation"] = Unit(
+                [
+                    Column("id", PortableType.Guid, nullable: false),
+                    Column("value", PortableType.Int32, nullable: false)
+                ],
+                key: ["id"]) with
+            {
+                AggregationProfiles = [new AggregationProfile
+                {
+                    Name = "totals",
+                    GroupByColumns = ["group.dot"],
+                    Aggregates = [new Aggregate.Sum("total", "value")]
+                }]
+            }
+        };
+
+        Assert.Equal(
+            cases.Keys,
+            cases.Where(item => PortabilityValidator.Validate(item.Value).Refusals.Any(refusal => refusal.Code == "GW-PORT-010"))
+                .Select(item => item.Key));
+    }
+
+    [Fact]
+    public void Provider_owned_hidden_columns_remain_valid_physical_identifiers()
+    {
+        var result = Validate(new StorageUnit
+        {
+            Id = new StorageUnitId("hidden"),
+            Name = "hidden",
+            Columns =
+            [
+                new() { Name = ProviderOwnedColumns.Scope, Type = PortableType.String, IsNullable = false, MaxLength = 128 },
+                new() { Name = "__groundwork_action", Type = PortableType.String, IsNullable = false, MaxLength = 1 },
+                new() { Name = "__groundwork_version", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = SearchKeyProjection.Prefix + "name", Type = PortableType.String, MaxLength = 320 }
+            ],
+            Key = new KeyDefinition { Columns = [ProviderOwnedColumns.Scope] }
+        });
+
+        Assert.DoesNotContain(result.Refusals, refusal => refusal.Code == "GW-PORT-010");
+    }
+
+    [Fact]
+    public void Overlong_provider_owned_hidden_columns_are_refused()
+    {
+        var hiddenName = SearchKeyProjection.Prefix + new string('h', 63);
+        var result = Validate(new StorageUnit
+        {
+            Id = new StorageUnitId("overlong-hidden"),
+            Name = "overlong-hidden",
+            Columns =
+            [
+                new() { Name = ProviderOwnedColumns.Scope, Type = PortableType.String, IsNullable = false, MaxLength = 128 },
+                new() { Name = hiddenName, Type = PortableType.String, MaxLength = 320 }
+            ],
+            Key = new KeyDefinition { Columns = [ProviderOwnedColumns.Scope] }
+        });
+
+        var diagnostic = Assert.Single(result.Refusals, refusal => refusal.Code == "GW-PORT-010");
+        Assert.Equal($"columns.{hiddenName}", diagnostic.Path);
+        Assert.Contains("at most 63 ASCII bytes", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Provider_sequence_requires_non_nullable_int64()
     {
         var result = Validate(Unit([
@@ -418,7 +590,13 @@ public sealed class PortabilityTests
                     Index("by-tenant-primary", "tenant", unique: true),
                     Index("by-tenant-alias", "tenant", unique: true)
                 ],
-                key: ["id"]))
+                key: ["id"])),
+        new(
+            "GW-PORT-010",
+            Unit([
+                Column("id", PortableType.Guid, nullable: false),
+                Column(new string('x', 64), PortableType.String)
+            ], key: ["id"]))
     ];
 
     private sealed record PortabilityRuleFixture(

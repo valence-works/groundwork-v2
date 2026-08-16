@@ -198,6 +198,14 @@ public sealed class SchemaSubject
         }
 
         AggregationProfileValidator.ValidateUnit(unit);
+        var identifiers = PortabilityValidator.ValidatePhysicalIdentifiers(unit);
+        if (!identifiers.IsPortable)
+        {
+            var refusal = identifiers.Refusals[0];
+            throw new ArgumentException(
+                $"{refusal.Code} at {refusal.Path}: {refusal.Message}", nameof(unit));
+        }
+
         var duplicateIndexes = PortabilityValidator.ValidateDuplicatePhysicalIndexSignatures(unit);
         if (!duplicateIndexes.IsPortable)
         {
