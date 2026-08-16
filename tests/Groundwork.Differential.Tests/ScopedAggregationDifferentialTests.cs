@@ -12,9 +12,9 @@ using Xunit;
 namespace Groundwork.Differential.Tests;
 
 [CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class ScopedAggregationDifferentialCollection
+public sealed class NativeProviderDifferentialCollection
 {
-    public const string Name = "Scoped aggregation live providers";
+    public const string Name = "Native provider differential tests";
 }
 
 /// <summary>
@@ -24,7 +24,7 @@ public sealed class ScopedAggregationDifferentialCollection
 /// artifact fact additionally proves the provider-owned scope command/pipeline shape without
 /// widening the public API or claiming an ordinary Query observer.
 /// </summary>
-[Collection(ScopedAggregationDifferentialCollection.Name)]
+[Collection(NativeProviderDifferentialCollection.Name)]
 public sealed class ScopedAggregationDifferentialTests
 {
     [Fact]
