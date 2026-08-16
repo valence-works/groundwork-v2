@@ -41,6 +41,7 @@ public static class RetentionSessionExtensions
         RetentionExecutionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "retention");
         options ??= new RetentionExecutionOptions();
         ValidateExecutionOptions(options);
         return session is IRetentionStorageSession native

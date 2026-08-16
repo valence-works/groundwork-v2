@@ -85,7 +85,11 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
     {
         ThrowIfDisposed();
         var applied = state.Resolve(unit, access);
-        var collection = MongoSchemaCoordinator.EnsureAdmission(state, applied, access);
+        var collection = access.IsPrivilegedAcrossScopes
+            ? state.Context.Database.GetCollection<BsonDocument>(applied.CollectionName)
+            : MongoSchemaCoordinator.EnsureAdmission(state, applied, access);
+        if (!access.IsPrivilegedAcrossScopes)
+            state.RegisterScope(applied, access);
         return new MongoStorageSession(state, applied, access, collection, null);
     }
 
@@ -94,6 +98,9 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
         ArgumentNullException.ThrowIfNull(units);
+        if (access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-003: privileged cross-scope access is query-only and cannot begin a unit of work.");
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
 
@@ -103,6 +110,8 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
         var collections = applied
             .Select(unit => MongoSchemaCoordinator.EnsureAdmission(state, unit, access))
             .ToArray();
+        foreach (var unit in applied)
+            state.RegisterScope(unit, access);
         return new MongoUnitOfWork(state, applied, collections, access);
     }
 
@@ -142,6 +151,7 @@ internal sealed class MongoProviderState
     internal MongoAppliedUnit Resolve(StorageUnit declaration, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(declaration);
+        ProviderOwnedColumns.ValidateLogicalDeclaration(declaration);
         declaration = SearchKeyProjection.Expand(declaration);
         AggregationProfileValidator.ValidateUnit(declaration);
         ValidateScope(declaration, access);
@@ -209,6 +219,57 @@ internal sealed class MongoProviderState
     internal bool CollectionExists(string name) => Context.Database.ListCollectionNames(
         new ListCollectionNamesOptions { Filter = new BsonDocument("name", name) }).Any();
 
+    internal void RegisterScope(MongoAppliedUnit applied, MongoStorageAccess access)
+    {
+        if (applied.Declaration.Scope != ScopePolicy.Scoped || access.Scope is null)
+            return;
+        var scope = access.Scope.Value;
+        var token = CrossScopeQueryMaterializer.ScopeToken(access.Scope);
+        var document = new BsonDocument
+        {
+            ["_id"] = "scope:" + applied.Declaration.Id.Value + ":" + token,
+            ["kind"] = "scope",
+            ["unit"] = applied.Declaration.Id.Value,
+            ["scope"] = scope,
+            ["token"] = token,
+            ["collection"] = MongoSchemaCoordinator.CollectionName(applied, access)
+        };
+        Metadata.ReplaceOne(
+            new BsonDocument("_id", document["_id"]),
+            document,
+            new ReplaceOptions { IsUpsert = true });
+    }
+
+    internal IReadOnlyList<MongoScopeRegistration> ReadScopes(MongoAppliedUnit applied)
+    {
+        var filter = new BsonDocument
+        {
+            ["kind"] = "scope",
+            ["unit"] = applied.Declaration.Id.Value
+        };
+        return Metadata.Find(filter)
+            .Sort(new BsonDocument("token", 1))
+            .ToList()
+            .Select(document =>
+            {
+                var scope = new StorageScope(document["scope"].AsString);
+                var token = document["token"].AsString;
+                var collection = document["collection"].AsString;
+                var expectedToken = CrossScopeQueryMaterializer.ScopeToken(scope);
+                var expectedCollection = MongoSchemaCoordinator.CollectionName(
+                    applied,
+                    MongoStorageAccess.Scoped(scope));
+                if (!string.Equals(token, expectedToken, StringComparison.Ordinal) ||
+                    !string.Equals(collection, expectedCollection, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"GW-ACCESS-006: MongoDB scope registry drift was detected for storage unit '{applied.Declaration.Name}'. Reopen the affected scoped session to rebuild its provider-owned registration.");
+                }
+                return new MongoScopeRegistration(scope, token, collection);
+            })
+            .ToArray();
+    }
+
     internal static void ValidateScope(StorageUnit unit, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(access);
@@ -221,6 +282,8 @@ internal sealed class MongoProviderState
 }
 
 internal sealed record MongoAppliedUnit(StorageUnit Declaration, string CollectionName);
+
+internal sealed record MongoScopeRegistration(StorageScope Scope, string Token, string CollectionName);
 
 internal sealed class MongoProviderCatalog(MongoProviderState state) : IMongoProviderCatalog
 {
@@ -270,6 +333,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 {
     public MongoSchemaDiff Diff(StorageUnit desired)
     {
+        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         ValidateDeclaration(desired);
@@ -293,6 +357,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
     public MongoSchemaApplyResult Apply(StorageUnit desired)
     {
+        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         ValidateDeclaration(desired);
@@ -871,6 +936,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfDisposed();
+        if (Access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
@@ -985,8 +1053,143 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             sourceIncludesContinuation: true);
     }
 
+    public CrossScopeQueryResult QueryAcrossScopes(
+        QueryRequest request,
+        QueryRenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+        if (!Access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
+        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
+                nameof(request));
+        StorageAccessValidation.ObservePrivilegedQuery(
+            StorageAccess.PrivilegedAcrossScopes(Access.Audit!),
+            Unit);
+
+        var suppliedOptions = options ?? QueryRenderOptions.Default;
+        if (suppliedOptions.FindPinnedIndex() is not null)
+            throw new NotSupportedException(
+                "GW-ACCESS-005: MongoDB cross-scope queries cannot pin one physical index across multiple scope collections.");
+        var scopeToken = new ColumnRef(
+            new TableId(Unit.Name),
+            CrossScopeQueryMaterializer.ScopeTokenColumn,
+            QueryType.String,
+            isNullable: false);
+        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
+            new[] { scopeToken }
+                .Concat(Unit.Key.Columns
+                    .Select(QueryColumn)
+                    .Where(column => column is not null)
+                    .Select(column => column!))) with
+        {
+            Indexes = ImmutableArray<QueryIndexDeclaration>.Empty,
+            PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal),
+            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+            LatestPartitionColumns = [scopeToken]
+        };
+        var executionSource = QueryRequestExecution.WithProviderPredicate(
+            request,
+            request.Where,
+            CrossScopeQueryMaterializer.BindingDiscriminator(
+                StorageAccess.PrivilegedAcrossScopes(Access.Audit!)));
+        var executionRequest = EnsureCrossScopeProjection(
+            QueryRequestExecution.ForPage(executionSource, renderOptions));
+        var sourcePrefix = CrossScopeSourcePrefix(state.ReadScopes(applied));
+        var command = new MongoQueryRenderer().Render(
+            executionRequest,
+            renderOptions,
+            collection.CollectionNamespace.CollectionName,
+            sourcePrefix);
+        var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
+        var documents = collection.Aggregate(pipeline).ToList();
+        var rows = documents.Select(ToCrossScopeQueryRow).ToArray();
+        var materialized = QueryResultMaterializer.Materialize(
+            executionSource,
+            renderOptions,
+            rows,
+            selectedIndex: null,
+            indexHintApplied: false,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+        return CrossScopeQueryMaterializer.FromNativePage(
+            materialized,
+            rows,
+            CrossScopeQueryMaterializer.RawScopeColumn);
+    }
+
+    private static IReadOnlyList<BsonDocument> CrossScopeSourcePrefix(
+        IReadOnlyList<MongoScopeRegistration> scopes)
+    {
+        var stages = new List<BsonDocument>
+        {
+            new("$match", new BsonDocument("_id", new BsonDocument("$exists", false)))
+        };
+        foreach (var scope in scopes)
+        {
+            stages.Add(new BsonDocument("$unionWith", new BsonDocument
+            {
+                ["coll"] = scope.CollectionName,
+                ["pipeline"] = new BsonArray
+                {
+                    new BsonDocument("$set", new BsonDocument
+                    {
+                        [CrossScopeQueryMaterializer.RawScopeColumn] = scope.Scope.Value,
+                        [CrossScopeQueryMaterializer.ScopeTokenColumn] = scope.Token
+                    })
+                }
+            }));
+        }
+        return stages;
+    }
+
+    private QueryRequest EnsureCrossScopeProjection(QueryRequest request)
+    {
+        if (request.Projection.AllColumns || request.Projection.Columns.Any(column =>
+                string.Equals(column.Name, CrossScopeQueryMaterializer.RawScopeColumn, StringComparison.Ordinal)))
+            return request;
+        var rawScope = new ColumnRef(
+            new TableId(Unit.Name),
+            CrossScopeQueryMaterializer.RawScopeColumn,
+            QueryType.String,
+            isNullable: false);
+        return QueryRequestExecution.WithProjection(
+            request,
+            Projection.ColumnsOnly([.. request.Projection.Columns, rawScope]));
+    }
+
+    private IReadOnlyDictionary<string, object?> ToCrossScopeQueryRow(BsonDocument document)
+    {
+        var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var column in Unit.Columns)
+        {
+            if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
+                continue;
+            if (document.TryGetValue(column.Name, out var value))
+                row[column.Name] = MongoValueCodec.Decode(value, column);
+        }
+        foreach (var internalColumn in new[]
+                 {
+                     CrossScopeQueryMaterializer.RawScopeColumn,
+                     CrossScopeQueryMaterializer.ScopeTokenColumn
+                 })
+        {
+            if (document.TryGetValue(internalColumn, out var value))
+                row[internalColumn] = value.AsString;
+        }
+        if (document.TryGetValue("__groundwork_total_count", out var count))
+            row["__groundwork_total_count"] = count.ToInt64();
+        if (document.TryGetValue("__groundwork_count_only", out var marker))
+            row["__groundwork_count_only"] = marker.ToInt64();
+        return row;
+    }
+
     public AggregationResult Aggregate(AggregationQuery query)
     {
+        RefusePrivilegedOperation("aggregate");
         ArgumentNullException.ThrowIfNull(query);
         ThrowIfDisposed();
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
@@ -1071,6 +1274,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoStoredEntry? Read(MongoStorageKey key)
     {
+        RefusePrivilegedOperation("read");
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
@@ -1080,6 +1284,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null)
     {
+        RefusePrivilegedOperation("insert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Insert);
@@ -1087,6 +1292,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null)
     {
+        RefusePrivilegedOperation("update");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Update);
@@ -1094,6 +1300,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null)
     {
+        RefusePrivilegedOperation("upsert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Upsert);
@@ -1101,6 +1308,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null)
     {
+        RefusePrivilegedOperation("conditional upsert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         return ConditionalUpsertCore(values, options);
@@ -1111,6 +1319,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
+        RefusePrivilegedOperation("batch write");
         ArgumentNullException.ThrowIfNull(writes);
         ThrowIfDisposed();
         var nativeOnAppend = IsNativeAppendBatch(writes);
@@ -1267,6 +1476,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
     {
+        RefusePrivilegedOperation("delete");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, ToStoreOptions(options));
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
@@ -1275,6 +1485,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
+        RefusePrivilegedOperation("retention");
         options ??= new RetentionExecutionOptions();
         if (options.MaxRowsPerBatch <= 0)
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
@@ -1368,6 +1579,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public StorageInspection Inspect()
     {
+        RefusePrivilegedOperation("inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         ThrowIfDisposed();
         var filter = new BsonDocument("_id", HighWaterId());
@@ -1381,6 +1593,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
     {
+        RefusePrivilegedOperation("retention");
         var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
         declaration.Validate(Unit);
@@ -1518,6 +1731,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
     {
+        RefusePrivilegedOperation("append");
         ThrowIfDisposed();
         var declaration = Unit.AppendIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{Unit.Name}' does not declare append idempotency.");
@@ -1568,6 +1782,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public MongoAppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
     {
+        RefusePrivilegedOperation("append");
         ThrowIfDisposed();
         var declaration = Unit.AppendIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{Unit.Name}' does not declare append idempotency.");
@@ -2313,7 +2528,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 : new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted);
         }
         var existing = FindOne(identity);
-        var existingVersion = Version(identity);
+        var existingVersion = Version(identity, existing);
         if (existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
         if (!ConcurrencyAllows(existing, existingVersion, options, MutationKind.Delete))
@@ -2563,6 +2778,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(MongoStorageSession));
+    }
+
+    private void RefusePrivilegedOperation(string operation)
+    {
+        if (Access.IsPrivilegedAcrossScopes)
+        {
+            throw new InvalidOperationException(
+                $"GW-ACCESS-003: privileged cross-scope access is query-only; '{operation}' requires an ordinary session with an explicit scope.");
+        }
     }
 }
 

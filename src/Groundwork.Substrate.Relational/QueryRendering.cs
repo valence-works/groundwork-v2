@@ -192,18 +192,28 @@ public abstract class RelationalQueryRenderer
 
         var selection = request.Projection.AllColumns
             ? "*"
-            : string.Join(", ", request.Projection.Columns.Select(column => dialect.QuoteIdentifier(column.Name)));
+            : string.Join(", ", request.Projection.Columns.Select(RenderSelection));
         if ((request.LatestPerKey is not null || request.Result.IncludesTotalCount) && !request.Projection.AllColumns)
         {
             var required = (request.LatestPerKey is { } latest
-                    ? new[] { latest.Key, latest.Timestamp }
+                    ? new[] { latest.Key, latest.Timestamp }.Concat(options.LatestPartitionColumns)
                     : Array.Empty<ColumnRef>())
                 .Concat(effectiveOrder.Select(term => term.Column))
                 .Where(column => !request.Projection.Columns.Any(selected => string.Equals(selected.Name, column.Name, StringComparison.Ordinal)))
                 .GroupBy(column => column.Name, StringComparer.Ordinal)
                 .Select(group => group.First());
             foreach (var column in required)
-                selection += ", " + dialect.QuoteIdentifier(column.Name);
+                selection += ", " + RenderSelection(column);
+        }
+        if (request.Projection.AllColumns)
+        {
+            foreach (var column in effectiveOrder.Select(term => term.Column)
+                         .Where(RequiresExplicitSelection)
+                         .GroupBy(column => column.Name, StringComparer.Ordinal)
+                         .Select(group => group.First()))
+            {
+                selection += ", " + RenderSelection(column);
+            }
         }
 
         var from = dialect.QuoteIdentifier(request.Table.Value);
@@ -321,12 +331,23 @@ public abstract class RelationalQueryRenderer
         latestOrder.AddRange(tieBreak
             .Where(column => !string.Equals(column.Name, latest.Timestamp.Name, StringComparison.Ordinal))
             .Select(column => RenderOrderTerm(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First))));
-        return "WITH __groundwork_base AS (SELECT " + selection + ", ROW_NUMBER() OVER (PARTITION BY " + RenderColumn(latest.Key) +
+        var partitions = new[] { latest.Key }
+            .Concat(options.LatestPartitionColumns)
+            .GroupBy(column => column.Name, StringComparer.Ordinal)
+            .Select(group => RenderColumn(group.First()));
+        return "WITH __groundwork_base AS (SELECT " + selection + ", ROW_NUMBER() OVER (PARTITION BY " + string.Join(", ", partitions) +
             " ORDER BY " + string.Join(", ", latestOrder) + ") AS __groundwork_latest_rank, 1 AS __groundwork_has_row FROM " + from + " WHERE " + where + ")";
     }
 
     /// <summary>Returns the provider expression used for comparisons and ordering of one column.</summary>
     protected virtual string RenderColumn(ColumnRef column) => dialect.QuoteIdentifier(column.Name);
+
+    /// <summary>Renders one selected expression and preserves the model column name as its result alias.</summary>
+    protected virtual string RenderSelection(ColumnRef column) =>
+        RenderColumn(column) + " AS " + dialect.QuoteIdentifier(column.Name);
+
+    /// <summary>True when a computed order column must be selected even for <see cref="Projection.All"/>.</summary>
+    protected virtual bool RequiresExplicitSelection(ColumnRef column) => false;
 
     /// <summary>Adapts a model value to the provider's declared physical representation.</summary>
     protected virtual object? AdaptParameter(QueryType type, object? value) => value;

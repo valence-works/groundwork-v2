@@ -20,6 +20,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(DocumentUnit);
         _ = typeof(DocumentReadResult<>);
         _ = typeof(PortableType);
+        _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
         _ = typeof(QueryCoverageException);
         _ = typeof(RecordTable);
@@ -36,6 +37,12 @@ internal static class PublicApiApprovalFixture
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
         _ = typeof(StorageAccess);
+        _ = typeof(StorageAccessAudit);
+        _ = typeof(StorageAccessEvent);
+        _ = typeof(IStorageAccessObserver);
+        _ = typeof(IPrivilegedCrossScopeQuerySession);
+        _ = typeof(CrossScopeQueryResult);
+        _ = typeof(CrossScopeQueryRow);
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
         _ = typeof(SqliteProviderFactory);
@@ -52,6 +59,9 @@ internal static class PublicApiApprovalFixture
             (session, operation, options) => session.ApplyRetention(operation, options));
         _ = new RetentionExecutionOptions { KeepNewestOverride = 0 };
         _ = new Func<IStorageSession, StorageInspection>(session => session.Inspect());
+        _ = new Func<StorageAccessAudit, StorageAccess>(StorageAccess.PrivilegedAcrossScopes);
+        _ = new Func<IStorageSession, QueryRequest, CrossScopeQueryResult>(
+            (session, request) => session.QueryAcrossScopes(request));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableStoreUnitOfWork<ApprovalRecord>>((table, connection) => table.BeginUnitOfWork(connection, BatchWriteOptions.Exact));
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));

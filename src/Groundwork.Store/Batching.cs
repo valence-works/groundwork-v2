@@ -63,6 +63,12 @@ public static class BatchWriteCapabilities
         "Replay-stable exact retention",
         "Records a caller operation identity and immutable retention result so acknowledgement-loss retries replay without deleting again.");
 
+    public static CapabilityDescriptor AtomicCommitDescriptor { get; } = new(
+        WellKnownCapabilities.AtomicCommit,
+        "Atomic commit",
+        "Commits all staged writes across the declared storage units in one provider transaction.",
+        EvidenceGatedByDefault: true);
+
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
         Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor });
 
@@ -92,7 +98,8 @@ public static class BatchWriteCapabilities
         string batchCost,
         bool exactAppendOutcomes,
         bool durableHighWaterInspection,
-        bool exactRetention)
+        bool exactRetention,
+        bool atomicCommit = false)
     {
         var descriptors = new List<CapabilityDescriptor>
         {
@@ -127,6 +134,11 @@ public static class BatchWriteCapabilities
             descriptors.Add(ExactRetentionDescriptor with
             {
                 Description = $"Replays operation-identified retention results on {provider}; the operation ledger and cleanup are durable."
+            });
+        if (atomicCommit)
+            descriptors.Add(AtomicCommitDescriptor with
+            {
+                Description = $"Commits all staged writes across declared {provider} storage units in one provider transaction."
             });
         if (nativeBatch)
             descriptors.Add(NativeBatchDescriptor);

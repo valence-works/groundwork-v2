@@ -207,6 +207,20 @@ public static class QueryRequestExecution
         };
     }
 
+    /// <summary>Builds a provider execution request with additional internal projection columns.</summary>
+    public static QueryRequest WithProjection(QueryRequest request, Projection projection)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (projection is null) throw new ArgumentNullException(nameof(projection));
+        return new QueryRequest(request.Table, request.Where, request.Order, projection, request.Paging,
+            request.Result, request.LatestPerKey, request.AcceptedScan)
+        {
+            CanonicalPredicate = request.CanonicalPredicate,
+            ContinuationFingerprint = request.ContinuationFingerprint,
+            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+        };
+    }
+
     public static QueryRequest ForPage(QueryRequest request, QueryRenderOptions options)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));

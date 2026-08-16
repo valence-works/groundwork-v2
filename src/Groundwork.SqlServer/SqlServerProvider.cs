@@ -42,7 +42,8 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         batchCost: "uses one durable table-valued-parameter MERGE batch; VALUES is a compatibility fallback",
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
-        exactRetention: true);
+        exactRetention: true,
+        atomicCommit: true);
 
     internal object Gate => gate;
 
@@ -87,6 +88,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(units);
+        StorageAccessValidation.EnsureUnitOfWork(access);
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
         if (units.Any(unit => unit is null))

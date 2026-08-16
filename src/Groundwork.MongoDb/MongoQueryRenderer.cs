@@ -9,7 +9,11 @@ public sealed class MongoQueryRenderer
 {
     private const string MatchNoneField = "_groundwork_match_none";
 
-    public MongoQueryCommand Render(QueryRequest request, QueryRenderOptions? options = null, string? physicalCollectionName = null)
+    public MongoQueryCommand Render(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        string? physicalCollectionName = null,
+        IReadOnlyList<BsonDocument>? sourcePrefix = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         options ??= QueryRenderOptions.Default;
@@ -82,7 +86,9 @@ public sealed class MongoQueryRenderer
             : new BsonDocument(request.Projection.Columns.ToDictionary(column => column.Name, _ => (BsonValue)1));
         var sort = new BsonDocument(order.Select(term =>
             new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1)));
-        var pipeline = RenderPipeline(physicalCollectionName ?? request.Table.Value, baseFilter, cursor, request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount, options);
+        var pipeline = RenderPipeline(physicalCollectionName ?? request.Table.Value, baseFilter, cursor,
+            request.LatestPerKey, order, projection, request.Paging, request.Result.IncludesTotalCount,
+            options, sourcePrefix);
         return new MongoQueryCommand(
             filter,
             sort,
@@ -334,12 +340,14 @@ public sealed class MongoQueryRenderer
         BsonDocument projection,
         Paging paging,
         bool includesTotalCount,
-        QueryRenderOptions options)
+        QueryRenderOptions options,
+        IReadOnlyList<BsonDocument>? sourcePrefix)
     {
-        if (order.Count == 0 && !includesTotalCount && latest is null)
+        if (order.Count == 0 && !includesTotalCount && latest is null && sourcePrefix is null)
             return Array.Empty<BsonDocument>();
 
-        var prefix = new List<BsonDocument> { new("$match", baseFilter.DeepClone()) };
+        var prefix = sourcePrefix?.Select(stage => stage.DeepClone().AsBsonDocument).ToList() ?? [];
+        prefix.Add(new BsonDocument("$match", baseFilter.DeepClone()));
         if (latest is not null)
         {
             var latestSort = new BsonDocument
@@ -364,9 +372,15 @@ public sealed class MongoQueryRenderer
                 tieIndex++;
             }
             prefix.Add(new BsonDocument("$sort", latestSort));
+            BsonValue latestGroup = options.LatestPartitionColumns.Length == 0
+                ? "$" + latest.Key.Name
+                : new BsonDocument(
+                    new[] { latest.Key }.Concat(options.LatestPartitionColumns)
+                        .GroupBy(column => column.Name, StringComparer.Ordinal)
+                        .Select(group => new BsonElement(group.Key, "$" + group.Key)));
             prefix.Add(new BsonDocument("$group", new BsonDocument
             {
-                { "_id", "$" + latest.Key.Name },
+                { "_id", latestGroup },
                 { "__groundwork_latest", new BsonDocument("$first", "$$ROOT") }
             }));
             prefix.Add(new BsonDocument("$replaceWith", "$__groundwork_latest"));

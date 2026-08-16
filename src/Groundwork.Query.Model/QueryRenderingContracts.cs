@@ -186,6 +186,7 @@ public sealed record QueryRenderOptions
             throw new ArgumentException("Tie-break columns cannot contain null references.", nameof(tieBreakColumns));
         PhysicalIndexNames = ImmutableDictionary<string, string>.Empty.WithComparers(StringComparer.Ordinal);
         SearchKeyColumns = ImmutableDictionary<string, QuerySearchKeyColumn>.Empty.WithComparers(StringComparer.Ordinal);
+        LatestPartitionColumns = ImmutableArray<ColumnRef>.Empty;
     }
 
     /// <summary>Provider defaults are used unless a declaration explicitly requests pinning.</summary>
@@ -195,6 +196,9 @@ public sealed record QueryRenderOptions
     public string? SelectedIndex { get; }
     /// <summary>Declared identity columns appended to the requested order for deterministic paging.</summary>
     public ImmutableArray<ColumnRef> TieBreakColumns { get; init; }
+
+    /// <summary>Provider-owned partition columns added to LatestPerKey grouping.</summary>
+    public ImmutableArray<ColumnRef> LatestPartitionColumns { get; init; }
 
     /// <summary>Provider-resolved physical names for declared logical indexes.</summary>
     public IReadOnlyDictionary<string, string> PhysicalIndexNames { get; init; }

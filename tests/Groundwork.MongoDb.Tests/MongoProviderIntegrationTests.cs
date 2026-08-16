@@ -652,6 +652,34 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Exact_batch_inline_version_is_authoritative_for_conditional_delete()
+    {
+        using var connection = OpenConnection();
+        var unit = RequiredFoldedUnit(
+            "mongo-exact-delete-version",
+            concurrency: ConcurrencyDeclaration.Optimistic());
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.Equal(1, session.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Open" })).Version);
+
+        var exact = Assert.IsAssignableFrom<IBatchedStorageSession>(session).ApplyBatch(
+            [RowWrite.Upsert(unit,
+                new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["status"] = "Leased" }),
+                WriteOptions.IfVersion(1))],
+            exactOutcomes: true);
+        Assert.Equal(2, Assert.Single(exact).Outcome.Version);
+
+        var deleted = session.Delete(
+            new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
+            MongoWriteOptions.IfVersion(2));
+
+        Assert.Equal(MongoWriteOutcomeStatus.Deleted, deleted.Status);
+        Assert.Equal(2, deleted.Version);
+        Assert.Null(session.Read(new MongoStorageKey(new Dictionary<string, object?> { ["id"] = 1 })));
+    }
+
+    [SkippableFact]
     public void Folded_aggregate_batch_does_not_report_an_unmatched_incomplete_upsert_as_success()
     {
         using var connection = OpenConnection();
@@ -795,7 +823,11 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void Provider_sequence_is_capability_gated_by_mongodb_transactions()
     {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var connection = OpenConnection();
+        using var store = new MongoProviderFactory().Create(connectionString!);
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("p1-sequence-" + Guid.NewGuid().ToString("N")),
@@ -814,17 +846,95 @@ public sealed class MongoProviderIntegrationTests
         {
             var fit = Assert.IsType<ProviderFit.Unsupported>(connection.ProviderSequenceFit);
             Assert.Contains(MongoCapabilities.ProviderSequence, fit.MissingRequirements);
+            Assert.DoesNotContain(store.Capabilities,
+                capability => capability.Id == WellKnownCapabilities.AtomicCommit);
             var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
             Assert.Contains("transaction-capable", refusal.Message, StringComparison.OrdinalIgnoreCase);
             return;
         }
 
         Assert.IsType<ProviderFit.Supported>(connection.ProviderSequenceFit);
+        Assert.Contains(store.Capabilities,
+            capability => capability.Id == WellKnownCapabilities.AtomicCommit);
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         var result = session.Insert(new MongoStorageValues(new Dictionary<string, object?> { ["payload"] = "sequence" }));
         Assert.True(result.Succeeded);
         Assert.Equal(1L, result.GeneratedValue<long>("sequence"));
+    }
+
+    [SkippableFact]
+    public void Scoped_unit_of_work_registration_is_visible_to_privileged_queries()
+    {
+        using var connection = OpenConnection();
+        var unit = ScopedCrossScopeUnit("uow-registry");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var scope = MongoStorageAccess.Scoped(new StorageScope("uow-only-\U00010000"));
+
+        using (var unitOfWork = connection.BeginUnitOfWork(scope, unit))
+        {
+            var outcome = unitOfWork.OpenSession(unit).Insert(new MongoStorageValues(
+                new Dictionary<string, object?> { ["id"] = "one", ["value"] = "from-uow" }));
+            Assert.Equal(MongoWriteOutcomeStatus.Inserted, outcome.Status);
+            unitOfWork.Commit();
+        }
+
+        var privileged = connection.OpenSession(unit, MongoStorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("mongo-registry-test", "verify-uow-only-scope")));
+        Assert.Throws<InvalidOperationException>(() => privileged.Read(
+            new MongoStorageKey(new Dictionary<string, object?> { ["id"] = "one" })));
+        Assert.Throws<InvalidOperationException>(() => privileged.Insert(new MongoStorageValues(
+            new Dictionary<string, object?> { ["id"] = "refused", ["value"] = "refused" })));
+        Assert.Throws<InvalidOperationException>(() => privileged.Aggregate(new AggregationQuery("refused")));
+        var result = privileged.QueryAcrossScopes(new QueryRequest(
+            new TableId(unit.Name),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None));
+
+        var row = Assert.Single(result.Rows);
+        Assert.Equal("uow-only-\U00010000", row.Scope.Value);
+        Assert.Equal("from-uow", row.Values["value"]);
+    }
+
+    [SkippableFact]
+    public void Privileged_query_refuses_provider_scope_registry_drift()
+    {
+        using var connection = OpenConnection();
+        var unit = ScopedCrossScopeUnit("registry-drift");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        connection.OpenSession(unit, MongoStorageAccess.Scoped(new StorageScope("tenant-a")))
+            .Insert(new MongoStorageValues(
+                new Dictionary<string, object?> { ["id"] = "one", ["value"] = "visible" }));
+        var native = Assert.IsType<MongoDbProviderConnection>(connection);
+        native.Database.GetCollection<BsonDocument>("__groundwork_metadata").UpdateOne(
+            new BsonDocument { ["kind"] = "scope", ["unit"] = unit.Id.Value },
+            new BsonDocument("$set", new BsonDocument("collection", "forged-collection")));
+        var privileged = connection.OpenSession(unit, MongoStorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("mongo-registry-test", "verify-registry-drift-refusal")));
+
+        var failure = Assert.Throws<InvalidOperationException>(() => privileged.QueryAcrossScopes(
+            new QueryRequest(new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None)));
+
+        Assert.Contains("GW-ACCESS-006", failure.Message, StringComparison.Ordinal);
+    }
+
+    private static StorageUnit ScopedCrossScopeUnit(string prefix)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        return new StorageUnit
+        {
+            Id = new StorageUnitId($"mongo-{prefix}-{suffix}"),
+            Name = $"mongo_{prefix.Replace("-", "_", StringComparison.Ordinal)}_{suffix}",
+            Scope = ScopePolicy.Scoped,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+                new() { Name = "value", Type = PortableType.String, IsNullable = false, MaxLength = 64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
     }
 
     private static MongoStorageValues CustomerValues(string id, string? email) => new(new Dictionary<string, object?>

@@ -1,5 +1,6 @@
 using Groundwork.Substrate.Relational;
 using Groundwork.Query.Model;
+using Groundwork.Store;
 
 namespace Groundwork.PostgreSql;
 
@@ -17,9 +18,17 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         ? timestamp.ToUniversalTime().Ticks
         : value;
 
-    protected override string RenderColumn(ColumnRef column) => column.Type == QueryType.String
-        ? "(" + base.RenderColumn(column) + " COLLATE \"C\")"
-        : base.RenderColumn(column);
+    protected override string RenderColumn(ColumnRef column)
+    {
+        if (string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal))
+            return "upper(encode(sha256(convert_to(" + Dialect.QuoteIdentifier(PostgreSqlSchemaCoordinator.ScopeColumn) + ", 'UTF8')), 'hex'))";
+        return column.Type == QueryType.String
+            ? "(" + base.RenderColumn(column) + " COLLATE \"C\")"
+            : base.RenderColumn(column);
+    }
+
+    protected override bool RequiresExplicitSelection(ColumnRef column) =>
+        string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal);
 
     protected override string RenderOrderTerm(OrderTerm term)
     {
