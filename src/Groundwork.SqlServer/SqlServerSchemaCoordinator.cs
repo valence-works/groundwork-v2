@@ -86,8 +86,19 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
                     derived.AlgorithmId ?? throw new InvalidOperationException($"Derived search-key column '{derived.Name}' is missing its algorithm identity.")))
             ]);
 
-    internal static string BatchTypeName(StorageUnit physical) =>
-        SqlServerPhysicalName.Normalize("__groundwork_batch_type_" + physical.Id.Value);
+    internal static string BatchTypeName(StorageUnit physical)
+    {
+        ArgumentNullException.ThrowIfNull(physical);
+        PortabilityValidator.EnsurePhysicalIdentifier(physical.Name, "name");
+        var composed = $"__groundwork_batch_type_{physical.Name.Length}_{physical.Name}";
+        var nativeName = SqlServerPhysicalName.Normalize(composed);
+        PortabilityValidator.EnsurePhysicalIdentifier(
+            nativeName,
+            "sqlserver.batchType.name",
+            maximumByteLength: 128,
+            allowProviderOwnedPrefix: true);
+        return nativeName;
+    }
 
     private static string BatchTypeCanonicalDefinition(StorageUnit physical) =>
         JsonSerializer.Serialize(physical.Columns.Select(column => new
@@ -115,6 +126,8 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        PortabilityValidator.EnsurePhysicalIdentifiers(source);
+        EnsurePhysicalIndexNames(source);
         ProviderOwnedColumns.ValidateLogicalDeclaration(source);
         ConcurrencyDeclaration.ValidateDeclaration(source);
         source = SearchKeyProjection.Expand(source);
@@ -207,6 +220,28 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         if (physical.Id.Value.Length > 450)
             throw new InvalidOperationException("SQL Server storage-unit ids must contain at most 450 UTF-16 code units.");
         return physical;
+    }
+
+    private static void EnsurePhysicalIndexNames(StorageUnit source)
+    {
+        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var index in source.Indexes)
+        {
+            var physicalName = SqlServerDialect.PhysicalIndexName(source.Name, index.Name);
+            var path = $"indexes.{index.Name}.physicalName";
+            PortabilityValidator.EnsurePhysicalIdentifier(
+                physicalName,
+                path,
+                maximumByteLength: 128,
+                allowProviderOwnedPrefix: true);
+            if (seen.TryGetValue(physicalName, out var previous))
+            {
+                throw new InvalidOperationException(
+                    $"GW-PORT-011 at {path}: Provider-generated physical index name '{physicalName}' " +
+                    $"collides with index '{previous}'; choose identifiers whose composed names remain unique.");
+            }
+            seen.Add(physicalName, index.Name);
+        }
     }
 
     private void Remember(StorageUnit original, StorageUnit physical) => units[original.Id] = physical;

@@ -41,7 +41,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
         var session = new SqliteStorageSession(owner, SqliteSchemaCoordinator.Physicalize(unit), access, connection, transaction);
         sessions.Add(session);
-        var batched = new BatchStorageSession(session, batch);
+        var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);
         return batched;
     }

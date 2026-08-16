@@ -22,6 +22,131 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public void Live_compare_and_delete_preserves_revision_cas_and_exact_rollback()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var name = "compare_delete_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 100, IsNullable = false },
+                new ColumnDefinition { Name = "owner", Type = PortableType.String, MaxLength = 100 },
+                new ColumnDefinition { Name = "fence", Type = PortableType.Int64, IsNullable = false },
+                new ColumnDefinition { Name = "amount", Type = PortableType.Decimal, Precision = 12, Scale = 2 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var marker = new StorageUnit
+        {
+            Id = new StorageUnitId(name + "_marker"),
+            Name = name + "_marker",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 100, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 100, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(marker).Applied);
+        Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.CompareAndDelete);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(1L, session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
+        })).Version);
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-decimal", ["owner"] = "worker-a", ["fence"] = 7L, ["amount"] = 7m
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-decimal" }),
+                new Dictionary<string, object?> { ["amount"] = 7 }).Status);
+
+        Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L }).Status);
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-trailing", ["owner"] = "worker-a", ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-trailing" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-a ", ["fence"] = 7L }).Status);
+        Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-trailing" })));
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-key", ["owner"] = "worker-a", ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.NotFound,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-key " }),
+                new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L }).Status);
+        Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-key" })));
+        Assert.Equal(2L, session.Update(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
+        }), WriteOptions.IfVersion(1)).Version);
+        var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
+        Assert.Equal(WriteOutcomeStatus.Deleted, deleted.Status);
+        Assert.Equal(2L, deleted.Version);
+        Assert.Equal(WriteOutcomeStatus.NotFound,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-a" }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-null", ["owner"] = null, ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-null" }),
+                new Dictionary<string, object?> { ["owner"] = null }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-omitted", ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-omitted" }),
+                new Dictionary<string, object?> { ["owner"] = null }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-2", ["owner"] = "worker-a", ["fence"] = 7L
+        }));
+        var claimed = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-2" }))!;
+        var reclaimer = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(2L, reclaimer.Update(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-2", ["owner"] = "worker-b", ["fence"] = 8L
+        }), WriteOptions.IfVersion(claimed.Version!.Value)).Version);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit, marker);
+        work.Stage(RowWrite.Insert(marker, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "marker", ["value"] = "must-rollback"
+        })));
+        var compare = RowWrite.CompareAndDelete(unit,
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-2" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
+        work.Stage(compare);
+        var exception = Assert.Throws<BatchWriteException>(() => work.CommitWithOutcomes());
+        var outcome = Assert.Single(exception.Outcomes);
+        Assert.Same(compare, outcome.Write);
+        Assert.Equal(WriteOutcomeStatus.ComparisonMismatch, outcome.Outcome.Status);
+        var reclaimed = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-2" }))!;
+        Assert.Equal("worker-b", reclaimed.Values.Values["owner"]);
+        Assert.Equal(8L, reclaimed.Values.Values["fence"]);
+        Assert.Equal(2L, reclaimed.Version);
+        Assert.Null(connection.OpenSession(marker, StorageAccess.Global).Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "marker" })));
+    }
+
+    [Fact]
     public void W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix()
     {
         foreach (var (keyCount, includePartialUniqueIndex, optimistic) in W2Shapes())
@@ -71,14 +196,68 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
                 new() { Name = "email", Type = PortableType.String, MaxLength = 320, IsNullable = false }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
-            Indexes = [new IndexDefinition { Name = "by-email", Columns = [new IndexColumn("email")], IsUnique = true }]
+            Indexes = [new IndexDefinition { Name = "by_email", Columns = [new IndexColumn("email")], IsUnique = true }]
         };
 
         Assert.True(connection.Schema.Apply(unit).Applied);
         var indexes = connection.Catalog.ReadIndexes(unit.Id);
-        var email = Assert.Single(indexes, index => index.Name == "by-email");
+        var email = Assert.Single(indexes, index => index.Name == "by_email");
         Assert.True(email.IsUnique);
         Assert.Equal("email", Assert.Single(email.Columns).Column);
+    }
+
+    [Fact]
+    public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.boundary.id"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    [Fact]
+    public void Exact_batch_writes_with_an_unconstrained_logical_id_use_the_validated_physical_type_name()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.id/with spaces/" + new string('x', 80)),
+            Name = "sqlserver_batch_boundary",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 1,
+            ["payload"] = "one"
+        })));
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = 2,
+            ["payload"] = "two"
+        })));
+
+        var report = work.CommitWithOutcomes();
+
+        Assert.Equal(2, report.Summary.Succeeded);
+        Assert.All(report.Outcomes, outcome => Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Outcome.Status));
     }
 
     [Fact]
@@ -204,7 +383,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             "Server=invalid-host.invalid,1433;Database=master;User Id=sa;Password=Groundwork!2026;Encrypt=False;TrustServerCertificate=True");
         var unit = new StorageUnit
         {
-            Id = new StorageUnitId("unbounded-key"), Name = "unbounded-key",
+            Id = new StorageUnitId("unbounded-key"), Name = "unbounded_key",
             Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
             Key = new KeyDefinition { Columns = ["id"] }
         };

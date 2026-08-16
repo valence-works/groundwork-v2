@@ -40,7 +40,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
         var session = new PostgreSqlStorageSession(owner, physical, access, connection, transaction);
         sessions.Add(session);
-        var batched = new BatchStorageSession(session, batch);
+        var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);
         return batched;
     }

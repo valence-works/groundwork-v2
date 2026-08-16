@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
@@ -156,7 +157,7 @@ public sealed class PostgreSqlDialectTests
     {
         var index = new IndexDefinition
         {
-            Name = "by-name",
+            Name = "by_name",
             Columns =
             [
                 new IndexColumn("name", SortDirection.Ascending),
@@ -169,6 +170,43 @@ public sealed class PostgreSqlDialectTests
         Assert.Contains("\"name\" ASC NULLS FIRST", sql, StringComparison.Ordinal);
         Assert.Contains("\"createdAt\" DESC NULLS LAST", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INDEXED BY", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Composed_index_names_are_hashed_to_the_63_byte_postgreSQL_budget()
+    {
+        var table = new string('t', PortabilityValidator.MaximumPortableIdentifierLength);
+        var index = new IndexDefinition
+        {
+            Name = "i",
+            Columns = [new IndexColumn("value")]
+        };
+
+        var logical = $"__groundwork_ix_{table.Length}_{table}_{index.Name.Length}_{index.Name}";
+        var hash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(logical)))[..10].ToLowerInvariant();
+        var expected = logical[..(PortabilityValidator.MaximumPortableIdentifierLength - hash.Length - 1)] + "_" + hash;
+        var sql = dialect.CreateIndexSql(table, index, null);
+
+        Assert.Contains($"\"{expected}\"", sql, StringComparison.Ordinal);
+        Assert.Equal(PortabilityValidator.MaximumPortableIdentifierLength, expected.Length);
+    }
+
+    [SkippableFact]
+    public void Provider_applies_a_63_byte_storage_unit_name_without_rewriting()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.boundary.id"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
     [Fact]
@@ -238,7 +276,7 @@ public sealed class PostgreSqlDialectTests
               AND index_class.relname=@index;
             """;
         command.Parameters.AddWithValue("table", unit.Name);
-        command.Parameters.AddWithValue("index", unit.Name + "__by-name");
+        command.Parameters.AddWithValue("index", PhysicalIndexName(unit.Name, "by_name"));
         using var reader = command.ExecuteReader();
         Assert.True(reader.Read());
         Assert.Equal((short)2, reader.GetInt16(0)); // ASC NULLS FIRST
@@ -257,12 +295,13 @@ public sealed class PostgreSqlDialectTests
         {
             raw.Open();
             using var command = raw.CreateCommand();
-            command.CommandText = $"DROP INDEX \"{unit.Name}__by-name\"; CREATE INDEX \"{unit.Name}__by-name\" ON \"{unit.Name}\" (\"value\");";
+            var physicalIndexName = PhysicalIndexName(unit.Name, "by_name");
+            command.CommandText = $"DROP INDEX \"{physicalIndexName}\"; CREATE INDEX \"{physicalIndexName}\" ON \"{unit.Name}\" (\"value\");";
             command.ExecuteNonQuery();
         }
 
         var exception = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
-        Assert.Contains("by-name", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("by_name", exception.Message, StringComparison.Ordinal);
     }
 
     [SkippableFact]
@@ -326,7 +365,7 @@ public sealed class PostgreSqlDialectTests
             [
                 new IndexDefinition
                 {
-                    Name = "unique-email-present",
+                    Name = "unique_email_present",
                     Columns = [new IndexColumn("email")],
                     IsUnique = true,
                     MissingValues = MissingValueBehavior.Excluded
@@ -457,6 +496,128 @@ public sealed class PostgreSqlDialectTests
             report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
     }
 
+    [SkippableFact]
+    public void Live_compare_and_delete_preserves_revision_cas_and_exact_rollback()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var name = "pg_compare_delete_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "owner", Type = PortableType.String },
+                new ColumnDefinition { Name = "fence", Type = PortableType.Int64, IsNullable = false },
+                new ColumnDefinition { Name = "amount", Type = PortableType.Decimal, Precision = 12, Scale = 2 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        connection.Schema.Apply(unit);
+        var marker = new StorageUnit
+        {
+            Id = new StorageUnitId(name + "_marker"),
+            Name = name + "_marker",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(marker);
+        Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.CompareAndDelete);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(1L, session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
+        })).Version);
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-decimal", ["owner"] = "worker-a", ["fence"] = 7L, ["amount"] = 7m
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-decimal" }),
+                new Dictionary<string, object?> { ["amount"] = 7 }).Status);
+
+        var mismatchObserver = new WritePathObserver();
+        Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
+                new WriteOptions { Observer = mismatchObserver }).Status);
+        Assert.Equal(1, mismatchObserver.RoundTrips);
+        Assert.Contains(mismatchObserver.Commands, command => command.Operation == "postgresql.compare-and-delete-read");
+        Assert.Equal(2L, session.Update(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
+        }), WriteOptions.IfVersion(1)).Version);
+        var deleteObserver = new WritePathObserver();
+        var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
+            new WriteOptions { Observer = deleteObserver });
+        Assert.Equal(WriteOutcomeStatus.Deleted, deleted.Status);
+        Assert.Equal(2L, deleted.Version);
+        Assert.Equal(2, deleteObserver.RoundTrips);
+        Assert.Contains(deleteObserver.Commands, command => command.Operation == "postgresql.compare-and-delete");
+        Assert.Equal(WriteOutcomeStatus.NotFound,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-a" }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-reclaimed", ["owner"] = "worker-a", ["fence"] = 7L
+        }));
+        var claimed = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-reclaimed" }))!;
+        using (var compareWork = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit, marker))
+        {
+            compareWork.Stage(RowWrite.Insert(marker, new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = "marker", ["value"] = "must-rollback"
+            })));
+            var compare = RowWrite.CompareAndDelete(unit,
+                new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-reclaimed" }),
+                new Dictionary<string, object?> { ["owner"] = claimed.Values.Values["owner"], ["fence"] = claimed.Values.Values["fence"] });
+            compareWork.Stage(compare);
+
+            var reclaimer = connection.OpenSession(unit, StorageAccess.Global);
+            Assert.Equal(2L, reclaimer.Update(new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = "claim-reclaimed", ["owner"] = "worker-b", ["fence"] = 8L
+            }), WriteOptions.IfVersion(claimed.Version!.Value)).Version);
+
+            var exception = Assert.Throws<BatchWriteException>(() => compareWork.CommitWithOutcomes());
+            var outcome = Assert.Single(exception.Outcomes);
+            Assert.Same(compare, outcome.Write);
+            Assert.Equal(WriteOutcomeStatus.ComparisonMismatch, outcome.Outcome.Status);
+            var reclaimed = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-reclaimed" }))!;
+            Assert.Equal("worker-b", reclaimed.Values.Values["owner"]);
+            Assert.Equal(8L, reclaimed.Values.Values["fence"]);
+            Assert.Equal(2L, reclaimed.Version);
+            Assert.Null(connection.OpenSession(marker, StorageAccess.Global).Read(
+                new StorageKey(new Dictionary<string, object?> { ["id"] = "marker" })));
+        }
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-null", ["owner"] = null, ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-null" }),
+                new Dictionary<string, object?> { ["owner"] = null }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-omitted", ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-omitted" }),
+                new Dictionary<string, object?> { ["owner"] = null }).Status);
+
+    }
+
     private sealed class PostgreSqlFixture : IDisposable
     {
         private readonly string adminConnectionString;
@@ -520,7 +681,7 @@ public sealed class PostgreSqlDialectTests
         [
             new IndexDefinition
             {
-                Name = "by-name",
+                Name = "by_name",
                 Columns =
                 [
                     new IndexColumn("value", SortDirection.Ascending),
@@ -529,4 +690,7 @@ public sealed class PostgreSqlDialectTests
             }
         ]
     };
+
+    private static string PhysicalIndexName(string table, string index) =>
+        $"__groundwork_ix_{table.Length}_{table}_{index.Length}_{index}";
 }

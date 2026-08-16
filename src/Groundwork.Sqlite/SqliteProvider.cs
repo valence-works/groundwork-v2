@@ -60,7 +60,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         exactAppendOutcomes: true,
         durableHighWaterInspection: true,
         exactRetention: true,
-        atomicCommit: true);
+        atomicCommit: true,
+        compareAndDelete: true);
 
     internal object Gate => gate;
 
@@ -89,6 +90,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
         schemaCoordinator.EnsureRuntimeAdmission(unit);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
@@ -117,6 +119,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         foreach (var unit in units)
         {
             ArgumentNullException.ThrowIfNull(unit);
+            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
             SqliteSchemaCoordinator.ValidateAccess(unit, access);
             schemaCoordinator.EnsureRuntimeAdmission(unit);
         }

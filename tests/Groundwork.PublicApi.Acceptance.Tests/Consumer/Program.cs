@@ -28,6 +28,7 @@ try
     RunRecordsJourney(connection);
     RunPrivilegedCrossScopeJourney(connection);
     RunExactAppendJourney(connection);
+    RunCompareAndDeleteJourney(connection);
     RunLifecycleJourney(connection);
     RunAggregationSourcePredicateJourney(connection);
     RunDocumentsJourney(connection);
@@ -131,6 +132,80 @@ static void RunExactAppendJourney(IStorageProviderConnection connection)
     Require(replayed.Outcomes[0].GeneratedValue<long>("sequence") == 1, "The package-only replay did not preserve its generated sequence.");
 }
 
+static void RunCompareAndDeleteJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("compare_delete_records"),
+        Name = "compare_delete_records",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "owner", Type = PortableType.String, MaxLength = 64 },
+            new() { Name = "fence", Type = PortableType.Int64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Concurrency = ConcurrencyDeclaration.Optimistic()
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The package-only compare-and-delete schema did not apply.");
+    Require(connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.CompareAndDelete),
+        "The package-only provider did not advertise atomic compare-and-delete.");
+
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    Require(session is ICompareAndDeleteStorageSession,
+        "The package-only session did not expose the advertised compare-and-delete capability.");
+    var inserted = session.Insert(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "claim", ["owner"] = "worker-a", ["fence"] = 7L
+    }));
+    Require(inserted.Status == WriteOutcomeStatus.Inserted && inserted.Version == 1,
+        "The package-only compare-and-delete setup did not insert version 1.");
+
+    var mismatch = session.CompareAndDelete(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L });
+    Require(mismatch.Status == WriteOutcomeStatus.ComparisonMismatch && session.Read(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" })) is not null,
+        "The package-only compare-and-delete did not preserve a mismatched claim.");
+
+    var renewed = session.Update(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "claim", ["owner"] = "worker-a", ["fence"] = 7L
+    }), WriteOptions.IfVersion(1));
+    Require(renewed.Status == WriteOutcomeStatus.Updated && renewed.Version == 2,
+        "The package-only claim renewal did not advance its revision.");
+    var deleted = session.CompareAndDelete(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
+    Require(deleted.Status == WriteOutcomeStatus.Deleted,
+        "The package-only compare-and-delete did not delete the renewed claim without a stale CAS token.");
+    Require(session.CompareAndDelete(
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-a" }).Status == WriteOutcomeStatus.NotFound,
+        "The package-only compare-and-delete did not distinguish an absent claim.");
+
+    session.Insert(new StorageValues(new Dictionary<string, object?>
+    {
+        ["id"] = "claim-exact", ["owner"] = "worker-a", ["fence"] = 9L
+    }));
+    var staged = RowWrite.CompareAndDelete(unit,
+        new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-exact" }),
+        new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 9L });
+    using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+    work.Stage(staged);
+    var report = work.CommitWithOutcomes();
+    var stagedOutcome = AssertSingle(report.Outcomes);
+    Require(ReferenceEquals(stagedOutcome.Write, staged) &&
+            stagedOutcome.Outcome.Status == WriteOutcomeStatus.Deleted,
+        "The package-only exact batch did not attribute the staged compare-and-delete outcome.");
+}
+
+static T AssertSingle<T>(IReadOnlyList<T> items)
+{
+    Require(items.Count == 1, "The package-only exact batch returned an unexpected outcome count.");
+    return items[0];
+}
+
 static void RunLifecycleJourney(IStorageProviderConnection connection)
 {
     var unit = new KernelStorageUnit
@@ -166,7 +241,7 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
         .OptimisticConcurrency()
         .Column(customer => customer.Email, column => column.MaxLength(320).Required())
         .Column(customer => customer.Name, column => column.MaxLength(200).Required())
-        .Index("by-email", customer => customer.Email)
+        .Index("by_email", customer => customer.Email)
         .Build();
 
     var applied = connection.Schema.Apply(table.Definition);
@@ -197,11 +272,11 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
     }
 
     var query = table.Query.Where(customer => customer.Email == "ada@example.test");
-    var matches = records.Query(query, RecordQueryOptions.UsingIndex("by-email"));
+    var matches = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));
     Require(matches.Count == 1 && matches[0].Name == "Ada Byron", "The covered typed query did not return the updated customer.");
 
     var uncovered = new RuntimeCoverageGate(
-        [new CoverageIndex("by-email", [new CoverageIndexColumn("email")])],
+        [new CoverageIndex("by_email", [new CoverageIndexColumn("email")])],
         []);
     try
     {
@@ -313,11 +388,55 @@ static void RunAggregationSourcePredicateJourney(IStorageProviderConnection conn
 
 static void RunFailureJourneys(IStorageProviderConnection connection)
 {
+    var overlongName = new string('u', PortabilityValidator.MaximumPortableIdentifierLength + 2);
+    var forgedOverlong = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("logical.id/with spaces and punctuation"),
+        Name = overlongName,
+        Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Guid, IsNullable = false }],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+    var overlongDiagnostic = PortabilityValidator.Validate(forgedOverlong).Refusals.Single(
+        refusal => refusal.Code == "GW-PORT-010");
+    Require(overlongDiagnostic.Path == "name" &&
+            overlongDiagnostic.Message.Contains(overlongName, StringComparison.Ordinal) &&
+            overlongDiagnostic.Message.Contains("at most 63 ASCII bytes", StringComparison.Ordinal) &&
+            overlongDiagnostic.Message.Contains("shorter", StringComparison.OrdinalIgnoreCase),
+        "The packed public API did not expose the stable overlong physical-name diagnostic.");
+    try
+    {
+        connection.Schema.Apply(forgedOverlong);
+        throw new InvalidOperationException("The provider admitted an overlong physical storage-unit name.");
+    }
+    catch (InvalidOperationException exception)
+    {
+        Require(exception.Message.Contains("GW-PORT-010", StringComparison.Ordinal) &&
+                exception.Message.Contains("at name", StringComparison.Ordinal) &&
+                exception.Message.Contains(overlongName, StringComparison.Ordinal) &&
+                exception.Message.Contains("at most 63 ASCII bytes", StringComparison.Ordinal) &&
+                exception.Message.Contains("shorter", StringComparison.OrdinalIgnoreCase),
+            "The provider did not refuse the forged overlong name before schema I/O.");
+    }
+
+    var forgedMalformedIndex = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("logical.index.id/with spaces"),
+        Name = "valid_unit",
+        Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Guid, IsNullable = false }],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by.id", Columns = [new IndexColumn("id")] }]
+    };
+    var malformedIndexDiagnostic = PortabilityValidator.Validate(forgedMalformedIndex).Refusals.Single(
+        refusal => refusal.Code == "GW-PORT-010");
+    Require(malformedIndexDiagnostic.Path == "indexes[0].name" &&
+            malformedIndexDiagnostic.Message.Contains("by.id", StringComparison.Ordinal),
+        "The packed public API did not expose a structural malformed-index diagnostic path.");
+
     try
     {
         _ = RecordTable.For<JsonRecord>("json_failure")
             .Key(row => row.Id)
-            .Index("by-payload", row => row.Payload)
+            .Index("by_payload", row => row.Payload)
             .Build();
         throw new InvalidOperationException("The declaration accepted an index over JSON.");
     }
@@ -348,7 +467,7 @@ static void RunFailureJourneys(IStorageProviderConnection connection)
     var folded = RecordTable.For<FoldedCustomer>("folded_customers")
         .Key(row => row.Id)
         .Column(row => row.Email, column => column.MaxLength(320).Required().Collation(PortableCollation.OrdinalIgnoreCase))
-        .Index("by-email", row => row.Email)
+        .Index("by_email", row => row.Email)
         .Build();
     try
     {

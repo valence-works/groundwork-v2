@@ -507,7 +507,7 @@ public sealed class ExactAppendProofTests
     private static StorageUnit JsonAppendUnit(string name) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
@@ -522,7 +522,7 @@ public sealed class ExactAppendProofTests
     private static StorageUnit DecimalUnit(string name) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
@@ -538,7 +538,7 @@ public sealed class ExactAppendProofTests
         TimeSpan? window = null) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
@@ -553,7 +553,7 @@ public sealed class ExactAppendProofTests
     private static StorageUnit NonSequenceUnit(string name) => new()
     {
         Id = new StorageUnitId(name),
-        Name = name,
+        Name = PhysicalName(name),
         Columns =
         [
             new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 200 },
@@ -562,6 +562,14 @@ public sealed class ExactAppendProofTests
         Key = new KeyDefinition { Columns = ["id"] },
         AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
     };
+
+    private static string PhysicalName(string name)
+    {
+        var normalized = name.Replace('-', '_');
+        return normalized.Length <= PortabilityValidator.MaximumPortableIdentifierLength
+            ? normalized
+            : normalized[..30] + "_" + normalized[^32..];
+    }
 
     private sealed class CapabilityHidingSession(IStorageSession inner) : IStorageSession
     {

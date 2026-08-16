@@ -12,6 +12,23 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
+    public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
+    {
+        using var connection = OpenConnection();
+        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("logical.boundary.id"),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    [SkippableFact]
     public void Schema_admission_refuses_invalid_aggregation_before_persistence()
     {
         using var connection = OpenConnection();
@@ -243,7 +260,7 @@ public sealed class MongoProviderIntegrationTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("mongo-aggregation-profile-drift-" + Guid.NewGuid().ToString("N")),
-            Name = "mongo_aggregation_profile_drift_" + Guid.NewGuid().ToString("N"),
+            Name = "mongo_aggregation_drift_" + Guid.NewGuid().ToString("N"),
             Columns =
             [
                 new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
@@ -308,6 +325,127 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Live_compare_and_delete_is_transactional_and_exact()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var native = OpenConnection();
+        Assert.True(native.ProviderSequenceFit is ProviderFit.Supported);
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var name = "mongo_compare_delete_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "owner", Type = PortableType.String },
+                new ColumnDefinition { Name = "fence", Type = PortableType.Int64, IsNullable = false },
+                new ColumnDefinition { Name = "amount", Type = PortableType.Decimal, Precision = 12, Scale = 2 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var marker = new StorageUnit
+        {
+            Id = new StorageUnitId(name + "_marker"),
+            Name = name + "_marker",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(marker).Applied);
+        Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.CompareAndDelete);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(1L, session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
+        })).Version);
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-decimal", ["owner"] = "worker-a", ["fence"] = 7L, ["amount"] = 7m
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-decimal" }),
+                new Dictionary<string, object?> { ["amount"] = 7 }).Status);
+
+        var mismatchObserver = new WritePathObserver();
+        Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
+                new WriteOptions { Observer = mismatchObserver }).Status);
+        Assert.Equal(2, mismatchObserver.RoundTrips);
+        Assert.Contains(mismatchObserver.Commands, command => command.Operation == "mongodb.compare-and-delete-read");
+        Assert.Equal(2L, session.Update(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
+        }), WriteOptions.IfVersion(1)).Version);
+        var deleteObserver = new WritePathObserver();
+        var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
+            new WriteOptions { Observer = deleteObserver });
+        Assert.Equal(WriteOutcomeStatus.Deleted, deleted.Status);
+        Assert.Equal(2L, deleted.Version);
+        Assert.Equal(3, deleteObserver.RoundTrips);
+        Assert.Contains(deleteObserver.Commands, command => command.Operation == "mongodb.compare-and-delete");
+        Assert.Equal(WriteOutcomeStatus.NotFound,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-a" }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-null", ["owner"] = null, ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-null" }),
+                new Dictionary<string, object?> { ["owner"] = null }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-omitted", ["fence"] = 7L
+        }));
+        Assert.Equal(WriteOutcomeStatus.Deleted,
+            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-omitted" }),
+                new Dictionary<string, object?> { ["owner"] = null }).Status);
+
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-2", ["owner"] = "worker-a", ["fence"] = 7L
+        }));
+        var claimed = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-2" }))!;
+        var reclaimer = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(2L, reclaimer.Update(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "claim-2", ["owner"] = "worker-b", ["fence"] = 8L
+        }), WriteOptions.IfVersion(claimed.Version!.Value)).Version);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit, marker);
+        work.Stage(RowWrite.Insert(marker, new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "marker", ["value"] = "must-rollback"
+        })));
+        var compare = RowWrite.CompareAndDelete(unit,
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-2" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
+        work.Stage(compare);
+        var exception = Assert.Throws<BatchWriteException>(() => work.CommitWithOutcomes());
+        var outcome = Assert.Single(exception.Outcomes);
+        Assert.Same(compare, outcome.Write);
+        Assert.Equal(WriteOutcomeStatus.ComparisonMismatch, outcome.Outcome.Status);
+        var reclaimed = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-2" }))!;
+        Assert.Equal("worker-b", reclaimed.Values.Values["owner"]);
+        Assert.Equal(8L, reclaimed.Values.Values["fence"]);
+        Assert.Equal(2L, reclaimed.Version);
+        Assert.Null(connection.OpenSession(marker, StorageAccess.Global).Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "marker" })));
+    }
+
+    [SkippableFact]
     public void Customer_schema_is_native_and_catalog_is_read_from_mongodb()
     {
         using var connection = OpenConnection();
@@ -329,10 +467,10 @@ public sealed class MongoProviderIntegrationTests
 
         Assert.False(first.IsNoOp);
         Assert.True(second.IsNoOp);
-        Assert.Contains(indexes, index => index.Name == "unique-email" &&
+        Assert.Contains(indexes, index => index.Name == "unique_email" &&
             index.IsUnique && index.MissingValues == MissingValueBehavior.Excluded);
-        Assert.Contains(reopenedIndexes, index => index.Name == "unique-email");
-        Assert.Contains("unique-email", indexNames);
+        Assert.Contains(reopenedIndexes, index => index.Name == "unique_email");
+        Assert.Contains("unique_email", indexNames);
 
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         var values = CustomerValues("one", "one@example.test");
@@ -455,13 +593,13 @@ public sealed class MongoProviderIntegrationTests
         connection.Schema.Apply(unit);
         var native = Assert.IsType<MongoDbProviderConnection>(connection).Database
             .GetCollection<BsonDocument>(unit.Name);
-        native.Indexes.DropOne("unique-email");
+        native.Indexes.DropOne("unique_email");
 
         var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
 
         Assert.True(report.IsProcessReady);
         Assert.Contains(report.IndexDrift, refusal => refusal.Code == "GW-RUNTIME-002" &&
-            refusal.Path == "indexes.unique-email");
+            refusal.Path == "indexes.unique_email");
         var session = connection.OpenSession(unit, MongoStorageAccess.Global);
         Assert.NotNull(session);
     }
@@ -493,7 +631,7 @@ public sealed class MongoProviderIntegrationTests
             Columns = [.. original.Columns.Select(column => column.Name == "status"
                 ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
                 : column)],
-            Indexes = [new IndexDefinition { Name = "unique-status", Columns = [new IndexColumn("status")], IsUnique = true }]
+            Indexes = [new IndexDefinition { Name = "unique_status", Columns = [new IndexColumn("status")], IsUnique = true }]
         };
 
         var exception = Assert.Throws<MongoCommandException>(() => connection.Schema.Apply(folded));
@@ -525,7 +663,7 @@ public sealed class MongoProviderIntegrationTests
             Columns = [.. original.Columns.Select(column => column.Name == "status"
                 ? column with { Collation = PortableCollation.OrdinalIgnoreCase }
                 : column)],
-            Indexes = [new IndexDefinition { Name = "unique-status", Columns = [new IndexColumn("status")], IsUnique = true }]
+            Indexes = [new IndexDefinition { Name = "unique_status", Columns = [new IndexColumn("status")], IsUnique = true }]
         };
 
         var applied = connection.Schema.Apply(folded);
@@ -725,7 +863,7 @@ public sealed class MongoProviderIntegrationTests
                     new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false, Collation = PortableCollation.OrdinalIgnoreCase }
                 ],
                 Key = new KeyDefinition { Columns = ["id"] },
-                Indexes = [new IndexDefinition { Name = "by-status", Columns = [new IndexColumn("status")] }]
+                Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
             };
             connection.Schema.Apply(unit);
             var session = connection.OpenSession(unit, MongoStorageAccess.Global);
@@ -742,12 +880,12 @@ public sealed class MongoProviderIntegrationTests
             var status = new ColumnRef(table, "status", QueryType.String, false, 32,
                 stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
             var options = new QueryRenderOptions(
-                [new QueryIndexDeclaration("by-status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.ProviderDefault)],
-                selectedIndex: "by-status");
+                [new QueryIndexDeclaration("by_status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.ProviderDefault)],
+                selectedIndex: "by_status");
             var result = session.Query(new QueryRequest(table,
                 new Predicate.StartsWith(status, "OP"), [], Projection.All, Paging.None), options);
 
-            Assert.Equal("by-status", result.SelectedIndex);
+            Assert.Equal("by_status", result.SelectedIndex);
             Assert.Equal([1], result.Rows.Select(row => Assert.IsType<int>(row["id"])));
             var artifact = Assert.Single(Directory.GetFiles(artifactDirectory, "*.json"));
             Assert.Contains("optimizer-selected", Path.GetFileName(artifact), StringComparison.Ordinal);
@@ -959,6 +1097,33 @@ public sealed class MongoProviderIntegrationTests
                 capability => capability.Id == WellKnownCapabilities.AtomicCommit);
             var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
             Assert.Contains("transaction-capable", refusal.Message, StringComparison.OrdinalIgnoreCase);
+
+            var compareUnit = new StorageUnit
+            {
+                Id = new StorageUnitId("mongo-standalone-compare-" + Guid.NewGuid().ToString("N")),
+                Name = "MongoStandaloneCompare_" + Guid.NewGuid().ToString("N"),
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                    new() { Name = "owner", Type = PortableType.String }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            };
+            Assert.True(store.Schema.Apply(compareUnit).Applied);
+            Assert.DoesNotContain(store.Capabilities,
+                capability => capability.Id == BatchWriteCapabilities.CompareAndDelete);
+            var compareSession = store.OpenSession(compareUnit, StorageAccess.Global);
+            Assert.False(compareSession is ICompareAndDeleteStorageSession);
+            var observer = new WritePathObserver();
+            Assert.Throws<NotSupportedException>(() => compareSession.CompareAndDelete(
+                new StorageKey(new Dictionary<string, object?> { ["id"] = "missing" }),
+                new Dictionary<string, object?> { ["owner"] = "worker" },
+                new WriteOptions { Observer = observer }));
+            Assert.Empty(observer.Commands);
+            var uowRefusal = Assert.Throws<InvalidOperationException>(() =>
+                store.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, compareUnit));
+            Assert.Contains("transaction", uowRefusal.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(observer.Commands);
             return;
         }
 
@@ -1078,7 +1243,7 @@ public sealed class MongoProviderIntegrationTests
             [
                 new IndexDefinition
                 {
-                    Name = uniqueStatus ? "unique-status" : "by-status",
+                    Name = uniqueStatus ? "unique_status" : "by_status",
                     Columns = [new IndexColumn("status")],
                     IsUnique = uniqueStatus
                 }

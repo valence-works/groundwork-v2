@@ -16,12 +16,12 @@ internal static class TestingFixture
         [
             new IndexDefinition
             {
-                Name = "by-value",
+                Name = "by_value",
                 Columns = [new IndexColumn("value")]
             },
             new IndexDefinition
             {
-                Name = "unique-value",
+                Name = "unique_value",
                 Columns = [new IndexColumn("uniqueValue")],
                 IsUnique = true,
                 MissingValues = MissingValueBehavior.Excluded

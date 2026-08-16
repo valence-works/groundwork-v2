@@ -44,7 +44,7 @@ public sealed class DocumentsContractTests
         var unit = DocumentUnit.For<NamedDocument>("named", "named")
             .Id(document => document.Id)
             .Project(document => document.DisplayName)
-            .Index("by-display", document => document.DisplayName, SortDirection.Descending)
+            .Index("by_display", document => document.DisplayName, SortDirection.Descending)
             .Build();
 
         Assert.Equal("display_name", Assert.Single(unit.Bindings).Path);
@@ -473,7 +473,7 @@ public sealed class DocumentsContractTests
         var missing = Assert.Throws<DocumentDeclarationException>(() =>
             DocumentUnit.For<Invoice>("invoice", "invoices")
                 .Id(invoice => invoice.Id)
-                .Index("by-name", invoice => invoice.Customer.Name)
+                .Index("by_name", invoice => invoice.Customer.Name)
                 .Build());
         Assert.Contains(missing.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-005");
 
@@ -481,7 +481,7 @@ public sealed class DocumentsContractTests
             DocumentUnit.For<Invoice>("invoice", "invoices")
                 .Id(invoice => invoice.Id)
                 .Project(invoice => invoice.Tags)
-                .Index("by-tags", invoice => invoice.Tags)
+                .Index("by_tags", invoice => invoice.Tags)
                 .Build());
         Assert.Contains(jsonIndex.Diagnostics, diagnostic => diagnostic.Code == "GW-DOC-DECL-006");
     }

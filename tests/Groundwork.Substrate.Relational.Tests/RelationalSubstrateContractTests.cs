@@ -294,7 +294,7 @@ public sealed class RelationalSubstrateContractTests
             new SchemaSubject(new StorageUnit
             {
                 Id = new StorageUnitId("tickets-derived"),
-                Name = "tickets-derived",
+                Name = "tickets_derived",
                 Columns =
                 [
                     new() { Name = "id", Type = PortableType.Int64 },

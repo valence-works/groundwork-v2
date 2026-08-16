@@ -20,8 +20,8 @@ public sealed class BuilderTests
             .Boolean("isActive", column => column.Required().Default(true))
             .Decimal("balance", 19, 4, column => column.Required())
             .Key("id")
-            .UniqueIndex("by-email", "email")
-            .Index("by-created", index => index.Descending("createdAt"))
+            .UniqueIndex("by_email", "email")
+            .Index("by_created", index => index.Descending("createdAt"))
             .Build();
 
         Assert.Equal("customer", customer.Id.Value);
@@ -43,10 +43,10 @@ public sealed class BuilderTests
             .String("id", 32, column => column.Required())
             .String("email", 320)
             .Key("id")
-            .UniqueIndex("by-email", index => index
+            .UniqueIndex("by_email", index => index
                 .Column("email")
                 .ExcludeMissingValues())
-            .Index("by-id", "id")
+            .Index("by_id", "id")
             .Build();
 
         Assert.Equal(MissingValueBehavior.Excluded, definition.Indexes[0].MissingValues);
@@ -62,7 +62,7 @@ public sealed class BuilderTests
                 .String("name", column => column.Required())
                 .Decimal("amount")
                 .Key("name")
-                .Index("by-name", "name")
+                .Index("by_name", "name")
                 .Build());
 
         Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-PORT-002");
@@ -78,8 +78,8 @@ public sealed class BuilderTests
             .Column(customer => customer.Name, column => column.MaxLength(200))
             .Column(customer => customer.Email, column => column.MaxLength(320))
             .Column(customer => customer.Balance, column => column.Precision(19, 4))
-            .UniqueIndex("by-email", customer => customer.Email)
-            .Index("by-created", customer => customer.CreatedAt, SortDirection.Descending)
+            .UniqueIndex("by_email", customer => customer.Email)
+            .Index("by_created", customer => customer.CreatedAt, SortDirection.Descending)
             .Build();
 
         KernelStorageUnit definition = table.Definition;
@@ -104,7 +104,7 @@ public sealed class BuilderTests
             RecordTable.For<InvalidCustomer>("invalid")
                 .Key(customer => customer.Id)
                 .Column(customer => customer.Name)
-                .UniqueIndex("by-name", customer => customer.Name)
+                .UniqueIndex("by_name", customer => customer.Name)
                 .Build());
 
         Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-PORT-003");
@@ -119,7 +119,7 @@ public sealed class BuilderTests
                 .Declare("invalid", "invalid")
                 .Decimal("amount", 39, 0)
                 .Key("amount")
-                .Index("by-amount", "amount")
+                .Index("by_amount", "amount")
                 .Build());
 
         Assert.Contains(exception.Diagnostics, diagnostic =>
@@ -223,7 +223,7 @@ public sealed class BuilderTests
             .Int32("id")
             .Int32("value")
             .Key("id", "id", "missing")
-            .Index("by-value", "missing", "value", "value")
+            .Index("by_value", "missing", "value", "value")
             .Build());
 
         Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-DECL-KEY-002");
@@ -240,20 +240,20 @@ public sealed class BuilderTests
             .Int32("id", column => column.Required())
             .Json("payload")
             .Key("id")
-            .Index("by-payload", "payload")
+            .Index("by_payload", "payload")
             .Build());
         var unique = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
             .Declare("bad-unique-json-index", "bad_unique_json_index")
             .Int32("id", column => column.Required())
             .Json("payload")
             .Key("id")
-            .UniqueIndex("by-payload", "payload")
+            .UniqueIndex("by_payload", "payload")
             .Build());
 
         Assert.All(new[] { regular, unique }, error => Assert.Contains(
             error.Diagnostics,
             diagnostic => diagnostic.Code == "GW-DECL-INDEX-003" &&
-                diagnostic.Path == "indexes.by-payload.columns[0]"));
+                diagnostic.Path == "indexes.by_payload.columns[0]"));
     }
 
     [Fact]

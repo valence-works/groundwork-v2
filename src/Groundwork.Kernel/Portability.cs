@@ -85,10 +85,15 @@ public sealed class PortabilityValidationContext
 public static class PortabilityValidator
 {
     public const int StrictIndexKeyByteBudget = 1700;
+    /// <summary>
+    /// The maximum UTF-8 byte length for a portable physical identifier. The grammar below is
+    /// ASCII-only, so this is also its maximum character count. It is the shared ceiling for
+    /// provider-rendered names, including PostgreSQL's native identifier limit.
+    /// </summary>
+    public const int MaximumPortableIdentifierLength = 63;
 
     private const int MinimumPortableDecimalPrecision = 1;
     private const int MaximumPortableDecimalPrecision = 38;
-    private const int MaximumPortableIdentifierLength = 63;
 
     public static PortabilityValidationResult Validate(
         StorageUnit? unit,
@@ -139,6 +144,46 @@ public static class PortabilityValidator
         var diagnostics = new List<PortabilityRefusal>();
         ValidatePhysicalIdentifiers(unit, unit.Columns ?? [], unit.Indexes ?? [], diagnostics);
         return new(diagnostics);
+    }
+
+    /// <summary>
+    /// Fails before provider work when a declaration contains a non-portable rendered unit or
+    /// index identifier. Other portability rules remain available to provider-specific schema
+    /// validation and are intentionally not applied by this pre-I/O name boundary.
+    /// </summary>
+    public static void EnsurePhysicalIdentifiers(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ThrowIfInvalid(ValidatePhysicalIdentifiers(unit));
+    }
+
+    /// <summary>
+    /// Validates one provider-rendered identifier using the same grammar and budget applied to a
+    /// complete storage declaration. The path is included in the stable diagnostic so provider
+    /// adapters can fail before emitting native DDL or opening a physical collection.
+    /// </summary>
+    public static PortabilityValidationResult ValidatePhysicalIdentifier(
+        string? identifier,
+        string path,
+        int maximumByteLength = MaximumPortableIdentifierLength,
+        bool allowProviderOwnedPrefix = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumByteLength);
+        var diagnostics = new List<PortabilityRefusal>();
+        ValidateIdentifier(identifier, path, diagnostics, maximumByteLength, allowProviderOwnedPrefix);
+        return new(diagnostics);
+    }
+
+    /// <summary>Fails when a provider-composed physical identifier exceeds its native budget.</summary>
+    public static void EnsurePhysicalIdentifier(
+        string identifier,
+        string path,
+        int maximumByteLength = MaximumPortableIdentifierLength,
+        bool allowProviderOwnedPrefix = false)
+    {
+        ArgumentNullException.ThrowIfNull(identifier);
+        ThrowIfInvalid(ValidatePhysicalIdentifier(identifier, path, maximumByteLength, allowProviderOwnedPrefix));
     }
 
     internal static PortabilityValidationResult ValidateDuplicatePhysicalIndexSignatures(StorageUnit? unit)
@@ -201,6 +246,8 @@ public static class PortabilityValidator
         IReadOnlyList<IndexDefinition> indexes,
         ICollection<PortabilityRefusal> diagnostics)
     {
+        ValidateIdentifier(unit.Name, "name", diagnostics);
+
         var declaredPhysicalNames = columns
             .Where(column => column is not null)
             .Select(column => column.Name)
@@ -211,7 +258,7 @@ public static class PortabilityValidator
             var column = columns[columnIndex];
             if (column is not null)
             {
-                ValidateIdentifier(column.Name, $"columns.{column.Name}", diagnostics);
+                ValidateIdentifier(column.Name, $"columns.{column.Name}", diagnostics, allowKnownProviderOwnedColumn: true);
 
                 if (column.Type == PortableType.String && column.Name is { } sourceName &&
                     !string.IsNullOrWhiteSpace(sourceName) &&
@@ -219,32 +266,51 @@ public static class PortabilityValidator
                     !declaredPhysicalNames.Contains(SearchKeyProjection.ColumnName(sourceName)))
                 {
                     var searchKey = SearchKeyProjection.ColumnName(sourceName);
-                    ValidateIdentifier(searchKey, $"derivedColumns.{searchKey}.name", diagnostics);
+                    ValidateIdentifier(searchKey, $"derivedColumns.{searchKey}.name", diagnostics, allowKnownProviderOwnedColumn: true);
                 }
             }
         }
 
         var keyColumns = unit.Key?.Columns ?? [];
         for (var keyIndex = 0; keyIndex < keyColumns.Count; keyIndex++)
-            ValidateIdentifier(keyColumns[keyIndex], $"key.columns[{keyIndex}]", diagnostics);
+            ValidateIdentifier(keyColumns[keyIndex], $"key.columns[{keyIndex}]", diagnostics, allowKnownProviderOwnedColumn: true);
 
-        foreach (var index in indexes.Where(index => index is not null))
+        var indexNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var indexPosition = 0; indexPosition < indexes.Count; indexPosition++)
         {
+            var index = indexes[indexPosition];
+            if (index is null)
+                continue;
+            var indexPath = $"indexes[{indexPosition}]";
+            ValidateIdentifier(index.Name, $"{indexPath}.name", diagnostics);
+            if (index.Name is not null && indexNames.ContainsKey(index.Name))
+            {
+                diagnostics.Add(new(
+                    "GW-PORT-011",
+                    $"Physical index name '{index.Name}' is declared more than once; " +
+                    "choose a unique name for each physical index.",
+                    $"{indexPath}.name"));
+            }
+            else if (index.Name is not null)
+            {
+                indexNames.Add(index.Name, index.Name);
+            }
             var indexColumns = index.Columns ?? [];
             for (var columnIndex = 0; columnIndex < indexColumns.Count; columnIndex++)
             {
                 var column = indexColumns[columnIndex];
                 ValidateIdentifier(
                     column?.Column,
-                    $"indexes.{index.Name}.columns[{columnIndex}]",
-                    diagnostics);
+                    $"{indexPath}.columns[{columnIndex}]",
+                    diagnostics,
+                    allowKnownProviderOwnedColumn: true);
             }
         }
 
         foreach (var derived in (unit.DerivedColumns ?? []).Where(column => column is not null))
         {
-            ValidateIdentifier(derived.Name, $"derivedColumns.{derived.Name}.name", diagnostics);
-            ValidateIdentifier(derived.SourceColumn, $"derivedColumns.{derived.Name}.sourceColumn", diagnostics);
+            ValidateIdentifier(derived.Name, $"derivedColumns.{derived.Name}.name", diagnostics, allowKnownProviderOwnedColumn: true);
+            ValidateIdentifier(derived.SourceColumn, $"derivedColumns.{derived.Name}.sourceColumn", diagnostics, allowKnownProviderOwnedColumn: true);
         }
 
         if (unit.Concurrency?.TokenColumn is { } tokenColumn)
@@ -294,23 +360,35 @@ public static class PortabilityValidator
     private static void ValidateIdentifier(
         string? identifier,
         string path,
-        ICollection<PortabilityRefusal> diagnostics)
+        ICollection<PortabilityRefusal> diagnostics,
+        int maximumByteLength = MaximumPortableIdentifierLength,
+        bool allowProviderOwnedPrefix = false,
+        bool allowKnownProviderOwnedColumn = false)
     {
-        if (IsPortableIdentifier(identifier))
+        if (IsPortableIdentifier(identifier, maximumByteLength, allowProviderOwnedPrefix, allowKnownProviderOwnedColumn))
             return;
 
-        var display = identifier is null ? "<null>" : $"'{identifier}'";
+        var display = identifier switch
+        {
+            null => "<null>",
+            "" => "<empty>",
+            _ => $"'{identifier}'"
+        };
         diagnostics.Add(new(
             "GW-PORT-010",
-            $"Physical column identifier {display} is invalid; use ASCII letters, digits, and underscores, " +
-            "starting with a letter or underscore, keep it at most 63 ASCII bytes, and do not use the " +
+            $"Physical identifier {display} is invalid; use ASCII letters, digits, and underscores, " +
+            $"starting with a letter or underscore, keep it at most {maximumByteLength} ASCII bytes, and do not use the " +
             "'__groundwork_' provider-owned prefix; choose a shorter identifier when necessary.",
             path));
     }
 
-    private static bool IsPortableIdentifier(string? identifier)
+    private static bool IsPortableIdentifier(
+        string? identifier,
+        int maximumByteLength = MaximumPortableIdentifierLength,
+        bool allowProviderOwnedPrefix = false,
+        bool allowKnownProviderOwnedColumn = false)
     {
-        if (string.IsNullOrWhiteSpace(identifier) || identifier.Length > MaximumPortableIdentifierLength ||
+        if (string.IsNullOrWhiteSpace(identifier) || identifier.Length > maximumByteLength ||
             !IsIdentifierStart(identifier[0]))
             return false;
         for (var index = 1; index < identifier.Length; index++)
@@ -319,8 +397,20 @@ public static class PortabilityValidator
                 return false;
         }
 
-        return !identifier.StartsWith("__groundwork_", StringComparison.Ordinal) ||
-            IsKnownProviderOwnedColumn(identifier);
+        return allowProviderOwnedPrefix ||
+            !identifier.StartsWith("__groundwork_", StringComparison.Ordinal) ||
+            allowKnownProviderOwnedColumn && IsKnownProviderOwnedColumn(identifier);
+    }
+
+    private static void ThrowIfInvalid(PortabilityValidationResult result)
+    {
+        if (result.IsPortable)
+            return;
+
+        throw new InvalidOperationException(string.Join(
+            Environment.NewLine,
+            result.Refusals.Select(refusal =>
+                $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
     }
 
     private static bool IsIdentifierStart(char value) =>
