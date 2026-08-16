@@ -296,7 +296,7 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
-    public void Schema_apply_refuses_retention_partition_drift_that_contains_the_legacy_delimiter()
+    public void Schema_apply_refuses_retention_partition_layout_drift()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://retention-partition-drift");
         var name = "retention-partition-drift";
@@ -308,7 +308,7 @@ public sealed class InMemoryProviderTests
             [
                 new() { Name = "id", Type = PortableType.String, MaxLength = 16, IsNullable = false },
                 new() { Name = "ordering", Type = PortableType.Int64, IsNullable = false },
-                new() { Name = "a|b", Type = PortableType.String, MaxLength = 16, IsNullable = false },
+                new() { Name = "a_b", Type = PortableType.String, MaxLength = 16, IsNullable = false },
                 new() { Name = "a", Type = PortableType.String, MaxLength = 16, IsNullable = false },
                 new() { Name = "b", Type = PortableType.String, MaxLength = 16, IsNullable = false }
             ],
@@ -317,7 +317,7 @@ public sealed class InMemoryProviderTests
             {
                 KeepNewest = 3,
                 OrderColumn = "ordering",
-                PartitionColumns = ["a|b"]
+                PartitionColumns = ["a_b"]
             }
         };
         Assert.True(connection.Schema.Apply(initial).Applied);
