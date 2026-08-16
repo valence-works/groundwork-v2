@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.ObjectModel;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -414,6 +415,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
         var collection = state.Context.Database.GetCollection<BsonDocument>(CollectionName(applied, access));
         EnsureLedgerIndexes(state, applied.Declaration.AppendIdempotency?.LedgerName);
+        EnsureLedgerIndexes(state, applied.Declaration.RetentionIdempotency?.LedgerName);
         return collection;
     }
 
@@ -834,8 +836,9 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
+    private const string HighWaterValue = "high_water";
     private readonly MongoProviderState state;
     private readonly MongoAppliedUnit applied;
     private readonly IMongoCollection<BsonDocument> collection;
@@ -1362,6 +1365,136 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             : collection.Find(transactionSession, filter);
     }
 
+    public StorageInspection Inspect()
+    {
+        ThrowIfDisposed();
+        var document = state.Metadata.Find(new BsonDocument("_id", HighWaterId())).FirstOrDefault();
+        if (document is null || !document.TryGetValue(HighWaterValue, out var value) || value.IsBsonNull)
+            return new StorageInspection(null);
+        return new StorageInspection(value.ToInt64());
+    }
+
+    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
+    {
+        var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
+            $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
+        declaration.Validate(Unit);
+        options ??= new RetentionExecutionOptions();
+        RetentionSessionExtensions.ValidateExecutionOptions(options);
+        RetentionOperationCodec.ValidateOperation(operationId);
+        return ExecuteWithTransactionIfNeeded(transactional => transactional.ApplyExactRetentionCore(operationId, declaration, options));
+    }
+
+    private RetentionOperationResult ApplyExactRetentionCore(
+        OperationId operationId,
+        RetentionIdempotencyDeclaration declaration,
+        RetentionExecutionOptions options)
+    {
+        var scope = Access.Scope?.Value ?? string.Empty;
+        var ledger = state.Operations(declaration.LedgerName);
+        var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
+        var cutoffExpression = new BsonDocument("$dateSubtract", new BsonDocument
+        {
+            ["startDate"] = "$$NOW",
+            ["unit"] = "millisecond",
+            ["amount"] = Math.Max(1L, checked((long)Math.Ceiling(declaration.Window.TotalMilliseconds)))
+        });
+        var identity = new BsonDocument
+        {
+            ["unit"] = Unit.Id.Value,
+            ["scope"] = scope,
+            ["nonce"] = operationId.Nonce
+        };
+        var valid = new BsonDocument
+        {
+            ["_id"] = identity,
+            ["$expr"] = new BsonDocument("$gt", new BsonArray { "$committed_at", cutoffExpression })
+        };
+        var existing = transactionSession is null
+            ? ledger.Find(valid).FirstOrDefault()
+            : ledger.Find(transactionSession, valid).FirstOrDefault();
+        if (existing is not null)
+            return ReadExistingRetention(existing, operationId, scope, fingerprint);
+
+        var expired = transactionSession is null
+            ? ledger.Find(new BsonDocument("_id", identity)).FirstOrDefault()
+            : ledger.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();
+        if (expired is not null)
+        {
+            if (transactionSession is null)
+                ledger.DeleteOne(new BsonDocument("_id", identity));
+            else
+                ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
+        }
+
+        var ledgerSet = new BsonDocument
+        {
+            ["unit"] = MissingOrLiteral("unit", Unit.Id.Value),
+            ["scope"] = MissingOrLiteral("scope", scope),
+            ["nonce"] = MissingOrLiteral("nonce", operationId.Nonce),
+            ["committed_at"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$committed_at"), "missing" }), "$$NOW", "$committed_at"
+            }),
+            ["input_fingerprint"] = MissingOrLiteral("input_fingerprint", fingerprint),
+            ["exact_result"] = new BsonDocument("$cond", new BsonArray
+            {
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$type", "$exact_result"), "missing" }), string.Empty, "$exact_result"
+            })
+        };
+        var ledgerUpdate = Builders<BsonDocument>.Update.Pipeline(
+            new EmptyPipelineDefinition<BsonDocument>()
+                .AppendStage<BsonDocument, BsonDocument, BsonDocument>(new BsonDocument("$set", ledgerSet)));
+        var ledgerOptions = new FindOneAndUpdateOptions<BsonDocument>
+        {
+            IsUpsert = true,
+            ReturnDocument = ReturnDocument.Before
+        };
+        BsonDocument? previous;
+        try
+        {
+            previous = transactionSession is null
+                ? ledger.FindOneAndUpdate(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions)
+                : ledger.FindOneAndUpdate(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions);
+        }
+        catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+        {
+            throw new MongoLedgerConflictException();
+        }
+        if (previous is not null)
+            return ReadExistingRetention(previous, operationId, scope, fingerprint);
+
+        // This method is called through ExecuteWithTransactionIfNeeded. A cancellation or
+        // provider failure aborts the transaction, so no delete batch can outlive its ledger result.
+        var retention = ApplyRetention(options);
+        var result = new RetentionOperationResult(RetentionOperationStatus.Executed, retention.DeletedRows, retention.Batches, retention.Completed);
+        var completed = Builders<BsonDocument>.Update.Set("exact_result", RetentionOperationCodec.SerializeResult(result));
+        if (transactionSession is null)
+            ledger.UpdateOne(new BsonDocument("_id", identity), completed);
+        else
+            ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
+        return result;
+    }
+
+    private RetentionOperationResult ReadExistingRetention(
+        BsonDocument existing,
+        OperationId operationId,
+        string scope,
+        string fingerprint)
+    {
+        var storedFingerprint = existing.TryGetValue("input_fingerprint", out var fingerprintValue) && !fingerprintValue.IsBsonNull
+            ? fingerprintValue.AsString
+            : null;
+        var storedResult = existing.TryGetValue("exact_result", out var resultValue) && !resultValue.IsBsonNull
+            ? resultValue.AsString
+            : null;
+        if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
+            throw new InvalidOperationException("GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
+        if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
+            throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
+        return RetentionOperationCodec.DeserializeResult(storedResult) with { Status = RetentionOperationStatus.Replayed };
+    }
+
     private static BsonDocument RetentionSort(
         StorageUnit unit,
         RetentionDeclaration declaration,
@@ -1600,6 +1733,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             var outcome = MutateCore(value, MongoWriteOptions.Unconditional, MutationKind.Insert);
             if (!outcome.Succeeded)
                 throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
+            RecordHighWater(outcome.GeneratedValues);
             outcomes.Add(outcome);
         }
         var serializedResult = ExactAppendCodec.SerializeOutcomes(
@@ -1687,7 +1821,11 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ArgumentNullException.ThrowIfNull(values);
         ThrowIfDisposed();
         var outcome = ExecuteWithTransactionIfNeeded(transactional =>
-            transactional.MutateCore(values, options, kind, exactOutcome));
+        {
+            var result = transactional.MutateCore(values, options, kind, exactOutcome);
+            transactional.RecordHighWater(result.GeneratedValues);
+            return result;
+        });
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             kind is MutationKind.Insert or MutationKind.Upsert)
         {
@@ -2312,15 +2450,41 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ["key"] = identity
     };
 
+    private BsonValue HighWaterId() => new BsonDocument
+    {
+        ["unit"] = Unit.Id.Value,
+        ["scope"] = Access.Scope?.Value ?? "<global>",
+        ["kind"] = "sequence-high-water"
+    };
+
+    private void RecordHighWater(IReadOnlyDictionary<string, object?> generatedValues)
+    {
+        var sequence = Unit.Columns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
+        if (sequence is null || !generatedValues.TryGetValue(sequence.Name, out var generated) || generated is null)
+            return;
+        var filter = new BsonDocument("_id", HighWaterId());
+        var update = Builders<BsonDocument>.Update
+            .SetOnInsert("unit", Unit.Id.Value)
+            .SetOnInsert("scope", Access.Scope?.Value ?? "<global>")
+            .Max(HighWaterValue, Convert.ToInt64(generated, CultureInfo.InvariantCulture));
+        if (transactionSession is null)
+            state.Metadata.UpdateOne(filter, update, new UpdateOptions { IsUpsert = true });
+        else
+            state.Metadata.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = true });
+    }
+
     private T ExecuteWithTransactionIfNeeded<T>(Func<MongoStorageSession, T> operation)
     {
         if (transactionSession is not null)
             return operation(this);
         if (!Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence) &&
-            Unit.AppendIdempotency is null)
+            Unit.AppendIdempotency is null &&
+            Unit.RetentionIdempotency is null)
             return operation(this);
 
-        var transactionReason = Unit.AppendIdempotency is null ? "ProviderSequence" : "AppendIdempotency";
+        var transactionReason = Unit.AppendIdempotency is null
+            ? Unit.RetentionIdempotency is null ? "ProviderSequence" : "ExactRetention"
+            : "AppendIdempotency";
         state.Context.RequireTransactions(transactionReason);
         MongoException? lastTransientFailure = null;
         for (var attempt = 0; attempt < 5; attempt++)

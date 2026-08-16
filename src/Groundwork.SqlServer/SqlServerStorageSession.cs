@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -286,6 +286,103 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         return new RetentionResult(deleted, batches);
     }
 
+    public StorageInspection Inspect() => Execute(() =>
+    {
+        EnsureHighWaterTable();
+        using var command = Command($"SELECT {Quote(HighWaterValue)} FROM {Quote(HighWaterTable)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope;");
+        AddLedgerParameter(command, "unit", Unit.Id.Value);
+        AddLedgerParameter(command, "scope", Access.Scope?.Value ?? string.Empty);
+        var value = command.ExecuteScalar();
+        return value is null or DBNull
+            ? new StorageInspection(null)
+            : new StorageInspection(Convert.ToInt64(value, CultureInfo.InvariantCulture));
+    });
+
+    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
+    {
+        var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
+            $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
+        declaration.Validate(Unit);
+        options ??= new RetentionExecutionOptions();
+        RetentionSessionExtensions.ValidateExecutionOptions(options);
+        RetentionOperationCodec.ValidateOperation(operationId);
+        return ExecuteWrite(() => ApplyExactRetentionCore(operationId, declaration, options));
+    }
+
+    private RetentionOperationResult ApplyExactRetentionCore(
+        OperationId operationId,
+        RetentionIdempotencyDeclaration declaration,
+        RetentionExecutionOptions options)
+    {
+        EnsureLedgerTable(declaration.LedgerName);
+        var providerNow = ProviderNow();
+        var scope = Access.Scope?.Value ?? string.Empty;
+        var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
+        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
+        using (var reclaim = Command($"WITH expired AS (SELECT TOP (128) * FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff) DELETE FROM expired;"))
+        {
+            AddLedgerParameter(reclaim, "reclaim_unit", Unit.Id.Value);
+            AddLedgerParameter(reclaim, "cutoff", FormatLedgerTime(cutoff));
+            reclaim.ExecuteNonQuery();
+        }
+
+        var existing = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
+        if (existing is not null)
+        {
+            var (committedAt, storedFingerprint, storedResult) = existing.Value;
+            if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
+            {
+                if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
+                    throw new InvalidOperationException("GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
+                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
+                return RetentionOperationCodec.DeserializeResult(storedResult) with { Status = RetentionOperationStatus.Replayed };
+            }
+
+            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
+            deleteExpired.ExecuteNonQuery();
+        }
+
+        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) SELECT @unit, @scope, @nonce, @committed_at, @fingerprint, @result WHERE NOT EXISTS (SELECT 1 FROM {Quote(declaration.LedgerName)} WITH (UPDLOCK, HOLDLOCK) WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce);"))
+        {
+            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
+            AddLedgerParameter(insertLedger, "committed_at", FormatLedgerTime(providerNow));
+            AddLedgerParameter(insertLedger, "fingerprint", fingerprint);
+            AddLedgerParameter(insertLedger, "result", string.Empty);
+            if (insertLedger.ExecuteNonQuery() == 0)
+            {
+                var raced = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
+                if (raced is null || string.IsNullOrEmpty(raced.Value.storedFingerprint) || string.IsNullOrEmpty(raced.Value.storedResult))
+                    throw new InvalidOperationException("GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
+                if (!string.Equals(raced.Value.storedFingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, raced.Value.storedFingerprint, fingerprint);
+                return RetentionOperationCodec.DeserializeResult(raced.Value.storedResult) with { Status = RetentionOperationStatus.Replayed };
+            }
+        }
+
+        var retention = ApplyRetentionCore(options);
+        var result = new RetentionOperationResult(RetentionOperationStatus.Executed, retention.DeletedRows, retention.Batches, retention.Completed);
+        using var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+        AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
+        AddLedgerParameter(complete, "result", RetentionOperationCodec.SerializeResult(result));
+        complete.ExecuteNonQuery();
+        return result;
+    }
+
+    private (DateTimeOffset committedAt, string? storedFingerprint, string? storedResult)? ReadRetentionLedger(string table, OperationId operationId, string scope)
+    {
+        using var command = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(table)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+        AddLedgerParameters(command, Unit.Id.Value, scope, operationId.Nonce);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+        return (
+            DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture),
+            reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture));
+    }
+
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
@@ -474,6 +571,32 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
     }
 
+    private void EnsureHighWaterTable()
+    {
+        using var command = Command($"BEGIN TRY IF OBJECT_ID(N'{HighWaterTable}', N'U') IS NULL BEGIN CREATE TABLE {Quote(HighWaterTable)} (" +
+            $"{Quote(LedgerUnit)} nvarchar(450) NOT NULL, " +
+            $"{Quote(LedgerScope)} nvarchar(128) NOT NULL, " +
+            $"{Quote(HighWaterValue)} bigint NOT NULL, " +
+            $"PRIMARY KEY NONCLUSTERED ({Quote(LedgerUnit)}, {Quote(LedgerScope)})); END; END TRY BEGIN CATCH IF ERROR_NUMBER() <> 2714 THROW; END CATCH;");
+        command.ExecuteNonQuery();
+    }
+
+    private void RecordHighWater(object? generatedValue)
+    {
+        if (SequenceColumnDefinition is null || generatedValue is null)
+            return;
+        EnsureHighWaterTable();
+        using var command = Command($"MERGE {Quote(HighWaterTable)} WITH (HOLDLOCK) AS target " +
+            $"USING (SELECT @unit AS {Quote(LedgerUnit)}, @scope AS {Quote(LedgerScope)}, @value AS {Quote(HighWaterValue)}) AS source " +
+            $"ON target.{Quote(LedgerUnit)}=source.{Quote(LedgerUnit)} AND target.{Quote(LedgerScope)}=source.{Quote(LedgerScope)} " +
+            $"WHEN MATCHED THEN UPDATE SET {Quote(HighWaterValue)}=CASE WHEN target.{Quote(HighWaterValue)} < source.{Quote(HighWaterValue)} THEN source.{Quote(HighWaterValue)} ELSE target.{Quote(HighWaterValue)} END " +
+            $"WHEN NOT MATCHED THEN INSERT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(HighWaterValue)}) VALUES (source.{Quote(LedgerUnit)}, source.{Quote(LedgerScope)}, source.{Quote(HighWaterValue)}); ");
+        AddLedgerParameter(command, "unit", Unit.Id.Value);
+        AddLedgerParameter(command, "scope", Access.Scope?.Value ?? string.Empty);
+        AddLedgerParameter(command, "value", Convert.ToInt64(generatedValue, CultureInfo.InvariantCulture));
+        command.ExecuteNonQuery();
+    }
+
     private static void AddLedgerParameters(SqlCommand command, string unit, string scope, string nonce)
     {
         AddLedgerParameter(command, "unit", unit);
@@ -481,7 +604,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         AddLedgerParameter(command, "nonce", nonce);
     }
 
-    private static void AddLedgerParameter(SqlCommand command, string name, string value) =>
+    private static void AddLedgerParameter(SqlCommand command, string name, object? value) =>
         command.Parameters.AddWithValue("@" + name, value);
 
     private static string FormatLedgerTime(DateTimeOffset value) =>
@@ -894,12 +1017,14 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 }
 
                 var generated = insert.ExecuteScalar();
+                var generatedValue = FromSqlServer(generated!, SequenceColumnDefinition);
+                RecordHighWater(generatedValue);
                 return new WriteOutcome(
                     WriteOutcomeStatus.Inserted,
                     VersionColumnDefinition is null ? null : 1,
                     generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
                     {
-                        [SequenceColumnDefinition.Name] = FromSqlServer(generated!, SequenceColumnDefinition)
+                        [SequenceColumnDefinition.Name] = generatedValue
                     });
             }
             catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
@@ -936,12 +1061,14 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             }
 
             var generated = command.ExecuteScalar();
+            var generatedValue = FromSqlServer(generated!, SequenceColumnDefinition);
+            RecordHighWater(generatedValue);
             return new WriteOutcome(
                 status,
                 VersionColumnDefinition is null ? null : 1,
                 generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
-                    [SequenceColumnDefinition.Name] = FromSqlServer(generated!, SequenceColumnDefinition)
+                    [SequenceColumnDefinition.Name] = generatedValue
                 });
         }
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
@@ -1317,6 +1444,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private const string LedgerCommittedAt = "committed_at";
     private const string LedgerFingerprint = "input_fingerprint";
     private const string LedgerResult = "exact_result";
+    private const string HighWaterTable = "__groundwork_sequence_high_waters";
+    private const string HighWaterValue = "high_water";
     private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
     private static string Quote(string value) => SqlServerProviderConnection.QuoteIdentifier(value);
 

@@ -1,5 +1,8 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
+using Groundwork.MongoDb;
+using Groundwork.PostgreSql;
+using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Store;
 using Groundwork.Testing;
@@ -166,6 +169,35 @@ public sealed class LifecycleCapabilityProofTests
         }
     }
 
+    [SkippableFact]
+    public void PostgreSQL_lifecycle_capabilities_preserve_high_water_and_exact_retention()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run the PostgreSQL lifecycle proof.");
+        using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
+        AssertNativeLifecycle(connection, "postgresql");
+    }
+
+    [SkippableFact]
+    public void SQLServer_lifecycle_capabilities_preserve_high_water_and_exact_retention()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server lifecycle proof.");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        AssertNativeLifecycle(connection, "sqlserver");
+    }
+
+    [SkippableFact]
+    public void MongoDB_lifecycle_capabilities_preserve_high_water_and_exact_retention()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB lifecycle proof.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        Skip.If(!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.ExactRetention),
+            "MongoDB deployment does not advertise transaction-backed exact retention.");
+        AssertNativeLifecycle(connection, "mongodb");
+    }
+
     [Fact]
     public void Lifecycle_capabilities_are_advertised_as_distinct_optional_contracts()
     {
@@ -210,6 +242,26 @@ public sealed class LifecycleCapabilityProofTests
         [],
         Projection.All,
         Paging.None);
+
+    private static void AssertNativeLifecycle(IStorageProviderConnection connection, string provider)
+    {
+        var unit = LifecycleUnit($"lifecycle-{provider}-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.DurableHighWaterInspection);
+        Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.ExactRetention);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Values("first"));
+        session.Insert(Values("second"));
+        session.Insert(Values("third"));
+        Assert.Equal(3L, session.Inspect().LifetimeCommittedSequenceHighWater);
+        var operation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-retention");
+        var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(executed.DeletedRows, replayed.DeletedRows);
+        Assert.Single(session.Query(All(unit)).Rows);
+    }
 
     private sealed class CancelAfterFirstRetentionBatch(CancellationTokenSource cancellation) : IWritePathObserver
     {

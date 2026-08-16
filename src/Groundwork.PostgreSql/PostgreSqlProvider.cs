@@ -41,7 +41,9 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         "PostgreSQL", nativeBatch: true,
         exactOutcomeCost: "one RETURNING result per native batch",
         batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback",
-        exactAppendOutcomes: true);
+        exactAppendOutcomes: true,
+        durableHighWaterInspection: true,
+        exactRetention: true);
 
     internal string ConnectionString => connectionString;
 
