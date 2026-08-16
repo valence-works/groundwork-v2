@@ -39,6 +39,18 @@ jobs:
       - name: Build Documents from a local package feed only
         run: tests/Groundwork.Documents.External/verify-local-package.sh
 
+  public-api-acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Pack the public artifacts used by the acceptance consumer
+        run: dotnet pack Groundwork.slnx --configuration Release --output artifacts/packages
+      - name: Run the clean-room public API journey twice from packed artifacts
+        run: dotnet test tests/Groundwork.PublicApi.Acceptance.Tests/Groundwork.PublicApi.Acceptance.Tests.csproj --configuration Release
+
   query-differential:
     runs-on: ubuntu-latest
     services:

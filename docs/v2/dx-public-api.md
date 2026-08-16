@@ -49,3 +49,22 @@ integration over the same `Groundwork.Store` connection contract without changin
 `Groundwork.Diagnostics` owns opt-in native explain-plan artifact assertions. The environment
 variable and artifact behavior are diagnostic/test concerns and are deliberately not part of the
 core Store contract.
+
+## Clean-room public API approval
+
+The public API dogfood journey is built outside the repository source graph from the packed
+artifacts. It exercises SQLite schema apply/verify, typed Records writes and queries, Documents,
+batch outcomes, coverage enforcement, concurrency diagnostics, and public schema-drift admission.
+The compile-time fixture and `public-api.approved.txt` manifest cover the callable surface used by
+the consumer; `friction-log.md` records the remaining ergonomic decisions.
+
+Run the same proof used by CI:
+
+```sh
+dotnet pack Groundwork.slnx --configuration Release --output artifacts/packages
+dotnet test tests/Groundwork.PublicApi.Acceptance.Tests --configuration Release
+```
+
+The test copies the consumer into a temporary external solution, restores only package references,
+builds it twice with repository props disabled, and runs it after each build. The consumer contains
+no project references, internal namespace access, reflection, friend assembly, or Testing adapter.
