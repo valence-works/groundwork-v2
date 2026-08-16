@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
+using Groundwork.Sqlite;
 using Groundwork.Store;
 using Groundwork.Testing;
 using Xunit;
@@ -101,6 +102,71 @@ public sealed class LifecycleCapabilityProofTests
     }
 
     [Fact]
+    public void Exact_retention_is_atomic_when_cancellation_arrives_after_a_delete_batch()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-atomic-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-atomic-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        for (var index = 0; index < 5; index++)
+            session.Insert(Values($"row-{index}"));
+
+        using var cancellation = new CancellationTokenSource();
+        var observer = new CancelAfterFirstRetentionBatch(cancellation);
+        var operation = new OperationId(DateTimeOffset.UtcNow, "retention-atomic");
+        Assert.Throws<OperationCanceledException>(() => session.ApplyRetention(operation, new RetentionExecutionOptions
+        {
+            MaxRowsPerBatch = 1,
+            CancellationToken = cancellation.Token,
+            Observer = observer
+        }));
+        Assert.Equal(5, session.Query(All(unit)).Rows.Count);
+
+        var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        Assert.Equal(executed.DeletedRows, replayed.DeletedRows);
+        Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+    }
+
+    [Fact]
+    public void SQLite_lifecycle_capabilities_preserve_high_water_and_exact_retention_across_restart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-lifecycle-" + Guid.NewGuid().ToString("N") + ".db");
+        var unit = LifecycleUnit("lifecycle-sqlite-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        try
+        {
+            using (var connection = new SqliteProviderFactory().Create($"Data Source={path}"))
+            {
+                Assert.True(connection.Schema.Apply(unit).Applied);
+                Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.DurableHighWaterInspection);
+                Assert.Contains(connection.Capabilities, capability => capability.Id == BatchWriteCapabilities.ExactRetention);
+                var session = connection.OpenSession(unit, StorageAccess.Global);
+                session.Insert(Values("first"));
+                session.Insert(Values("second"));
+                session.Insert(Values("third"));
+                Assert.Equal(3L, session.Inspect().LifetimeCommittedSequenceHighWater);
+
+                var operation = new OperationId(DateTimeOffset.UtcNow, "sqlite-retention-replay");
+                var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+                var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+                Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+                Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+                Assert.Equal(executed.DeletedRows, replayed.DeletedRows);
+            }
+
+            using var restarted = new SqliteProviderFactory().Create($"Data Source={path}");
+            var reopened = restarted.OpenSession(unit, StorageAccess.Global);
+            Assert.Equal(3L, reopened.Inspect().LifetimeCommittedSequenceHighWater);
+            Assert.Single(reopened.Query(All(unit)).Rows);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
     public void Lifecycle_capabilities_are_advertised_as_distinct_optional_contracts()
     {
         using var connection = new InMemoryProviderFactory().Create("lifecycle-capabilities-" + Guid.NewGuid().ToString("N"));
@@ -144,4 +210,16 @@ public sealed class LifecycleCapabilityProofTests
         [],
         Projection.All,
         Paging.None);
+
+    private sealed class CancelAfterFirstRetentionBatch(CancellationTokenSource cancellation) : IWritePathObserver
+    {
+        private int batches;
+
+        public void Observe(WritePathEvent command)
+        {
+            if (command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase) &&
+                Interlocked.Increment(ref batches) == 1)
+                cancellation.Cancel();
+        }
+    }
 }

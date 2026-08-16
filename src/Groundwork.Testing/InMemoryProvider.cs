@@ -235,6 +235,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         ValidateRetention(desired);
         desired.AppendIdempotency?.Validate(desired);
+        desired.RetentionIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
@@ -251,6 +252,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         ValidateRetention(desired);
         desired.AppendIdempotency?.Validate(desired);
+        desired.RetentionIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
         lock (database.Gate)
@@ -346,6 +348,9 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         if (current is not null && !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change append idempotency window or ledger non-additively.");
+        if (current is not null && !SchemaIdentity.RetentionIdempotencyEquals(current.RetentionIdempotency, desired.RetentionIdempotency))
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change retention idempotency window or ledger non-additively.");
 
         if (current is null)
         {
@@ -475,6 +480,12 @@ internal static class SchemaIdentity
     internal static bool IdempotencyEquals(
         AppendIdempotencyDeclaration? left,
         AppendIdempotencyDeclaration? right) =>
+        left?.Window == right?.Window &&
+        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
+
+    internal static bool RetentionIdempotencyEquals(
+        RetentionIdempotencyDeclaration? left,
+        RetentionIdempotencyDeclaration? right) =>
         left?.Window == right?.Window &&
         string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
 
@@ -923,7 +934,18 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
                 return existing.Result with { Status = RetentionOperationStatus.Replayed };
             }
 
-            var retention = ApplyRetentionCore(options);
+            // Exact retention is transactional at the mapping boundary: execute against a
+            // private snapshot and publish rows plus the ledger only after every batch has
+            // completed. Cancellation therefore cannot leave a partially retained stream.
+            var candidate = CurrentState().Clone();
+            var retention = ApplyRetentionCore(options, candidate);
+            if (liveState)
+                database.Units[Unit.Id] = candidate;
+            else
+            {
+                stagedUnits![Unit.Id] = candidate;
+                state = candidate;
+            }
             var result = new RetentionOperationResult(
                 RetentionOperationStatus.Executed,
                 retention.DeletedRows,
@@ -944,7 +966,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         return ApplyRetentionCore(options);
     }
 
-    private RetentionResult ApplyRetentionCore(RetentionExecutionOptions options)
+    private RetentionResult ApplyRetentionCore(
+        RetentionExecutionOptions options,
+        InMemoryUnitState? targetState = null)
     {
         options ??= new RetentionExecutionOptions();
         if (options.MaxRowsPerBatch <= 0)
@@ -957,7 +981,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         {
             ThrowIfDisposed();
             options.CancellationToken.ThrowIfCancellationRequested();
-            var current = CurrentState();
+            var current = targetState ?? CurrentState();
             if (!current.Partitions.TryGetValue(partition, out var entries) || entries.Count == 0)
                 return new RetentionResult(0, 0);
 
@@ -977,7 +1001,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             lock (database.Gate)
             {
                 ThrowIfDisposed();
-                var current = CurrentState();
+                var current = targetState ?? CurrentState();
                 if (!current.Partitions.TryGetValue(partition, out var entries))
                     continue;
                 foreach (var identity in batch)

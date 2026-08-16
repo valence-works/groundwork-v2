@@ -616,6 +616,9 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             if (!SchemaIdentity.RetentionEquals(current.Retention, desired.Retention))
                 throw new MongoSchemaConflictException(
                     $"Storage unit '{desired.Name}' changed its retention declaration non-additively.");
+            if (!SchemaIdentity.RetentionIdempotencyEquals(current.RetentionIdempotency, desired.RetentionIdempotency))
+                throw new MongoSchemaConflictException(
+                    $"Storage unit '{desired.Name}' changed its retention idempotency declaration non-additively.");
             if (current.Scope != desired.Scope || current.Concurrency != desired.Concurrency ||
                 current.Timestamps != desired.Timestamps || current.SchemaVersion != desired.SchemaVersion ||
                 !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
@@ -797,6 +800,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
         }
         unit.AppendIdempotency?.Validate(unit);
+        unit.RetentionIdempotency?.Validate(unit);
         if (unit.Columns.Count == 0)
             throw new ArgumentException("A MongoDB storage unit must declare at least one column.", nameof(unit));
         if (unit.Key.Columns.Count == 0)
@@ -2600,6 +2604,9 @@ internal static class SchemaIdentity
         unit.AppendIdempotency is null
             ? "idempotency:none"
             : string.Join("|", "idempotency", unit.AppendIdempotency.Window.Ticks, unit.AppendIdempotency.LedgerName),
+        unit.RetentionIdempotency is null
+            ? "retention-idempotency:none"
+            : string.Join("|", "retention-idempotency", unit.RetentionIdempotency.Window.Ticks, unit.RetentionIdempotency.LedgerName),
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
@@ -2621,6 +2628,12 @@ internal static class SchemaIdentity
     internal static bool IdempotencyEquals(
         AppendIdempotencyDeclaration? left,
         AppendIdempotencyDeclaration? right) =>
+        left?.Window == right?.Window &&
+        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
+
+    internal static bool RetentionIdempotencyEquals(
+        RetentionIdempotencyDeclaration? left,
+        RetentionIdempotencyDeclaration? right) =>
         left?.Window == right?.Window &&
         string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
 

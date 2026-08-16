@@ -671,7 +671,7 @@ internal sealed class BatchContext
 }
 
 /// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
-internal sealed class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession
+internal sealed class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     private readonly IStorageSession inner;
     private readonly BatchContext context;
@@ -722,6 +722,22 @@ internal sealed class BatchStorageSession : IStorageSession, IExactAppendStorage
         return inner is IRetentionStorageSession native
             ? native.ApplyRetention(options)
             : RetentionSessionExtensions.ApplyRetention(inner, options);
+    }
+
+    public StorageInspection Inspect()
+    {
+        context.FlushAll();
+        return inner is IStorageInspectionSession inspection
+            ? inspection.Inspect()
+            : throw new NotSupportedException("GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
+    }
+
+    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
+    {
+        context.FlushAll();
+        return inner is IExactRetentionStorageSession exact
+            ? exact.ApplyRetention(operationId, options)
+            : throw new NotSupportedException("GW-RETENTION-003: this provider session does not advertise exact retention operations.");
     }
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) =>
