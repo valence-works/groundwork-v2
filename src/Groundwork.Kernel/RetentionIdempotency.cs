@@ -5,15 +5,9 @@ namespace Groundwork.Kernel;
 /// <summary>Declares the durable replay window and ledger for operation-identified retention.</summary>
 public sealed record RetentionIdempotencyDeclaration
 {
-    private static readonly string[] ProviderReservedLedgerNames =
-    [
-        "__groundwork_metadata", "__groundwork_sequences", "__groundwork_schema_history",
-        "__groundwork_schema_locks", "__groundwork_schema_fences", "__groundwork_search_key_algorithms"
-    ];
-
     public required TimeSpan Window { get; init; }
 
-    public string LedgerName { get; init; } = "__groundwork_retention_operations";
+    public string LedgerName { get; init; } = ProviderReservedLedgerNames.DefaultRetentionLedger;
 
     public void Validate() => Validate(null);
 
@@ -39,7 +33,16 @@ public sealed record RetentionIdempotencyDeclaration
                 nameof(LedgerName));
         }
 
-        if (ProviderReservedLedgerNames.Contains(LedgerName, StringComparer.OrdinalIgnoreCase))
+        if (owner?.AppendIdempotency is { } append &&
+            string.Equals(LedgerName, append.LedgerName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                $"Append and retention idempotency ledgers cannot share provider storage name '{LedgerName}'; declare distinct ledgers.",
+                nameof(LedgerName));
+        }
+
+        if (ProviderReservedLedgerNames.All.Contains(LedgerName, StringComparer.OrdinalIgnoreCase) &&
+            !string.Equals(LedgerName, ProviderReservedLedgerNames.DefaultRetentionLedger, StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException(
                 $"The retention idempotency ledger '{LedgerName}' is reserved by a provider-owned catalog.",

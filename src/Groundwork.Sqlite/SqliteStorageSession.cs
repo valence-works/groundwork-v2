@@ -216,6 +216,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     public StorageInspection Inspect() => Execute(() =>
     {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         EnsureHighWaterTable();
         using var command = Command($"SELECT {Quote(HighWaterValue)} FROM {Quote(HighWaterTable)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope;");
         command.Parameters.AddWithValue("@unit", Unit.Id.Value);

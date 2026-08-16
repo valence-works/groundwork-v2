@@ -726,6 +726,7 @@ internal sealed class BatchStorageSession : IStorageSession, IExactAppendStorage
 
     public StorageInspection Inspect()
     {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         context.FlushAll();
         return inner is IStorageInspectionSession inspection
             ? inspection.Inspect()

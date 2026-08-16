@@ -48,8 +48,18 @@ Providers advertise these contracts through
 `BatchWriteCapabilities.DurableHighWaterInspection` and
 `BatchWriteCapabilities.ExactRetention`. A provider that cannot provide the
 required transactional semantics omits the descriptors and its session does
-not implement the capability interfaces; the extension reports
-`GW-INSPECT-001` or `GW-RETENTION-003` before provider state is opened. The
-InMemory, SQLite, PostgreSQL, SQL Server, and transaction-capable MongoDB
+not implement the capability interfaces. Unsupported inspection reports
+`GW-INSPECT-001`; inspection on a unit without a `ProviderSequence` reports
+`GW-INSPECT-002`; unsupported exact retention reports `GW-RETENTION-003`.
+
+Append and retention declarations must use distinct ledger names. Groundwork
+reserves its metadata, schema, search-key, high-water, and default operation
+ledger names; custom declarations cannot claim those names. SQL Server creates
+the lifecycle identity columns with `Latin1_General_100_BIN2` so unit, scope,
+and nonce values use ordinal identity semantics. Existing lifecycle tables
+with a different collation are refused with migration guidance rather than
+silently merging case-distinct identities.
+
+The InMemory, SQLite, PostgreSQL, SQL Server, and transaction-capable MongoDB
 conformance proofs cover scope isolation, restart/replay, rollback-safe
-cancellation, and exact conflict behavior.
+cancellation, exact conflict behavior, and capability refusal.

@@ -248,6 +248,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 
     public StorageInspection Inspect()
     {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         if (exactInner is not IStorageInspectionSession inspection)
             throw new NotSupportedException("GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
         return inspection.Inspect();

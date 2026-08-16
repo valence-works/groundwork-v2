@@ -5,12 +5,6 @@ namespace Groundwork.Kernel;
 /// <summary>Declares the durable replay window for append operations on a storage unit.</summary>
 public sealed record AppendIdempotencyDeclaration
 {
-    private static readonly string[] ProviderReservedLedgerNames =
-    [
-        "__groundwork_metadata", "__groundwork_sequences", "__groundwork_schema_history",
-        "__groundwork_schema_locks", "__groundwork_schema_fences", "__groundwork_search_key_algorithms"
-    ];
-
     /// <summary>
     /// The amount of provider-recorded time for which an operation nonce is retained. A replay
     /// inside this window is acknowledged without writing the payload again.
@@ -20,7 +14,7 @@ public sealed record AppendIdempotencyDeclaration
     /// <summary>
     /// Kernel-owned ledger table/collection name. The default is shared by all units.
     /// </summary>
-    public string LedgerName { get; init; } = "__groundwork_operations";
+    public string LedgerName { get; init; } = ProviderReservedLedgerNames.DefaultAppendLedger;
 
     public void Validate()
     {
@@ -50,7 +44,16 @@ public sealed record AppendIdempotencyDeclaration
                 nameof(LedgerName));
         }
 
-        if (ProviderReservedLedgerNames.Contains(LedgerName, StringComparer.OrdinalIgnoreCase))
+        if (owner.RetentionIdempotency is { } retention &&
+            string.Equals(LedgerName, retention.LedgerName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                $"Append and retention idempotency ledgers cannot share provider storage name '{LedgerName}'; declare distinct ledgers.",
+                nameof(LedgerName));
+        }
+
+        if (ProviderReservedLedgerNames.All.Contains(LedgerName, StringComparer.OrdinalIgnoreCase) &&
+            !string.Equals(LedgerName, ProviderReservedLedgerNames.DefaultAppendLedger, StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException(
                 $"The append idempotency ledger '{LedgerName}' is reserved by a provider-owned catalog.",

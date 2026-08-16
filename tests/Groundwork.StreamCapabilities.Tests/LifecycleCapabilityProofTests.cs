@@ -25,6 +25,56 @@ public sealed class LifecycleCapabilityProofTests
     }
 
     [Fact]
+    public void Inspection_requires_a_provider_sequence_column()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("lifecycle-inspection-no-sequence-" + Guid.NewGuid().ToString("N")),
+            Name = "lifecycle-inspection-no-sequence-" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 100 },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 100 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        using var inMemory = new InMemoryProviderFactory().Create(unit.Name);
+        Assert.True(inMemory.Schema.Apply(unit).Applied);
+        var inMemoryRefusal = Assert.Throws<NotSupportedException>(() =>
+            inMemory.OpenSession(unit, StorageAccess.Global).Inspect());
+        Assert.StartsWith("GW-INSPECT-002", inMemoryRefusal.Message, StringComparison.Ordinal);
+
+        using var sqlite = new SqliteProviderFactory().Create("Data Source=:memory:");
+        Assert.True(sqlite.Schema.Apply(unit).Applied);
+        var sqliteRefusal = Assert.Throws<NotSupportedException>(() =>
+            sqlite.OpenSession(unit, StorageAccess.Global).Inspect());
+        Assert.StartsWith("GW-INSPECT-002", sqliteRefusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InMemory_rejects_multiple_provider_sequence_columns_without_retention()
+    {
+        var name = "lifecycle-multiple-sequences-" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence_a", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "sequence_b", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 100 }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence_a"] }
+        };
+
+        using var connection = new InMemoryProviderFactory().Create(name);
+        var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+        Assert.Contains("GW-PORT-005", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Rolled_back_generated_sequence_does_not_advance_durable_high_water()
     {
         using var connection = new InMemoryProviderFactory().Create("lifecycle-rollback-" + Guid.NewGuid().ToString("N"));
@@ -244,6 +294,26 @@ public sealed class LifecycleCapabilityProofTests
         Skip.If(!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.ExactRetention),
             "MongoDB deployment does not advertise transaction-backed exact retention.");
         AssertNativeLifecycle(connection, "mongodb");
+    }
+
+    [SkippableFact]
+    public void MongoDB_unit_of_work_inspection_reads_transactional_high_water()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB transactional inspection proof.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        Skip.If(!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.DurableHighWaterInspection),
+            "MongoDB deployment does not advertise transaction-backed high-water inspection.");
+
+        var unit = LifecycleUnit("lifecycle-mongo-uow-inspection-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var session = work.OpenSession(unit);
+        Assert.Equal(1L, session.Insert(Values("transactional")).GeneratedValue<long>("sequence"));
+        Assert.Equal(1L, session.Inspect().LifetimeCommittedSequenceHighWater);
+        work.Rollback();
+
+        Assert.Null(connection.OpenSession(unit, StorageAccess.Global).Inspect().LifetimeCommittedSequenceHighWater);
     }
 
     [SkippableFact]

@@ -1367,8 +1367,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public StorageInspection Inspect()
     {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         ThrowIfDisposed();
-        var document = state.Metadata.Find(new BsonDocument("_id", HighWaterId())).FirstOrDefault();
+        var filter = new BsonDocument("_id", HighWaterId());
+        var document = transactionSession is null
+            ? state.Metadata.Find(filter).FirstOrDefault()
+            : state.Metadata.Find(transactionSession, filter).FirstOrDefault();
         if (document is null || !document.TryGetValue(HighWaterValue, out var value) || value.IsBsonNull)
             return new StorageInspection(null);
         return new StorageInspection(value.ToInt64());

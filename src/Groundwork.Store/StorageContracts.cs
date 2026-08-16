@@ -511,6 +511,7 @@ public static class StorageInspectionSessionExtensions
     public static StorageInspection Inspect(this IStorageSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
+        EnsureProviderSequence(session.Unit);
         if (session is not IStorageInspectionSession inspection)
         {
             throw new NotSupportedException(
@@ -519,6 +520,18 @@ public static class StorageInspectionSessionExtensions
         }
 
         return inspection.Inspect();
+    }
+
+    /// <summary>Refuses inspection declarations that cannot produce a sequence high-water.</summary>
+    public static void EnsureProviderSequence(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        if (!unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+        {
+            throw new NotSupportedException(
+                "GW-INSPECT-002: durable sequence inspection requires a ProviderSequence column; " +
+                "declare one before calling Inspect.");
+        }
     }
 }
 

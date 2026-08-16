@@ -240,6 +240,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     public StorageInspection Inspect() => Execute(() =>
     {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         EnsureHighWaterTable();
         using var command = Command($"SELECT {Quote(HighWaterValue)} FROM {Quote(HighWaterTable)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope;");
         Add(command, "unit", Unit.Id.Value);

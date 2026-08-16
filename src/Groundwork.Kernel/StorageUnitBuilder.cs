@@ -106,7 +106,7 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Retain(RetentionDeclaration declaration) => Retention(declaration);
 
     /// <summary>Opts the unit into replay-stable operation-identified retention.</summary>
-    public StorageDeclarationBuilder RetentionIdempotency(TimeSpan window, string ledgerName = "__groundwork_retention_operations")
+    public StorageDeclarationBuilder RetentionIdempotency(TimeSpan window, string ledgerName = ProviderReservedLedgerNames.DefaultRetentionLedger)
     {
         state.SetRetentionIdempotency(new RetentionIdempotencyDeclaration { Window = window, LedgerName = ledgerName });
         return this;
@@ -136,7 +136,7 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Index(string name, Action<IndexBuilder> configure) =>
         AddIndex(name, configure, unique: false);
 
-    public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = "__groundwork_operations")
+    public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = ProviderReservedLedgerNames.DefaultAppendLedger)
     {
         state.SetAppendIdempotency(new AppendIdempotencyDeclaration { Window = window, LedgerName = ledgerName });
         return this;

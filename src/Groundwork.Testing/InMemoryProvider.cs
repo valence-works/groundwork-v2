@@ -233,7 +233,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
-        ValidateRetention(desired);
+        ValidatePortability(desired);
         desired.AppendIdempotency?.Validate(desired);
         desired.RetentionIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
@@ -250,7 +250,7 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
     {
         ArgumentNullException.ThrowIfNull(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
-        ValidateRetention(desired);
+        ValidatePortability(desired);
         desired.AppendIdempotency?.Validate(desired);
         desired.RetentionIdempotency?.Validate(desired);
         desired = SearchKeyProjection.Expand(desired);
@@ -311,10 +311,8 @@ internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISc
         }
     }
 
-    private static void ValidateRetention(StorageUnit unit)
+    private static void ValidatePortability(StorageUnit unit)
     {
-        if (unit.Retention is null)
-            return;
         var portability = PortabilityValidator.Validate(unit);
         if (!portability.IsPortable)
         {
@@ -896,6 +894,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
     public StorageInspection Inspect()
     {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         lock (database.Gate)
         {
             ThrowIfDisposed();

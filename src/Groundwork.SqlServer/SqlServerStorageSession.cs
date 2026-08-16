@@ -288,6 +288,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     public StorageInspection Inspect() => Execute(() =>
     {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         EnsureHighWaterTable();
         using var command = Command($"SELECT {Quote(HighWaterValue)} FROM {Quote(HighWaterTable)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope;");
         AddLedgerParameter(command, "unit", Unit.Id.Value);
@@ -537,9 +538,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private void EnsureLedgerTable(string table)
     {
         using var command = Command($"BEGIN TRY IF OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}', N'U') IS NULL BEGIN CREATE TABLE {Quote(table)} (" +
-            $"{Quote(LedgerUnit)} nvarchar(450) NOT NULL, " +
-            $"{Quote(LedgerScope)} nvarchar(128) NOT NULL, " +
-            $"{Quote(LedgerNonce)} nvarchar(256) NOT NULL, " +
+            $"{Quote(LedgerUnit)} nvarchar(450) COLLATE {BinaryIdentityCollation} NOT NULL, " +
+            $"{Quote(LedgerScope)} nvarchar(128) COLLATE {BinaryIdentityCollation} NOT NULL, " +
+            $"{Quote(LedgerNonce)} nvarchar(256) COLLATE {BinaryIdentityCollation} NOT NULL, " +
             $"{Quote(LedgerCommittedAt)} nvarchar(64) NOT NULL, " +
             $"{Quote(LedgerFingerprint)} nvarchar(128) NULL, " +
             $"{Quote(LedgerResult)} nvarchar(max) NULL, " +
@@ -550,6 +551,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
         EnsureLedgerColumn(table, LedgerFingerprint, "nvarchar(128)");
         EnsureLedgerColumn(table, LedgerResult, "nvarchar(max)");
+        EnsureBinaryIdentityColumns(table, [LedgerUnit, LedgerScope, LedgerNonce]);
 
         using var cleanupIndex = Command($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{IdempotencyRules.CleanupIndexName(table)}' AND object_id = OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}')) " +
             $"CREATE INDEX {Quote(IdempotencyRules.CleanupIndexName(table))} ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
@@ -574,11 +576,32 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private void EnsureHighWaterTable()
     {
         using var command = Command($"BEGIN TRY IF OBJECT_ID(N'{HighWaterTable}', N'U') IS NULL BEGIN CREATE TABLE {Quote(HighWaterTable)} (" +
-            $"{Quote(LedgerUnit)} nvarchar(450) NOT NULL, " +
-            $"{Quote(LedgerScope)} nvarchar(128) NOT NULL, " +
+            $"{Quote(LedgerUnit)} nvarchar(450) COLLATE {BinaryIdentityCollation} NOT NULL, " +
+            $"{Quote(LedgerScope)} nvarchar(128) COLLATE {BinaryIdentityCollation} NOT NULL, " +
             $"{Quote(HighWaterValue)} bigint NOT NULL, " +
             $"PRIMARY KEY NONCLUSTERED ({Quote(LedgerUnit)}, {Quote(LedgerScope)})); END; END TRY BEGIN CATCH IF ERROR_NUMBER() <> 2714 THROW; END CATCH;");
         command.ExecuteNonQuery();
+        EnsureBinaryIdentityColumns(HighWaterTable, [LedgerUnit, LedgerScope]);
+    }
+
+    private void EnsureBinaryIdentityColumns(string table, IReadOnlyList<string> columns)
+    {
+        var escapedTable = table.Replace("'", "''", StringComparison.Ordinal);
+        using var command = Command($"SELECT c.name, c.collation_name FROM sys.columns c " +
+            $"WHERE c.object_id = OBJECT_ID(N'{escapedTable}', N'U') AND c.name IN ({string.Join(", ", columns.Select(column => "N'" + column.Replace("'", "''", StringComparison.Ordinal) + "'"))});");
+        using var reader = command.ExecuteReader();
+        var collations = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        while (reader.Read())
+            collations[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
+
+        if (columns.Any(column => !collations.TryGetValue(column, out var collation) ||
+                                  !string.Equals(collation, BinaryIdentityCollation, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"{LifecycleSchemaDiagnosticCode}: SQL Server lifecycle table '{table}' must use " +
+                $"{BinaryIdentityCollation} on identity columns ({string.Join(", ", columns)}). " +
+                "Recreate or migrate the table under the current Groundwork lifecycle schema before retrying.");
+        }
     }
 
     private void RecordHighWater(object? generatedValue)
@@ -1446,6 +1469,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private const string LedgerResult = "exact_result";
     private const string HighWaterTable = "__groundwork_sequence_high_waters";
     private const string HighWaterValue = "high_water";
+    private const string BinaryIdentityCollation = "Latin1_General_100_BIN2";
+    private const string LifecycleSchemaDiagnosticCode = "GW-SQLSERVER-LIFECYCLE-001";
     private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
     private static string Quote(string value) => SqlServerProviderConnection.QuoteIdentifier(value);
 
