@@ -116,7 +116,7 @@ public sealed class AggregationConformanceTests
             Columns =
             [
                 new() { Name = "id", Type = PortableType.String, IsNullable = false },
-                new() { Name = "createdAt", Type = PortableType.DateTimeOffset }
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
             ],
             Key = new KeyDefinition { Columns = ["id"] },
             AggregationProfiles =

@@ -70,7 +70,7 @@ public sealed class TimeBucketDifferentialTests
             })).Status);
 
         var calls = new List<string>();
-        Groundwork.Store.AggregationExecutionDiagnostics.Observer = calls.Add;
+        Groundwork.Kernel.AggregationExecutionDiagnostics.Observer = calls.Add;
         try
         {
             var exception = Assert.Throws<AggregationBudgetExceededException>(() => session.Aggregate(new AggregationQuery("hourly")
@@ -83,7 +83,7 @@ public sealed class TimeBucketDifferentialTests
         }
         finally
         {
-            Groundwork.Store.AggregationExecutionDiagnostics.Observer = null;
+            Groundwork.Kernel.AggregationExecutionDiagnostics.Observer = null;
         }
     }
 
@@ -115,6 +115,8 @@ public sealed class TimeBucketDifferentialTests
         Assert.Contains("$group", json, StringComparison.Ordinal);
         Assert.Contains("$setWindowFields", json, StringComparison.Ordinal);
         Assert.Contains("$dateTrunc", json, StringComparison.Ordinal);
+        Assert.Contains("$dateFromString", json, StringComparison.Ordinal);
+        Assert.Contains("$dateAdd", json, StringComparison.Ordinal);
         Assert.Contains("1001", json, StringComparison.Ordinal);
         Assert.Contains("Europe/Amsterdam", json, StringComparison.Ordinal);
         Assert.DoesNotContain("$lookup", json, StringComparison.Ordinal);
@@ -219,6 +221,24 @@ public sealed class TimeBucketDifferentialTests
                 TimeZoneId = "Pacific Standard Time"
             }));
         Assert.Contains(exception.Errors, error => error.Code == "GW-AGG-QUERY-017");
+    }
+
+    [Fact]
+    public void Utc_iana_zone_id_is_accepted_without_a_path_separator()
+    {
+        var unit = Unit();
+        var instant = new DateTimeOffset(2026, 1, 15, 20, 0, 0, TimeSpan.Zero);
+        var result = AggregationExecutor.Execute(
+            unit,
+            unit.AggregationProfiles.Single(),
+            [new Dictionary<string, object?> { ["id"] = "utc-row", ["createdAt"] = instant }],
+            new AggregationQuery("daily")
+            {
+                TimeRange = new AggregationTimeRange(instant.AddHours(-1), instant.AddHours(1)),
+                TimeZoneId = "UTC"
+            });
+
+        Assert.Equal(new DateTimeOffset(2026, 1, 15, 0, 0, 0, TimeSpan.Zero), Assert.Single(result.Rows)["bucket"]);
     }
 
     [Fact]
@@ -445,6 +465,38 @@ public sealed class TimeBucketDifferentialTests
         Assert.Equal(new DateTimeOffset(2026, 10, 24, 22, 0, 0, TimeSpan.Zero), fallOutput["bucket"]);
         Assert.Equal(2L, fallOutput["count"]);
 
+        // Goose Bay repeated local midnight in 2010. The declared contract selects the
+        // earliest instant (the occurrence with the larger UTC offset), which is 03:00Z.
+        var ambiguousMidnightInstant = new DateTimeOffset(2010, 11, 7, 4, 30, 0, TimeSpan.Zero);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "goose-bay-ambiguous-midnight", ["createdAt"] = ambiguousMidnightInstant
+        })).Status);
+        var ambiguousMidnight = AggregateWithSingleNativeCall(session, new AggregationQuery("daily")
+        {
+            TimeRange = new AggregationTimeRange(ambiguousMidnightInstant.AddHours(-1), ambiguousMidnightInstant.AddHours(1)),
+            TimeZoneId = "America/Goose_Bay"
+        });
+        var ambiguousOutput = Assert.Single(ambiguousMidnight.Rows);
+        Assert.Equal(new DateTimeOffset(2010, 11, 7, 3, 0, 0, TimeSpan.Zero), ambiguousOutput["bucket"]);
+        Assert.Equal(1L, ambiguousOutput["count"]);
+
+        // Apia skipped all of 2011-12-30. Looking back into that nonexistent local date
+        // must not move the following day's bucket later than its real 00:00 boundary.
+        var apiaInstant = new DateTimeOffset(2011, 12, 30, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "apia-after-skipped-date", ["createdAt"] = apiaInstant
+        })).Status);
+        var apia = AggregateWithSingleNativeCall(session, new AggregationQuery("daily")
+        {
+            TimeRange = new AggregationTimeRange(apiaInstant.AddHours(-1), apiaInstant.AddHours(1)),
+            TimeZoneId = "Pacific/Apia"
+        });
+        var apiaOutput = Assert.Single(apia.Rows);
+        Assert.Equal(new DateTimeOffset(2011, 12, 30, 10, 0, 0, TimeSpan.Zero), apiaOutput["bucket"]);
+        Assert.Equal(1L, apiaOutput["count"]);
+
         // The same logical key/data in two scopes must not cross-contaminate a native bucket.
         var scopedUnit = Unit() with
         {
@@ -507,6 +559,18 @@ public sealed class TimeBucketDifferentialTests
         Assert.Equal(2L, Assert.Single(output, row => Equals(row["bucket"], from))["count"]);
         Assert.Equal(2L, Assert.Single(output, row => Equals(row["bucket"], firstEnd))["count"]);
 
+        var reduced = AggregateWithSingleNativeCall(session, new AggregationQuery("hourly")
+        {
+            TimeRange = new AggregationTimeRange(from, to),
+            PostPredicate = new AggregationPredicate.Comparison(
+                "count", AggregationPredicateOperator.Equal, [2L]),
+            OrderByTerms = [new AggregationOrderTerm("bucket", SortDirection.Descending)],
+            Take = 1
+        });
+        var reducedOutput = Assert.Single(reduced.Rows);
+        Assert.Equal(firstEnd, reducedOutput["bucket"]);
+        Assert.Equal(2L, reducedOutput["count"]);
+
         // Also exercise a source range before its explicit origin; negative elapsed durations
         // must use mathematical floor rather than SQL integer truncation toward zero.
         var negativeOrigin = AggregateWithSingleNativeCall(session, new AggregationQuery("hourly")
@@ -557,7 +621,7 @@ public sealed class TimeBucketDifferentialTests
         AggregationQuery query)
     {
         var calls = new List<string>();
-        Groundwork.Store.AggregationExecutionDiagnostics.Observer = calls.Add;
+        Groundwork.Kernel.AggregationExecutionDiagnostics.Observer = calls.Add;
         try
         {
             var result = session.Aggregate(query);
@@ -567,7 +631,7 @@ public sealed class TimeBucketDifferentialTests
         }
         finally
         {
-            Groundwork.Store.AggregationExecutionDiagnostics.Observer = null;
+            Groundwork.Kernel.AggregationExecutionDiagnostics.Observer = null;
         }
     }
 
@@ -618,7 +682,18 @@ public sealed class TimeBucketDifferentialTests
             {
                 Name = "hourly",
                 GroupByExpressions = [AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))],
-                Aggregates = [new Aggregate.Count("count")]
+                Aggregates = [new Aggregate.Count("count")],
+                AllowedPredicates =
+                [
+                    new AggregationPredicateAllowance
+                    {
+                        Alias = "count",
+                        SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                        {
+                            AggregationPredicateOperator.Equal
+                        }
+                    }
+                ]
             }
         ]
     };

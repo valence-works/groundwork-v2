@@ -107,6 +107,38 @@ public sealed class AggregationSqlRenderingTests
     }
 
     [Fact]
+    public void Renderer_accepts_the_utc_iana_id_and_maps_it_for_sql_server()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-utc-zone"),
+            Name = "aggregation_utc_zone",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "daily",
+            GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var instant = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("daily")
+            {
+                TimeRange = new AggregationTimeRange(instant, instant.AddDays(1)),
+                TimeZoneId = "UTC"
+            }).CommandText;
+
+        Assert.Contains("AT TIME ZONE 'UTC'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Renderer_uses_the_query_guid_order_key_for_aggregation_output()
     {
         var unit = new StorageUnit

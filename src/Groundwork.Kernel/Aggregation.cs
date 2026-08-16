@@ -532,8 +532,10 @@ internal static class AggregationGrouping
                 QueryType.DateTimeOffset,
                 column.IsNullable);
             // A null instant has no portable bucket identity and is excluded rather than forming a
-            // provider-dependent null group.
-            predicates.Add(new Predicate.Not(new Predicate.Equal(reference, QueryConstant.Of(reference, null))));
+            // provider-dependent null group. Non-nullable declarations need no predicate and
+            // cannot construct a null QueryConstant.
+            if (column.IsNullable)
+                predicates.Add(new Predicate.Not(new Predicate.Equal(reference, QueryConstant.Of(reference, null))));
             if (query.TimeRange is { } range)
             {
                 predicates.Add(new Predicate.Range(
@@ -1067,15 +1069,15 @@ public static class AggregationExecutor
                     "GW-AGG-QUERY-016",
                     "TimeZoneId is only valid for local calendar-day buckets.",
                     "timeZoneId")]);
-            if (!timeZoneId.Contains('/', StringComparison.Ordinal) ||
-                !TimeZoneInfo.TryConvertIanaIdToWindowsId(timeZoneId, out _))
+            TimeZoneInfo zone;
+            try { zone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId); }
+            catch (TimeZoneNotFoundException) { throw new AggregationValidationException([new("GW-AGG-QUERY-017", $"Time zone '{timeZoneId}' is not installed.", "timeZoneId")]); }
+            catch (InvalidTimeZoneException) { throw new AggregationValidationException([new("GW-AGG-QUERY-017", $"Time zone '{timeZoneId}' is invalid.", "timeZoneId")]); }
+            if (!zone.HasIanaId || !TimeZoneInfo.TryConvertIanaIdToWindowsId(timeZoneId, out _))
                 throw new AggregationValidationException([new(
                     "GW-AGG-QUERY-017",
                     $"Time zone '{timeZoneId}' is not a supported IANA time-zone id.",
                     "timeZoneId")]);
-            try { _ = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId); }
-            catch (TimeZoneNotFoundException) { throw new AggregationValidationException([new("GW-AGG-QUERY-017", $"Time zone '{timeZoneId}' is not installed.", "timeZoneId")]); }
-            catch (InvalidTimeZoneException) { throw new AggregationValidationException([new("GW-AGG-QUERY-017", $"Time zone '{timeZoneId}' is invalid.", "timeZoneId")]); }
         }
 
         if (query.OrderBy is not null && query.OrderByTerms is { Count: > 0 })

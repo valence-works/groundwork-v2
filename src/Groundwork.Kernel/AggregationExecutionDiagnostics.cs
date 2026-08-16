@@ -1,4 +1,4 @@
-namespace Groundwork.Store;
+namespace Groundwork.Kernel;
 
 /// <summary>Internal test seam for proving native aggregation round-trip counts.</summary>
 internal static class AggregationExecutionDiagnostics

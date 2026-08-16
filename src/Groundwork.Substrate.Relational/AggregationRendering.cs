@@ -219,6 +219,14 @@ public static class RelationalAggregationRenderer
         var sqlServerBucketRemainder = $"CONVERT(bigint, {sqlServerBucketTicks} - ({sqlServerBucketSeconds} * 10000000))";
         var sqlServerBucketDays = $"CONVERT(int, FLOOR(CONVERT(decimal(38,0), {sqlServerBucketSeconds}) / 86400))";
         var sqlServerDayRemainder = $"CONVERT(int, {sqlServerBucketSeconds} - ({sqlServerBucketDays} * CAST(86400 AS bigint)))";
+        var postgresInstant = $"to_timestamp(FLOOR((CAST({source} AS numeric) - 621355968000000000) / 10000) / 1000.0)";
+        var postgresLocalMidnight = $"date_trunc('day', {postgresInstant} AT TIME ZONE '{SqlLiteral(timeZoneId ?? string.Empty)}')";
+        var postgresDefaultMidnight = $"({postgresLocalMidnight} AT TIME ZONE '{SqlLiteral(timeZoneId ?? string.Empty)}')";
+        // PostgreSQL selects the post-transition occurrence of an ambiguous wall-clock time.
+        // Reconstruct an alternate boundary with the prior local noon's offset, admit it only
+        // when it maps back to the target local date, then select the earliest valid instant.
+        var postgresPriorNoonCandidate = $"((({postgresLocalMidnight} - INTERVAL '12 hours') AT TIME ZONE '{SqlLiteral(timeZoneId ?? string.Empty)}') + INTERVAL '12 hours')";
+        var postgresEarliestMidnight = $"CASE WHEN date_trunc('day', {postgresPriorNoonCandidate} AT TIME ZONE '{SqlLiteral(timeZoneId ?? string.Empty)}') = {postgresLocalMidnight} THEN LEAST({postgresDefaultMidnight}, {postgresPriorNoonCandidate}) ELSE {postgresDefaultMidnight} END";
         return bucket.Kind switch
         {
             AggregationTimeBucketKind.FixedUtc when IsSqlite(dialect) =>
@@ -228,7 +236,7 @@ public static class RelationalAggregationRenderer
             AggregationTimeBucketKind.FixedUtc when IsPostgreSql(dialect) =>
                 $"CAST(FLOOR((CAST({source} AS numeric) - {originTicks}) / {bucket.Width.Ticks.ToString(CultureInfo.InvariantCulture)}) * {bucket.Width.Ticks.ToString(CultureInfo.InvariantCulture)} + {originTicks} AS bigint)",
             AggregationTimeBucketKind.LocalCalendarDay when IsPostgreSql(dialect) =>
-                $"CAST(EXTRACT(EPOCH FROM (date_trunc('day', to_timestamp(FLOOR((CAST({source} AS numeric) - 621355968000000000) / 10000) / 1000.0) AT TIME ZONE '{SqlLiteral(timeZoneId!)}') AT TIME ZONE '{SqlLiteral(timeZoneId!)}')) * 10000000 + 621355968000000000 AS bigint)",
+                $"CAST(EXTRACT(EPOCH FROM ({postgresEarliestMidnight})) * 10000000 + 621355968000000000 AS bigint)",
             AggregationTimeBucketKind.FixedUtc when IsSqlServer(dialect) =>
                 $"DATEADD(NANOSECOND, {sqlServerBucketRemainder} * 100, DATEADD(SECOND, {sqlServerDayRemainder}, DATEADD(DAY, {sqlServerBucketDays}, {sqlServerOrigin})))",
             AggregationTimeBucketKind.LocalCalendarDay when IsSqlServer(dialect) =>

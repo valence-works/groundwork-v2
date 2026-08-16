@@ -483,16 +483,70 @@ internal sealed partial class MongoStorageSession
             }),
             new BsonDecimal128(10_000L)
         })));
-        var truncated = new BsonDocument("$dateTrunc", new BsonDocument
+        var timeZoneId = AggregationGrouping.LocalTimeZoneId(profile, query);
+        var localMidnightText = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = milliseconds,
+            ["format"] = "%Y-%m-%dT00:00:00.000Z",
+            ["timezone"] = timeZoneId
+        });
+        var localMidnightWallClock = new BsonDocument("$dateFromString", new BsonDocument
+        {
+            ["dateString"] = localMidnightText
+        });
+        // MongoDB also selects the post-transition occurrence of ambiguous local midnight.
+        // The prior local noon supplies the pre-transition offset without relying on an
+        // ambiguous 23:xx wall time; the date check below rejects unrelated earlier changes.
+        var previousLocalNoonWallClock = new BsonDocument("$dateSubtract", new BsonDocument
+        {
+            ["startDate"] = localMidnightWallClock,
+            ["unit"] = "hour",
+            ["amount"] = 12
+        });
+        var previousLocalNoonText = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = previousLocalNoonWallClock,
+            ["format"] = "%Y-%m-%dT%H:%M:%S.%L"
+        });
+        var previousLocalNoonInstant = new BsonDocument("$dateFromString", new BsonDocument
+        {
+            ["dateString"] = previousLocalNoonText,
+            ["timezone"] = timeZoneId
+        });
+        var priorOffsetCandidate = new BsonDocument("$dateAdd", new BsonDocument
+        {
+            ["startDate"] = previousLocalNoonInstant,
+            ["unit"] = "hour",
+            ["amount"] = 12
+        });
+        var defaultMidnight = new BsonDocument("$dateTrunc", new BsonDocument
         {
             ["date"] = milliseconds,
             ["unit"] = "day",
-            ["timezone"] = AggregationGrouping.LocalTimeZoneId(profile, query)
+            ["timezone"] = timeZoneId
+        });
+        var sourceLocalDate = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = milliseconds,
+            ["format"] = "%Y-%m-%d",
+            ["timezone"] = timeZoneId
+        });
+        var candidateLocalDate = new BsonDocument("$dateToString", new BsonDocument
+        {
+            ["date"] = priorOffsetCandidate,
+            ["format"] = "%Y-%m-%d",
+            ["timezone"] = timeZoneId
+        });
+        var earliestValidInstant = new BsonDocument("$cond", new BsonArray
+        {
+            new BsonDocument("$eq", new BsonArray { sourceLocalDate, candidateLocalDate }),
+            new BsonDocument("$min", new BsonArray { defaultMidnight, priorOffsetCandidate }),
+            defaultMidnight
         });
         return new BsonDocument("$add", new BsonArray
         {
             unixTicks,
-            new BsonDocument("$multiply", new BsonArray { new BsonDocument("$toLong", truncated), 10_000L })
+            new BsonDocument("$multiply", new BsonArray { new BsonDocument("$toLong", earliestValidInstant), 10_000L })
         });
     }
 

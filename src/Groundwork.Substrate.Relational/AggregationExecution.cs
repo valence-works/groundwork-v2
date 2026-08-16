@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
-using Groundwork.Store;
 
 namespace Groundwork.Substrate.Relational;
 
