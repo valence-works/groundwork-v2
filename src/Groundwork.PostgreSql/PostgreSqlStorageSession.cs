@@ -64,7 +64,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             if (name == "__groundwork_total_count") return value;
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        });
+        }, activeTransaction ?? transaction);
         AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
@@ -124,7 +124,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             if (name == "__groundwork_total_count") return value;
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        });
+        }, activeTransaction ?? transaction);
         AssertExplainPlan(command, renderOptions);
         var materialized = QueryResultMaterializer.Materialize(
             executionSource,
