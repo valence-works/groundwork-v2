@@ -250,7 +250,8 @@ public sealed class RecordTableSession<T>
     {
         if (options?.ExpectedVersion is not null && !table.Definition.Concurrency.IsOptimistic)
             throw new InvalidOperationException(
-                $"Storage unit '{table.Definition.Name}' does not declare version machinery.");
+                $"Storage unit '{table.Definition.Name}' does not declare version machinery. " +
+                "Declare .OptimisticConcurrency() before using RecordWriteOptions.IfVersion(...).");
     }
 }
 

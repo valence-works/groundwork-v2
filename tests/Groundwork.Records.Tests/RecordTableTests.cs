@@ -230,7 +230,7 @@ public sealed class RecordTableTests
         var error = Assert.Throws<InvalidOperationException>(() =>
             records.Insert(Customer.Create("Ada", "ada@example.test"), RecordWriteOptions.IfVersion(1)));
 
-        Assert.Equal("Storage unit '" + table.Definition.Name + "' does not declare version machinery.", error.Message);
+        Assert.Equal("Storage unit '" + table.Definition.Name + "' does not declare version machinery. Declare .OptimisticConcurrency() before using RecordWriteOptions.IfVersion(...).", error.Message);
     }
 
     [Fact]

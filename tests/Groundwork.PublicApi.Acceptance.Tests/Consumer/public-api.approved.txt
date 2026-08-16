@@ -1,0 +1,14 @@
+Groundwork.Documents.DocumentUnit
+Groundwork.Documents.DocumentReadResult
+Groundwork.Kernel.PortableType
+Groundwork.Query.Model.QueryRequest
+Groundwork.Query.Planning.QueryCoverageException
+Groundwork.Records.RecordTable
+Groundwork.Records.RecordTableStoreUnitOfWork
+Groundwork.Records.RecordWriteOptions
+Groundwork.Store.BatchWriteOptions
+Groundwork.Store.RowWrite
+Groundwork.Store.StorageAccess
+Groundwork.Store.StorageKey
+Groundwork.Store.StorageValues
+Groundwork.Sqlite.SqliteProviderFactory
