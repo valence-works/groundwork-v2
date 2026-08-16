@@ -2558,14 +2558,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(expectedValues);
         WritePreconditionValidator.Validate(Unit, WriteOperation.CompareAndDelete, ToStoreOptions(options));
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, new StorageKey(key.Values));
         var validated = CompareAndDeleteValidation.Validate(
             Unit,
-            new StorageKey(key.Values),
+            canonicalKey,
             expectedValues,
             ToStoreOptions(options));
         ThrowIfDisposed();
         return ExecuteWithTransactionIfNeeded(
-            transactional => transactional.CompareAndDeleteCore(key, validated, options),
+            transactional => transactional.CompareAndDeleteCore(new MongoStorageKey(canonicalKey.Values), validated, options),
             requireTransaction: true);
     }
 

@@ -216,6 +216,13 @@ public sealed class SqliteCompareAndDeleteTests
                 new WriteOptions { Observer = wrongTypeObserver }));
             Assert.Empty(wrongTypeObserver.Commands);
 
+            var decimalObserver = new WritePathObserver();
+            Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
+                Key("claim-admission"),
+                new Dictionary<string, object?> { ["amount"] = 7.004m },
+                new WriteOptions { Observer = decimalObserver }));
+            Assert.Empty(decimalObserver.Commands);
+
             var jsonUnit = unit with
             {
                 Id = new StorageUnitId("compare-delete-sqlite-json"),

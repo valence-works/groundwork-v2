@@ -288,12 +288,13 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
         WriteOptions? options = null)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "compare-and-delete");
-        var validated = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
         if (exactInner is not IMongoCompareAndDeleteStorageSession compareAndDelete)
             throw new NotSupportedException(
                 "GW-COMPARE-DELETE-001: this MongoDB deployment does not advertise transactional compare-and-delete.");
         var result = compareAndDelete.CompareAndDelete(
-            new MongoStorageKey(key.Values),
+            new MongoStorageKey(canonicalKey.Values),
             validated,
             new MongoWriteOptions { Precondition = options?.Precondition ?? WritePrecondition.Unconditional, Observer = options?.Observer });
         return ToStore(result);

@@ -1022,11 +1022,12 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         WriteOptions? options = null)
     {
         RefusePrivilegedPointOperation("compare-and-delete");
-        var validated = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.CompareAndDelete(CurrentState(), partition, key, validated, options);
+            return Mutation.CompareAndDelete(CurrentState(), partition, canonicalKey, validated, options);
         }
     }
 
@@ -1723,7 +1724,8 @@ internal static class Mutation
         {
             if (!values.TryGetValue(column, out var value))
                 throw new ArgumentException($"Key column '{column}' is required.", nameof(values));
-            return ValueCanonicalizer.Canonical(value);
+            var definition = unit.Columns.Single(candidate => candidate.Name == column);
+            return ValueCanonicalizer.Canonical(value, definition.Type);
         });
         return string.Join("|", parts);
     }
@@ -1759,6 +1761,15 @@ internal static class Mutation
 
 internal static class ValueCanonicalizer
 {
+    internal static string Canonical(object? value, PortableType type) => type switch
+    {
+        PortableType.Int64 when value is int or long => Canonical(Convert.ToInt64(value, CultureInfo.InvariantCulture)),
+        PortableType.Decimal when value is byte or sbyte or short or ushort or int or uint or long or ulong or decimal =>
+            Canonical(Convert.ToDecimal(value, CultureInfo.InvariantCulture)),
+        PortableType.DateTimeOffset when value is DateTimeOffset timestamp => Canonical(timestamp.ToUniversalTime()),
+        _ => Canonical(value)
+    };
+
     internal static string Canonical(object? value) => value switch
     {
         null => "null",

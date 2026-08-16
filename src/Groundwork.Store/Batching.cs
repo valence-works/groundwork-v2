@@ -197,12 +197,14 @@ public sealed class RowWrite
         Unit = unit ?? throw new ArgumentNullException(nameof(unit));
         Mode = mode;
         Values = values;
-        Key = key;
         Options = options ?? WriteOptions.Unconditional;
+        Key = mode == RowWriteMode.CompareAndDelete && key is not null
+            ? CompareAndDeleteValidation.CanonicalizeKey(unit, key)
+            : key;
         ExpectedValues = mode == RowWriteMode.CompareAndDelete
             ? CompareAndDeleteValidation.Validate(
                 unit,
-                key!,
+                Key!,
                 expectedValues ?? throw new ArgumentNullException(nameof(expectedValues)),
                 Options)
             : expectedValues is null

@@ -307,10 +307,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         IReadOnlyDictionary<string, object?> expectedValues,
         WriteOptions? options = null)
     {
-        var expected = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var expected = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
         return ExecuteWrite(() =>
         {
-            var (where, parameters) = KeyPredicate(key.Values);
+            var (where, parameters) = KeyPredicate(canonicalKey.Values);
             foreach (var pair in expected)
             {
                 if (pair.Value is null)
@@ -347,7 +348,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 return new WriteOutcome(WriteOutcomeStatus.Deleted);
             }
 
-            var existing = ReadCore(key, options?.Observer, "sqlite.compare-and-delete-read");
+            var existing = ReadCore(canonicalKey, options?.Observer, "sqlite.compare-and-delete-read");
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&

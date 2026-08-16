@@ -330,10 +330,11 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         IReadOnlyDictionary<string, object?> expectedValues,
         WriteOptions? options = null)
     {
-        var expected = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var expected = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
         return ExecuteWrite(() =>
         {
-            var (where, parameters) = KeyPredicate(key.Values, exactStringKeys: true);
+            var (where, parameters) = KeyPredicate(canonicalKey.Values, exactStringKeys: true);
             foreach (var pair in expected)
             {
                 if (pair.Value is null)
@@ -375,7 +376,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 return new WriteOutcome(WriteOutcomeStatus.Deleted);
             }
 
-            var existing = ReadCore(key, options?.Observer, "sqlserver.compare-and-delete-read", exactStringKeys: true);
+            var existing = ReadCore(canonicalKey, options?.Observer, "sqlserver.compare-and-delete-read", exactStringKeys: true);
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&

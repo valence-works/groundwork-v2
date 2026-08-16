@@ -37,8 +37,9 @@ public static class CompareAndDeleteSessionExtensions
                 "inspect ICompareAndDeleteStorageSession before using CompareAndDelete.");
         }
 
-        var validated = CompareAndDeleteValidation.Validate(session.Unit, key, expectedValues, options);
-        return compareAndDelete.CompareAndDelete(key, validated, options);
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(session.Unit, key);
+        var validated = CompareAndDeleteValidation.Validate(session.Unit, canonicalKey, expectedValues, options);
+        return compareAndDelete.CompareAndDelete(canonicalKey, validated, options);
     }
 }
 
@@ -56,23 +57,8 @@ internal static class CompareAndDeleteValidation
         ArgumentNullException.ThrowIfNull(expectedValues);
         WritePreconditionValidator.Validate(unit, WriteOperation.CompareAndDelete, options);
 
+        _ = CanonicalizeKey(unit, key);
         var declared = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
-        var keyColumns = unit.Key.Columns
-            .Where(column => !IsProviderOwnedColumn(column))
-            .ToHashSet(StringComparer.Ordinal);
-        if (key.Values.Count != keyColumns.Count || key.Values.Keys.Any(column => !keyColumns.Contains(column)))
-        {
-            throw new ArgumentException(
-                $"A compare-and-delete key for '{unit.Name}' must contain exactly the declared key columns.",
-                nameof(key));
-        }
-
-        foreach (var keyColumn in keyColumns)
-        {
-            if (!declared.TryGetValue(keyColumn, out var definition))
-                throw new ArgumentException($"Key column '{keyColumn}' is not declared by '{unit.Name}'.", nameof(key));
-            ValidateValue(definition, key.Values[keyColumn], keyColumn, nameof(key));
-        }
 
         if (expectedValues.Count == 0)
             throw new ArgumentException("A compare-and-delete requires at least one expected column value.", nameof(expectedValues));
@@ -100,6 +86,34 @@ internal static class CompareAndDeleteValidation
         }
 
         return new ReadOnlyDictionary<string, object?>(snapshot);
+    }
+
+    internal static StorageKey CanonicalizeKey(StorageUnit unit, StorageKey key)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(key);
+
+        var declared = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        var keyColumns = unit.Key.Columns
+            .Where(column => !IsProviderOwnedColumn(column))
+            .ToArray();
+        var keyColumnSet = keyColumns.ToHashSet(StringComparer.Ordinal);
+        if (key.Values.Count != keyColumns.Length || key.Values.Keys.Any(column => !keyColumnSet.Contains(column)))
+        {
+            throw new ArgumentException(
+                $"A compare-and-delete key for '{unit.Name}' must contain exactly the declared key columns.",
+                nameof(key));
+        }
+
+        var snapshot = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var keyColumn in keyColumns)
+        {
+            if (!declared.TryGetValue(keyColumn, out var definition))
+                throw new ArgumentException($"Key column '{keyColumn}' is not declared by '{unit.Name}'.", nameof(key));
+            snapshot.Add(keyColumn, CanonicalizeValue(definition, key.Values[keyColumn], keyColumn, nameof(key)));
+        }
+
+        return new StorageKey(snapshot);
     }
 
     internal static bool IsProviderOwnedColumn(string column) =>
@@ -163,7 +177,11 @@ internal static class CompareAndDeleteValidation
             return definition.Type switch
             {
                 PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
-                PortableType.Decimal => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+                PortableType.Decimal => CanonicalizeDecimal(
+                    Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+                    definition,
+                    column,
+                    parameter),
                 PortableType.DateTimeOffset => ((DateTimeOffset)value).ToUniversalTime(),
                 PortableType.Binary => ((byte[])value).ToArray(),
                 _ => StorageValues.CloneValue(value)
@@ -179,6 +197,36 @@ internal static class CompareAndDeleteValidation
     }
 
     private static bool IsDecimal(object? value) => value is byte or sbyte or short or ushort or int or uint or long or ulong or decimal;
+
+    private static decimal CanonicalizeDecimal(
+        decimal value,
+        ColumnDefinition definition,
+        string column,
+        string parameter)
+    {
+        if (definition is not { Precision: int precision, Scale: int scale })
+            return value;
+
+        if (decimal.Round(value, scale, MidpointRounding.ToEven) != value)
+        {
+            throw new ArgumentException(
+                $"Comparison value for column '{column}' cannot be represented exactly by Decimal({precision},{scale}).",
+                parameter);
+        }
+
+        var integral = decimal.Truncate(decimal.Abs(value));
+        var integerDigits = integral == 0m
+            ? 0
+            : integral.ToString("0", CultureInfo.InvariantCulture).Length;
+        if (integerDigits > precision - scale)
+        {
+            throw new ArgumentException(
+                $"Comparison value for column '{column}' exceeds Decimal({precision},{scale}).",
+                parameter);
+        }
+
+        return value;
+    }
 
 }
 

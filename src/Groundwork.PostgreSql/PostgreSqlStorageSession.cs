@@ -286,14 +286,15 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         IReadOnlyDictionary<string, object?> expectedValues,
         WriteOptions? options = null)
     {
-        var expected = CompareAndDeleteValidation.Validate(Unit, key, expectedValues, options);
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var expected = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
         return ExecuteWrite(() =>
         {
             // Lock the identity row in the current transaction before classifying a
             // zero-row delete. This keeps absence and comparison mismatch tied to one
             // serializable provider decision even when the surrounding UOW uses
             // PostgreSQL's default ReadCommitted isolation.
-            var existing = ReadCore(key, options?.Observer, forUpdate: true, observerOperation: "postgresql.compare-and-delete-read");
+            var existing = ReadCore(canonicalKey, options?.Observer, forUpdate: true, observerOperation: "postgresql.compare-and-delete-read");
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
@@ -302,7 +303,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             if (!MatchesExpected(existing, expected))
                 return new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
 
-            var (where, parameters) = KeyPredicate(key.Values);
+            var (where, parameters) = KeyPredicate(canonicalKey.Values);
             foreach (var pair in expected)
             {
                 if (pair.Value is null)

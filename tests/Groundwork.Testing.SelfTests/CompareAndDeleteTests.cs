@@ -171,6 +171,65 @@ public sealed class CompareAndDeleteTests
     }
 
     [Fact]
+    public void Int64_key_aliases_are_canonicalized_before_in_memory_lookup()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("compare-delete-int64-key"),
+            Name = "compare_delete_int64_key",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new ColumnDefinition { Name = "owner", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://compare-delete-int64-key");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["owner"] = "worker-a" }));
+
+        var write = RowWrite.CompareAndDelete(
+            unit,
+            new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a" });
+
+        Assert.IsType<long>(write.Key!.Values["id"]);
+        Assert.Equal(WriteOutcomeStatus.Deleted, session.CompareAndDelete(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a" }).Status);
+    }
+
+    [Theory]
+    [InlineData("7.004")]
+    [InlineData("12345678901")]
+    public void Decimal_expected_values_outside_declared_shape_are_refused(string value)
+    {
+        var unit = Unit() with
+        {
+            Columns =
+            [
+                ..Unit().Columns,
+                new ColumnDefinition
+                {
+                    Name = "amount",
+                    Type = PortableType.Decimal,
+                    IsNullable = false,
+                    Precision = 12,
+                    Scale = 2
+                }
+            ]
+        };
+
+        var exception = Assert.Throws<ArgumentException>(() => RowWrite.CompareAndDelete(
+            unit,
+            Key("claim-decimal-shape"),
+            new Dictionary<string, object?> { ["amount"] = decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture) }));
+
+        Assert.Contains("Decimal(12,2)", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Fingerprint_is_injective_and_canonical_for_delimiters_json_and_numeric_types()
     {
         var unit = Unit() with
