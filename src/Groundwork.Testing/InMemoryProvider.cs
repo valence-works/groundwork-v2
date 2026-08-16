@@ -987,7 +987,11 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             // Snapshot the watermark under the short read lock. Deleting outside that lock
             // prevents OnAppend from turning a retention scan into a write convoy.
             var rows = entries.Values.Select(entry => entry.Values).ToArray();
-            victimKeys = RetentionRows.OrderVictims(Unit, declaration, rows)
+            victimKeys = RetentionRows.OrderVictims(
+                Unit,
+                declaration,
+                RetentionSessionExtensions.EffectiveKeepNewest(Unit, options),
+                rows)
                 .Select(row => InMemoryKey(Unit, row))
                 .ToArray();
         }

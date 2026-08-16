@@ -199,6 +199,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
         var declaration = Unit.Retention ??
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keepNewest = RetentionSessionExtensions.EffectiveKeepNewest(Unit, options);
         var keyColumns = Unit.Key.Columns;
         var partition = declaration.PartitionColumns.Count == 0
             ? string.Empty
@@ -222,7 +223,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                 $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
                 $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
                 $"DELETE FROM {Quote(Unit.Name)} AS target USING victims AS victim WHERE {equality};");
-            Add(command, "keep", declaration.KeepNewest);
+            Add(command, "keep", keepNewest);
             Add(command, "limit", options.MaxRowsPerBatch);
             if (Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn))
                 Add(command, "__groundwork_scope", Access.Scope!.Value);

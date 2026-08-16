@@ -17,7 +17,7 @@ var unit = new StorageUnit
 var highWater = session.Inspect().LifetimeCommittedSequenceHighWater;
 var result = session.ApplyRetention(
     new OperationId(DateTimeOffset.UtcNow, "retention-cycle-2026-08-16"),
-    new RetentionExecutionOptions { MaxRowsPerBatch = 128 });
+    new RetentionExecutionOptions { MaxRowsPerBatch = 128, KeepNewestOverride = 10 });
 ```
 
 `IStorageInspectionSession` is the additive durable high-water capability. Its
@@ -32,9 +32,14 @@ capability. It uses `RetentionIdempotencyDeclaration`, deliberately separate
 from `AppendIdempotency`: append replay lifetime and retention replay lifetime
 are independent policies. The persisted ledger stores a canonical request
 fingerprint and a versioned exact result. A same-nonce retry with the same
-request returns `RetentionOperationStatus.Replayed`; a changed request raises
+request (including its effective keep value) returns `RetentionOperationStatus.Replayed`; a changed request raises
 `GW-RETENTION-001` before changing rows. Malformed/legacy exact results raise
 `GW-RETENTION-002` with a new-nonce remediation.
+
+`RetentionExecutionOptions.KeepNewestOverride` is an optional non-negative per-pass value. Null
+uses the declaration, a positive value keeps that many newest rows, and zero deletes every row in
+each partition without resetting the durable sequence high-water. The effective value is part of
+the exact-operation fingerprint, so a same-nonce retry with a different override is refused.
 
 Exact retention is atomic at the provider boundary. The bounded delete loop,
 ledger placeholder, and final result update share one transaction (or an

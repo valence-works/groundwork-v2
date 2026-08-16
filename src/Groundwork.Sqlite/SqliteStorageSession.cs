@@ -330,6 +330,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
         var declaration = Unit.Retention ??
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keepNewest = RetentionSessionExtensions.EffectiveKeepNewest(Unit, options);
         var keyColumns = Unit.Key.Columns;
         var partition = declaration.PartitionColumns.Count == 0
             ? string.Empty
@@ -353,7 +354,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
                 $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
                 $"DELETE FROM {Quote(Unit.Name)} AS target WHERE EXISTS (SELECT 1 FROM victims AS victim WHERE {equality});");
-            command.Parameters.AddWithValue("@keep", declaration.KeepNewest);
+            command.Parameters.AddWithValue("@keep", keepNewest);
             command.Parameters.AddWithValue("@limit", options.MaxRowsPerBatch);
             if (Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
                 command.Parameters.AddWithValue("@__groundwork_scope", Access.Scope!.Value);

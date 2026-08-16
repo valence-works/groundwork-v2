@@ -1280,6 +1280,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
         var declaration = Unit.Retention ??
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keepNewest = RetentionSessionExtensions.EffectiveKeepNewest(Unit, options);
         var deleted = 0;
         var batches = 0;
 
@@ -1330,14 +1331,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 options.CancellationToken.ThrowIfCancellationRequested();
                 var victimsQuery = Find(partitionFilter)
                     .Sort(RetentionSort(Unit, declaration, includePartitions: false))
-                    .Skip(declaration.KeepNewest)
+                    .Skip(keepNewest)
                     .Limit(options.MaxRowsPerBatch)
                     .Project(new BsonDocument("_id", 1));
                 victimsQuery.Options.BatchSize = options.MaxRowsPerBatch;
                 victimsQuery.Options.AllowDiskUse = true;
                 options.Observer?.Observe(new WritePathEvent(
                     "mongodb.retention-watermark-find",
-                    $"MongoDB.Find(sort:order-desc+key-asc; skip:{declaration.KeepNewest}; limit:{options.MaxRowsPerBatch}; projection:_id)",
+                    $"MongoDB.Find(sort:order-desc+key-asc; skip:{keepNewest}; limit:{options.MaxRowsPerBatch}; projection:_id)",
                     IsProbe: false));
                 var victims = victimsQuery.ToList(options.CancellationToken);
                 if (victims.Count == 0)

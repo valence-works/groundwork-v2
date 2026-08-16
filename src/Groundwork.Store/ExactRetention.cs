@@ -102,7 +102,7 @@ internal static class RetentionOperationCodec
             unit.Id.Value,
             unit.Name,
             unit.Scope.ToString(),
-            retention.KeepNewest.ToString(CultureInfo.InvariantCulture),
+            RetentionSessionExtensions.EffectiveKeepNewest(unit, options).ToString(CultureInfo.InvariantCulture),
             retention.OrderColumn,
             retention.Trigger.ToString(),
             .. retention.PartitionColumns,

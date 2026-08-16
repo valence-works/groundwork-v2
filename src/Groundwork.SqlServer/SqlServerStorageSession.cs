@@ -244,6 +244,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
         var declaration = Unit.Retention ??
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
+        var keepNewest = RetentionSessionExtensions.EffectiveKeepNewest(Unit, options);
         var keyColumns = Unit.Key.Columns;
         var partition = declaration.PartitionColumns.Count == 0
             ? string.Empty
@@ -267,7 +268,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
                 $"SELECT TOP (@limit) {keys} FROM ranked WHERE __groundwork_retention_rank > @keep) " +
                 $"DELETE target FROM {Quote(Unit.Name)} AS target INNER JOIN victims AS victim ON {equality};");
-            SqlServerProviderConnection.AddParameter(command, "@keep", declaration.KeepNewest,
+            SqlServerProviderConnection.AddParameter(command, "@keep", keepNewest,
                 new ColumnDefinition { Name = "keep", Type = PortableType.Int32, IsNullable = false });
             SqlServerProviderConnection.AddParameter(command, "@limit", options.MaxRowsPerBatch,
                 new ColumnDefinition { Name = "limit", Type = PortableType.Int32, IsNullable = false });

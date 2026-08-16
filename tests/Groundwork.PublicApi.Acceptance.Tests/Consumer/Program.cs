@@ -85,10 +85,11 @@ static void RunLifecycleJourney(IStorageProviderConnection connection)
     session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "second" }));
     Require(session.Inspect().LifetimeCommittedSequenceHighWater == 2, "The public lifecycle inspection did not expose the committed high-water.");
     var operation = new OperationId(DateTimeOffset.UtcNow, "public-retention");
-    var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
-    var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
-    Require(executed.Status == RetentionOperationStatus.Executed && executed.DeletedRows == 1, "The public exact retention did not execute one deletion.");
+    var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1, KeepNewestOverride = 0 });
+    var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1, KeepNewestOverride = 0 });
+    Require(executed.Status == RetentionOperationStatus.Executed && executed.DeletedRows == 2, "The public exact retention override did not delete all rows.");
     Require(replayed.Status == RetentionOperationStatus.Replayed && replayed.DeletedRows == executed.DeletedRows, "The public exact retention did not replay its result.");
+    Require(session.Inspect().LifetimeCommittedSequenceHighWater == 2, "The public exact retention override reset the sequence high-water.");
 }
 
 static void RunRecordsJourney(IStorageProviderConnection connection)

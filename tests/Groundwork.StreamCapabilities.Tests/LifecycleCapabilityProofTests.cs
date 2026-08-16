@@ -138,9 +138,13 @@ public sealed class LifecycleCapabilityProofTests
             Assert.Equal(3L, scopeB.Inspect().LifetimeCommittedSequenceHighWater);
 
             var operation = new OperationId(DateTimeOffset.UtcNow, "scope-a-retention");
-            var result = scopeA.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+            var result = scopeA.ApplyRetention(operation, new RetentionExecutionOptions
+            {
+                MaxRowsPerBatch = 1,
+                KeepNewestOverride = 0
+            });
             Assert.Equal(RetentionOperationStatus.Executed, result.Status);
-            Assert.Equal(1, result.DeletedRows);
+            Assert.Equal(2, result.DeletedRows);
             Assert.Equal(2L, scopeA.Inspect().LifetimeCommittedSequenceHighWater);
         }
 
@@ -149,7 +153,7 @@ public sealed class LifecycleCapabilityProofTests
         var reopenedB = restarted.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
         Assert.Equal(2L, reopenedA.Inspect().LifetimeCommittedSequenceHighWater);
         Assert.Equal(3L, reopenedB.Inspect().LifetimeCommittedSequenceHighWater);
-        Assert.Single(reopenedA.Query(All(unit)).Rows);
+        Assert.Empty(reopenedA.Query(All(unit)).Rows);
     }
 
     [Fact]
@@ -207,6 +211,81 @@ public sealed class LifecycleCapabilityProofTests
         Assert.StartsWith(RetentionIdempotencyConflictException.DiagnosticCode, conflict.Message, StringComparison.Ordinal);
         Assert.Equal(before, session.Inspect().LifetimeCommittedSequenceHighWater);
         Assert.Empty(session.Query(All(unit)).Rows);
+    }
+
+    [Fact]
+    public void InMemory_exact_retention_honors_a_positive_runtime_keep_override()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-override-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-override-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        for (var index = 0; index < 4; index++)
+            session.Insert(Values($"override-{index}"));
+
+        var operation = new OperationId(DateTimeOffset.UtcNow, "retention-override");
+        var options = new RetentionExecutionOptions { KeepNewestOverride = 2, MaxRowsPerBatch = 1 };
+        var executed = session.ApplyRetention(operation, options);
+        var replayed = session.ApplyRetention(operation, options);
+
+        Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
+        Assert.Equal(2, executed.DeletedRows);
+        Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(executed with { Status = RetentionOperationStatus.Replayed }, replayed);
+        Assert.Throws<RetentionIdempotencyConflictException>(() => session.ApplyRetention(
+            operation,
+            options with { KeepNewestOverride = 1 }));
+        Assert.Equal(4L, session.Inspect().LifetimeCommittedSequenceHighWater);
+        Assert.Equal(2, session.Query(All(unit)).Rows.Count);
+    }
+
+    [Fact]
+    public void InMemory_exact_retention_zero_runtime_override_deletes_all_even_when_declaration_keeps_one()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-override-zero-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-override-zero-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        for (var index = 0; index < 3; index++)
+            session.Insert(Values($"override-zero-{index}"));
+
+        var result = session.ApplyRetention(
+            new OperationId(DateTimeOffset.UtcNow, "retention-override-zero"),
+            new RetentionExecutionOptions { KeepNewestOverride = 0, MaxRowsPerBatch = 1 });
+
+        Assert.Equal(RetentionOperationStatus.Executed, result.Status);
+        Assert.Equal(3, result.DeletedRows);
+        Assert.Equal(3L, session.Inspect().LifetimeCommittedSequenceHighWater);
+        Assert.Empty(session.Query(All(unit)).Rows);
+    }
+
+    [Fact]
+    public void Reference_retention_honors_a_runtime_keep_override()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-reference-override-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-reference-override-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var native = connection.OpenSession(unit, StorageAccess.Global);
+        for (var index = 0; index < 4; index++)
+            native.Insert(Values($"reference-override-{index}"));
+
+        var reference = new CapabilityHidingSession(native);
+        var result = reference.ApplyRetention(new RetentionExecutionOptions { KeepNewestOverride = 2 });
+
+        Assert.Equal(2, result.DeletedRows);
+        Assert.Equal(2, reference.Query(All(unit)).Rows.Count);
+    }
+
+    [Fact]
+    public void Negative_runtime_keep_override_is_rejected_before_provider_dispatch()
+    {
+        using var connection = new InMemoryProviderFactory().Create("lifecycle-retention-invalid-override-" + Guid.NewGuid().ToString("N"));
+        var unit = LifecycleUnit("lifecycle-retention-invalid-override-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = new CapabilityHidingSession(connection.OpenSession(unit, StorageAccess.Global));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => session.ApplyRetention(
+            new RetentionExecutionOptions { KeepNewestOverride = -1 }));
     }
 
     [Fact]
@@ -518,30 +597,37 @@ public sealed class LifecycleCapabilityProofTests
 
     private static void AssertDeleteAllLifecycle(IStorageProviderConnection connection, string provider)
     {
-        var unit = LifecycleUnit($"s7-{provider}-delete-all-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global, keepNewest: 0);
+        var unit = LifecycleUnit($"s7-{provider}-override-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
         session.Insert(Values("first"));
         session.Insert(Values("second"));
         session.Insert(Values("third"));
+        session.Insert(Values("fourth"));
         var highWater = session.Inspect().LifetimeCommittedSequenceHighWater;
 
-        var operation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-retention-delete-all");
-        var executed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
-        var replayed = session.ApplyRetention(operation, new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+        var operation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-retention-override");
+        var commandObserver = new RecordingRetentionObserver();
+        var options = new RetentionExecutionOptions { KeepNewestOverride = 2, MaxRowsPerBatch = 1, Observer = commandObserver };
+        var executed = session.ApplyRetention(operation, options);
+        var replayed = session.ApplyRetention(operation, options);
 
-        Assert.Equal(3L, highWater);
+        Assert.Equal(4L, highWater);
         Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
-        Assert.Equal(3, executed.DeletedRows);
+        Assert.Equal(2, executed.DeletedRows);
         Assert.Equal(RetentionOperationStatus.Replayed, replayed.Status);
         Assert.Equal(executed with { Status = RetentionOperationStatus.Replayed }, replayed);
         Assert.Throws<RetentionIdempotencyConflictException>(() => session.ApplyRetention(
             operation,
-            new RetentionExecutionOptions { MaxRowsPerBatch = 2 }));
+            options with { KeepNewestOverride = 1 }));
+        Assert.InRange(commandObserver.Events.Count, 2, 5);
+        Assert.All(commandObserver.Events, item =>
+            Assert.Contains("retention", item.Operation, StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(commandObserver.Events, item => item.Operation.Contains("query", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(highWater, session.Inspect().LifetimeCommittedSequenceHighWater);
-        Assert.Empty(session.Query(All(unit)).Rows);
+        Assert.Equal(2, session.Query(All(unit)).Rows.Count);
 
-        var cancellationUnit = LifecycleUnit($"s7-{provider}-cancel-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global, keepNewest: 0);
+        var cancellationUnit = LifecycleUnit($"s7-{provider}-cancel-" + Guid.NewGuid().ToString("N"), ScopePolicy.Global);
         Assert.True(connection.Schema.Apply(cancellationUnit).Applied);
         var cancellationSession = connection.OpenSession(cancellationUnit, StorageAccess.Global);
         for (var index = 0; index < 5; index++)
@@ -554,16 +640,17 @@ public sealed class LifecycleCapabilityProofTests
             new RetentionExecutionOptions
             {
                 MaxRowsPerBatch = 1,
+                KeepNewestOverride = 0,
                 CancellationToken = cancellation.Token,
                 Observer = observer
             }));
         Assert.Equal(5, cancellationSession.Query(All(cancellationUnit)).Rows.Count);
         var resumed = cancellationSession.ApplyRetention(
             cancellationOperation,
-            new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+            new RetentionExecutionOptions { MaxRowsPerBatch = 1, KeepNewestOverride = 0 });
         var resumedReplay = cancellationSession.ApplyRetention(
             cancellationOperation,
-            new RetentionExecutionOptions { MaxRowsPerBatch = 1 });
+            new RetentionExecutionOptions { MaxRowsPerBatch = 1, KeepNewestOverride = 0 });
         Assert.Equal(5, resumed.DeletedRows);
         Assert.Equal(RetentionOperationStatus.Replayed, resumedReplay.Status);
         Assert.Equal(resumed.DeletedRows, resumedReplay.DeletedRows);
@@ -670,6 +757,13 @@ public sealed class LifecycleCapabilityProofTests
                 Interlocked.Increment(ref batches) == 1)
                 cancellation.Cancel();
         }
+    }
+
+    private sealed class RecordingRetentionObserver : IWritePathObserver
+    {
+        public List<WritePathEvent> Events { get; } = [];
+
+        public void Observe(WritePathEvent command) => Events.Add(command);
     }
 
     private sealed class CapabilityHidingSession(IStorageSession inner) : IStorageSession
