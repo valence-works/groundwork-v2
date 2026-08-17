@@ -1,0 +1,46 @@
+items:
+- name: Overview
+  href: index.md
+- name: Getting started
+  items:
+  - name: Install from Feedz
+    href: getting-started/install.md
+  - name: SQLite quickstart
+    href: getting-started/quickstart.md
+- name: Concepts
+  items:
+  - name: Architecture and packages
+    href: concepts/architecture.md
+  - name: Storage units and access
+    href: concepts/storage-units-and-access.md
+  - name: Queries and writes
+    href: concepts/queries-and-writes.md
+- name: Guides
+  items:
+  - name: Schema deployment
+    href: guides/schema-deployment.md
+  - name: Transactions and exact outcomes
+    href: guides/transactions.md
+  - name: Privileged cross-scope queries
+    href: ../../v2/privileged-cross-scope.md
+  - name: LINQ queries
+    href: ../../v2/query-linq.md
+  - name: Aggregation profiles
+    href: ../../v2/aggregation-profiles.md
+- name: Providers
+  href: providers/toc.yml
+- name: API reference
+  href: reference/api.md
+  items:
+  - name: All namespaces
+    href: api/
+- name: Detailed contracts
+  items:
+  - name: Provider support matrix
+    href: ../../v2/support-matrix.md
+  - name: Portable semantics
+    href: ../../v2/portable-semantics.md
+  - name: Public API boundary
+    href: ../../v2/dx-public-api.md
+  - name: Versioning policy
+    href: ../../v2/versioning.md

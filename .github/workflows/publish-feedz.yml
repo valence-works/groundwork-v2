@@ -63,6 +63,10 @@ jobs:
         run: dotnet restore Groundwork.slnx --nologo
       - name: Run the full test suite
         run: dotnet test Groundwork.slnx --configuration Release --no-restore --nologo
+      - name: Build and verify the public documentation gate
+        run: |
+          eng/build-docs.sh
+          eng/verify-docs-site.sh
       - name: Run packaging contract tests
         run: dotnet test tests/Groundwork.Packaging.Tests/Groundwork.Packaging.Tests.csproj --configuration Release --no-restore --nologo
       - name: Pack the explicit public package allowlist

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/docfx/main/schemas/docfx.schema.json",
+  "metadata": [
+    {
+      "src": [
+        {
+          "src": "../..",
+          "files": [
+            "src/Groundwork.Analyzers/bin/Release/netstandard2.0/Groundwork.Analyzers.dll",
+            "src/Groundwork.Diagnostics/bin/Release/net10.0/Groundwork.Diagnostics.dll",
+            "src/Groundwork.Documents/bin/Release/net10.0/Groundwork.Documents.dll",
+            "src/Groundwork.Kernel/bin/Release/net10.0/Groundwork.Kernel.dll",
+            "src/Groundwork.MongoDb/bin/Release/net10.0/Groundwork.MongoDb.dll",
+            "src/Groundwork.PostgreSql/bin/Release/net10.0/Groundwork.PostgreSql.dll",
+            "src/Groundwork.Query.Linq/bin/Release/netstandard2.0/Groundwork.Query.Linq.dll",
+            "src/Groundwork.Query.Linq.Sqlite/bin/Release/net10.0/Groundwork.Query.Linq.Sqlite.dll",
+            "src/Groundwork.Query.Model/bin/Release/netstandard2.0/Groundwork.Query.Model.dll",
+            "src/Groundwork.Query.Planning/bin/Release/netstandard2.0/Groundwork.Query.Planning.dll",
+            "src/Groundwork.Records/bin/Release/net10.0/Groundwork.Records.dll",
+            "src/Groundwork.Records.Store/bin/Release/net10.0/Groundwork.Records.Store.dll",
+            "src/Groundwork.Schema/bin/Release/netstandard2.0/Groundwork.Schema.dll",
+            "src/Groundwork.Schema.Generator/bin/Release/netstandard2.0/Groundwork.Schema.Generator.dll",
+            "src/Groundwork.SchemaTool/bin/Release/net10.0/Groundwork.SchemaTool.dll",
+            "src/Groundwork.SchemaTool.MSBuild/bin/Release/net10.0/Groundwork.SchemaTool.MSBuild.dll",
+            "src/Groundwork.SqlServer/bin/Release/net10.0/Groundwork.SqlServer.dll",
+            "src/Groundwork.Sqlite/bin/Release/net10.0/Groundwork.Sqlite.dll",
+            "src/Groundwork.Store/bin/Release/net10.0/Groundwork.Store.dll",
+            "src/Groundwork.Substrate.Mongo/bin/Release/net10.0/Groundwork.Substrate.Mongo.dll",
+            "src/Groundwork.Substrate.Relational/bin/Release/net10.0/Groundwork.Substrate.Relational.dll",
+            "src/Groundwork.Testing/bin/Release/net10.0/Groundwork.Testing.dll"
+          ]
+        }
+      ],
+      "dest": "v0.1/api",
+      "references": [
+        ".references/*.dll"
+      ],
+      "disableGitFeatures": false
+    }
+  ],
+  "build": {
+    "content": [
+      {
+        "files": [
+          "*.md",
+          "toc.yml",
+          "v0.1/**/*.md",
+          "v0.1/**/toc.yml",
+          "v0.1/api/**/*.yml"
+        ]
+      },
+      {
+        "src": "..",
+        "files": [
+          "v2/**/*.md",
+          "query-coverage-analyzer.md",
+          "query-linq-sqlite.md",
+          "schema-tool.md",
+          "sqlite-provider.md",
+          "sqlserver-provider.md"
+        ],
+        "dest": "v0.1/reference/implementation"
+      }
+    ],
+    "output": "_site",
+    "template": [
+      "default",
+      "modern"
+    ],
+    "postProcessors": [
+      "ExtractSearchIndex"
+    ],
+    "globalMetadata": {
+      "_appName": "Groundwork",
+      "_appTitle": "Groundwork documentation",
+      "_appFooter": "Groundwork is licensed under MIT.",
+      "_enableSearch": true,
+      "_disableContribution": false,
+      "_lang": "en",
+      "_gitContribute": {
+        "repo": "https://github.com/valence-works/groundwork-v2",
+        "branch": "main"
+      }
+    },
+    "sitemap": {
+      "baseUrl": "https://valence-works.github.io/groundwork-v2"
+    }
+  }
+}

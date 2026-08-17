@@ -112,6 +112,20 @@ public sealed class PackagingContractTests
     }
 
     [Fact]
+    public void Publication_workflow_requires_the_public_documentation_gate_before_packing()
+    {
+        var root = FindRepositoryRoot();
+        var workflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "publish-feedz.yml"));
+        var docsBuild = workflow.IndexOf("eng/build-docs.sh", StringComparison.Ordinal);
+        var docsVerification = workflow.IndexOf("eng/verify-docs-site.sh", StringComparison.Ordinal);
+        var pack = workflow.IndexOf("eng/pack-public-packages.sh", StringComparison.Ordinal);
+
+        Assert.True(docsBuild >= 0);
+        Assert.True(docsVerification > docsBuild);
+        Assert.True(pack > docsVerification);
+    }
+
+    [Fact]
     public void Publication_workflow_verifies_the_exact_version_from_feedz_after_push()
     {
         var root = FindRepositoryRoot();

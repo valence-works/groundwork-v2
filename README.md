@@ -13,6 +13,15 @@ The first public packages are pre-1.0 previews. See the [v2 versioning
 policy](docs/v2/versioning.md) and [provider support
 matrix](docs/v2/support-matrix.md) before consuming a preview package.
 
+The [public documentation portal](docs/portal/index.md) contains the compiled
+quickstart, concepts and guides, provider pages, versioned reference material,
+and the generated .NET API. Build and verify it locally with:
+
+```shell
+eng/build-docs.sh
+eng/verify-docs-site.sh
+```
+
 ## Consume preview packages
 
 Groundwork previews are published to the public Feedz source:

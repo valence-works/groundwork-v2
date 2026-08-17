@@ -1,0 +1,58 @@
+name: Build and publish documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".config/dotnet-tools.json"
+      - "docs/**"
+      - "samples/Groundwork.Samples.Quickstart/**"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - ".config/dotnet-tools.json"
+      - "docs/**"
+      - "samples/Groundwork.Samples.Quickstart/**"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: eng/build-docs.sh
+      - run: eng/verify-docs-site.sh
+      - run: dotnet test tests/Groundwork.Docs.Acceptance.Tests/Groundwork.Docs.Acceptance.Tests.csproj --configuration Release --no-restore --nologo
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/portal/_site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy static documentation
+        id: deployment
+        uses: actions/deploy-pages@v4

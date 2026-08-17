@@ -5,5 +5,8 @@
 .vscode/
 TestResults/
 artifacts/
+docs/portal/.references/
+docs/portal/_site/
+docs/portal/v0.1/api/
 *.user
 *.suo
