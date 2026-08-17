@@ -61,6 +61,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(CrossScopeQueryRow);
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
+        _ = typeof(StorageUnitQueryRenderOptions);
         _ = typeof(SqliteProviderFactory);
         _ = typeof(InMemoryProviderFactory);
     }
@@ -97,6 +98,8 @@ internal static class PublicApiApprovalFixture
         _ = new Func<StorageAccessAudit, StorageAccess>(StorageAccess.PrivilegedAcrossScopes);
         _ = new Func<IStorageSession, QueryRequest, CrossScopeQueryResult>(
             (session, request) => session.QueryAcrossScopes(request));
+        _ = new Func<Groundwork.Kernel.StorageUnit, string, QueryRenderOptions>(
+            (unit, selectedIndex) => unit.CreateQueryRenderOptions(selectedIndex));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableStoreUnitOfWork<ApprovalRecord>>((table, connection) => table.BeginUnitOfWork(connection, BatchWriteOptions.Exact));
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));
