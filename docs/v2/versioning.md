@@ -21,6 +21,12 @@ While the major version is zero:
   semantics, and storage contracts are changed only with an explicit release
   note and regression proof.
 
+Groundwork v2 is a clean-break pre-1.0 product. When a preview release note
+marks a persisted schema boundary, consumers must discard the earlier preview
+catalog and create a fresh one from the new declarations. Groundwork does not
+ship an in-place migration, compatibility alias, dual-write, or fallback path
+between those preview catalogs.
+
 After `1.0.0`, normal SemVer applies: breaking changes require a major version,
 compatible features use a minor version, and fixes use a patch version.
 Deprecated APIs remain documented for at least one minor release where
