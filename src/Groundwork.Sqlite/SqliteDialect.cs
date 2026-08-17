@@ -46,11 +46,12 @@ internal sealed class SqliteDialect : RelationalDialect
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
 
-    public override string? MapCollation(ColumnDefinition definition) => definition.Collation switch
+    public override string? MapCollation(ColumnDefinition definition) => (definition.Type, definition.Collation) switch
     {
-        null or PortableCollation.Ordinal => "BINARY",
-        PortableCollation.OrdinalIgnoreCase => "NOCASE",
-        PortableCollation.UnicodeOrdinalIgnoreCase => throw new NotSupportedException(
+        (PortableType.String, null or PortableCollation.Ordinal) => "GROUNDWORK_UTF16_ORDINAL",
+        (_, null or PortableCollation.Ordinal) => "BINARY",
+        (_, PortableCollation.OrdinalIgnoreCase) => "NOCASE",
+        (_, PortableCollation.UnicodeOrdinalIgnoreCase) => throw new NotSupportedException(
             "SQLite does not provide the portable UnicodeOrdinalIgnoreCase collation."),
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
@@ -264,7 +265,8 @@ internal sealed class SqliteDialect : RelationalDialect
             var declaration = createSql is null ? null : SqliteCreateTableSql.ExtractColumnDeclaration(createSql, name);
             var providerSequence = declaration?.Contains("AUTOINCREMENT", StringComparison.OrdinalIgnoreCase) == true;
             result[name] = new(name, reader.GetString(2), !providerSequence && reader.GetInt32(3) == 0,
-                reader.IsDBNull(4) ? null : reader.GetString(4), "BINARY", reader.GetInt32(5),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                declaration is null ? "BINARY" : SqliteCreateTableSql.ExtractCollation(declaration), reader.GetInt32(5),
                 Generation: providerSequence ? ColumnGeneration.ProviderSequence : ColumnGeneration.Supplied);
         }
         return result;

@@ -461,13 +461,17 @@ public sealed class QueryRendererTests
     public void Default_index_policy_never_emits_a_hint_and_postgres_has_no_hint_syntax()
     {
         var request = Request(new Predicate.Equal(Id, QueryConstant.Of(Id, 7L)), [], Paging.None, ResultShape.Rows.Instance);
-        var options = new QueryRenderOptions([new QueryIndexDeclaration("ix_id", ["id"], QueryIndexPinning.ProviderDefault)]);
+        var options = new QueryRenderOptions(
+            [new QueryIndexDeclaration("ix_id", ["id"], QueryIndexPinning.ProviderDefault)],
+            selectedIndex: "ix_id");
 
         var sql = new SqlServerQueryRenderer().Render(request, options);
         var postgres = new PostgreSqlQueryRenderer().Render(request, options with { });
 
+        Assert.Equal("ix_id", sql.SelectedIndex);
         Assert.False(sql.IndexHintApplied);
         Assert.DoesNotContain("INDEX", sql.CommandText, StringComparison.Ordinal);
+        Assert.Equal("ix_id", postgres.SelectedIndex);
         Assert.False(postgres.IndexHintApplied);
     }
 

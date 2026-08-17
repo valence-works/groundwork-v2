@@ -937,10 +937,9 @@ public sealed class SqliteProviderTests
             new Groundwork.Query.Model.TableId(folded.Name),
             new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
             [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None),
-            new QueryRenderOptions(
-                [new QueryIndexDeclaration("by_status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.Pinned)],
-                selectedIndex: "by_status"));
+            folded.CreateQueryRenderOptions("by_status"));
         Assert.Equal("by_status", indexed.SelectedIndex);
+        Assert.False(indexed.IndexHintApplied);
         Assert.Equal([1], indexed.Rows.Select(row => Assert.IsType<int>(row["id"])));
 
         Assert.Equal(WriteOutcomeStatus.Updated, session.Update(new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })).Status);
