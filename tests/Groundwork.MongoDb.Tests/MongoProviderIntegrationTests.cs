@@ -1125,6 +1125,152 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public async Task Concurrent_transactional_create_only_reservations_report_a_conflict_instead_of_leaking_wiredtiger_error()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var nativeSetup = new MongoDbProviderFactory().Create(connectionString!);
+        Skip.If(nativeSetup.ProviderSequenceFit is ProviderFit.Unsupported,
+            "MongoDB standalone deployments cannot execute unit-of-work transactions.");
+
+        var name = "mongo_login_race_" + Guid.NewGuid().ToString("N")[..20];
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "identity", Type = PortableType.String, IsNullable = false, MaxLength = 128 },
+                new() { Name = "owner", Type = PortableType.String, IsNullable = false, MaxLength = 128 }
+            ],
+            Key = new KeyDefinition { Columns = ["identity"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(nativeSetup.Schema.Apply(unit).Applied);
+
+        using var firstConnection = new MongoProviderFactory().Create(connectionString!);
+        using var secondConnection = new MongoProviderFactory().Create(connectionString!);
+        using var first = firstConnection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        using var second = secondConnection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        first.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("first"), WriteOptions.CreateOnly));
+        second.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("second"), WriteOptions.CreateOnly));
+
+        using var start = new Barrier(2);
+        var firstTask = Task.Run(() => CommitReservation(first, start));
+        var secondTask = Task.Run(() => CommitReservation(second, start));
+        var results = await Task.WhenAll(firstTask, secondTask);
+
+        Assert.Single(results, result => result.Report?.IsSuccessful == true);
+        var loser = Assert.Single(results, result => result.Report is null);
+        var batchError = Assert.IsType<BatchWriteException>(loser.Error);
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, Assert.Single(batchError.Outcomes).Outcome.Status);
+        var winner = firstConnection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["identity"] = "provider|subject" }));
+        Assert.NotNull(winner);
+        Assert.True(winner!.Values.Values["owner"] is "first" or "second");
+        Assert.Equal(1, winner.Version);
+
+        static StorageValues ReservationValues(string owner) =>
+            new(new Dictionary<string, object?>
+            {
+                ["identity"] = "provider|subject",
+                ["owner"] = owner
+            });
+
+        static ReservationCommitResult CommitReservation(IUnitOfWork work, Barrier start)
+        {
+            start.SignalAndWait();
+            try
+            {
+                return new ReservationCommitResult(work.CommitWithOutcomes(), null);
+            }
+            catch (Exception exception)
+            {
+                return new ReservationCommitResult(null, exception);
+            }
+        }
+    }
+
+    [SkippableFact]
+    public void Transaction_body_retries_a_transient_write_conflict_before_returning_success()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var native = new MongoDbProviderFactory().Create(connectionString!);
+        Skip.If(native.ProviderSequenceFit is ProviderFit.Unsupported,
+            "MongoDB standalone deployments cannot execute unit-of-work transactions.");
+
+        var name = "mongo_retry_body_" + Guid.NewGuid().ToString("N")[..20];
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 128 }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        Assert.True(native.Schema.Apply(unit).Applied);
+
+        using var failpointClient = new MongoClient(connectionString!);
+        var admin = failpointClient.GetDatabase("admin");
+        var failpointEnabled = false;
+        try
+        {
+            try
+            {
+                admin.RunCommand<BsonDocument>(new BsonDocument
+                {
+                    ["configureFailPoint"] = "failCommand",
+                    ["mode"] = new BsonDocument("times", 1),
+                    ["data"] = new BsonDocument
+                    {
+                        ["failCommands"] = new BsonArray { "insert" },
+                        ["errorCode"] = 112,
+                        ["errorLabels"] = new BsonArray { "TransientTransactionError" }
+                    }
+                });
+                failpointEnabled = true;
+            }
+            catch (MongoCommandException exception)
+            {
+                Skip.If(true, $"MongoDB failCommand is unavailable: {exception.Message}");
+            }
+
+            using var connection = new MongoProviderFactory().Create(connectionString!);
+            var outcome = connection.OpenSession(unit, StorageAccess.Global).Insert(
+                new StorageValues(new Dictionary<string, object?> { ["payload"] = "retry-me" }));
+
+            Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Status);
+            Assert.Equal(1L, outcome.GeneratedValue<long>("sequence"));
+        }
+        finally
+        {
+            if (failpointEnabled)
+            {
+                try
+                {
+                    admin.RunCommand<BsonDocument>(new BsonDocument
+                    {
+                        ["configureFailPoint"] = "failCommand",
+                        ["mode"] = "off"
+                    });
+                }
+                catch (MongoException)
+                {
+                    // Keep the original test failure if disabling the test-only failpoint fails.
+                }
+            }
+        }
+    }
+
+    private sealed record ReservationCommitResult(BatchWriteReport? Report, Exception? Error);
+
+    [SkippableFact]
     public void Provider_sequence_is_capability_gated_by_mongodb_transactions()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");

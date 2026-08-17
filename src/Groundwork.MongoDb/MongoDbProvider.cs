@@ -918,6 +918,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     private readonly MongoUnitOfWork? unitOfWork;
     private bool disposed;
 
+    // A wrapper-owned transaction must let transient failures escape so the wrapper can
+    // replay the complete body. Explicit unit-of-work sessions have no body replay boundary
+    // here, so they normalize the provider error at the write; direct writes preserve an
+    // unknown transient infrastructure failure rather than misclassifying it as uniqueness.
+    private bool ShouldNormalizeTransientWriteConflict =>
+        unitOfWork is not null;
+
     internal MongoStorageSession(
         MongoProviderState state,
         MongoAppliedUnit applied,
@@ -2174,6 +2181,19 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     : MongoWriteOutcomeStatus.UniqueViolation,
                 existingVersion);
         }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            // A concurrent transactional insert into the same identity can surface as
+            // WiredTiger code 112 rather than duplicate key 11000. Treat both outcomes
+            // identically so an exact unit of work reports its portable conflict result
+            // after the transaction is rolled back instead of leaking a driver exception.
+            return new MongoWriteOutcome(
+                exactOutcome && Unit.Concurrency.IsOptimistic
+                    ? MongoWriteOutcomeStatus.ConcurrencyConflict
+                    : MongoWriteOutcomeStatus.UniqueViolation,
+                existingVersion);
+        }
 
         PersistVersion(identity, nextVersion);
         var status = kind switch
@@ -2284,6 +2304,11 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 MongoWriteOutcomeStatus.UniqueViolation,
                 null,
                 ExtractIndexName(exception.WriteError?.Message));
+        }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation);
         }
     }
 
@@ -2408,6 +2433,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 null,
                 indexName);
         }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            return new MongoWriteOutcome(
+                optimistic
+                    ? MongoWriteOutcomeStatus.ConcurrencyConflict
+                    : MongoWriteOutcomeStatus.UniqueViolation);
+        }
     }
 
     private MongoWriteOutcome ExactOutcomeUpsert(
@@ -2490,6 +2523,11 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             var indexName = ExtractIndexName(exception.WriteError?.Message);
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, null, indexName);
         }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation);
+        }
     }
 
     private ColumnDefinition? MissingRequiredColumn(IReadOnlyDictionary<string, object?> values) =>
@@ -2510,6 +2548,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     private static bool IsIdentityIndex(string? indexName) =>
         string.Equals(indexName, "_id_", StringComparison.Ordinal) ||
         string.Equals(indexName, "_id", StringComparison.Ordinal);
+
+    private static bool IsTransientWriteConflict(MongoCommandException exception) =>
+        exception.Code == 112 || exception.HasErrorLabel("TransientTransactionError");
+
+    private static bool IsTransientTransactionBodyFailure(MongoException exception) =>
+        exception.HasErrorLabel("TransientTransactionError") ||
+        exception is MongoCommandException { Code: 112 };
 
     private static string? ExtractIndexName(string? message)
     {
@@ -2806,12 +2851,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             try
             {
                 var result = operation(transactional);
-                if (result is MongoWriteOutcome { Status: MongoWriteOutcomeStatus.UniqueViolation })
+                if (result is MongoWriteOutcome
+                    {
+                        Status: MongoWriteOutcomeStatus.UniqueViolation or
+                            MongoWriteOutcomeStatus.ConcurrencyConflict
+                    })
                 {
-                    // A duplicate-key write aborts the Mongo transaction immediately. Return
-                    // the provider-neutral outcome without attempting commitTransaction on the
-                    // already-aborted transaction; callers must be able to continue their
-                    // conformance sequence with a fresh write transaction.
+                    // A duplicate-key or transient-conflict write aborts the Mongo transaction
+                    // immediately. Return the provider-neutral outcome without attempting
+                    // commitTransaction on the already-aborted transaction; callers must be
+                    // able to continue their conformance sequence with a fresh write transaction.
                     try { session.AbortTransaction(); }
                     catch (MongoException) { }
                     operationCompleted = true;
@@ -2822,7 +2871,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 return result;
             }
             catch (MongoException exception) when (
-                exception.HasErrorLabel("TransientTransactionError") && attempt < 4)
+                IsTransientTransactionBodyFailure(exception) && attempt < 4)
             {
                 lastTransientFailure = exception;
             }
