@@ -205,6 +205,14 @@ public sealed class RecordsProviderProofTests
         Assert.True(upserted.Status is RecordWriteStatus.Upserted or RecordWriteStatus.Updated);
         Assert.Equal(3, upserted.Version);
 
+        // The selected index is provider-default evidence, not a hint. Give cost-based optimizers
+        // enough rows to choose the equality index honestly instead of preferring a tiny-table scan.
+        for (var index = 0; index < 64; index++)
+        {
+            var decoy = Customer.Create("Optimizer scale", $"optimizer-{index:D2}-{email}");
+            Assert.Equal(RecordWriteStatus.Inserted, records.Insert(decoy).Status);
+        }
+
         var query = table.Query.Where(row => row.Email == email).OrderBy(row => row.Name);
         var result = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));
         var match = Assert.Single(result);

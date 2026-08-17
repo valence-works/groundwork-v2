@@ -12,6 +12,15 @@ internal static class SqliteCreateTableSql
         return sql[item.Identifier.End..item.End];
     }
 
+    public static string ExtractCollation(string declaration)
+    {
+        ArgumentNullException.ThrowIfNull(declaration);
+        var keyword = FindKeyword(declaration, "COLLATE");
+        return keyword < 0
+            ? "BINARY"
+            : ReadIdentifier(declaration[(keyword + "COLLATE".Length)..]);
+    }
+
     public static string ReplaceTableAndColumn(string sql, string expectedTable, string replacementTable, string column, string replacementColumn)
     {
         var parsed = Parse(sql);
