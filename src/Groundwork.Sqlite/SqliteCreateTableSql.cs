@@ -12,6 +12,15 @@ internal static class SqliteCreateTableSql
         return sql[item.Identifier.End..item.End];
     }
 
+    public static string ExtractCollation(string declaration)
+    {
+        ArgumentNullException.ThrowIfNull(declaration);
+        var keyword = FindTopLevelKeyword(declaration, "COLLATE");
+        return keyword < 0
+            ? "BINARY"
+            : ReadIdentifier(declaration[(keyword + "COLLATE".Length)..]);
+    }
+
     public static string ReplaceTableAndColumn(string sql, string expectedTable, string replacementTable, string column, string replacementColumn)
     {
         var parsed = Parse(sql);
@@ -32,6 +41,39 @@ internal static class SqliteCreateTableSql
                 IsKeywordBoundary(value, index - 1) && IsKeywordBoundary(value, index + keyword.Length)) return index;
             index++;
         }
+        return -1;
+    }
+
+    private static int FindTopLevelKeyword(string value, string keyword)
+    {
+        var depth = 0;
+        for (var index = 0; index < value.Length;)
+        {
+            if (TrySkipSyntax(value, ref index)) continue;
+            if (value[index] == '(')
+            {
+                depth++;
+                index++;
+                continue;
+            }
+            if (value[index] == ')')
+            {
+                if (depth == 0)
+                    throw new InvalidOperationException("Physical column definition has an unmatched closing parenthesis.");
+                depth--;
+                index++;
+                continue;
+            }
+            if (depth == 0 && index <= value.Length - keyword.Length &&
+                value.AsSpan(index, keyword.Length).Equals(keyword, StringComparison.OrdinalIgnoreCase) &&
+                IsKeywordBoundary(value, index - 1) && IsKeywordBoundary(value, index + keyword.Length))
+            {
+                return index;
+            }
+            index++;
+        }
+        if (depth != 0)
+            throw new InvalidOperationException("Physical column definition has an unmatched opening parenthesis.");
         return -1;
     }
 

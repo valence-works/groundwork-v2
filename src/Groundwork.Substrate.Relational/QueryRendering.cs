@@ -178,19 +178,20 @@ public abstract class RelationalQueryRenderer
                 where = $"({where}) AND ({RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex)})";
         }
 
-        var selectedIndex = options.FindPinnedIndex();
-        var indexHintApplied = selectedIndex is not null && supportsIndexHints;
-        if (selectedIndex is not null && !selectedIndex.IncludesNulls)
+        var pinnedIndex = options.FindPinnedIndex();
+        var expectedIndex = options.FindSelectedIndex();
+        var indexHintApplied = pinnedIndex is not null && supportsIndexHints;
+        if (pinnedIndex is not null && !pinnedIndex.IncludesNulls)
         {
             if (matchNone)
             {
                 // A contradiction matches no row, but SQL Server still requires a query using a
                 // filtered index to restate that index's filter. Keep the logical contradiction and
                 // make the null exclusion visible to the optimizer.
-                where = $"({where}) AND ({string.Join(" AND ", selectedIndex.Columns.Select(column => dialect.QuoteIdentifier(column) + " IS NOT NULL"))})";
+                where = $"({where}) AND ({string.Join(" AND ", pinnedIndex.Columns.Select(column => dialect.QuoteIdentifier(column) + " IS NOT NULL"))})";
             }
-            var unproven = selectedIndex.Columns
-                .Where(column => selectedIndex.NullableColumns.Contains(column) && CanMatchNull(request.Where, column))
+            var unproven = pinnedIndex.Columns
+                .Where(column => pinnedIndex.NullableColumns.Contains(column) && CanMatchNull(request.Where, column))
                 .ToArray();
             if (unproven.Length != 0)
                 throw new QueryRenderException(
@@ -227,7 +228,7 @@ public abstract class RelationalQueryRenderer
 
         var from = dialect.QuoteIdentifier(request.Table.Value);
         if (indexHintApplied)
-            from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(selectedIndex!.Name));
+            from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(pinnedIndex!.Name));
         string sql;
         if (request.Result.IncludesTotalCount)
         {
@@ -280,7 +281,7 @@ public abstract class RelationalQueryRenderer
             parameters,
             request.Result.IncludesTotalCount,
             matchNone,
-            selectedIndex?.Name,
+            expectedIndex?.Name,
             indexHintApplied,
             effectiveOrder.Select(term => term.Column.Name).ToArray());
     }

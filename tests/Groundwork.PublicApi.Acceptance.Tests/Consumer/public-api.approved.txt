@@ -38,4 +38,5 @@ Groundwork.Store.CrossScopeQueryResult
 Groundwork.Store.CrossScopeQueryRow
 Groundwork.Store.StorageKey
 Groundwork.Store.StorageValues
+Groundwork.Store.StorageUnitQueryRenderOptions
 Groundwork.Sqlite.SqliteProviderFactory
