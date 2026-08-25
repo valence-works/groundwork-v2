@@ -281,6 +281,74 @@ public sealed class PostgreSqlDialectTests
         Assert.Equal(PortabilityValidator.MaximumPortableIdentifierLength, expected.Length);
     }
 
+    /// <summary>
+    /// A JSON column has to reach PostgreSQL as <c>jsonb</c> however it is written. The parameters of a
+    /// batched statement cannot be named after their columns — one row per staged write, so the names are
+    /// prefixed to stay unique — and typing them from the placeholder rather than the column silently sent
+    /// every batched JSON value as text, which PostgreSQL rejects with 42804.
+    /// <para>
+    /// Single and batched writes are asserted together and in that order: the single write is the control,
+    /// and the defect this pins was invisible precisely because that control passed.
+    /// </para>
+    /// </summary>
+    [SkippableTheory]
+    [InlineData(RowWriteMode.Insert)]
+    [InlineData(RowWriteMode.Upsert)]
+    public void Json_columns_reach_the_database_as_jsonb_however_they_are_written(RowWriteMode mode)
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var unit = JsonDocumentUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var access = StorageAccess.Global;
+
+        // Control: one row at a time already worked, and is what made the batch defect hard to see.
+        var single = connection.OpenSession(unit, access)
+            .Upsert(JsonRow("single", "{\"kind\":\"single\"}"), WriteOptions.Unconditional);
+        Assert.True(single.Succeeded, $"Single write did not succeed: {single.Status}.");
+
+        // The path that failed: both batch shapes go through the same parameter binding.
+        using (var unitOfWork = connection.BeginUnitOfWork(access, BatchWriteOptions.Exact, [unit]))
+        {
+            unitOfWork.Stage(mode == RowWriteMode.Insert
+                ? RowWrite.Insert(unit, JsonRow("batch-a", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional)
+                : RowWrite.Upsert(unit, JsonRow("batch-a", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional));
+            unitOfWork.Stage(mode == RowWriteMode.Insert
+                ? RowWrite.Insert(unit, JsonRow("batch-b", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional)
+                : RowWrite.Upsert(unit, JsonRow("batch-b", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional));
+            unitOfWork.CommitWithOutcomes();
+        }
+
+        // Committed, not merely accepted: read the rows back through a fresh session.
+        var session = connection.OpenSession(unit, access);
+        foreach (var id in new[] { "single", "batch-a", "batch-b" })
+        {
+            Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?>
+            {
+                ["id"] = id
+            })));
+        }
+    }
+
+    private static StorageUnit JsonDocumentUnit() => new()
+    {
+        Id = new StorageUnitId("logical.json.document"),
+        Name = "json_documents",
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+            new ColumnDefinition { Name = "content", Type = PortableType.Json, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    private static StorageValues JsonRow(string id, string content) =>
+        new(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = id,
+            ["content"] = content
+        });
+
     [SkippableFact]
     public void Provider_applies_a_63_byte_storage_unit_name_without_rewriting()
     {

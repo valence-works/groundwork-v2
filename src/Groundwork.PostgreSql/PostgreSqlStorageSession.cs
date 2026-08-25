@@ -820,7 +820,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             {
                 var name = $"r{row}_{column}";
                 parameters.Add("@" + name);
-                Add(command, name, physical[column]);
+                Add(command, name, physical[column], column);
             }
             rows.Add($"({string.Join(", ", parameters)})");
         }
@@ -1379,12 +1379,23 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             Add(command, pair.Key.TrimStart('@'), pair.Value);
     }
 
-    private void Add(NpgsqlCommand command, string name, object? value)
+    /// <summary>
+    /// Adds one parameter, typed from the column it carries.
+    /// <para>
+    /// <paramref name="column"/> is separate from <paramref name="name"/> because a batched statement
+    /// cannot name its parameters after their columns — it holds one row per write, so the names are
+    /// prefixed to keep them unique. Deriving the type from the placeholder instead would silently miss
+    /// for every batched write, and PostgreSQL rejects an untyped JSON value with
+    /// <c>42804: column "…" is of type jsonb but expression is of type text</c>.
+    /// </para>
+    /// </summary>
+    private void Add(NpgsqlCommand command, string name, object? value, string? column = null)
     {
         var parameter = command.Parameters.AddWithValue(name, value ?? DBNull.Value);
-        if (name == "expected")
+        var typedAs = column ?? name;
+        if (typedAs == "expected")
             parameter.NpgsqlDbType = NpgsqlDbType.Bigint;
-        if (Unit.Columns.FirstOrDefault(column => column.Name == name)?.Type == PortableType.Json)
+        if (Unit.Columns.FirstOrDefault(candidate => candidate.Name == typedAs)?.Type == PortableType.Json)
             parameter.NpgsqlDbType = NpgsqlDbType.Jsonb;
     }
 
