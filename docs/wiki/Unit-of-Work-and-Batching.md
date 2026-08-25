@@ -41,10 +41,15 @@ cap/read/query flushes as well as to commit.
 var summary = work.Commit();
 // summary.Submitted / Applied / Succeeded / Failed / Superseded / IsSuccessful
 
-// Exact — full per-row evidence.
+// Exact — one outcome per staged input, in declaration order.
 var report = work.CommitWithOutcomes();
-foreach (var outcome in report.Outcomes)
-    Console.WriteLine($"{outcome.Ordinal}: {outcome.Outcome.Status} ({outcome.Disposition})");
+for (var ordinal = 0; ordinal < report.Outcomes.Count; ordinal++)
+{
+    var outcome = report.Outcomes[ordinal];
+    Console.WriteLine(outcome.IsSuperseded
+        ? $"{ordinal}: superseded by #{outcome.WinnerOrdinal} ({outcome.WinnerEvidence?.Status})"
+        : $"{ordinal}: {outcome.Outcome.Status}");
+}
 ```
 
 `Commit`/`CommitAsync` **never** expose provider row statuses. `CommitWithOutcomes` **rejects an
@@ -69,8 +74,12 @@ Writes are first coalesced **by storage unit and key in declaration order**. The
 even when earlier inputs used a different mode or column set. Only then are the final writes grouped
 into a provider batch.
 
-Earlier inputs are reported as `RowWriteDisposition.Superseded` with their zero-based ordinal and
-provider evidence of the winning input. **They are not reported as provider successes.**
+Earlier inputs are reported as `RowWriteDisposition.Superseded`, carrying `WinnerOrdinal` (the
+zero-based declaration position that won) and `WinnerEvidence` (that winner's `WriteOutcome`).
+**They are not reported as provider successes.**
+
+`report.Outcomes` holds one entry per staged input in declaration order, so an entry's own ordinal is
+its index in that list — `RowWriteOutcome` itself has no `Ordinal` member.
 
 ```csharp
 work.Stage(RowWrite.Insert(unit, valuesA));   // ordinal 0 → Superseded
