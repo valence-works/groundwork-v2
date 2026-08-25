@@ -1,0 +1,260 @@
+# Diagnostics Reference
+
+Every Groundwork refusal carries a **stable code**, a **path** to the offending element, and a
+**message naming the corrective action**. Codes are part of the public contract: they change only
+with an explicit release note and regression proof.
+
+Use them. Branch on `exception.Message.Contains("GW-…")` or on typed `Code` properties rather than on
+message text.
+
+## Where codes surface
+
+| Type | Carries |
+| --- | --- |
+| `PortabilityRefusal` | `Code`, `Message`, `Path` |
+| `PortableSemanticRefusal` | `Code`, `Message`, `Path` |
+| `GroundworkDiagnostic` (via `StorageDeclarationException.Diagnostics`) | `Code`, `Message`, `Path` |
+| `DocumentDiagnostic` (via `DocumentDeclarationException.Diagnostics`) | `Code`, `Message`, `Path` |
+| `LinqDiagnostic` (via `LinqTranslationException.Diagnostics`) | `Code`, `Message`, `Span`, `Path` |
+| `CoverageRefusal` (via `QueryCoverageException`) | `Code`, `Message`, `NearestIndex`, `SuggestedIndex`, `SuggestedDeclaration` |
+| `AggregationValidationError` (via `AggregationValidationException`) | `Code`, `Message`, `Path` |
+| `CapabilityValidationIssue` | `Code`, `Message`, `Target`, `IsError` |
+| `QueryRenderException` | `Code`, `Message` |
+| Runtime `InvalidOperationException` / `NotSupportedException` | Code embedded in the message |
+
+---
+
+## `GW-PORT-*` — declaration portability
+
+Raised by `PortabilityValidator`, builders, and providers **before schema I/O**.
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `GW-PORT-000` | No storage unit supplied | Pass a unit |
+| `GW-PORT-001` | Unique index includes nullable columns with `MissingValues.Included` | Use `Excluded`, or make the columns required |
+| `GW-PORT-002` | Decimal column missing `Precision`/`Scale` | Declare both |
+| `GW-PORT-003` | Index key column lacks a positive `MaxLength` | Declare `MaxLength` |
+| `GW-PORT-004` | Decimal index key width uncomputable (precision outside supported range) | Use a supported precision |
+| `GW-PORT-005` | `ProviderSequence` is not the sole non-nullable `Int64` primary key | Make it so |
+| `GW-PORT-006` | Collation outside the portable set | Use `Ordinal`, `OrdinalIgnoreCase`, or `UnicodeOrdinalIgnoreCase` |
+| `GW-PORT-007` | Invalid retention declaration | Non-negative `KeepNewest`, declared non-nullable orderable order column, declared partition columns |
+| `GW-PORT-008` | MongoDB composite key **order** changed after apply | Restore the order, or rebuild the catalog |
+| `GW-PORT-009` | Two indexes share a physical signature | Consolidate onto one index |
+| `GW-PORT-010` | Invalid physical identifier | ASCII letters/digits/underscores, starts with letter/underscore, ≤ 63 bytes, no `__groundwork_` prefix |
+| `GW-PORT-011` | Duplicate physical index name | Use unique names |
+
+---
+
+## `GW-SEM-*` — portable query semantics
+
+Raised by `PortableQuerySemantics.Validate`. See **[Portable Semantics](Portable-Semantics)**.
+
+| Code | Meaning |
+| --- | --- |
+| `GW-SEM-NULL-001` | Range with a null operand |
+| `GW-SEM-NULL-002` | Null value for a non-nullable column |
+| `GW-SEM-NOT-001` | Non-portable negation |
+| `GW-SEM-TYPE-001` | Column comparison requires exact matching types |
+| `GW-SEM-TYPE-002` | Double membership |
+| `GW-SEM-TYPE-004` | Untyped or null constant reference |
+| `GW-SEM-TYPE-005` | Constant type must exactly match column/set type |
+| `GW-SEM-TYPE-006` | Binary floating point in a predicate or index |
+| `GW-SEM-TYPE-007` | Element set without an exact declared element type |
+| `GW-SEM-TEXT-001` | Non-portable text comparison policy |
+| `GW-SEM-TEXT-003` | Non-portable substring anchor |
+| `GW-SEM-DECIMAL-001` | Decimal is not `decimal(18,4)` |
+| `GW-SEM-ORDER-001` | Ordering a non-orderable type |
+| `GW-SEM-ORDER-002` | Ordering comparison on a non-orderable type |
+| `GW-SEM-ORDER-003` | Range ordering on a non-orderable type |
+| `GW-SEM-ORDER-004` | `NullOrder.ProviderDefault` |
+| `GW-SEM-ORDER-005` | Boolean ordering |
+| `GW-SEM-LATEST-001` | Latest-per-key needs a non-null `DateTimeOffset` |
+| `GW-SEM-UNKNOWN-001` | Unrecognised predicate node |
+
+---
+
+## `GW-LINQ-*` — LINQ translation
+
+| Code | Problem | Fix |
+| --- | --- | --- |
+| `GW-LINQ-101` | Computed/member expression over columns | Declare a computed column |
+| `GW-LINQ-102` | Arithmetic expression over columns | Declare a computed column |
+| `GW-LINQ-103` | Column-to-column comparison | Add `.AcceptScan(...)` |
+| `GW-LINQ-104` | Cross-table expression | v2 has no joins — element set or two queries |
+| `GW-LINQ-105` | Grouped top-one | Use `.LatestPer(...)` |
+| `GW-LINQ-106` | Unsupported element-set predicate | Declare the element set |
+| `GW-LINQ-107` | Opaque helper | Mark it `[GwQueryFragment]` |
+| `GW-LINQ-108` | Unpinned string comparison | Use `Ordinal`/`OrdinalIgnoreCase` matching the column's folding |
+| `GW-LINQ-109` | Non-UTC clock | Use `DateTimeOffset.UtcNow` |
+| `GW-LINQ-110` | Decimal precision/scale | Value exceeds the declared decimal |
+
+---
+
+## `GW-COVER-*` — query coverage
+
+Published codes appear in messages; Roslyn ids use underscores.
+
+| Code | Roslyn id | Meaning |
+| --- | --- | --- |
+| `GW-COVER-005` | `GW_COVER_005` | Coverage refusal |
+| `GW-COVER-006` | `GW_COVER_006` | Uncovered query — includes suggested `[GwIndex(...)]` |
+| `GW-COVER-009` | `GW_COVER_009` | Coverage refusal |
+| `GW-COVER-016` | `GW_COVER_016` | Coverage refusal |
+| `GW-COVER-900` | `GW_COVER_900` | Unresolved composition. Error by default; downgradeable in `.editorconfig` |
+| `GW-COVER-901` | `GW_COVER_901` | Scan marker on an index-covered query |
+| `GW-COVER-902` | `GW_COVER_902` | Accepted scan without `[assembly: GwAllowAcceptedScans]` |
+| `GW-COVER-903` | `GW_COVER_903` | Scan marker on/after expiry |
+| `GW-COVER-904` | `GW_COVER_904` | Scan marker in its final 30 days |
+| `GW-COVER-905` | `GW_COVER_905` | Accepted-scan inventory |
+
+---
+
+## `GW-QUERY-*` — rendering and execution
+
+| Code | Meaning |
+| --- | --- |
+| `GW-QUERY-009` | Query rendering refusal |
+| `GW-QUERY-013` | Query rendering refusal |
+| `GW-QUERY-015` | `In` value count exceeds the cap (default 1,000) |
+| `GW-QUERY-018` | Index column uses a non-queryable portable type |
+| `GW-QUERY-020` | Query rendering refusal |
+| `GW-QUERY-030` | Query rendering refusal |
+| `GW-QUERY-031` | `ColumnRef` policy does not match the schema's persisted search-key mapping |
+
+---
+
+## `GW-RUNTIME-*` — runtime schema admission
+
+| Code | Meaning | Severity |
+| --- | --- | --- |
+| `GW-RUNTIME-001` | Column drift — missing/changed column, collation, or search-key algorithm | **Startup-fatal** |
+| `GW-RUNTIME-002` | Index drift — missing/changed declared index | Dependent query shapes refuse |
+| `GW-RUNTIME-010`…`013` | Additional runtime admission refusals | |
+
+---
+
+## `GW-WRITE-CONCURRENCY-*`
+
+| Code | Meaning |
+| --- | --- |
+| `GW-WRITE-CONCURRENCY-001` | `CreateOnly`/`IfVersion` on a `None` unit |
+| `GW-WRITE-CONCURRENCY-002` | Invalid operation/precondition pairing |
+| `GW-WRITE-CONCURRENCY-003` | Application supplied a system-owned token value |
+
+---
+
+## `GW-APPEND-*` / `GW-RETENTION-*` / `GW-INSPECT-*`
+
+| Code | Meaning |
+| --- | --- |
+| `GW-APPEND-001` | Same unit/scope/nonce with a **different payload**. Nothing written. |
+| `GW-APPEND-002` | Legacy ledger entry has no persisted generated values |
+| `GW-APPEND-003` | Provider does not advertise exact append |
+| `GW-RETENTION-001` | Same nonce, changed retention request (including effective keep value) |
+| `GW-RETENTION-002` | Malformed/legacy exact retention result — use a new nonce |
+| `GW-RETENTION-003` | Provider does not advertise exact retention |
+| `GW-RETENTION-004` | `RetentionIdempotency` declared without `Retention` |
+| `GW-INSPECT-001` | Provider does not advertise durable inspection |
+| `GW-INSPECT-002` | Unit has no `ProviderSequence` column |
+
+---
+
+## `GW-ACCESS-*` — access context
+
+| Code | Meaning |
+| --- | --- |
+| `GW-ACCESS-001` | Cross-scope query without privileged access |
+| `GW-ACCESS-002` | Provider session does not advertise privileged cross-scope queries |
+| `GW-ACCESS-003` | Point operation under privileged access (ambiguous) |
+| `GW-ACCESS-004`…`006` | Additional access-context refusals |
+
+---
+
+## `GW-DECL-*` — Records declarations
+
+| Code | Meaning |
+| --- | --- |
+| `GW-DECL-COLUMN-001` | Invalid column declaration |
+| `GW-DECL-CONCURRENCY-001` | Invalid concurrency declaration |
+| `GW-DECL-KEY-001`…`003` | Invalid key declaration |
+| `GW-DECL-INDEX-001`, `-002` | Invalid index declaration |
+| `GW-DECL-INDEX-003` | Index over a JSON column — *"Leave the JSON column unindexed"* |
+
+---
+
+## `GW-DOC-*` — Documents
+
+| Code | Meaning |
+| --- | --- |
+| `GW-DOC-DECL-001` | Missing `Id` selector |
+| `GW-DOC-DECL-002` | JSON path projected more than once |
+| `GW-DOC-DECL-003` | Column collides with a reserved/declared column |
+| `GW-DOC-DECL-004` | Duplicate index name |
+| `GW-DOC-DECL-005` | Index targets an unprojected path |
+| `GW-DOC-DECL-006` | Index targets a JSON projection |
+| `GW-DOC-DECL-007` | Enum with unsupported unsigned underlying type |
+| `GW-DOC-DECL-008` | Enum JSON converter unusable or emits an unsupported kind |
+| `GW-DOC-DECL-009` | Projected member can be omitted by the JSON contract |
+| `GW-DOC-MAT-001`…`004` | Materialization failures |
+
+---
+
+## `GW-AGG-*` — aggregation
+
+Grouped by concern:
+
+| Family | Concern |
+| --- | --- |
+| `GW-AGG-DECL-001`…`010` | Profile declaration |
+| `GW-AGG-QUERY-001`…`017` | Query admission |
+| `GW-AGG-SOURCE-001`…`007` | Source predicate binding |
+| `GW-AGG-PRED-001`…`012` | Post predicate / allowances |
+| `GW-AGG-GROUP-001`…`012` | Grouping and time buckets |
+| `GW-AGG-BOUND-001`…`008` | `MaxInputRows` / `MaxGroups` budgets |
+| `GW-AGG-TYPE-001`…`004`, `GW-AGG-COLUMN-001`/`002` | Reducer types and columns |
+| `GW-AGG-SUM-001` | `Sum` accepts only `Int32`/`Int64`/`Decimal` |
+| `GW-AGG-FIRST-001` | `FirstBy` requires a non-null orderable order column |
+
+---
+
+## `GW-CAP-*` — capability validation
+
+| Code | Meaning |
+| --- | --- |
+| `GW-CAP-002` | Provider warning (non-fatal) |
+| `GW-CAP-004` | Provider does not support required capabilities |
+| `GW-CAP-005` | Provider does not support the declared concurrency mode |
+| `GW-CAP-013` | Capability is evidence-gated and lacks evidence |
+| `GW-CAP-014` | Required capability is not registered — register it via an `IGroundworkModule` |
+
+---
+
+## `GW-CLI-*` / `GW-SCHEMA-*` — tooling
+
+| Code | Meaning |
+| --- | --- |
+| `GW-CLI-001`, `-005`…`-012` | CLI invocation and authorization refusals |
+| `GW-CLI-007` | Schema changes require explicit `--safe` authorization |
+| `GW-SCHEMA-001`…`005` | Schema planning/application refusals |
+| `GW-SCHEMA-TOOL-001` | Schema tool refusal |
+
+---
+
+## Other
+
+| Code | Meaning |
+| --- | --- |
+| `GW-COMPARE-DELETE-001` | Invalid compare-and-delete request (e.g. a JSON column in the equality set) |
+| `GW-BATCH-FINGERPRINT-001` | Batch fingerprint refusal |
+| `GW-SQLSERVER-LIFECYCLE-001` | SQL Server lifecycle table has a non-`BIN2` collation — migration required |
+
+---
+
+## Stability
+
+Diagnostic codes, public result semantics, and storage contracts change **only with an explicit
+release note and regression proof**, even before 1.0. You can safely branch on them.
+
+## Next
+
+- **[Troubleshooting](Troubleshooting)** — symptom → cause → fix
