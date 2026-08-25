@@ -393,6 +393,16 @@ internal sealed class PostgreSqlStore : IDisposable
 
     public void Dispose()
     {
+        // Npgsql pools per connection string, and every store here gets its own SearchPath, so this
+        // store's pool is one no later test can ever reuse. Returning the sessions is not enough:
+        // disposing an NpgsqlConnection hands it back to that pool rather than closing the socket, so
+        // without this the idle physical connections survive for the life of the process. Nine
+        // PostgreSQL tests at WriterCount = 32 exhaust a default max_connections = 100 that way, which
+        // surfaces as 53300 in whichever tests happen to run once the budget is gone (#62).
+        // Clearing before the drop also releases anything still holding a lock on the schema.
+        using (var pooled = new NpgsqlConnection(ConnectionString))
+            NpgsqlConnection.ClearPool(pooled);
+
         using var admin = new NpgsqlConnection(adminConnectionString);
         admin.Open();
         using var command = admin.CreateCommand();
