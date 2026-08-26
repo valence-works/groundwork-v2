@@ -835,6 +835,61 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public async Task Configured_linq_executor_counts_and_probes_provider_side_with_honest_cancellation()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-counts"), Name = "linq_counts",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var (id, value) in new[] { ("a", "hit"), ("b", "hit"), ("c", "miss") })
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = id, ["value_col"] = value })).Status);
+
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_counts", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Display), "value_col", QueryType.String)
+            ]));
+
+        Assert.Equal(2, await table.Query.Where(ticket => ticket.Display == "hit").CountAsync(executor));
+        Assert.Equal(0, await table.Query.Where(ticket => ticket.Display == "absent").CountAsync(executor));
+        Assert.True(await table.Query.Where(ticket => ticket.Display == "miss").AnyAsync(executor));
+        Assert.False(await table.Query.Where(ticket => ticket.Display == "absent").AnyAsync(executor));
+
+        var cancelled = new CancellationToken(canceled: true);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.ToListAsync(executor, cancelled));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.CountAsync(executor, cancelled));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.AnyAsync(executor, cancelled));
+    }
+
+    [Fact]
+    public void Configured_linq_executor_requires_a_sqlite_session()
+    {
+        using var database = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-foreign"), Name = "linq_foreign",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(database.Schema.Apply(unit).Applied);
+
+        Assert.Throws<ArgumentException>(() => new SqliteLinqExecutor(database.OpenSession(unit, StorageAccess.Global)));
+    }
+
+    private sealed class LinqCountTicket
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Display { get; set; } = string.Empty;
+    }
+
+    [Fact]
     public void Provider_passes_provider_neutral_conformance()
     {
         using var store = TemporaryStore.Create();

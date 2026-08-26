@@ -292,6 +292,47 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Count_and_any_are_answered_provider_side_over_the_public_adapter()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://records-" + Guid.NewGuid().ToString("N"));
+        var table = CustomerTable();
+        Assert.True(connection.Schema.Apply(table.Definition).Applied);
+        var records = table.Open(connection);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(Customer.Create("Ada", "ada@example.test")).Status);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(Customer.Create("Ada", "ada.two@example.test")).Status);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(Customer.Create("Grace", "grace@example.test")).Status);
+
+        Assert.Equal(2, records.Count(table.Query.Where(row => row.Name == "Ada")));
+        Assert.Equal(0, records.Count(table.Query.Where(row => row.Name == "Missing")));
+        Assert.True(records.Any(table.Query.Where(row => row.Name == "Grace")));
+        Assert.False(records.Any(table.Query.Where(row => row.Name == "Missing")));
+    }
+
+    [Fact]
+    public void Count_executes_a_total_count_request_with_a_single_row_page()
+    {
+        var table = CustomerTable();
+        var store = new CapturingRecordStore(totalCount: 7);
+        var records = table.Open(store);
+
+        Assert.Equal(7, records.Count(table.Query.Where(row => row.Name == "Ada")));
+        Assert.True(store.Request!.Result.IncludesTotalCount);
+        Assert.Equal(1, store.Request.Paging.Limit);
+    }
+
+    [Fact]
+    public void Count_refuses_a_store_result_without_a_provider_total_count()
+    {
+        var table = CustomerTable();
+        var records = table.Open(new CapturingRecordStore());
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            records.Count(table.Query.Where(row => row.Name == "Ada")));
+
+        Assert.Contains("provider-side total count", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Records_has_no_provider_assembly_reference()
     {
         var references = typeof(RecordTable<>).Assembly.GetReferencedAssemblies()
@@ -338,8 +379,9 @@ public sealed class RecordTableTests
     public sealed record InvalidVersionCustomer(Guid Id, string Name, string Version);
     public sealed record JsonCustomer(Guid Id, object Payload);
 
-    private sealed class CapturingRecordStore : IRecordStore
+    private sealed class CapturingRecordStore(long? totalCount = null) : IRecordStore
     {
+        public QueryRequest? Request { get; private set; }
         public QueryRenderOptions? Options { get; private set; }
         public RecordWriteResult Insert(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
         public RecordWriteResult Update(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
@@ -347,8 +389,9 @@ public sealed class RecordTableTests
         public RecordWriteResult Delete(Groundwork.Kernel.StorageUnit unit, RowValues key, RecordWriteOptions? options = null) => throw new NotSupportedException();
         public RecordQueryResult Query(QueryRequest request, QueryRenderOptions? options = null)
         {
+            Request = request;
             Options = options;
-            return new RecordQueryResult([]);
+            return new RecordQueryResult([], totalCount);
         }
     }
 }

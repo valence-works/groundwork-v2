@@ -90,6 +90,45 @@ public static class RelationalQueryResultReader
         return rows;
     }
 
+    public static Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadAsync(
+        DbConnection connection,
+        RelationalQueryCommand query,
+        Func<string, object?, object?> decode,
+        CancellationToken cancellationToken = default) =>
+        ReadAsync(connection, query, decode, transaction: null, cancellationToken);
+
+    /// <summary>Reads a rendered query on the async ADO.NET surface using the caller-owned transaction, when one exists.</summary>
+    internal static async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadAsync(
+        DbConnection connection,
+        RelationalQueryCommand query,
+        Func<string, object?, object?> decode,
+        DbTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(decode);
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = query.CommandText;
+        AddParameters(command, query);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var rows = new List<IReadOnlyDictionary<string, object?>>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+            for (var index = 0; index < reader.FieldCount; index++)
+            {
+                var name = reader.GetName(index);
+                var value = reader.IsDBNull(index) ? null : reader.GetValue(index);
+                row[name] = decode(name, value);
+            }
+            rows.Add(row);
+        }
+        return rows;
+    }
+
     /// <summary>Adds the rendered values to a native command, including explain commands.</summary>
     public static void AddParameters(DbCommand command, RelationalQueryCommand query)
     {

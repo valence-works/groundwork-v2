@@ -171,6 +171,5 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
                 "Groundwork.Query.Model.GwAllowAcceptedScansAttribute",
                 StringComparison.Ordinal));
 
-    private static bool IsTerminal(string name) => name is
-        "QueryAsync" or "CountAsync" or "FirstOrDefaultAsync" or "ToListAsync";
+    private static bool IsTerminal(string name) => QueryResolver.TerminalNames.Contains(name);
 }

@@ -1,5 +1,6 @@
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
+using Groundwork.Sqlite;
 using Groundwork.Store;
 
 namespace Groundwork.Query.Linq.Sqlite;
@@ -7,28 +8,46 @@ namespace Groundwork.Query.Linq.Sqlite;
 /// <summary>Configured async adapter for a closed LINQ database over an existing SQLite session.</summary>
 public sealed class SqliteLinqExecutor : IGwQueryExecutor
 {
-    private readonly IStorageSession session;
-    public SqliteLinqExecutor(IStorageSession session) => this.session = session ?? throw new ArgumentNullException(nameof(session));
+    private readonly SqliteStorageSession session;
 
-    public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
+    public SqliteLinqExecutor(IStorageSession session)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        IReadOnlyList<T> rows = session.Query(request).Rows.Select(row => Materialize<T>(row, model)).ToArray();
-        return Task.FromResult(rows);
+        ArgumentNullException.ThrowIfNull(session);
+        this.session = session as SqliteStorageSession ?? throw new ArgumentException(
+            "The SQLite LINQ executor requires a session opened by the SQLite provider.", nameof(session));
     }
 
-    public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var result = session.Query(request);
-        return Task.FromResult(result.TotalCount ?? result.Rows.Count);
+        ArgumentNullException.ThrowIfNull(request);
+        var result = await session.QueryAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Rows.Select(row => Materialize<T>(row, model)).ToArray();
     }
 
-    public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default)
+    public async Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(session.Query(request).Rows.Count != 0);
+        ArgumentNullException.ThrowIfNull(request);
+        var result = await session.QueryAsync(ForCount(request), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.TotalCount ?? throw new InvalidOperationException(
+            $"Query on '{request.Table.Value}' returned no provider-side total count; a materialized page is never counted client-side.");
     }
+
+    public async Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var result = await session.QueryAsync(ForExistence(request), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Rows.Count != 0;
+    }
+
+    /// <summary>Executes the provider's windowed count over the full predicate with a single-row page.</summary>
+    private static QueryRequest ForCount(QueryRequest request) => new(
+        request.Table, request.Where, request.Order, request.Projection,
+        Paging.OffsetLimit(0, 1), ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan);
+
+    /// <summary>Executes a limit-1 existence probe instead of materializing the requested page.</summary>
+    private static QueryRequest ForExistence(QueryRequest request) => new(
+        request.Table, request.Where, request.Order, request.Projection,
+        Paging.OffsetLimit(request.Paging.Offset ?? 0, 1), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan);
 
     private static T Materialize<T>(IReadOnlyDictionary<string, object?> row, GwTableModel<T>? model)
     {

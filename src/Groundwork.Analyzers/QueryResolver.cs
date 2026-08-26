@@ -35,8 +35,8 @@ internal sealed class QueryResolution
 
 internal static class QueryResolver
 {
-    private static readonly ImmutableHashSet<string> TerminalNames =
-        ImmutableHashSet.Create(StringComparer.Ordinal, "QueryAsync", "CountAsync", "FirstOrDefaultAsync", "ToListAsync");
+    internal static readonly ImmutableHashSet<string> TerminalNames =
+        ImmutableHashSet.Create(StringComparer.Ordinal, "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync");
 
     public static bool IsCandidate(InvocationExpressionSyntax terminal)
     {
@@ -164,12 +164,9 @@ internal static class QueryResolver
             return QueryResolution.Unresolved($"method '{name}' is outside the closed query surface", invocation);
         }
 
-        ResultShape result = terminal.Expression is MemberAccessExpressionSyntax terminalMember &&
-                     terminalMember.Name.Identifier.ValueText == "CountAsync"
-            ? (ResultShape)ResultShape.TotalCount.Instance
-            : ResultShape.Rows.Instance;
+        var (result, pagingOverride) = TerminalShape(terminal);
         return QueryResolution.Resolved(
-            BuildRequests(state, optionalPredicates, result),
+            BuildRequests(state, optionalPredicates, result, pagingOverride),
             terminal);
     }
 
@@ -221,7 +218,7 @@ internal static class QueryResolver
                 continue;
             if (reference.Parent is MemberAccessExpressionSyntax member && member.Expression == reference &&
                 member.Parent is InvocationExpressionSyntax invocation &&
-                member.Name.Identifier.ValueText is "Where" or "QueryAsync" or "CountAsync" or "FirstOrDefaultAsync" or "ToListAsync")
+                (member.Name.Identifier.ValueText == "Where" || TerminalNames.Contains(member.Name.Identifier.ValueText)))
                 continue;
             return QueryResolution.Unresolved("the query local escapes the method before its terminal operation", terminal);
         }
@@ -251,11 +248,8 @@ internal static class QueryResolver
                 return QueryResolution.Unresolved("reassignment shape enumeration is bounded at 32 shapes; use WhereIf or runtime coverage", ifStatement, ifStatement);
         }
 
-        ResultShape result = terminal.Expression is MemberAccessExpressionSyntax terminalMember &&
-                     terminalMember.Name.Identifier.ValueText == "CountAsync"
-            ? (ResultShape)ResultShape.TotalCount.Instance
-            : ResultShape.Rows.Instance;
-        return QueryResolution.Resolved(BuildRequests(state, optional, result), terminal);
+        var (result, pagingOverride) = TerminalShape(terminal);
+        return QueryResolution.Resolved(BuildRequests(state, optional, result, pagingOverride), terminal);
     }
 
     private static QueryResolution ResolveInitializer(
@@ -270,10 +264,22 @@ internal static class QueryResolver
         return ResolveChain(initializer, chain, tableInvocation, tableType, model, schema, cancellationToken);
     }
 
+    /// <summary>Mirrors the runtime terminal semantics of <c>Count()</c>/<c>Any()</c> and their async forms.</summary>
+    private static (ResultShape Result, Paging? PagingOverride) TerminalShape(InvocationExpressionSyntax terminal) =>
+        terminal.Expression is MemberAccessExpressionSyntax member
+            ? member.Name.Identifier.ValueText switch
+            {
+                "Count" or "CountAsync" => ((ResultShape)ResultShape.TotalCount.Instance, Paging.None),
+                "Any" or "AnyAsync" => (ResultShape.Rows.Instance, Paging.OffsetLimit(0, 1)),
+                _ => (ResultShape.Rows.Instance, null)
+            }
+            : (ResultShape.Rows.Instance, null);
+
     private static IEnumerable<QueryRequest> BuildRequests(
         QueryShapeState state,
         IReadOnlyList<Predicate> optionalPredicates,
-        ResultShape result)
+        ResultShape result,
+        Paging? pagingOverride)
     {
         var shapeCount = 1 << optionalPredicates.Count;
         for (var mask = 0; mask < shapeCount; mask++)
@@ -288,9 +294,9 @@ internal static class QueryResolver
                 1 => terms[0],
                 _ => new Predicate.And(terms)
             };
-            var paging = state.Limit.HasValue
+            var paging = pagingOverride ?? (state.Limit.HasValue
                 ? Paging.OffsetLimit(state.Offset ?? 0, state.Limit.Value)
-                : Paging.None;
+                : Paging.None);
             yield return new QueryRequest(
                 new TableId(state.Table.Name),
                 predicate,

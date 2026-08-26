@@ -2,7 +2,7 @@ using Groundwork.Schema;
 
 var database = new Database();
 var status = "open";
-_ = database.Table<Ticket>().Where(ticket => ticket.Status == status).QueryAsync();
+_ = database.Table<Ticket>().Where(ticket => ticket.Status == status).ToListAsync();
 
 [GwTable("tickets")]
 public sealed class Ticket
@@ -19,5 +19,5 @@ public sealed class Database
 public sealed class Query<T>
 {
     public Query<T> Where(Func<T, bool> predicate) => this;
-    public Task QueryAsync() => Task.CompletedTask;
+    public Task ToListAsync() => Task.CompletedTask;
 }
