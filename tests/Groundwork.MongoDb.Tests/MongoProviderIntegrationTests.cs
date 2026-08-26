@@ -433,10 +433,10 @@ public sealed class MongoProviderIntegrationTests
                 new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
         var mismatchObserver = new ProviderCommandObserver();
+        var mismatchSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, mismatchObserver);
         Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
-            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
-                new WriteOptions { Observer = mismatchObserver }).Status);
+            mismatchSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L }).Status);
         Assert.Equal(2, mismatchObserver.RoundTrips);
         Assert.Contains(mismatchObserver.Commands, command => command.Operation == "mongodb.compare-and-delete-read");
         Assert.Equal(2L, session.Update(new StorageValues(new Dictionary<string, object?>
@@ -444,9 +444,9 @@ public sealed class MongoProviderIntegrationTests
             ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
         }), WriteOptions.IfVersion(1)).Version);
         var deleteObserver = new ProviderCommandObserver();
-        var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
-            new WriteOptions { Observer = deleteObserver });
+        var deleteSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, deleteObserver);
+        var deleted = deleteSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
         Assert.Equal(WriteOutcomeStatus.Deleted, deleted.Status);
         Assert.Equal(2L, deleted.Version);
         Assert.Equal(3, deleteObserver.RoundTrips);
@@ -776,11 +776,11 @@ public sealed class MongoProviderIntegrationTests
         Assert.NotNull(stored);
         Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored.Values.Values.Keys);
 
-        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
         var aggregateObserver = new ProviderCommandObserver();
+        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(
+            connection.OpenSession(unit, MongoStorageAccess.Global, aggregateObserver));
         var aggregate = batch.ApplyBatch(
-            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
-                new WriteOptions { Observer = aggregateObserver })]);
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }))]);
         Assert.Equal(WriteOutcomeStatus.Upserted, Assert.Single(aggregate).Outcome.Status);
         Assert.Contains(aggregateObserver.Commands, command => command.Operation == "mongodb.batch-write");
 
@@ -1315,13 +1315,12 @@ public sealed class MongoProviderIntegrationTests
             Assert.True(store.Schema.Apply(compareUnit).Applied);
             Assert.DoesNotContain(store.Capabilities,
                 capability => capability.Id == BatchWriteCapabilities.CompareAndDelete);
-            var compareSession = store.OpenSession(compareUnit, StorageAccess.Global);
-            Assert.False(compareSession is ICompareAndDeleteStorageSession);
             var observer = new ProviderCommandObserver();
+            var compareSession = store.OpenSession(compareUnit, StorageAccess.Global, observer);
+            Assert.False(compareSession is ICompareAndDeleteStorageSession);
             Assert.Throws<NotSupportedException>(() => compareSession.CompareAndDelete(
                 new StorageKey(new Dictionary<string, object?> { ["id"] = "missing" }),
-                new Dictionary<string, object?> { ["owner"] = "worker" },
-                new WriteOptions { Observer = observer }));
+                new Dictionary<string, object?> { ["owner"] = "worker" }));
             Assert.Empty(observer.Commands);
             var uowRefusal = Assert.Throws<InvalidOperationException>(() =>
                 store.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, compareUnit));

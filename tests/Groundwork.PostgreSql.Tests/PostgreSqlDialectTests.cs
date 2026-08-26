@@ -702,10 +702,10 @@ public sealed class PostgreSqlDialectTests
                 new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
         var mismatchObserver = new ProviderCommandObserver();
+        var mismatchSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, mismatchObserver);
         Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
-            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
-                new WriteOptions { Observer = mismatchObserver }).Status);
+            mismatchSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L }).Status);
         Assert.Equal(1, mismatchObserver.RoundTrips);
         Assert.Contains(mismatchObserver.Commands, command => command.Operation == "postgresql.compare-and-delete-read");
         Assert.Equal(2L, session.Update(new StorageValues(new Dictionary<string, object?>
@@ -713,9 +713,9 @@ public sealed class PostgreSqlDialectTests
             ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
         }), WriteOptions.IfVersion(1)).Version);
         var deleteObserver = new ProviderCommandObserver();
-        var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
-            new WriteOptions { Observer = deleteObserver });
+        var deleteSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, deleteObserver);
+        var deleted = deleteSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
         Assert.Equal(WriteOutcomeStatus.Deleted, deleted.Status);
         Assert.Equal(2L, deleted.Version);
         Assert.Equal(2, deleteObserver.RoundTrips);

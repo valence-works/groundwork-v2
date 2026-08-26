@@ -437,16 +437,15 @@ public sealed class DocumentsContractTests
         connection.Schema.Apply(unit.StorageUnit);
         var value = new EnumDocument(Guid.NewGuid(), OrderStatus.Paid);
         var documentObserver = new ProviderCommandObserver();
-        var documentWrite = unit.Upsert(value, new WriteOptions { Observer = documentObserver });
+        var documentWrite = unit.Upsert(value);
 
-        var documentOutcome = unit.Execute(connection, documentWrite);
+        var documentOutcome = unit.Execute(connection, documentWrite, observer: documentObserver);
 
         var equivalentObserver = new ProviderCommandObserver();
         var equivalentWrite = RowWrite.Upsert(
             unit.StorageUnit,
-            new StorageValues(documentWrite.Values!.Values),
-            new WriteOptions { Observer = equivalentObserver });
-        var equivalentOutcome = connection.OpenSession(unit.StorageUnit, StorageAccess.Global)
+            new StorageValues(documentWrite.Values!.Values));
+        var equivalentOutcome = connection.OpenSession(unit.StorageUnit, StorageAccess.Global, equivalentObserver)
             .Upsert(equivalentWrite.Values!, equivalentWrite.Options);
 
         Assert.True(documentOutcome.Succeeded);

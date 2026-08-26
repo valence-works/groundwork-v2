@@ -41,7 +41,8 @@ try
             RunCommitWorkload(provider, unit, count, providerName);
             return 0;
         }
-        var rawSession = provider.OpenSession(unit, StorageAccess.Global);
+        var observer = new ProviderCommandObserver();
+        var rawSession = provider.OpenSession(unit, StorageAccess.Global, observer);
         if (rawSession is not IConcurrencyStorageSession session)
             throw new InvalidOperationException($"Provider '{providerName}' does not expose conditional upsert.");
 
@@ -50,7 +51,8 @@ try
         long? version = null;
         for (var index = 0; index < count; index++)
         {
-            var observer = new ProviderCommandObserver();
+            var roundTripsBefore = observer.RoundTrips;
+            var probesBefore = observer.Commands.Count(command => command.IsProbe);
             var outcome = session.ConditionalUpsert(
                 new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
@@ -62,14 +64,13 @@ try
                 {
                     Precondition = version is { } expected
                         ? WritePrecondition.IfVersion(expected)
-                        : WritePrecondition.Unconditional,
-                    Observer = observer
+                        : WritePrecondition.Unconditional
                 });
             if (!outcome.Succeeded)
                 throw new InvalidOperationException($"Write {index} returned {outcome.Status}.");
             version = outcome.Version;
-            totalRoundTrips += observer.RoundTrips;
-            totalProbes += observer.Commands.Count(command => command.IsProbe);
+            totalRoundTrips += observer.RoundTrips - roundTripsBefore;
+            totalProbes += observer.Commands.Count(command => command.IsProbe) - probesBefore;
         }
 
         Console.WriteLine($"provider={providerName} workload={workload} writes={count} round_trips={totalRoundTrips} probes={totalProbes} final_version={version?.ToString() ?? "none"}");
@@ -189,6 +190,7 @@ static void RunCommitWorkload(
     using var work = provider.BeginUnitOfWork(
         StorageAccess.Global,
         new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Aggregate },
+        observer,
         unit);
     for (var index = 0; index < count; index++)
     {
@@ -197,7 +199,7 @@ static void RunCommitWorkload(
             ["id"] = "row-" + index,
             ["value"] = "value-" + index,
             ["createdAt"] = DateTimeOffset.UnixEpoch
-        }), new WriteOptions { Observer = observer }));
+        })));
     }
 
     // Measure the aggregate-cost path. CommitWithOutcomes is intentionally more
