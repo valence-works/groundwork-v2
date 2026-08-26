@@ -388,6 +388,9 @@ public interface IMongoProviderConnection : IDisposable
 
     IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access, IProviderCommandObserver? observer = null);
 
+    IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units);
+
+    /// <summary>Begins a unit of work whose provider commands are counted by <paramref name="observer"/>.</summary>
     IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, IProviderCommandObserver? observer, params StorageUnit[] units);
 }
 

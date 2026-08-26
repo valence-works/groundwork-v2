@@ -93,6 +93,9 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
         return new MongoStorageSession(state, applied, access, collection, null);
     }
 
+    public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units)
+        => BeginUnitOfWork(access, observer: null, units);
+
     public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, IProviderCommandObserver? observer, params StorageUnit[] units)
     {
         ThrowIfDisposed();

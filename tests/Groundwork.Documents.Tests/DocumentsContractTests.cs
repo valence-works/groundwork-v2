@@ -702,7 +702,7 @@ public sealed class DocumentsContractTests
         public IProviderCatalog Catalog => throw new NotSupportedException();
         public ISchemaCoordinator Schema => throw new NotSupportedException();
         public IReadOnlyList<CapabilityDescriptor> Capabilities => [];
-        public IStorageSession OpenSession(Groundwork.Kernel.StorageUnit unit, StorageAccess access)
+        public IStorageSession OpenSession(Groundwork.Kernel.StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
         {
             OpenCount++;
             LastAccess = access;
@@ -710,6 +710,7 @@ public sealed class DocumentsContractTests
         }
         public IUnitOfWork BeginUnitOfWork(StorageAccess access, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
         public IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
+        public IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, IProviderCommandObserver? observer, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
         public void Dispose() { }
     }
 

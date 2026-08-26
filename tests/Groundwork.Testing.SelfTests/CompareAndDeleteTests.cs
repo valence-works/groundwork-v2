@@ -219,13 +219,12 @@ public sealed class CompareAndDeleteTests
         var direct = connection.OpenSession(unit, StorageAccess.Global);
         direct.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["owner"] = "worker-a" }));
 
-        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
         var stagedObserver = new ProviderCommandObserver();
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, stagedObserver, unit);
         work.Stage(RowWrite.CompareAndDelete(
             unit,
             new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
-            new Dictionary<string, object?> { ["owner"] = "worker-a" },
-            new WriteOptions { Observer = stagedObserver }));
+            new Dictionary<string, object?> { ["owner"] = "worker-a" }));
         var capability = Assert.IsAssignableFrom<ICompareAndDeleteStorageSession>(work.OpenSession(unit));
 
         Assert.Throws<ArgumentException>(() => capability.CompareAndDelete(
@@ -340,10 +339,11 @@ public sealed class CompareAndDeleteTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var observer = new ProviderCommandObserver();
 
-        Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
-            Key("claim-1"),
-            new Dictionary<string, object?> { ["missing"] = "value" },
-            new WriteOptions { Observer = observer }));
+        Assert.Throws<ArgumentException>(() => connection
+            .OpenSession(unit, StorageAccess.Global, observer)
+            .CompareAndDelete(
+                Key("claim-1"),
+                new Dictionary<string, object?> { ["missing"] = "value" }));
         Assert.Equal(0, observer.RoundTrips);
 
         var jsonUnit = unit with
@@ -351,10 +351,9 @@ public sealed class CompareAndDeleteTests
             Columns = [..unit.Columns, new ColumnDefinition { Name = "payload", Type = PortableType.Json }]
         };
         connection.Schema.Apply(jsonUnit);
-        Assert.Throws<ArgumentException>(() => connection.OpenSession(jsonUnit, StorageAccess.Global).CompareAndDelete(
+        Assert.Throws<ArgumentException>(() => connection.OpenSession(jsonUnit, StorageAccess.Global, observer).CompareAndDelete(
             Key("claim-1"),
-            new Dictionary<string, object?> { ["payload"] = "{\"a\":1}" },
-            new WriteOptions { Observer = observer }));
+            new Dictionary<string, object?> { ["payload"] = "{\"a\":1}" }));
         Assert.Equal(0, observer.RoundTrips);
     }
 

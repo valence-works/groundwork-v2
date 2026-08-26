@@ -989,6 +989,7 @@ public sealed class SqliteProviderTests
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
             new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },
+            observer,
             unit);
 
         for (var index = 0; index < 1_000; index++)
@@ -998,7 +999,7 @@ public sealed class SqliteProviderTests
                 ["id"] = $"id-{index}",
                 ["value"] = $"value-{index}",
                 ["uniqueValue"] = $"unique-{index}"
-            }), new WriteOptions { Observer = observer }));
+            })));
         }
 
         var summary = work.CommitWithOutcomes();
@@ -1120,6 +1121,7 @@ public sealed class SqliteProviderTests
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
             new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },
+            observer,
             unit);
         for (var row = 0; row < 1_000; row++)
         {
@@ -1127,7 +1129,7 @@ public sealed class SqliteProviderTests
                 column => column.Name,
                 column => (object?)$"{column.Name}-{row}",
                 StringComparer.Ordinal);
-            work.Stage(RowWrite.Upsert(unit, new StorageValues(values), new WriteOptions { Observer = observer }));
+            work.Stage(RowWrite.Upsert(unit, new StorageValues(values)));
         }
 
         var report = work.CommitWithOutcomes();
