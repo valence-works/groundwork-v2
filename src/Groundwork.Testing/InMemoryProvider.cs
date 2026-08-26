@@ -624,6 +624,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     /// whatever happened to be staged first.
     /// </summary>
     private readonly IProviderCommandObserver? commandObserver;
+    private bool suppressQueryObservation;
 
     public StorageUnit Unit { get; }
 
@@ -666,7 +667,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            commandObserver?.Observe(new ProviderCommandEvent("in-memory.query", null, ProviderCommandKind.Read, IsProbe: false));
+            if (!suppressQueryObservation)
+                commandObserver?.Observe(new ProviderCommandEvent("in-memory.query", null, ProviderCommandKind.Read, IsProbe: false));
             var rows = CurrentState().Partitions.TryGetValue(partition, out var entries)
                 ? entries.Values
                     .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
@@ -806,7 +808,19 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         AggregationExecutor.ValidateQuery(Unit, profile, query);
         commandObserver?.Observe(new ProviderCommandEvent("in-memory.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
-        return AggregationSessionExecutor.Execute(this, query);
+        // The executor scans through this session's public Query. That scan is the aggregate's own work,
+        // already represented by the event above — letting it also raise in-memory.query would count one
+        // logical operation twice, which is the exact failure the Kind/probe distinctions exist to avoid.
+        // Sessions are single-caller (they are not thread-safe), so a field suffices.
+        suppressQueryObservation = true;
+        try
+        {
+            return AggregationSessionExecutor.Execute(this, query);
+        }
+        finally
+        {
+            suppressQueryObservation = false;
+        }
     }
 
     private ColumnRef? QueryColumn(string name)

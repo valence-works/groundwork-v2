@@ -77,6 +77,41 @@ public sealed class ProviderCommandTests
         Assert.DoesNotContain(observer.Commands, command => command.IsProbe);
     }
 
+    [Fact]
+    public void InMemory_aggregate_counts_once_even_though_it_scans_through_query()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://aggregate-once");
+        var unit = Unit("memory-agg-once") with
+        {
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "by-value",
+                    GroupByColumns = ["value"],
+                    Aggregates = [new Aggregate.Count("total")]
+                }
+            ]
+        };
+        connection.Schema.Apply(unit);
+        connection.OpenSession(unit, StorageAccess.Global)
+            .Insert(Values("one", "first", DateTimeOffset.UnixEpoch));
+
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        _ = session.Aggregate(new AggregationQuery("by-value"));
+
+        // The executor's internal scan is the aggregate's own work; one logical operation, one event.
+        var single = Assert.Single(observer.Commands);
+        Assert.Equal("in-memory.aggregate", single.Operation);
+        Assert.Equal(ProviderCommandKind.Read, single.Kind);
+
+        // A plain Query on the same session still counts normally afterwards.
+        _ = session.Query(Page(unit));
+        Assert.Equal(2, observer.RoundTrips);
+        Assert.Equal("in-memory.query", observer.Commands[^1].Operation);
+    }
+
     [SkippableFact]
     public void PostgreSQL_read_and_query_raise_single_read_events()
     {
