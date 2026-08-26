@@ -633,6 +633,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     {
         ArgumentNullException.ThrowIfNull(key);
         RefusePrivilegedPointOperation("read");
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.read", null, ProviderCommandKind.Read, IsProbe: false));
         lock (database.Gate)
         {
             ThrowIfDisposed();
@@ -647,6 +648,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     {
         ArgumentNullException.ThrowIfNull(request);
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.query", null, ProviderCommandKind.Read, IsProbe: false));
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
@@ -800,6 +802,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public AggregationResult Aggregate(AggregationQuery query)
     {
         RefusePrivilegedPointOperation("aggregate");
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         return AggregationSessionExecutor.Execute(this, query);
     }
 

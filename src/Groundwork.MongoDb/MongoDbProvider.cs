@@ -967,6 +967,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.query", "MongoDB.Aggregate(page)", ProviderCommandKind.Read, IsProbe: false));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var executionSource = Access.Policy == ScopePolicy.Scoped
             ? QueryRequestExecution.WithProviderPredicate(request, request.Where,
@@ -1220,6 +1221,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ThrowIfDisposed();
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         AggregationProfileValidator.Validate(Unit, profile);
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         return ExecuteNativeAggregation(profile, query);
     }
 
@@ -1302,7 +1304,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
-        var document = FindOne(identity);
+        var document = FindOne(identity, "mongodb.read", isProbe: false);
         return document is null ? null : MongoDocumentMapper.DecodeEntry(Unit, document, Version(identity, document));
     }
 
@@ -2637,7 +2639,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
         var existing = Unit.Concurrency.IsOptimistic
-            ? FindOne(identity)
+            ? FindOne(identity, "mongodb.compare-and-delete-read")
             : null;
         if (Unit.Concurrency.IsOptimistic && existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
@@ -2780,9 +2782,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
     }
 
-    private BsonDocument? FindOne(BsonValue identity)
+    private BsonDocument? FindOne(BsonValue identity, string operation = "mongodb.write-probe", bool isProbe = true)
     {
-        commandObserver?.Observe(new ProviderCommandEvent("mongodb.compare-and-delete-read", "MongoDB.FindOne", ProviderCommandKind.Write, IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent(operation, "MongoDB.FindOne", ProviderCommandKind.Read, IsProbe: isProbe));
         return transactionSession is null
             ? collection.Find(new BsonDocument("_id", identity)).FirstOrDefault()
             : collection.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();

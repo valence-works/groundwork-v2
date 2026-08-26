@@ -71,6 +71,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
@@ -156,6 +157,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
@@ -206,7 +208,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     public StoredEntry? Read(StorageKey key)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => PublicEntry(ReadCore(key)));
+        return Execute(() => PublicEntry(ReadCore(key, observerOperation: "postgresql.read", isProbe: false)));
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -1211,14 +1213,15 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     private StoredEntry? ReadCore(
         StorageKey key,
         bool forUpdate = false,
-        string? observerOperation = null)
+        string? observerOperation = null,
+        bool isProbe = true)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumn is null ? [] : [VersionColumn]).ToArray();
         var locking = forUpdate ? " FOR UPDATE" : string.Empty;
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where}{locking};");
         AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, ProviderCommandKind.Write, IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
             return null;

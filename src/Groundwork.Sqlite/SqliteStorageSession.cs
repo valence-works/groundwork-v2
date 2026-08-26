@@ -65,6 +65,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
@@ -151,6 +152,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
@@ -205,7 +207,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     public StoredEntry? Read(StorageKey key)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => PublicEntry(ReadCore(key)));
+        return Execute(() => PublicEntry(ReadCore(key, observerOperation: "sqlite.read", isProbe: false)));
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -1415,13 +1417,14 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     private StoredEntry? ReadCore(
         StorageKey key,
-        string? observerOperation = null)
+        string? observerOperation = null,
+        bool isProbe = true)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlite.write-probe", command.CommandText, ProviderCommandKind.Write, IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlite.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);

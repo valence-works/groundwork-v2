@@ -63,6 +63,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
@@ -148,6 +149,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
@@ -228,7 +230,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     public StoredEntry? Read(StorageKey key)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => PublicEntry(ReadCore(key)));
+        return Execute(() => PublicEntry(ReadCore(key, observerOperation: "sqlserver.read", isProbe: false)));
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -1513,13 +1515,14 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private StoredEntry? ReadCore(
         StorageKey key,
         string? observerOperation = null,
-        bool exactStringKeys = false)
+        bool exactStringKeys = false,
+        bool isProbe = true)
     {
         var (where, parameters) = KeyPredicate(key.Values, exactStringKeys);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, ProviderCommandKind.Write, IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
