@@ -1132,6 +1132,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             collection.CollectionNamespace.CollectionName,
             sourcePrefix);
         var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.query-across-scopes", "MongoDB.Aggregate(cross-scope)", ProviderCommandKind.Read, IsProbe: false));
         var documents = collection.Aggregate(pipeline).ToList();
         var rows = documents.Select(ToCrossScopeQueryRow).ToArray();
         var materialized = QueryResultMaterializer.Materialize(

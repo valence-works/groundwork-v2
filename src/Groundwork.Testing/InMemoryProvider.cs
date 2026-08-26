@@ -762,6 +762,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
+            commandObserver?.Observe(new ProviderCommandEvent("in-memory.query-across-scopes", null, ProviderCommandKind.Read, IsProbe: false));
             var values = CurrentState().Partitions
                 .SelectMany(partition => partition.Value.Values
                     .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))

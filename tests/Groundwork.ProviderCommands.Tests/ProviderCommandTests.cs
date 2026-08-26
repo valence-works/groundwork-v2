@@ -274,6 +274,33 @@ public sealed class ProviderCommandTests
     }
 
     [Fact]
+    public void SQLite_privileged_cross_scope_query_raises_one_read_event()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-cross-scope", scope: ScopePolicy.Scoped);
+        connection.Schema.Apply(unit);
+        connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")))
+            .Insert(Values("one", "first", DateTimeOffset.UnixEpoch));
+        connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")))
+            .Insert(Values("two", "second", DateTimeOffset.UnixEpoch));
+
+        var observer = new ProviderCommandObserver();
+        var privileged = connection.OpenSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("provider-command-tests", "cross-scope-observation")),
+            observer);
+        var crossScope = Assert.IsAssignableFrom<IPrivilegedCrossScopeQuerySession>(privileged);
+
+        var result = crossScope.QueryAcrossScopes(Page(unit));
+        Assert.Equal(2, result.Rows.Count);
+        var single = Assert.Single(observer.Commands);
+        Assert.Equal("sqlite.query-across-scopes", single.Operation);
+        Assert.Equal(ProviderCommandKind.Read, single.Kind);
+        Assert.False(single.IsProbe);
+    }
+
+    [Fact]
     public void One_session_records_reads_and_writes_in_order_and_OfKind_separates_them()
     {
         using var store = TemporarySqliteStore.Create();

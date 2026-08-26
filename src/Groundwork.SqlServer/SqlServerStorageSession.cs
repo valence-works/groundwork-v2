@@ -124,6 +124,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var executionRequest = EnsureScopeProjection(
             QueryRequestExecution.ForPage(executionSource, renderOptions));
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;

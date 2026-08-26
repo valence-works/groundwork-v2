@@ -127,6 +127,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         var executionRequest = EnsureScopeProjection(
             QueryRequestExecution.ForPage(executionSource, renderOptions));
         var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;

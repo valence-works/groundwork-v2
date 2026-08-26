@@ -132,6 +132,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var executionRequest = EnsureScopeProjection(
             QueryRequestExecution.ForPage(executionSource, renderOptions));
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
