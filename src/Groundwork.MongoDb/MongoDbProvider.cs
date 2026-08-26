@@ -90,7 +90,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
             : MongoSchemaCoordinator.EnsureAdmission(state, applied, access);
         if (!access.IsPrivilegedAcrossScopes)
             state.RegisterScope(applied, access);
-        return new MongoStorageSession(state, applied, access, collection, null);
+        return new MongoStorageSession(state, applied, access, collection, null, observer: observer);
     }
 
     public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units)
@@ -2864,7 +2864,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             using var session = state.Context.StartSession();
             session.StartTransaction();
-            var transactional = new MongoStorageSession(state, applied, Access, collection, session);
+            var transactional = new MongoStorageSession(state, applied, Access, collection, session, observer: commandObserver);
             var operationCompleted = false;
             try
             {
@@ -2981,7 +2981,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         ThrowIfTerminal();
         if (!units.TryGetValue(unit.Id, out var applied))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
-        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session, this);
+        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session, this, commandObserver);
         sessions.Add(session);
         return session;
     }
