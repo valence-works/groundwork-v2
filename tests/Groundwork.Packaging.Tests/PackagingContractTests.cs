@@ -34,7 +34,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Public_package_allowlist_is_explicit_and_excludes_non_release_projects()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var allowlist = File.ReadAllLines(Path.Combine(root, "eng", "public-packages.txt"))
             .Where(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#'))
             .Select(line => line.Split('|', 2)[1])
@@ -48,7 +48,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Release_contract_has_version_source_link_and_symbols()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var props = File.ReadAllText(Path.Combine(root, "Directory.Build.props"));
         Assert.Matches(@"<VersionPrefix>\d+\.\d+\.\d+</VersionPrefix>", props);
         Assert.Matches(@"<VersionSuffix>[0-9a-z.-]+</VersionSuffix>", props);
@@ -65,7 +65,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Public_tool_identity_is_groundwork_tool_while_project_identity_stays_schema_tool()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var project = XDocument.Load(Path.Combine(root, "src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj"));
         var packageId = project.Descendants("PackageId").Single().Value;
         Assert.Equal("Groundwork.Tool", packageId);
@@ -78,7 +78,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Publication_workflow_requires_a_release_key_and_never_publishes_unvalidated_packages()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
         Assert.Contains("FEEDZ_API_KEY", workflow, StringComparison.Ordinal);
         Assert.Contains("https://f.feedz.io/valence-works/groundwork/nuget/index.json", workflow, StringComparison.Ordinal);
@@ -98,7 +98,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Publication_workflow_runs_the_exact_clean_room_proof_after_layout_validation()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
         var layout = workflow.IndexOf("eng/verify-package-layout.sh", StringComparison.Ordinal);
         var cleanRoom = workflow.IndexOf("tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh", StringComparison.Ordinal);
@@ -114,7 +114,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Publication_workflow_verifies_the_exact_version_from_feedz_after_push()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
         var push = workflow.IndexOf("dotnet nuget push", StringComparison.Ordinal);
         var verifyJob = workflow.IndexOf("verify-feed:", StringComparison.Ordinal);
@@ -141,11 +141,4 @@ public sealed class PackagingContractTests
         Assert.Contains("Groundwork.Tool $version", cleanRoomVerifier, StringComparison.Ordinal);
     }
 
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Groundwork.slnx")))
-            directory = directory.Parent;
-        return directory?.FullName ?? throw new InvalidOperationException("Could not locate the Groundwork repository root.");
-    }
 }

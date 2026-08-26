@@ -8,35 +8,43 @@ namespace Groundwork.Packaging.Tests;
 /// <c>&lt;GroundworkCurrentRelease&gt;</c> in <c>Directory.Build.props</c> is the single source of
 /// truth for the most recently published release. This test keeps the repository consistent with
 /// it: the declared release must have release notes, the development version must be strictly
-/// ahead of it, and every documentation pin of the current version — package references and
-/// <c>--version</c> install commands — must name it exactly. Release notes under
-/// <c>docs/v2/releases/</c> are immutable archives and are excluded from the pin scan, so a
-/// release bump touches one declaration and this test then points at every stale pin.
+/// ahead of it, the clean-room consumer's default package version must name it, and every
+/// documentation pin of the current version — package references and <c>--version</c> install
+/// commands — must name it exactly. Release notes under <c>docs/v2/releases/</c> are immutable
+/// archives and are excluded from the pin scan, so a release bump touches one declaration and
+/// this test then points at every stale pin.
 /// </summary>
 public sealed class VersionIntegrityTests
 {
-    private static readonly Regex ReleaseVersionPattern =
-        new(@"^(\d+)\.(\d+)\.(\d+)-preview\.(\d+)$", RegexOptions.Compiled);
+    private static readonly Regex SemanticVersionPattern =
+        new(@"^(\d+)\.(\d+)\.(\d+)(?:-([0-9a-z.-]+))?$", RegexOptions.Compiled);
 
-    // A "pin" installs or references packages at the current release. Prose naming a historical
-    // release boundary (e.g. the SQLite catalog reset) is not a pin.
+    // A "pin" installs or references packages at the current release, with or without a prerelease
+    // suffix. Prose naming a historical release boundary (e.g. the SQLite catalog reset) is not a pin.
     private static readonly Regex DocumentationPinPattern =
-        new(@"(?:Version=""|--version\s+)(?<version>\d+\.\d+\.\d+-[0-9a-z.]+)", RegexOptions.Compiled);
+        new(@"(?:Version=""|--version\s+)(?<version>\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?)", RegexOptions.Compiled);
 
     [Fact]
     public void Documentation_and_build_props_agree_on_the_current_release()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var props = XDocument.Load(Path.Combine(root, "Directory.Build.props"));
-        var current = Property(props, "GroundworkCurrentRelease");
-        var development = $"{Property(props, "VersionPrefix")}-{Property(props, "VersionSuffix")}";
+        var current = RequiredProperty(props, "GroundworkCurrentRelease");
+        var prefix = RequiredProperty(props, "VersionPrefix");
+        var suffix = Property(props, "VersionSuffix");
+        var development = suffix is null ? prefix : $"{prefix}-{suffix}";
 
         Assert.True(
             File.Exists(Path.Combine(root, "docs", "v2", "releases", current + ".md")),
             $"docs/v2/releases/{current}.md must exist for the declared current release '{current}'.");
         Assert.True(
-            Order(development) > Order(current),
+            Compare(development, current) > 0,
             $"Development version '{development}' must be strictly ahead of the current release '{current}'.");
+
+        var consumer = Path.Combine(root, "tests", "Groundwork.PublicApi.Acceptance.Tests", "Consumer", "Groundwork.PublicApi.Consumer.csproj");
+        Assert.True(
+            string.Equals(XDocument.Load(consumer).Descendants("GroundworkVersion").Single().Value.Trim(), current, StringComparison.Ordinal),
+            $"The clean-room consumer's default GroundworkVersion must be the current release '{current}'.");
 
         var pins = DocumentationFiles(root)
             .SelectMany(file => File.ReadLines(file).Select((line, index) => (file, line, index)))
@@ -64,27 +72,53 @@ public sealed class VersionIntegrityTests
         }
     }
 
-    /// <summary>Orders '<c>major.minor.patch-preview.n</c>' versions numerically.</summary>
-    private static long Order(string version)
+    /// <summary>SemVer precedence for '<c>major.minor.patch[-prerelease]</c>' versions.</summary>
+    private static int Compare(string left, string right)
     {
-        var match = ReleaseVersionPattern.Match(version);
-        Assert.True(match.Success, $"Version '{version}' does not match the required '<major>.<minor>.<patch>-preview.<n>' format.");
-        return match.Groups.Cast<Group>().Skip(1)
-            .Aggregate(0L, (order, group) => order * 100_000 + long.Parse(group.Value));
+        var (leftMatch, rightMatch) = (Parse(left), Parse(right));
+        for (var group = 1; group <= 3; group++)
+        {
+            var comparison = int.Parse(leftMatch.Groups[group].Value).CompareTo(int.Parse(rightMatch.Groups[group].Value));
+            if (comparison != 0)
+                return comparison;
+        }
+
+        var (leftPre, rightPre) = (leftMatch.Groups[4], rightMatch.Groups[4]);
+        if (!leftPre.Success || !rightPre.Success)
+            return (leftPre.Success ? 0 : 1) - (rightPre.Success ? 0 : 1); // a stable version outranks any prerelease
+
+        var leftIds = leftPre.Value.Split('.');
+        var rightIds = rightPre.Value.Split('.');
+        for (var index = 0; index < Math.Min(leftIds.Length, rightIds.Length); index++)
+        {
+            var comparison = (long.TryParse(leftIds[index], out var leftNumber), long.TryParse(rightIds[index], out var rightNumber)) switch
+            {
+                (true, true) => leftNumber.CompareTo(rightNumber),
+                (true, false) => -1, // numeric identifiers rank below alphanumeric ones
+                (false, true) => 1,
+                _ => string.CompareOrdinal(leftIds[index], rightIds[index])
+            };
+            if (comparison != 0)
+                return Math.Sign(comparison);
+        }
+
+        return leftIds.Length.CompareTo(rightIds.Length);
     }
 
-    private static string Property(XDocument props, string name)
+    private static Match Parse(string version)
     {
-        var value = props.Descendants(name).Single().Value.Trim();
+        var match = SemanticVersionPattern.Match(version);
+        Assert.True(match.Success, $"Version '{version}' is not a lowercase '<major>.<minor>.<patch>[-prerelease]' version.");
+        return match;
+    }
+
+    private static string RequiredProperty(XDocument props, string name)
+    {
+        var value = Property(props, name);
         Assert.False(string.IsNullOrEmpty(value), $"Directory.Build.props must declare a non-empty <{name}>.");
-        return value;
+        return value!;
     }
 
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Groundwork.slnx")))
-            directory = directory.Parent;
-        return directory?.FullName ?? throw new InvalidOperationException("Could not locate the Groundwork repository root.");
-    }
+    private static string? Property(XDocument props, string name) =>
+        props.Descendants(name).SingleOrDefault()?.Value.Trim();
 }
