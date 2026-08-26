@@ -817,6 +817,13 @@ public sealed class PostgreSqlDialectTests
 
         public void Dispose()
         {
+            // Same per-connection-string pool leak as the concurrency harness (#62): this fixture's
+            // SearchPath makes its pool unreachable to every later fixture, and disposing a connection
+            // only returns it to that pool. Both suites draw on one server's max_connections, so a
+            // fixture that keeps its idle connections spends another suite's budget as well as its own.
+            using (var pooled = new NpgsqlConnection(ConnectionString))
+                NpgsqlConnection.ClearPool(pooled);
+
             using var admin = new NpgsqlConnection(adminConnectionString);
             admin.Open();
             using var command = admin.CreateCommand();
