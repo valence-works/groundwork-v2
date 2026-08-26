@@ -16,6 +16,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly SqliteDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+    private readonly ConcurrentDictionary<StorageUnitId, string> admitted = new();
 
     internal SqliteSchemaCoordinator(SqliteProviderConnection owner)
     {
@@ -25,13 +26,19 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired)
+    internal void EnsureRuntimeAdmission(StorageUnit desired, IProviderCommandObserver? observer = null)
     {
         var physical = Physicalize(desired);
-        if (physical.DerivedColumns.Count == 0)
-            return;
         var target = Target(physical);
+        if (admitted.TryGetValue(physical.Id, out var admittedFingerprint) &&
+            string.Equals(admittedFingerprint, target.Fingerprint, StringComparison.Ordinal))
+            return;
         var inspection = executor.InspectHistory(target);
+        observer?.Observe(new ProviderCommandEvent(
+            "sqlite.schema-admission",
+            $"Runtime schema admission inspection for '{physical.Name}'",
+            ProviderCommandKind.Read,
+            IsProbe: false));
         var applied = inspection.History.AppliedState;
         if (applied is null)
             return;
@@ -39,9 +46,10 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
             !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
         {
             throw new InvalidOperationException(
-                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
+                $"GW-RUNTIME-001: Storage unit '{desired.Name}' has physical schema drift. Apply the exact schema before opening a session." +
+                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => $"{refusal.Code} at {refusal.Path}: {refusal.Message}"))));
         }
+        admitted[physical.Id] = target.Fingerprint;
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -64,8 +72,10 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         var target = Target(physical);
         var result = PhysicalSchemaApplication.Apply(target, executor);
         owner.RefreshSchema();
-        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        var succeeded = result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges;
+        if (succeeded)
+            admitted[physical.Id] = target.Fingerprint;
+        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)), succeeded);
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>

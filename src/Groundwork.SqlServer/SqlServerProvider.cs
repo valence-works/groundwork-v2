@@ -71,7 +71,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
+        schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
         var connection = CreateIndependentConnection();
         lock (gate)
             sessionConnections.Add(connection);
@@ -108,7 +108,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         {
             PortabilityValidator.EnsurePhysicalIdentifiers(unit);
             SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
         }
 
         var connection = CreateIndependentConnection();

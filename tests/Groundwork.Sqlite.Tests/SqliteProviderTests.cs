@@ -956,6 +956,7 @@ public sealed class SqliteProviderTests
             new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
             [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None)).Rows);
 
+        connection.Dispose();
         using (var tamper = new SqliteConnection(store.ConnectionString))
         {
             tamper.Open();
@@ -963,8 +964,10 @@ public sealed class SqliteProviderTests
             command.CommandText = "UPDATE __groundwork_search_key_algorithms SET algorithm_id='stale-search-key-v0' WHERE table_name='folded_migration' AND column_name='__groundwork_search_status';";
             command.ExecuteNonQuery();
         }
-        var admission = Assert.Throws<InvalidOperationException>(() => connection.OpenSession(folded, StorageAccess.Global));
-        Assert.Contains("rebuild", admission.Message, StringComparison.OrdinalIgnoreCase);
+        using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
+        var admission = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(folded, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", admission.Message, StringComparison.Ordinal);
+        Assert.Contains("search-key algorithm", admission.Message, StringComparison.Ordinal);
     }
 
     [Fact]

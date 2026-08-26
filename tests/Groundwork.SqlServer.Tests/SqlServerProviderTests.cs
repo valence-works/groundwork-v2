@@ -392,6 +392,66 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Contains("bounded String key column", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Live_dropped_column_on_a_plain_unit_is_fatal_at_session_open()
+    {
+        fixture.Reset();
+        var name = "w2_sqlserver_admission_drop_" + Guid.NewGuid().ToString("N");
+        var unit = AdmissionUnit(name);
+        using (var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using (var sql = new SqlConnection(fixture.ConnectionString))
+        {
+            sql.Open();
+            using var alter = sql.CreateCommand();
+            alter.CommandText = $"ALTER TABLE [{name}] DROP COLUMN [payload];";
+            alter.ExecuteNonQuery();
+        }
+
+        using var reopened = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Live_admission_inspects_once_per_unit_per_connection()
+    {
+        fixture.Reset();
+        var name = "w2_sqlserver_admission_cache_" + Guid.NewGuid().ToString("N");
+        var unit = AdmissionUnit(name);
+        using (var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using var reopened = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var firstObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, firstObserver);
+        var admissionEvent = Assert.Single(firstObserver.Commands);
+        Assert.Equal("sqlserver.schema-admission", admissionEvent.Operation);
+        Assert.Equal(ProviderCommandKind.Read, admissionEvent.Kind);
+
+        var secondObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, secondObserver);
+        Assert.Equal(0, secondObserver.RoundTrips);
+    }
+
+    private static StorageUnit AdmissionUnit(string name) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 100, IsNullable = false },
+            new ColumnDefinition { Name = "payload", Type = PortableType.String, MaxLength = 200 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
     private static string Describe(ConcurrencyHarnessReport report) =>
         string.Join(Environment.NewLine, report.Scenarios.SelectMany(scenario =>
             scenario.Invariants.Select(invariant =>
