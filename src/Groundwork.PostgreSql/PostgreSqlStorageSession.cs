@@ -158,7 +158,6 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
-        commandObserver?.Observe(new ProviderCommandEvent("postgresql.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
@@ -174,7 +173,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                 query,
                 decode,
                 PostgreSqlSchemaCoordinator.ScopeColumn,
-                Access.Scope!)
+                Access.Scope!,
+                commandObserver,
+                "postgresql.aggregate")
             : RelationalAggregationExecutor.Execute(
             connection,
             activeTransaction ?? transaction,
@@ -182,7 +183,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             Unit,
             profile,
             query,
-            decode);
+            decode,
+            commandObserver,
+            "postgresql.aggregate");
     });
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)

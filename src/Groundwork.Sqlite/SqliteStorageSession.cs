@@ -153,7 +153,6 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
-        commandObserver?.Observe(new ProviderCommandEvent("sqlite.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
@@ -169,7 +168,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 query,
                 decode,
                 SqliteSchemaCoordinator.ScopeColumn,
-                Access.Scope!)
+                Access.Scope!,
+                commandObserver,
+                "sqlite.aggregate")
             : RelationalAggregationExecutor.Execute(
             connection,
             activeTransaction ?? transaction,
@@ -177,7 +178,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             Unit,
             profile,
             query,
-            decode);
+            decode,
+            commandObserver,
+            "sqlite.aggregate");
     });
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)

@@ -172,6 +172,49 @@ public sealed class ProviderCommandTests
     }
 
     [Fact]
+    public void SQLite_malformed_aggregate_on_a_declared_profile_counts_no_commands()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-agg-rejected") with
+        {
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "by-value",
+                    GroupByColumns = ["value"],
+                    Aggregates = [new Aggregate.Count("total")]
+                }
+            ]
+        };
+        connection.Schema.Apply(unit);
+        connection.OpenSession(unit, StorageAccess.Global)
+            .Insert(Values("one", "first", DateTimeOffset.UnixEpoch));
+
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+
+        // The profile resolves; the QUERY is malformed (both ordering forms). Rejected during
+        // validation, so no provider command ran and none may be counted — this is the failure a
+        // pre-validation event fabricates (GW-AGG-QUERY-006).
+        Assert.Throws<AggregationValidationException>(() => session.Aggregate(new AggregationQuery("by-value")
+        {
+            OrderBy = "total",
+            OrderByTerms = [new AggregationOrderTerm("total", SortDirection.Descending)]
+        }));
+        Assert.Equal(0, observer.RoundTrips);
+
+        // The same profile with a well-formed query executes and is counted: one budget probe
+        // (a read-kind probe) plus the aggregate itself.
+        var result = session.Aggregate(new AggregationQuery("by-value"));
+        Assert.NotNull(result);
+        Assert.True(observer.RoundTrips >= 1);
+        Assert.All(observer.Commands, command => Assert.Equal(ProviderCommandKind.Read, command.Kind));
+        Assert.Contains(observer.Commands, command => !command.IsProbe);
+    }
+
+    [Fact]
     public void One_session_records_reads_and_writes_in_order_and_OfKind_separates_them()
     {
         using var store = TemporarySqliteStore.Create();

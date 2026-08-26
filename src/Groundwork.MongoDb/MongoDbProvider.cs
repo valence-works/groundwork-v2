@@ -1221,7 +1221,6 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ThrowIfDisposed();
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         AggregationProfileValidator.Validate(Unit, profile);
-        commandObserver?.Observe(new ProviderCommandEvent("mongodb.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         return ExecuteNativeAggregation(profile, query);
     }
 

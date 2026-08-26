@@ -803,7 +803,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     {
         RefusePrivilegedPointOperation("aggregate");
         ArgumentNullException.ThrowIfNull(query);
-        AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        AggregationExecutor.ValidateQuery(Unit, profile, query);
         commandObserver?.Observe(new ProviderCommandEvent("in-memory.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         return AggregationSessionExecutor.Execute(this, query);
     }

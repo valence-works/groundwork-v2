@@ -150,7 +150,6 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
-        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
@@ -166,7 +165,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 query,
                 decode,
                 SqlServerSchemaCoordinator.ScopeColumn,
-                Access.Scope!)
+                Access.Scope!,
+                commandObserver,
+                "sqlserver.aggregate")
             : RelationalAggregationExecutor.Execute(
             connection,
             activeTransaction ?? transaction,
@@ -174,7 +175,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             Unit,
             profile,
             query,
-            decode);
+            decode,
+            commandObserver,
+            "sqlserver.aggregate");
     });
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
