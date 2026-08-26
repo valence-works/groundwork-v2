@@ -107,6 +107,13 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
@@ -129,7 +136,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         try
         {
             var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options);
+            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options, observer);
         }
         catch
         {

@@ -85,6 +85,13 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
@@ -108,7 +115,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         try
         {
             var transaction = connection.BeginTransaction(IsolationLevel.Serializable);
-            return new SqlServerUnitOfWork(this, connection, transaction, units, access, options);
+            return new SqlServerUnitOfWork(this, connection, transaction, units, access, options, observer);
         }
         catch
         {

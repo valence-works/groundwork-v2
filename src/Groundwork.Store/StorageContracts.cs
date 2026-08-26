@@ -813,6 +813,20 @@ public interface IStorageProviderConnection : IDisposable
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units);
+
+    /// <summary>
+    /// Begins a unit of work whose provider commands are counted by <paramref name="observer"/>.
+    /// </summary>
+    /// <remarks>
+    /// A unit of work builds its own sessions rather than going through <see cref="OpenSession"/>, so it
+    /// needs the observer handed to it directly. Without this overload the batched commit path — the one a
+    /// checkpoint commit actually takes — would report zero provider round trips while looking healthy.
+    /// </remarks>
+    IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
+        params StorageUnit[] units);
 }
 
 /// <summary>

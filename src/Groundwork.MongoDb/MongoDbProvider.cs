@@ -93,7 +93,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
         return new MongoStorageSession(state, applied, access, collection, null);
     }
 
-    public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units)
+    public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, IProviderCommandObserver? observer, params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
@@ -112,7 +112,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
             .ToArray();
         foreach (var unit in applied)
             state.RegisterScope(unit, access);
-        return new MongoUnitOfWork(state, applied, collections, access);
+        return new MongoUnitOfWork(state, applied, collections, access, observer);
     }
 
     public void Dispose()
@@ -2946,6 +2946,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
 internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
 {
+    private readonly IProviderCommandObserver? commandObserver;
     private readonly MongoProviderState state;
     private readonly IReadOnlyDictionary<StorageUnitId, (MongoAppliedUnit Applied, IMongoCollection<BsonDocument> Collection)> units;
     private readonly MongoStorageAccess access;
@@ -2957,8 +2958,10 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         MongoProviderState state,
         IReadOnlyList<MongoAppliedUnit> applied,
         IReadOnlyList<IMongoCollection<BsonDocument>> collections,
-        MongoStorageAccess access)
+        MongoStorageAccess access,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.state = state;
         this.access = access;
         units = applied.Select((unit, index) => (unit, collections[index]))

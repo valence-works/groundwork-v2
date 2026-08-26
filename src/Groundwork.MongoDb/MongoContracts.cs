@@ -388,7 +388,7 @@ public interface IMongoProviderConnection : IDisposable
 
     IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access, IProviderCommandObserver? observer = null);
 
-    IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units);
+    IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, IProviderCommandObserver? observer, params StorageUnit[] units);
 }
 
 public interface IMongoProviderFactory

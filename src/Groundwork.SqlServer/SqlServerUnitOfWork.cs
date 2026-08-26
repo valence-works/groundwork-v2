@@ -15,10 +15,13 @@ internal sealed class SqlServerUnitOfWork : IUnitOfWork
     private readonly List<SqlServerStorageSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;
+    private readonly IProviderCommandObserver? commandObserver;
 
     internal SqlServerUnitOfWork(SqlServerProviderConnection owner, SqlConnection connection, SqlTransaction transaction,
-        IEnumerable<StorageUnit> units, StorageAccess access, BatchWriteOptions options)
+        IEnumerable<StorageUnit> units, StorageAccess access, BatchWriteOptions options,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.owner = owner;
         this.connection = connection;
         this.transaction = transaction;
@@ -34,7 +37,7 @@ internal sealed class SqlServerUnitOfWork : IUnitOfWork
         if (!units.Contains(unit.Id))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-        var session = new SqlServerStorageSession(owner, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, transaction);
+        var session = new SqlServerStorageSession(owner, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, transaction, commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);

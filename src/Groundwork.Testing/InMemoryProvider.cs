@@ -83,6 +83,13 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
@@ -101,7 +108,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         if (states.Select(state => state.Unit.Id).Distinct().Count() != states.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
 
-        return new InMemoryUnitOfWork(database, states, access, options);
+        return new InMemoryUnitOfWork(database, states, access, options, observer);
     }
 
     public void Dispose() => disposed = true;
@@ -1359,6 +1366,7 @@ internal sealed record RetentionLedgerEntry(
 
 internal sealed class InMemoryUnitOfWork : IUnitOfWork
 {
+    private readonly IProviderCommandObserver? commandObserver;
     private readonly InMemoryDatabase database;
     private readonly StorageAccess access;
     private readonly Dictionary<StorageUnitId, InMemoryUnitState> staged;
@@ -1373,8 +1381,10 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         InMemoryDatabase database,
         IReadOnlyList<InMemoryUnitState> states,
         StorageAccess access,
-        BatchWriteOptions options)
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.database = database;
         this.access = access;
         batch = new BatchContext(options);
@@ -1395,7 +1405,7 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
             throw new InvalidOperationException(
                 $"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
 
-        var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged, stagedRetentionLedger: stagedRetentionLedger);
+        var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged, stagedRetentionLedger: stagedRetentionLedger, observer: commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);

@@ -15,6 +15,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
     private readonly List<PostgreSqlStorageSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;
+    private readonly IProviderCommandObserver? commandObserver;
 
     internal PostgreSqlUnitOfWork(
         PostgreSqlProviderConnection owner,
@@ -22,8 +23,10 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
         NpgsqlTransaction transaction,
         IReadOnlyList<StorageUnit> declarations,
         StorageAccess access,
-        BatchWriteOptions options)
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.owner = owner;
         this.connection = connection;
         this.transaction = transaction;
@@ -38,7 +41,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
         ThrowIfTerminal();
         if (!units.TryGetValue(unit.Id, out var physical))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
-        var session = new PostgreSqlStorageSession(owner, physical, access, connection, transaction);
+        var session = new PostgreSqlStorageSession(owner, physical, access, connection, transaction, commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);

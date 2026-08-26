@@ -80,6 +80,13 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
+        params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
@@ -103,7 +110,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         {
             var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
             OwnConnection(connection);
-            return new PostgreSqlUnitOfWork(this, connection, transaction, units, access, options);
+            return new PostgreSqlUnitOfWork(this, connection, transaction, units, access, options, observer);
         }
         catch
         {

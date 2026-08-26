@@ -63,12 +63,20 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
         StorageAccess access,
         BatchWriteOptions options,
         params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
+        params StorageUnit[] units)
     {
         StorageAccessValidation.EnsureUnitOfWork(access);
         return new MongoStoreUnitOfWork(
-            inner.BeginUnitOfWork(ToNative(access), units),
+            inner.BeginUnitOfWork(ToNative(access), observer, units),
             options,
-            inner.ProviderSequenceFit is ProviderFit.Supported);
+            inner.ProviderSequenceFit is ProviderFit.Supported,
+            observer);
     }
 
     public void Dispose() => inner.Dispose();
@@ -325,14 +333,16 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
     private readonly IMongoUnitOfWork inner;
     private readonly BatchContext batch;
     private readonly bool exactAvailable;
+    private readonly IProviderCommandObserver? commandObserver;
     private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
     private bool terminal;
 
-    internal MongoStoreUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options, bool exactAvailable)
+    internal MongoStoreUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options, bool exactAvailable, IProviderCommandObserver? commandObserver = null)
     {
         this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
         batch = new BatchContext(options ?? throw new ArgumentNullException(nameof(options)));
         this.exactAvailable = exactAvailable;
+        this.commandObserver = commandObserver;
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -343,8 +353,8 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
             return existing;
         var native = inner.OpenSession(unit);
         var store = exactAvailable
-            ? new MongoExactStoreSession(native)
-            : new MongoStoreSession(native);
+            ? new MongoExactStoreSession(native, commandObserver)
+            : new MongoStoreSession(native, commandObserver: commandObserver);
         var session = BatchStorageSession.Create(store, batch);
         sessions.Add(unit.Id, session);
         batch.Register(session);
