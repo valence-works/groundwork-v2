@@ -19,25 +19,6 @@ public static class SchemaToolExitCodes
     public const int Cancelled = 130;
 }
 
-public interface ISchemaToolProviderSession : IDisposable
-{
-    ProviderIdentity Provider { get; }
-    IPhysicalSchemaExecutor Executor { get; }
-    IPhysicalSchemaHistoryInspector Inspector { get; }
-}
-
-public sealed record SchemaToolProviderOptions(
-    string Provider,
-    string? Connection,
-    string? Database,
-    CancellationToken CancellationToken);
-
-public interface ISchemaToolProviderSessionFactory
-{
-    string Alias { get; }
-    ISchemaToolProviderSession Open(SchemaToolProviderOptions options);
-}
-
 public static class SchemaToolAuthorization
 {
     public static PhysicalSchemaPlanAuthorization Evaluate(

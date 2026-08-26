@@ -16,6 +16,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
+    <ProjectReference Include="../../src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
 </Project>

@@ -11,11 +11,13 @@
     <PackageReference Include="Testcontainers.MsSql" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.skippablefact" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="coverlet.collector" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.SqlServer/Groundwork.SqlServer.csproj" />
+    <ProjectReference Include="../../src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
 </Project>
