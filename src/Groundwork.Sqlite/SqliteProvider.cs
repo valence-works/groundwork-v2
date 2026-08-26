@@ -86,7 +86,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         }
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
@@ -97,7 +97,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         if (!isMemory)
             lock (gate) sessionConnections.Add(sessionConnection);
-        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null);
+        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

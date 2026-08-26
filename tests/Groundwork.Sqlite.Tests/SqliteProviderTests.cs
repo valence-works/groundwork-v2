@@ -985,7 +985,7 @@ public sealed class SqliteProviderTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Model(includePriority: false, includeUniqueIndex: false);
         connection.Schema.Apply(unit);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
             new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },
@@ -1116,7 +1116,7 @@ public sealed class SqliteProviderTests
             Key = new KeyDefinition { Columns = ["id"] }
         };
         connection.Schema.Apply(unit);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
             new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },

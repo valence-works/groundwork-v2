@@ -342,9 +342,6 @@ public sealed record WriteOptions
         init => precondition = value ?? throw new ArgumentNullException(nameof(value));
     }
 
-    /// <summary>Optional observer used by write-path proofs to count provider commands.</summary>
-    public IWritePathObserver? Observer { get; init; }
-
     public static WriteOptions Unconditional { get; } = new();
 
     public static WriteOptions CreateOnly { get; } = new() { Precondition = WritePrecondition.CreateOnly };
@@ -469,12 +466,13 @@ internal static class ImmutableGeneratedValues
         new ReadOnlyDictionary<string, object?>(new Dictionary<string, object?>(StringComparer.Ordinal));
 }
 
-/// <summary>Thread-safe command observer used by provider-neutral write-path proofs.</summary>
-public sealed class WritePathObserver : IWritePathObserver
+/// <summary>Thread-safe command observer used by provider-neutral round-trip proofs.</summary>
+public sealed class ProviderCommandObserver : IProviderCommandObserver
 {
     private readonly object gate = new();
-    private readonly List<WritePathEvent> commands = [];
+    private readonly List<ProviderCommandEvent> commands = [];
 
+    /// <summary>Every provider command this observer has seen, reads and writes alike.</summary>
     public int RoundTrips
     {
         get
@@ -483,7 +481,7 @@ public sealed class WritePathObserver : IWritePathObserver
         }
     }
 
-    public IReadOnlyList<WritePathEvent> Commands
+    public IReadOnlyList<ProviderCommandEvent> Commands
     {
         get
         {
@@ -491,7 +489,13 @@ public sealed class WritePathObserver : IWritePathObserver
         }
     }
 
-    public void Observe(WritePathEvent command)
+    /// <summary>The commands of one kind, for proofs that assert a write path's shape.</summary>
+    public IReadOnlyList<ProviderCommandEvent> OfKind(ProviderCommandKind kind)
+    {
+        lock (gate) return Array.AsReadOnly(commands.Where(command => command.Kind == kind).ToArray());
+    }
+
+    public void Observe(ProviderCommandEvent command)
     {
         if (string.IsNullOrWhiteSpace(command.Operation))
             throw new ArgumentException("An observed operation must have a name.", nameof(command));
@@ -794,7 +798,12 @@ public interface IStorageProviderConnection : IDisposable
     IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
 
     /// <summary>Opens a non-owning session view that remains valid while this connection is alive.</summary>
-    IStorageSession OpenSession(StorageUnit unit, StorageAccess access);
+    /// <param name="observer">
+    /// Optional sink for the provider commands this session issues. It counts every round trip the session
+    /// performs — reads, writes, probes and retention — because the session is what issues them. Schema work
+    /// is not included: it runs through <see cref="Schema"/> on the connection, not through a session.
+    /// </param>
+    IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null);
 
     /// <summary>Begins a unit of work that owns its transaction and staged sessions until terminal or disposed.</summary>
     IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units);

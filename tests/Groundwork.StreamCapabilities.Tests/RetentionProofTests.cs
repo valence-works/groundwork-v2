@@ -308,7 +308,7 @@ public sealed class RetentionProofTests
         for (var index = 0; index < 120; index++)
             Assert.True(session.Insert(Values(index % 3 == 0 ? "a" : "b")).Succeeded);
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var result = session.ApplyRetention(new RetentionExecutionOptions
         {
             MaxRowsPerBatch = 7,
@@ -468,8 +468,8 @@ public sealed class RetentionProofTests
             }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
-        var observer = new WritePathObserver();
-        static void Append(IStorageSession session, WritePathObserver observer, int index)
+        var observer = new ProviderCommandObserver();
+        static void Append(IStorageSession session, ProviderCommandObserver observer, int index)
         {
             var outcome = session.Insert(new StorageValues(new Dictionary<string, object?>
             {
@@ -542,7 +542,7 @@ public sealed class RetentionProofTests
             }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
         {
             for (var index = 0; index < 12; index++)
@@ -602,7 +602,7 @@ public sealed class RetentionProofTests
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var concurrency = Assert.IsAssignableFrom<IConcurrencyStorageSession>(session);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         for (var index = 0; index < 10; index++)
         {
             var values = new StorageValues(new Dictionary<string, object?>
@@ -722,7 +722,7 @@ public sealed class RetentionProofTests
             Assert.Equal(rows, work.Commit().Succeeded);
         }
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var result = session.ApplyRetention(new RetentionExecutionOptions
         {
@@ -830,11 +830,11 @@ public sealed class RetentionProofTests
     private static QueryRequest All(StorageUnit unit) => new(
         new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None);
 
-    private sealed class CancelAfterFirstBatch(CancellationTokenSource cancellation) : IWritePathObserver
+    private sealed class CancelAfterFirstBatch(CancellationTokenSource cancellation) : IProviderCommandObserver
     {
         private int batches;
 
-        public void Observe(WritePathEvent command)
+        public void Observe(ProviderCommandEvent command)
         {
             if (command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase) &&
                 Interlocked.Increment(ref batches) == 1)
@@ -842,7 +842,7 @@ public sealed class RetentionProofTests
         }
     }
 
-    private sealed class BlockingRetentionObserver : IWritePathObserver, IDisposable
+    private sealed class BlockingRetentionObserver : IProviderCommandObserver, IDisposable
     {
         private int retentionCommands;
 
@@ -852,7 +852,7 @@ public sealed class RetentionProofTests
 
         internal int RetentionCommands => Volatile.Read(ref retentionCommands);
 
-        public void Observe(WritePathEvent command)
+        public void Observe(ProviderCommandEvent command)
         {
             if (!command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase))
                 return;

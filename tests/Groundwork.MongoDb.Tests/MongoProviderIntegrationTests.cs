@@ -432,7 +432,7 @@ public sealed class MongoProviderIntegrationTests
             session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-decimal" }),
                 new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
-        var mismatchObserver = new WritePathObserver();
+        var mismatchObserver = new ProviderCommandObserver();
         Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
             session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
                 new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
@@ -443,7 +443,7 @@ public sealed class MongoProviderIntegrationTests
         {
             ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
         }), WriteOptions.IfVersion(1)).Version);
-        var deleteObserver = new WritePathObserver();
+        var deleteObserver = new ProviderCommandObserver();
         var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
             new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
             new WriteOptions { Observer = deleteObserver });
@@ -777,7 +777,7 @@ public sealed class MongoProviderIntegrationTests
         Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored.Values.Values.Keys);
 
         var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
-        var aggregateObserver = new WritePathObserver();
+        var aggregateObserver = new ProviderCommandObserver();
         var aggregate = batch.ApplyBatch(
             [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
                 new WriteOptions { Observer = aggregateObserver })]);
@@ -1317,7 +1317,7 @@ public sealed class MongoProviderIntegrationTests
                 capability => capability.Id == BatchWriteCapabilities.CompareAndDelete);
             var compareSession = store.OpenSession(compareUnit, StorageAccess.Global);
             Assert.False(compareSession is ICompareAndDeleteStorageSession);
-            var observer = new WritePathObserver();
+            var observer = new ProviderCommandObserver();
             Assert.Throws<NotSupportedException>(() => compareSession.CompareAndDelete(
                 new StorageKey(new Dictionary<string, object?> { ["id"] = "missing" }),
                 new Dictionary<string, object?> { ["owner"] = "worker" },

@@ -48,12 +48,12 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
         }
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
-        var session = inner.OpenSession(unit, ToNative(access));
+        var session = inner.OpenSession(unit, ToNative(access), observer);
         return inner.ProviderSequenceFit is ProviderFit.Supported
-            ? new MongoExactStoreSession(session)
-            : new MongoStoreSession(session);
+            ? new MongoExactStoreSession(session, observer)
+            : new MongoStoreSession(session, commandObserver: observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
@@ -112,7 +112,8 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
 
 internal class MongoStoreSession(
     IMongoStorageSession inner,
-    Action<StorageKey>? beforeRead = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+    Action<StorageKey>? beforeRead = null,
+    IProviderCommandObserver? commandObserver = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     public StorageUnit Unit => inner.Unit;
 
@@ -228,7 +229,7 @@ internal class MongoStoreSession(
 
     private static MongoWriteOptions? ToNative(WriteOptions? options) => options is null
         ? null
-        : new MongoWriteOptions { Precondition = options.Precondition, Observer = options.Observer };
+        : new MongoWriteOptions { Precondition = options.Precondition };
 
     protected static WriteOutcome ToStore(MongoWriteOutcome result) =>
         new((WriteOutcomeStatus)result.Status, result.Version, result.UniqueIndexName,
@@ -244,9 +245,10 @@ internal class MongoStoreSession(
             result.Version,
             () =>
             {
-                options?.Observer?.Observe(new WritePathEvent(
+                commandObserver?.Observe(new ProviderCommandEvent(
                     "mongodb.write-probe",
                     "MongoDB.FindOne(identity)",
+                    ProviderCommandKind.Write,
                     IsProbe: true));
                 var key = new MongoStorageKey(values.Values);
                 var existing = inner.Read(key);
@@ -265,8 +267,8 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 {
     private readonly IMongoStorageSession exactInner;
 
-    internal MongoExactStoreSession(IMongoStorageSession inner)
-        : base(inner) => exactInner = inner;
+    internal MongoExactStoreSession(IMongoStorageSession inner, IProviderCommandObserver? commandObserver = null)
+        : base(inner, commandObserver: commandObserver) => exactInner = inner;
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
@@ -296,7 +298,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
         var result = compareAndDelete.CompareAndDelete(
             new MongoStorageKey(canonicalKey.Values),
             validated,
-            new MongoWriteOptions { Precondition = options?.Precondition ?? WritePrecondition.Unconditional, Observer = options?.Observer });
+            new MongoWriteOptions { Precondition = options?.Precondition ?? WritePrecondition.Unconditional });
         return ToStore(result);
     }
 

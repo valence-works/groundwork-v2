@@ -62,11 +62,11 @@ public sealed class DocumentsProviderProofTests
         Assert.True(connection.Schema.Apply(unit.StorageUnit).Applied);
 
         var value = new ProviderDocument(Guid.NewGuid(), "Ada");
-        var documentObserver = new WritePathObserver();
+        var documentObserver = new ProviderCommandObserver();
         var documentWrite = unit.Upsert(value, new WriteOptions { Observer = documentObserver });
         var documentOutcome = unit.Execute(connection, documentWrite);
 
-        var ordinaryObserver = new WritePathObserver();
+        var ordinaryObserver = new ProviderCommandObserver();
         var ordinaryWrite = RowWrite.Upsert(
             unit.StorageUnit,
             new StorageValues(documentWrite.Values!.Values),

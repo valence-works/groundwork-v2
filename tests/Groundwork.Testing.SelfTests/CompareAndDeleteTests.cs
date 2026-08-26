@@ -220,7 +220,7 @@ public sealed class CompareAndDeleteTests
         direct.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["owner"] = "worker-a" }));
 
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
-        var stagedObserver = new WritePathObserver();
+        var stagedObserver = new ProviderCommandObserver();
         work.Stage(RowWrite.CompareAndDelete(
             unit,
             new StorageKey(new Dictionary<string, object?> { ["id"] = 1 }),
@@ -338,7 +338,7 @@ public sealed class CompareAndDeleteTests
         using var connection = new InMemoryProviderFactory().Create("memory://compare-delete-admission");
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
 
         Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
             Key("claim-1"),

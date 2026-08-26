@@ -436,12 +436,12 @@ public sealed class DocumentsContractTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         connection.Schema.Apply(unit.StorageUnit);
         var value = new EnumDocument(Guid.NewGuid(), OrderStatus.Paid);
-        var documentObserver = new WritePathObserver();
+        var documentObserver = new ProviderCommandObserver();
         var documentWrite = unit.Upsert(value, new WriteOptions { Observer = documentObserver });
 
         var documentOutcome = unit.Execute(connection, documentWrite);
 
-        var equivalentObserver = new WritePathObserver();
+        var equivalentObserver = new ProviderCommandObserver();
         var equivalentWrite = RowWrite.Upsert(
             unit.StorageUnit,
             new StorageValues(documentWrite.Values!.Values),

@@ -56,9 +56,9 @@ public sealed class WritePathTests
         connection.Schema.Apply(unit);
         var session = connection.OpenSession(unit, StorageAccess.Global);
         session.Conditional().ConditionalUpsert(Values("one", "first", DateTimeOffset.Parse("2026-01-01T00:00:00Z")),
-            new WriteOptions { Observer = new WritePathObserver() });
+            new WriteOptions { Observer = new ProviderCommandObserver() });
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var outcome = session.Conditional().ConditionalUpsert(
             Values("one", "stale", DateTimeOffset.Parse("2026-01-02T00:00:00Z")),
             new WriteOptions { Precondition = WritePrecondition.IfVersion(99), Observer = observer });
@@ -81,11 +81,11 @@ public sealed class WritePathTests
         var rawSession = connection.OpenSession(unit, StorageAccess.Global);
         var session = rawSession.Conditional();
 
-        var firstObserver = new WritePathObserver();
+        var firstObserver = new ProviderCommandObserver();
         var first = session.ConditionalUpsert(
             Values("one", "first", DateTimeOffset.UnixEpoch),
             new WriteOptions { Observer = firstObserver });
-        var secondObserver = new WritePathObserver();
+        var secondObserver = new ProviderCommandObserver();
         var second = session.ConditionalUpsert(
             Values("one", "second", DateTimeOffset.UnixEpoch),
             new WriteOptions { Observer = secondObserver });
@@ -113,9 +113,9 @@ public sealed class WritePathTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         session.Insert(Values("existing", "first", DateTimeOffset.UnixEpoch));
 
-        var existingObserver = new WritePathObserver();
+        var existingObserver = new ProviderCommandObserver();
         var existing = session.Update(KeyOnlyValues("existing"), new WriteOptions { Observer = existingObserver });
-        var missingObserver = new WritePathObserver();
+        var missingObserver = new ProviderCommandObserver();
         var missing = session.Update(KeyOnlyValues("missing"), new WriteOptions { Observer = missingObserver });
 
         Assert.Equal(WriteOutcomeStatus.Updated, existing.Status);
@@ -131,7 +131,7 @@ public sealed class WritePathTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Unit("sqlite-none-missing-update", ConcurrencyDeclaration.None);
         connection.Schema.Apply(unit);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
 
         var outcome = connection.OpenSession(unit, StorageAccess.Global).Update(
             Values("missing", "value", DateTimeOffset.UnixEpoch),
@@ -238,7 +238,7 @@ public sealed class WritePathTests
             Assert.DoesNotContain("__groundwork_version", columns);
         }
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var exception = Assert.Throws<InvalidOperationException>(() => session.Insert(
             Values("one", "value", DateTimeOffset.UnixEpoch),
@@ -312,7 +312,7 @@ public sealed class WritePathTests
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var result = session.ConditionalUpsert(
             Values("two", "duplicate", DateTimeOffset.UnixEpoch),
             new WriteOptions { Observer = observer });
@@ -334,7 +334,7 @@ public sealed class WritePathTests
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "first", DateTimeOffset.UnixEpoch));
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var result = session.ConditionalUpsert(
             Values("one", "second", DateTimeOffset.UnixEpoch.AddDays(1)),
             new WriteOptions { Precondition = WritePrecondition.IfVersion(1), Observer = observer });
@@ -357,7 +357,7 @@ public sealed class WritePathTests
         connection.Schema.Apply(unit);
         var rawSession = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
         var session = rawSession.Conditional();
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var result = session.ConditionalUpsert(
             Values("one", "first", DateTimeOffset.UnixEpoch),
             new WriteOptions { Observer = observer });
@@ -375,7 +375,7 @@ public sealed class WritePathTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Unit("sqlite-missing");
         connection.Schema.Apply(unit);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var outcome = connection.OpenSession(unit, StorageAccess.Global).Conditional().ConditionalUpsert(
             Values("missing", "value", DateTimeOffset.UnixEpoch),
             new WriteOptions { Precondition = WritePrecondition.IfVersion(99), Observer = observer });
@@ -398,7 +398,7 @@ public sealed class WritePathTests
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var result = session.ConditionalUpsert(
             Values("two", "duplicate", DateTimeOffset.UnixEpoch),
             new WriteOptions { Observer = observer });
@@ -420,7 +420,7 @@ public sealed class WritePathTests
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var result = session.ConditionalUpsert(
             Values("two", "duplicate", DateTimeOffset.UnixEpoch),
             new WriteOptions { Observer = observer });
@@ -442,7 +442,7 @@ public sealed class WritePathTests
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
         _ = session.ConditionalUpsert(Values("one", "duplicate", DateTimeOffset.UnixEpoch));
 
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var result = session.ConditionalUpsert(
             Values("two", "duplicate", DateTimeOffset.UnixEpoch),
             new WriteOptions { Observer = observer });
@@ -462,7 +462,7 @@ public sealed class WritePathTests
         var rawSession = connection.OpenSession(unit, StorageAccess.Global);
         var session = rawSession.Conditional();
         var firstTimestamp = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
-        var firstObserver = new WritePathObserver();
+        var firstObserver = new ProviderCommandObserver();
         var inserted = session.ConditionalUpsert(
             Values("one", "first", firstTimestamp),
             new WriteOptions { Observer = firstObserver });
@@ -491,7 +491,7 @@ public sealed class WritePathTests
             Assert.DoesNotContain(firstObserver.Commands, command =>
                 command.CommandText?.Contains("SELECT", StringComparison.OrdinalIgnoreCase) == true);
 
-        var secondObserver = new WritePathObserver();
+        var secondObserver = new ProviderCommandObserver();
         var updated = session.ConditionalUpsert(
             Values("one", "second", firstTimestamp.AddDays(1)),
             new WriteOptions { Precondition = WritePrecondition.IfVersion(1), Observer = secondObserver });
@@ -576,13 +576,13 @@ public sealed class WritePathTests
         var createdAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
         session.Insert(Values("existing", "first", createdAt));
 
-        var upsertObserver = new WritePathObserver();
+        var upsertObserver = new ProviderCommandObserver();
         var upsert = session.Upsert(
             Values("existing", "second", createdAt.AddDays(1)),
             new WriteOptions { Observer = upsertObserver });
-        var updateObserver = new WritePathObserver();
+        var updateObserver = new ProviderCommandObserver();
         var update = session.Update(KeyOnlyValues("existing"), new WriteOptions { Observer = updateObserver });
-        var missingObserver = new WritePathObserver();
+        var missingObserver = new ProviderCommandObserver();
         var missing = session.Update(KeyOnlyValues("missing"), new WriteOptions { Observer = missingObserver });
 
         Assert.Equal(WriteOutcomeStatus.Upserted, upsert.Status);
@@ -602,7 +602,7 @@ public sealed class WritePathTests
         Assert.Equal(createdAt, stored.Values.Values["createdAt"]);
     }
 
-    private static void AssertSingleUpdateWithoutProbe(WritePathObserver observer)
+    private static void AssertSingleUpdateWithoutProbe(ProviderCommandObserver observer)
     {
         var command = Assert.Single(observer.Commands);
         Assert.False(command.IsProbe);
@@ -629,7 +629,7 @@ public sealed class WritePathTests
         };
 
         connection.Schema.Apply(unit);
-        var observer = new WritePathObserver();
+        var observer = new ProviderCommandObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global).Conditional();
 
         var exception = Assert.Throws<NotSupportedException>(() => session.ConditionalUpsert(

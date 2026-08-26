@@ -26,14 +26,26 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         StorageUnit unit,
         StorageAccess access,
         NpgsqlConnection connection,
-        NpgsqlTransaction? transaction)
+        NpgsqlTransaction? transaction,
+        IProviderCommandObserver? observer = null)
     {
         this.owner = owner;
         Unit = unit;
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        commandObserver = observer;
     }
+
+    /// <summary>
+    /// Counts every provider command this session issues. It lives on the session because the session is what
+    /// issues commands; it used to be dug out of an individual write's options, which meant a batch observed
+    /// only whatever was staged first.
+    /// </summary>
+    private readonly IProviderCommandObserver? commandObserver;
+
+    private void Observe(string operation, string? commandText, ProviderCommandKind kind, bool isProbe = false) =>
+        commandObserver?.Observe(new ProviderCommandEvent(operation, commandText, kind, isProbe));
 
     public StorageUnit Unit { get; }
 
@@ -244,7 +256,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         var outcome = Execute(() => ConditionalUpsertCore(values, options));
         if (outcome.Status == WriteOutcomeStatus.Inserted && Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
-            ApplyOnAppendRetention(options?.Observer);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
@@ -252,8 +264,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     {
         var nativeOnAppend = IsNativeAppendBatch(writes);
         var outcomes = ExecuteWrite(() => ApplyBatchCore(writes));
-        if (nativeOnAppend && OnAppendRetentionCoordinator.TryGetObserver(outcomes, out var observer))
-            ApplyOnAppendRetention(observer);
+        if (nativeOnAppend && OnAppendRetentionCoordinator.ContainsAppend(outcomes))
+            ApplyOnAppendRetention();
         return outcomes;
     }
 
@@ -304,7 +316,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             // zero-row delete. This keeps absence and comparison mismatch tied to one
             // serializable provider decision even when the surrounding UOW uses
             // PostgreSQL's default ReadCommitted isolation.
-            var existing = ReadCore(canonicalKey, options?.Observer, forUpdate: true, observerOperation: "postgresql.compare-and-delete-read");
+            var existing = ReadCore(canonicalKey, forUpdate: true, observerOperation: "postgresql.compare-and-delete-read");
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
@@ -335,7 +347,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
             AddParameters(command, parameters);
-            options?.Observer?.Observe(new WritePathEvent("postgresql.compare-and-delete", command.CommandText, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("postgresql.compare-and-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             return command.ExecuteNonQuery() != 0
                 ? new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version)
                 : new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
@@ -388,7 +400,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             if (Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn))
                 Add(command, "__groundwork_scope", Access.Scope!.Value);
             var affected = command.ExecuteNonQuery();
-            options.Observer?.Observe(new WritePathEvent("postgresql.retention-delete", command.CommandText, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("postgresql.retention-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (affected == 0)
                 break;
             deleted += affected;
@@ -507,7 +519,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var execution = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: false));
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return new WriteOutcome(execution.Status);
     }
 
@@ -520,7 +532,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: true).ToReport());
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
@@ -746,7 +758,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
             VersionColumn is null ? [] : [Quote(VersionColumn.Name)]));
         command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT DO NOTHING RETURNING {returning};";
-        writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-insert", "PostgreSQL multi-row INSERT", IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.batch-insert", "PostgreSQL multi-row INSERT", ProviderCommandKind.Write, IsProbe: false));
         try
         {
             var returned = ReadReturnedRows(command, writes[0].Unit);
@@ -793,7 +805,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
             VersionColumn is null ? [] : [Quote(VersionColumn.Name)]));
         command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES {string.Join(", ", rows)} ON CONFLICT {conflict} DO UPDATE SET {string.Join(", ", updates)} RETURNING {returning};";
-        writes[0].Options.Observer?.Observe(new WritePathEvent("postgresql.batch-upsert", "PostgreSQL multi-row INSERT ON CONFLICT", IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.batch-upsert", "PostgreSQL multi-row INSERT ON CONFLICT", ProviderCommandKind.Write, IsProbe: false));
         try
         {
             var returned = ReadReturnedRows(command, writes[0].Unit);
@@ -906,13 +918,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var outcome = MutateCore(values, options, mutation);
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             mutation is Mutation.Insert or Mutation.Upsert)
-            ApplyOnAppendRetention(options?.Observer);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
-    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    private void ApplyOnAppendRetention()
     {
-        void Cleanup() => ApplyRetention(new RetentionExecutionOptions { Observer = observer });
+        void Cleanup() => ApplyRetention(new RetentionExecutionOptions());
         if (transaction is null)
             OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup);
         else
@@ -1012,12 +1024,12 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                 Add(command, pair.Key.TrimStart('@'), pair.Value);
         if (VersionColumn is not null)
             Add(command, "expected", options?.Precondition.Version);
-        options?.Observer?.Observe(new WritePathEvent("postgresql.conditional-upsert", sql, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.conditional-upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             using var reader = command.ExecuteReader();
             if (!reader.Read())
-                return DeferredConflict(key, options?.Observer);
+                return DeferredConflict(key);
 
             var inserted = reader.GetBoolean(0);
             var versionOrdinal = 1;
@@ -1030,13 +1042,13 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         }
     }
 
-    private WriteOutcome DeferredConflict(StorageKey key, IWritePathObserver? observer) =>
+    private WriteOutcome DeferredConflict(StorageKey key) =>
         WriteOutcome.Deferred(
             WriteOutcomeStatus.ConcurrencyConflict,
             null,
             () =>
             {
-                var existing = ReadCore(key, observer);
+                var existing = ReadCore(key);
                 return existing is null
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
                     : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
@@ -1125,7 +1137,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         using var command = Command(sql);
         AddParameters(command, parameters);
         if (Unit.Concurrency.IsNone)
-            options?.Observer?.Observe(new WritePathEvent("postgresql.update", sql, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("postgresql.update", sql, ProviderCommandKind.Write, IsProbe: false));
         if (command.ExecuteNonQuery() == 0)
             return new WriteOutcome(Unit.Concurrency.IsNone
                 ? WriteOutcomeStatus.NotFound
@@ -1169,9 +1181,10 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         if (exactOutcome && VersionColumn is not null)
             Add(command, "expected", options?.Precondition.Version);
         if (Unit.Concurrency.IsNone)
-            options?.Observer?.Observe(new WritePathEvent(
+            commandObserver?.Observe(new ProviderCommandEvent(
                 exactOutcome ? "postgresql.conditional-upsert" : "postgresql.upsert",
                 sql,
+                ProviderCommandKind.Write,
                 IsProbe: false));
         try
         {
@@ -1197,7 +1210,6 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     private StoredEntry? ReadCore(
         StorageKey key,
-        IWritePathObserver? observer = null,
         bool forUpdate = false,
         string? observerOperation = null)
     {
@@ -1206,7 +1218,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var locking = forUpdate ? " FOR UPDATE" : string.Empty;
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where}{locking};");
         AddParameters(command, parameters);
-        observer?.Observe(new WritePathEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, ProviderCommandKind.Write, IsProbe: true));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
             return null;

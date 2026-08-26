@@ -81,7 +81,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
         return MongoSchemaCoordinator.InspectAdmission(state, applied, access);
     }
 
-    public IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access)
+    public IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         var applied = state.Resolve(unit, access);
@@ -931,8 +931,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         MongoStorageAccess access,
         IMongoCollection<BsonDocument> collection,
         IClientSessionHandle? transactionSession,
-        MongoUnitOfWork? unitOfWork = null)
+        MongoUnitOfWork? unitOfWork = null,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.state = state;
         this.applied = applied;
         this.collection = collection;
@@ -941,6 +943,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         Access = access;
         Unit = MongoDeclarationSnapshot.Clone(applied.Declaration);
     }
+
+    /// <summary>
+    /// Counts every provider command this session issues. It belongs to the session because the session is
+    /// what issues commands; it used to be read off an individual write's options, so a batch observed only
+    /// whatever happened to be staged first.
+    /// </summary>
+    private readonly IProviderCommandObserver? commandObserver;
 
     public StorageUnit Unit { get; }
 
@@ -1336,8 +1345,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ThrowIfDisposed();
         var nativeOnAppend = IsNativeAppendBatch(writes);
         var outcomes = ExecuteWithTransactionIfNeeded(transactional => transactional.ApplyBatchCore(writes, exactOutcomes));
-        if (nativeOnAppend && OnAppendRetentionCoordinator.TryGetObserver(outcomes, out var observer))
-            ApplyOnAppendRetention(observer);
+        if (nativeOnAppend && OnAppendRetentionCoordinator.ContainsAppend(outcomes))
+            ApplyOnAppendRetention();
         return outcomes;
     }
 
@@ -1425,9 +1434,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             });
         }
 
-        writes[0].Options.Observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.batch-write",
             "MongoDB.BulkWrite(UpdateOne upsert:eligible-per-row ordered:false)",
+            ProviderCommandKind.Write,
             IsProbe: false));
         try
         {
@@ -1482,7 +1492,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         })).ToArray();
 
     private static MongoWriteOptions? ToNative(WriteOptions options) =>
-        new() { Precondition = options.Precondition, Observer = options.Observer };
+        new() { Precondition = options.Precondition };
 
     private static WriteOutcome ToStore(MongoWriteOutcome outcome) =>
         new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName, outcome.GeneratedValues);
@@ -1560,9 +1570,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     .Project(new BsonDocument("_id", 1));
                 victimsQuery.Options.BatchSize = options.MaxRowsPerBatch;
                 victimsQuery.Options.AllowDiskUse = true;
-                options.Observer?.Observe(new WritePathEvent(
+                commandObserver?.Observe(new ProviderCommandEvent(
                     "mongodb.retention-watermark-find",
                     $"MongoDB.Find(sort:order-desc+key-asc; skip:{keepNewest}; limit:{options.MaxRowsPerBatch}; projection:_id)",
+                    ProviderCommandKind.Read,
                     IsProbe: false));
                 var victims = victimsQuery.ToList(options.CancellationToken);
                 if (victims.Count == 0)
@@ -1574,9 +1585,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     ? collection.DeleteMany(filter, options.CancellationToken)
                     : collection.DeleteMany(transactionSession, filter, cancellationToken: options.CancellationToken);
                 var affected = checked((int)result.DeletedCount);
-                options.Observer?.Observe(new WritePathEvent(
+                commandObserver?.Observe(new ProviderCommandEvent(
                     "mongodb.retention-delete-many",
                     $"MongoDB.DeleteMany(ids<=:{options.MaxRowsPerBatch})",
+                    ProviderCommandKind.Write,
                     IsProbe: false));
                 deleted += affected;
                 batches++;
@@ -1789,7 +1801,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is MongoWriteOutcomeStatus.Inserted or MongoWriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
@@ -1837,7 +1849,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             report.Status is MongoWriteOutcomeStatus.Inserted or MongoWriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return report;
     }
 
@@ -2041,7 +2053,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     private static WriteOptions? ToStoreOptions(MongoWriteOptions? options) => options is null
         ? null
-        : new WriteOptions { Precondition = options.Precondition, Observer = options.Observer };
+        : new WriteOptions { Precondition = options.Precondition };
 
     internal void Close() => disposed = true;
 
@@ -2064,14 +2076,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             // Cleanup starts only after the sequence/write transaction commits, so a coalesced
             // dirty signal always represents a row visible to the active retention owner.
-            ApplyOnAppendRetention(options?.Observer);
+            ApplyOnAppendRetention();
         }
         return outcome;
     }
 
-    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    private void ApplyOnAppendRetention()
     {
-        void Cleanup() => ApplyRetention(new RetentionExecutionOptions { Observer = observer });
+        void Cleanup() => ApplyRetention(new RetentionExecutionOptions());
         if (transactionSession is null)
             OnAppendRetentionCoordinator.Run(state, Unit, Access.Scope?.Value, Cleanup);
         else
@@ -2097,7 +2109,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         if (sequence is not null && !hasSequenceLocator && (kind is MutationKind.Insert or MutationKind.Upsert))
         {
             var copied = keyValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-            var generated = NextSequence(sequence, options?.Observer);
+            var generated = NextSequence(sequence);
             copied[sequence.Name] = generated;
             values = new MongoStorageValues(copied);
             keyValues = values.Values;
@@ -2133,7 +2145,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             existing,
             column => sequence is not null && column.Name == sequence.Name && generatedValues.TryGetValue(column.Name, out var generated)
                 ? Convert.ToInt64(generated, System.Globalization.CultureInfo.InvariantCulture)
-                : NextSequence(column, options?.Observer),
+                : NextSequence(column),
             preserveCreatedAt: exactOutcome,
             generatedValues: generatedValues);
         if (nextVersion is not null)
@@ -2233,10 +2245,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 values.Values,
                 identity,
                 existing: null,
-                column => NextSequence(column, options?.Observer),
+                column => NextSequence(column),
                 generatedValues: generatedValues)
             : null;
-        options?.Observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.none-write",
             kind switch
             {
@@ -2244,6 +2256,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 MutationKind.Update => "MongoDB.UpdateOne(upsert:false)",
                 _ => $"MongoDB.UpdateOne(upsert:{canInsert.ToString().ToLowerInvariant()})"
             },
+            ProviderCommandKind.Write,
             IsProbe: false));
         try
         {
@@ -2337,7 +2350,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             transactional.ConditionalUpsertOne(values, options));
         if (outcome.Status == MongoWriteOutcomeStatus.Inserted &&
             Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
-            ApplyOnAppendRetention(options?.Observer);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
@@ -2354,7 +2367,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 values.Values,
                 identity,
                 existing: null,
-                column => NextSequence(column, options?.Observer))
+                column => NextSequence(column))
             : null;
         var filter = new BsonDocument("_id", identity);
         var optimistic = Unit.Concurrency.IsOptimistic;
@@ -2403,7 +2416,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         // identity, filter, or document values because they may contain PII/secrets.
         var commandDescription =
             $"MongoDB.UpdateOne(upsert:{isUpsert.ToString().ToLowerInvariant()}; filter=identity+version; update=$set/$inc/$setOnInsert)";
-        options?.Observer?.Observe(new WritePathEvent("mongodb.conditional-upsert", commandDescription, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.conditional-upsert", commandDescription, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             var result = transactionSession is null
@@ -2456,7 +2469,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 values.Values,
                 identity,
                 existing: null,
-                column => NextSequence(column, options?.Observer))
+                column => NextSequence(column))
             : null;
         var set = new BsonDocument();
         foreach (var column in Unit.Columns)
@@ -2492,9 +2505,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         if (setOnInsert.ElementCount != 0)
             update["$setOnInsert"] = setOnInsert;
 
-        options?.Observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.exact-batch-upsert",
             $"MongoDB.FindOneAndUpdate(upsert:{canInsert.ToString().ToLowerInvariant()}; return=before)",
+            ProviderCommandKind.Write,
             IsProbe: false));
         try
         {
@@ -2574,7 +2588,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
         if (!Unit.Concurrency.IsOptimistic)
         {
-            options?.Observer?.Observe(new WritePathEvent("mongodb.none-delete", "MongoDB.DeleteOne", IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("mongodb.none-delete", "MongoDB.DeleteOne", ProviderCommandKind.Write, IsProbe: false));
             var result = DeleteOne(new BsonDocument("_id", identity));
             return result.DeletedCount == 0
                 ? new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound)
@@ -2620,7 +2634,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
         var existing = Unit.Concurrency.IsOptimistic
-            ? FindOne(identity, options?.Observer)
+            ? FindOne(identity)
             : null;
         if (Unit.Concurrency.IsOptimistic && existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
@@ -2635,15 +2649,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         if (Unit.Concurrency.IsOptimistic && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
             filter[MongoDocumentMapper.VersionField] = options.Precondition.Version!.Value;
 
-        options?.Observer?.Observe(new WritePathEvent("mongodb.compare-and-delete", "MongoDB.DeleteOne", IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.compare-and-delete", "MongoDB.DeleteOne", ProviderCommandKind.Write, IsProbe: false));
         var result = DeleteOne(filter);
         if (result.DeletedCount != 0)
         {
-            RemoveVersion(identity, options?.Observer);
+            RemoveVersion(identity);
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted, existingVersion);
         }
 
-        existing ??= FindOne(identity, options?.Observer);
+        existing ??= FindOne(identity);
         if (existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
         existingVersion ??= Version(identity, existing);
@@ -2703,15 +2717,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             ? checked((current ?? 0) + 1)
             : null;
 
-    private long NextSequence(ColumnDefinition column, IWritePathObserver? observer = null)
+    private long NextSequence(ColumnDefinition column)
     {
         // Keep sequence allocation visible to the same diagnostic seam as the write.
         // ConditionalUpsert rejects this path before it can occur, preserving its
         // one-command contract; ordinary generated writes still report the extra
         // provider command instead of hiding it from accounting.
-        observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.provider-sequence",
             "MongoDB.FindOneAndUpdate(sequence)",
+            ProviderCommandKind.Write,
             IsProbe: false));
         return state.Sequences.FindOneAndUpdate(
             transactionSession,
@@ -2749,12 +2764,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return metadata is null ? null : metadata.GetValue("version", 0).ToInt64();
     }
 
-    private void RemoveVersion(BsonValue identity, IWritePathObserver? observer = null)
+    private void RemoveVersion(BsonValue identity)
     {
         if (Unit.Concurrency.IsOptimistic)
         {
             var filter = new BsonDocument("_id", MetadataId(identity));
-            observer?.Observe(new WritePathEvent("mongodb.compare-and-delete-version-delete", "MongoDB.DeleteOne(metadata)", IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("mongodb.compare-and-delete-version-delete", "MongoDB.DeleteOne(metadata)", ProviderCommandKind.Write, IsProbe: false));
             if (transactionSession is null)
                 state.Metadata.DeleteOne(filter);
             else
@@ -2762,9 +2777,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
     }
 
-    private BsonDocument? FindOne(BsonValue identity, IWritePathObserver? observer = null)
+    private BsonDocument? FindOne(BsonValue identity)
     {
-        observer?.Observe(new WritePathEvent("mongodb.compare-and-delete-read", "MongoDB.FindOne", IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.compare-and-delete-read", "MongoDB.FindOne", ProviderCommandKind.Write, IsProbe: true));
         return transactionSession is null
             ? collection.Find(new BsonDocument("_id", identity)).FirstOrDefault()
             : collection.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();

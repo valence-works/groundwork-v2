@@ -64,7 +64,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         }
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
@@ -75,7 +75,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         var connection = CreateIndependentConnection();
         lock (gate)
             sessionConnections.Add(connection);
-        return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null);
+        return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

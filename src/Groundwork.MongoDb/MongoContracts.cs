@@ -111,7 +111,6 @@ public sealed record MongoWriteOptions
         init => precondition = value ?? throw new ArgumentNullException(nameof(value));
     }
 
-    public IWritePathObserver? Observer { get; init; }
 
     public static MongoWriteOptions Unconditional { get; } = new();
 
@@ -387,7 +386,7 @@ public interface IMongoProviderConnection : IDisposable
     /// <summary>Reads native admission evidence without applying or repairing schema.</summary>
     MongoSchemaAdmissionReport InspectSchema(StorageUnit unit, MongoStorageAccess access);
 
-    IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access);
+    IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access, IProviderCommandObserver? observer = null);
 
     IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units);
 }

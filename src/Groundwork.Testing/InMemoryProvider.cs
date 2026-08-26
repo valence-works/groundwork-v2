@@ -66,14 +66,14 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         atomicCommit: true,
         compareAndDelete: true);
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
-        return new InMemoryStorageSession(database, state, access, liveState: true);
+        return new InMemoryStorageSession(database, state, access, liveState: true, observer: observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -596,8 +596,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         bool liveState = false,
         Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry>? stagedLedger = null,
         Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits = null,
-        Dictionary<RetentionLedgerKey, RetentionLedgerEntry>? stagedRetentionLedger = null)
+        Dictionary<RetentionLedgerKey, RetentionLedgerEntry>? stagedRetentionLedger = null,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.database = database;
         this.state = state;
         this.liveState = liveState;
@@ -608,6 +610,13 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         Unit = StorageDeclaration.Clone(state.Unit);
         partition = access.Scope?.Value ?? "<global>";
     }
+
+    /// <summary>
+    /// Counts every provider command this session issues. It belongs to the session because the session is
+    /// what issues commands; it used to be read off an individual write's options, so a batch observed only
+    /// whatever happened to be staged first.
+    /// </summary>
+    private readonly IProviderCommandObserver? commandObserver;
 
     public StorageUnit Unit { get; }
 
@@ -1000,7 +1009,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("conditional upsert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        options?.Observer?.Observe(new WritePathEvent("in-memory.conditional-upsert", null, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.conditional-upsert", null, ProviderCommandKind.Write, IsProbe: false));
         return Mutate(values, options, MutationKind.Upsert, exactOutcome: true, preserveCreatedAt: true);
     }
 
@@ -1024,7 +1033,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("compare-and-delete");
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
         var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
-        options?.Observer?.Observe(new WritePathEvent("in-memory.compare-and-delete", null, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.compare-and-delete", null, ProviderCommandKind.Write, IsProbe: false));
         lock (database.Gate)
         {
             ThrowIfDisposed();
@@ -1162,7 +1171,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             }
 
             batches++;
-            options.Observer?.Observe(new WritePathEvent("in-memory.retention", null, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("in-memory.retention", null, ProviderCommandKind.Write, IsProbe: false));
         }
 
         return new RetentionResult(deleted, batches);
@@ -1181,7 +1190,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         }
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return new(outcome.Status);
     }
 
@@ -1198,7 +1207,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         }
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
@@ -1303,18 +1312,17 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
 
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             kind is MutationKind.Insert or MutationKind.Upsert)
-            ApplyOnAppendRetention(options?.Observer);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
-    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    private void ApplyOnAppendRetention()
     {
         // Retention runs after the write lock is released. Providers with native post-commit
         // retention follow the same shape, so concurrent appends do not queue behind a scan.
         void Cleanup() => ApplyRetention(new RetentionExecutionOptions
         {
-            MaxRowsPerBatch = 512,
-            Observer = observer
+            MaxRowsPerBatch = 512
         });
         if (liveState)
             OnAppendRetentionCoordinator.Run(database, Unit, Access.Scope?.Value, Cleanup);

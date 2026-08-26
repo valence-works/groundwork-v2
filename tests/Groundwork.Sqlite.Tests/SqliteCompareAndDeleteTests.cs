@@ -27,7 +27,7 @@ public sealed class SqliteCompareAndDeleteTests
             Assert.Equal(WriteOutcomeStatus.Deleted,
                 session.CompareAndDelete(Key("claim-decimal"), new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
-            var mismatchObserver = new WritePathObserver();
+            var mismatchObserver = new ProviderCommandObserver();
             Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
                 session.CompareAndDelete(Key("claim-1"), new Dictionary<string, object?>
                 {
@@ -202,21 +202,21 @@ public sealed class SqliteCompareAndDeleteTests
             var session = connection.OpenSession(unit, StorageAccess.Global);
             session.Insert(Values("claim-admission", "worker-a", 7L));
 
-            var undeclaredObserver = new WritePathObserver();
+            var undeclaredObserver = new ProviderCommandObserver();
             Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
                 Key("claim-admission"),
                 new Dictionary<string, object?> { ["missing"] = "value" },
                 new WriteOptions { Observer = undeclaredObserver }));
             Assert.Empty(undeclaredObserver.Commands);
 
-            var wrongTypeObserver = new WritePathObserver();
+            var wrongTypeObserver = new ProviderCommandObserver();
             Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
                 Key("claim-admission"),
                 new Dictionary<string, object?> { ["fence"] = "seven" },
                 new WriteOptions { Observer = wrongTypeObserver }));
             Assert.Empty(wrongTypeObserver.Commands);
 
-            var decimalObserver = new WritePathObserver();
+            var decimalObserver = new ProviderCommandObserver();
             Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
                 Key("claim-admission"),
                 new Dictionary<string, object?> { ["amount"] = 7.004m },
@@ -230,7 +230,7 @@ public sealed class SqliteCompareAndDeleteTests
                 Columns = [..unit.Columns, new ColumnDefinition { Name = "payload", Type = PortableType.Json }]
             };
             connection.Schema.Apply(jsonUnit);
-            var jsonObserver = new WritePathObserver();
+            var jsonObserver = new ProviderCommandObserver();
             Assert.Throws<ArgumentException>(() => connection.OpenSession(jsonUnit, StorageAccess.Global).CompareAndDelete(
                 Key("claim-admission"),
                 new Dictionary<string, object?> { ["payload"] = "{\"a\":1}" },

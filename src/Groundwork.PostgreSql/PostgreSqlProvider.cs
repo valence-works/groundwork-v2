@@ -60,7 +60,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
             : PostgreSqlSchemaCoordinator.Physicalize(source);
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
@@ -70,7 +70,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = OpenConnection();
         OwnConnection(connection);
-        return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null);
+        return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

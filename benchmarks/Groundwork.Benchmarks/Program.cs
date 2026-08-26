@@ -50,7 +50,7 @@ try
         long? version = null;
         for (var index = 0; index < count; index++)
         {
-            var observer = new WritePathObserver();
+            var observer = new ProviderCommandObserver();
             var outcome = session.ConditionalUpsert(
                 new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
@@ -185,7 +185,7 @@ static void RunCommitWorkload(
     int count,
     string providerName)
 {
-    var observer = new WritePathObserver();
+    var observer = new ProviderCommandObserver();
     using var work = provider.BeginUnitOfWork(
         StorageAccess.Global,
         new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Aggregate },

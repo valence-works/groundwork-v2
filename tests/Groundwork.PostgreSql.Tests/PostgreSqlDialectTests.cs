@@ -701,7 +701,7 @@ public sealed class PostgreSqlDialectTests
             session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-decimal" }),
                 new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
-        var mismatchObserver = new WritePathObserver();
+        var mismatchObserver = new ProviderCommandObserver();
         Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
             session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
                 new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
@@ -712,7 +712,7 @@ public sealed class PostgreSqlDialectTests
         {
             ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
         }), WriteOptions.IfVersion(1)).Version);
-        var deleteObserver = new WritePathObserver();
+        var deleteObserver = new ProviderCommandObserver();
         var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
             new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
             new WriteOptions { Observer = deleteObserver });

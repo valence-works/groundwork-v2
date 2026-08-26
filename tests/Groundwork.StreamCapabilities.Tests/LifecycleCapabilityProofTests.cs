@@ -784,11 +784,11 @@ public sealed class LifecycleCapabilityProofTests
         }
     }
 
-    private sealed class CancelAfterFirstRetentionBatch(CancellationTokenSource cancellation) : IWritePathObserver
+    private sealed class CancelAfterFirstRetentionBatch(CancellationTokenSource cancellation) : IProviderCommandObserver
     {
         private int batches;
 
-        public void Observe(WritePathEvent command)
+        public void Observe(ProviderCommandEvent command)
         {
             if (command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase) &&
                 Interlocked.Increment(ref batches) == 1)
@@ -796,11 +796,11 @@ public sealed class LifecycleCapabilityProofTests
         }
     }
 
-    private sealed class RecordingRetentionObserver : IWritePathObserver
+    private sealed class RecordingRetentionObserver : IProviderCommandObserver
     {
-        public List<WritePathEvent> Events { get; } = [];
+        public List<ProviderCommandEvent> Events { get; } = [];
 
-        public void Observe(WritePathEvent command) => Events.Add(command);
+        public void Observe(ProviderCommandEvent command) => Events.Add(command);
     }
 
     private sealed class CapabilityHidingSession(IStorageSession inner) : IStorageSession
