@@ -15,6 +15,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
     private readonly List<SqliteStorageSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;
+    private readonly IProviderCommandObserver? commandObserver;
 
     internal SqliteUnitOfWork(
         SqliteProviderConnection owner,
@@ -22,8 +23,10 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         SqliteTransaction transaction,
         IEnumerable<StorageUnit> units,
         StorageAccess access,
-        BatchWriteOptions options)
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.owner = owner;
         this.connection = connection;
         this.transaction = transaction;
@@ -39,7 +42,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         if (!units.Contains(unit.Id))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
-        var session = new SqliteStorageSession(owner, SqliteSchemaCoordinator.Physicalize(unit), access, connection, transaction);
+        var session = new SqliteStorageSession(owner, SqliteSchemaCoordinator.Physicalize(unit), access, connection, transaction, commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);

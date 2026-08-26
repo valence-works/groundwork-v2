@@ -667,14 +667,15 @@ public sealed class DocumentUnit<T>
     public WriteOutcome Execute(
         IStorageProviderConnection connection,
         RowWrite write,
-        StorageAccess? access = null)
+        StorageAccess? access = null,
+        IProviderCommandObserver? observer = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(write);
         if (!ReferenceEquals(write.Unit, StorageUnit))
             throw new ArgumentException("The row write belongs to a different storage unit.", nameof(write));
 
-        var session = connection.OpenSession(StorageUnit, access ?? StorageAccess.Global);
+        var session = connection.OpenSession(StorageUnit, access ?? StorageAccess.Global, observer);
         return write.Mode switch
         {
             RowWriteMode.Insert => session.Insert(write.Values!, write.Options),

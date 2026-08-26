@@ -13,8 +13,6 @@ public sealed record RetentionExecutionOptions
     /// <summary>Optional per-pass retention override. Null uses the declaration; zero deletes all rows.</summary>
     public int? KeepNewestOverride { get; init; }
 
-    public IWritePathObserver? Observer { get; init; }
-
     public CancellationToken CancellationToken { get; init; }
 }
 
@@ -238,18 +236,17 @@ internal static class OnAppendRetentionCoordinator
 {
     private static readonly ConditionalWeakTable<object, OwnerState> Owners = new();
 
-    internal static bool TryGetObserver(
-        IReadOnlyList<RowWriteOutcome> outcomes,
-        out IWritePathObserver? observer)
+    /// <summary>
+    /// True when a batch contains an append that should trigger on-append retention. The observer is no
+    /// longer dug out of the first staged write's options — it belongs to the session, which already has it.
+    /// </summary>
+    internal static bool ContainsAppend(IReadOnlyList<RowWriteOutcome> outcomes)
     {
         foreach (var outcome in outcomes)
         {
-            if (!outcome.Outcome.Succeeded || outcome.Write.Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
-                continue;
-            observer = outcome.Write.Options.Observer;
-            return true;
+            if (outcome.Outcome.Succeeded && outcome.Write.Mode is RowWriteMode.Insert or RowWriteMode.Upsert)
+                return true;
         }
-        observer = null;
         return false;
     }
 

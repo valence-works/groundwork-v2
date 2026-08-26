@@ -345,11 +345,13 @@ public sealed class LifecycleCapabilityProofTests
         using var cancellation = new CancellationTokenSource();
         var observer = new CancelAfterFirstRetentionBatch(cancellation);
         var operation = new OperationId(DateTimeOffset.UtcNow, "retention-atomic");
-        Assert.Throws<OperationCanceledException>(() => session.ApplyRetention(operation, new RetentionExecutionOptions
+        // The observer cancels on its first command, so it gets a session of its own: attached to the one
+        // above it would fire on the seeding inserts instead of on the retention pass under test.
+        var observedSession = connection.OpenSession(unit, StorageAccess.Global, observer);
+        Assert.Throws<OperationCanceledException>(() => observedSession.ApplyRetention(operation, new RetentionExecutionOptions
         {
             MaxRowsPerBatch = 1,
-            CancellationToken = cancellation.Token,
-            Observer = observer
+            CancellationToken = cancellation.Token
         }));
         Assert.Equal(5, session.Query(All(unit)).Rows.Count);
 
@@ -645,9 +647,11 @@ public sealed class LifecycleCapabilityProofTests
 
         var operation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-retention-override");
         var commandObserver = new RecordingRetentionObserver();
-        var options = new RetentionExecutionOptions { KeepNewestOverride = 2, MaxRowsPerBatch = 1, Observer = commandObserver };
-        var executed = session.ApplyRetention(operation, options);
-        var replayed = session.ApplyRetention(operation, options);
+        var options = new RetentionExecutionOptions { KeepNewestOverride = 2, MaxRowsPerBatch = 1 };
+        // Observed on its own session so the recording covers the retention passes, not the seeding inserts.
+        var retentionSession = connection.OpenSession(unit, StorageAccess.Global, commandObserver);
+        var executed = retentionSession.ApplyRetention(operation, options);
+        var replayed = retentionSession.ApplyRetention(operation, options);
 
         Assert.Equal(4L, highWater);
         Assert.Equal(RetentionOperationStatus.Executed, executed.Status);
@@ -671,15 +675,15 @@ public sealed class LifecycleCapabilityProofTests
             cancellationSession.Insert(Values($"cancel-{index}"));
         using var cancellation = new CancellationTokenSource();
         var observer = new CancelAfterFirstRetentionBatch(cancellation);
+        var observedCancellationSession = connection.OpenSession(cancellationUnit, StorageAccess.Global, observer);
         var cancellationOperation = new OperationId(DateTimeOffset.UtcNow, $"{provider}-retention-cancel");
-        Assert.Throws<OperationCanceledException>(() => cancellationSession.ApplyRetention(
+        Assert.Throws<OperationCanceledException>(() => observedCancellationSession.ApplyRetention(
             cancellationOperation,
             new RetentionExecutionOptions
             {
                 MaxRowsPerBatch = 1,
                 KeepNewestOverride = 0,
-                CancellationToken = cancellation.Token,
-                Observer = observer
+                CancellationToken = cancellation.Token
             }));
         Assert.Equal(5, cancellationSession.Query(All(cancellationUnit)).Rows.Count);
         var resumed = cancellationSession.ApplyRetention(
@@ -784,11 +788,11 @@ public sealed class LifecycleCapabilityProofTests
         }
     }
 
-    private sealed class CancelAfterFirstRetentionBatch(CancellationTokenSource cancellation) : IWritePathObserver
+    private sealed class CancelAfterFirstRetentionBatch(CancellationTokenSource cancellation) : IProviderCommandObserver
     {
         private int batches;
 
-        public void Observe(WritePathEvent command)
+        public void Observe(ProviderCommandEvent command)
         {
             if (command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase) &&
                 Interlocked.Increment(ref batches) == 1)
@@ -796,11 +800,11 @@ public sealed class LifecycleCapabilityProofTests
         }
     }
 
-    private sealed class RecordingRetentionObserver : IWritePathObserver
+    private sealed class RecordingRetentionObserver : IProviderCommandObserver
     {
-        public List<WritePathEvent> Events { get; } = [];
+        public List<ProviderCommandEvent> Events { get; } = [];
 
-        public void Observe(WritePathEvent command) => Events.Add(command);
+        public void Observe(ProviderCommandEvent command) => Events.Add(command);
     }
 
     private sealed class CapabilityHidingSession(IStorageSession inner) : IStorageSession

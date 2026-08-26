@@ -22,14 +22,23 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private bool closed;
 
     internal SqlServerStorageSession(SqlServerProviderConnection owner, StorageUnit unit, StorageAccess access,
-        SqlConnection connection, SqlTransaction? transaction)
+        SqlConnection connection, SqlTransaction? transaction,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.owner = owner;
         Unit = unit;
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
     }
+
+    /// <summary>
+    /// Counts every provider command this session issues. It belongs to the session because the session is
+    /// what issues commands; it used to be read off an individual write's options, so a batch observed only
+    /// whatever happened to be staged first.
+    /// </summary>
+    private readonly IProviderCommandObserver? commandObserver;
 
     public StorageUnit Unit { get; }
     public StorageAccess Access { get; }
@@ -54,6 +63,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
@@ -114,6 +124,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var executionRequest = EnsureScopeProjection(
             QueryRequestExecution.ForPage(executionSource, renderOptions));
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
@@ -139,6 +150,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
@@ -150,19 +162,23 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 activeTransaction ?? transaction,
                 dialect,
                 Unit,
-                AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+                profile,
                 query,
                 decode,
                 SqlServerSchemaCoordinator.ScopeColumn,
-                Access.Scope!)
+                Access.Scope!,
+                commandObserver,
+                "sqlserver.aggregate")
             : RelationalAggregationExecutor.Execute(
             connection,
             activeTransaction ?? transaction,
             dialect,
             Unit,
-            AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+            profile,
             query,
-            decode);
+            decode,
+            commandObserver,
+            "sqlserver.aggregate");
     });
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
@@ -219,7 +235,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     public StoredEntry? Read(StorageKey key)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => PublicEntry(ReadCore(key)));
+        return Execute(() => PublicEntry(ReadCore(key, observerOperation: "sqlserver.read", isProbe: false)));
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -275,10 +291,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted, options?.Observer);
+        CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted);
         return outcome;
     }
 
@@ -293,13 +309,11 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        IWritePathObserver? observer = null;
-        var succeeded = nativeOnAppend &&
-            OnAppendRetentionCoordinator.TryGetObserver(outcomes, out observer);
-        CompleteOnAppend(registration, succeeded, observer);
+        var succeeded = nativeOnAppend && OnAppendRetentionCoordinator.ContainsAppend(outcomes);
+        CompleteOnAppend(registration, succeeded);
         return outcomes;
     }
 
@@ -312,6 +326,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             {
                 var (noneWhere, noneParameters) = KeyPredicate(key.Values);
                 using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+                commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
                 AddParameters(noneCommand, noneParameters);
                 return noneCommand.ExecuteNonQuery() == 0
                     ? new WriteOutcome(WriteOutcomeStatus.NotFound)
@@ -329,6 +344,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
             }
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             AddParameters(command, parameters);
             if (command.ExecuteNonQuery() == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
@@ -372,7 +388,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             var output = VersionColumnDefinition is null ? string.Empty : $" OUTPUT deleted.{Quote(VersionColumnDefinition.Name)}";
             using var command = Command($"DELETE FROM {Quote(Unit.Name)}{output} WHERE {where};");
             AddParameters(command, parameters);
-            options?.Observer?.Observe(new WritePathEvent("sqlserver.compare-and-delete", command.CommandText, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.compare-and-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (VersionColumnDefinition is not null)
             {
                 using (var reader = command.ExecuteReader())
@@ -386,7 +402,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 return new WriteOutcome(WriteOutcomeStatus.Deleted);
             }
 
-            var existing = ReadCore(canonicalKey, options?.Observer, "sqlserver.compare-and-delete-read", exactStringKeys: true);
+            var existing = ReadCore(canonicalKey, "sqlserver.compare-and-delete-read", exactStringKeys: true);
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
@@ -447,7 +463,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 SqlServerProviderConnection.AddParameter(command, "@__groundwork_scope", Access.Scope!.Value,
                     new ColumnDefinition { Name = SqlServerSchemaCoordinator.ScopeColumn, Type = PortableType.String, MaxLength = 128, IsNullable = false });
             var affected = command.ExecuteNonQuery();
-            options.Observer?.Observe(new WritePathEvent("sqlserver.retention-delete", command.CommandText, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.retention-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (affected == 0)
                 break;
             deleted += affected;
@@ -572,13 +588,12 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
         CompleteOnAppend(
             registration,
-            onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
-            observer: null);
+            onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
         return new WriteOutcome(execution.Status);
     }
 
@@ -597,10 +612,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed, observer: null);
+        CompleteOnAppend(registration, onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
         return outcome;
     }
 
@@ -925,7 +940,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
         sql += $"WHEN NOT MATCHED BY TARGET THEN INSERT ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))}) OUTPUT $action, {string.Join(", ", Unit.Key.Columns.Select(column => $"inserted.{Quote(column)}"))}{(VersionColumnDefinition is null ? string.Empty : $", inserted.{Quote(VersionColumnDefinition.Name)}")};";
         command.CommandText = sql;
-        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlserver.batch-merge-tvp", "SQL Server MERGE table-valued parameter", IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.batch-merge-tvp", "SQL Server MERGE table-valued parameter", ProviderCommandKind.Write, IsProbe: false));
         try
         {
             var returned = ReadMergeOutcomes(command, writes[0].Unit);
@@ -987,7 +1002,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
         sql += $"WHEN NOT MATCHED BY TARGET THEN INSERT ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))}) OUTPUT $action, {string.Join(", ", Unit.Key.Columns.Select(column => $"inserted.{Quote(column)}"))}{(VersionColumnDefinition is null ? string.Empty : $", inserted.{Quote(VersionColumnDefinition.Name)}")};";
         command.CommandText = sql;
-        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlserver.batch-merge", "SQL Server MERGE batch", IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.batch-merge", "SQL Server MERGE batch", ProviderCommandKind.Write, IsProbe: false));
         try
         {
             var returned = ReadMergeOutcomes(command, writes[0].Unit);
@@ -1121,10 +1136,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Succeeded, options?.Observer);
+        CompleteOnAppend(registration, onAppend && outcome.Succeeded);
         return outcome;
     }
 
@@ -1138,13 +1153,12 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     private void CompleteOnAppend(
         OnAppendRetentionCoordinator.AppendRegistration? registration,
-        bool cleanupRequired,
-        IWritePathObserver? observer)
+        bool cleanupRequired)
     {
         void Cleanup()
         {
             owner.ThrowIfDisposed();
-            ApplyRetentionCore(new RetentionExecutionOptions { Observer = observer });
+            ApplyRetentionCore(new RetentionExecutionOptions());
         }
         if (registration is not null)
         {
@@ -1208,6 +1222,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             var output = SequenceColumnDefinition is null ? string.Empty : $" OUTPUT INSERTED.{Quote(SequenceColumnDefinition.Name)}";
             using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
             AddParameters(insert, parameters);
+            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.insert", insert.CommandText, ProviderCommandKind.Write, IsProbe: false));
             try
             {
                 if (SequenceColumnDefinition is null)
@@ -1252,6 +1267,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});";
         using var command = Command(sql);
         AddParameters(command, parameters);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.insert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             if (SequenceColumnDefinition is null)
@@ -1288,7 +1304,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var sql = RenderNoneUpsertSql(Unit, columns);
         using var command = Command(sql);
         AddParameters(command, parameters);
-        options?.Observer?.Observe(new WritePathEvent("sqlserver.upsert", sql, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             command.ExecuteNonQuery();
@@ -1348,7 +1364,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         using var command = Command(sql);
         AddParameters(command, parameters);
         if (Unit.Concurrency.IsNone)
-            options?.Observer?.Observe(new WritePathEvent("sqlserver.update", sql, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.update", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             if (command.ExecuteNonQuery() == 0)
@@ -1452,7 +1468,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
               " COMMIT TRANSACTION; END TRY BEGIN CATCH IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; THROW; END CATCH;";
         using var command = Command(sql);
         AddParameters(command, parameters);
-        options?.Observer?.Observe(new WritePathEvent("sqlserver.conditional-upsert", sql, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.conditional-upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             using var reader = command.ExecuteReader();
@@ -1470,11 +1486,11 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out var indexName))
         {
             return IsPrimaryKeyViolation(indexName)
-                ? DeferredConflict(key, options?.Observer)
+                ? DeferredConflict(key)
                 : new WriteOutcome(WriteOutcomeStatus.UniqueViolation, null, LogicalIndexName(indexName));
         }
 
-        return DeferredConflict(key, options?.Observer);
+        return DeferredConflict(key);
     }
 
     private bool IsPrimaryKeyViolation(string indexName) =>
@@ -1493,13 +1509,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 StringComparison.OrdinalIgnoreCase))?.Name ?? physicalName;
     }
 
-    private WriteOutcome DeferredConflict(StorageKey key, IWritePathObserver? observer) =>
+    private WriteOutcome DeferredConflict(StorageKey key) =>
         WriteOutcome.Deferred(
             WriteOutcomeStatus.ConcurrencyConflict,
             null,
             () =>
             {
-                var existing = ReadCore(key, observer);
+                var existing = ReadCore(key);
                 return existing is null
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
                     : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
@@ -1507,15 +1523,15 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     private StoredEntry? ReadCore(
         StorageKey key,
-        IWritePathObserver? observer = null,
         string? observerOperation = null,
-        bool exactStringKeys = false)
+        bool exactStringKeys = false,
+        bool isProbe = true)
     {
         var (where, parameters) = KeyPredicate(key.Values, exactStringKeys);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
-        observer?.Observe(new WritePathEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);

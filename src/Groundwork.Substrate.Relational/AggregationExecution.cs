@@ -16,8 +16,10 @@ public static class RelationalAggregationExecutor
         StorageUnit unit,
         AggregationProfile profile,
         AggregationQuery query,
-        Func<string, object?, object?> decode) =>
-        ExecuteWithHandling(connection, transaction, dialect, unit, profile, query, decode, null, null);
+        Func<string, object?, object?> decode,
+        IProviderCommandObserver? observer = null,
+        string? observerOperation = null) =>
+        ExecuteWithHandling(connection, transaction, dialect, unit, profile, query, decode, null, null, observer, observerOperation);
 
     internal static AggregationResult ExecuteScoped(
         DbConnection connection,
@@ -28,7 +30,9 @@ public static class RelationalAggregationExecutor
         AggregationQuery query,
         Func<string, object?, object?> decode,
         string scopeColumn,
-        StorageScope scope)
+        StorageScope scope,
+        IProviderCommandObserver? observer = null,
+        string? observerOperation = null)
     {
         var scopeRef = new ColumnRef(new TableId(unit.Name), scopeColumn, QueryType.String, isNullable: false);
         return ExecuteWithHandling(
@@ -40,7 +44,9 @@ public static class RelationalAggregationExecutor
             query,
             decode,
             new Predicate.Equal(scopeRef, QueryConstant.Of(scopeRef, scope.Value)),
-            scope);
+            scope,
+            observer,
+            observerOperation);
     }
 
     private static AggregationResult ExecuteWithHandling(
@@ -52,11 +58,13 @@ public static class RelationalAggregationExecutor
         AggregationQuery query,
         Func<string, object?, object?> decode,
         Predicate? providerPredicate,
-        StorageScope? scope)
+        StorageScope? scope,
+        IProviderCommandObserver? observer = null,
+        string? observerOperation = null)
     {
         try
         {
-            return ExecuteCore(connection, transaction, dialect, unit, profile, query, decode, providerPredicate, scope);
+            return ExecuteCore(connection, transaction, dialect, unit, profile, query, decode, providerPredicate, scope, observer, observerOperation);
         }
         catch (AggregationBudgetExceededException)
         {
@@ -84,7 +92,9 @@ public static class RelationalAggregationExecutor
         AggregationQuery query,
         Func<string, object?, object?> decode,
         Predicate? providerPredicate,
-        StorageScope? scope)
+        StorageScope? scope,
+        IProviderCommandObserver? observer = null,
+        string? observerOperation = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(dialect);
@@ -94,7 +104,7 @@ public static class RelationalAggregationExecutor
         ArgumentNullException.ThrowIfNull(decode);
         var hasTimeBucket = AggregationGrouping.TimeBucket(profile) is not null;
         if (!hasTimeBucket)
-            VerifyBudgets(connection, transaction, dialect, unit, profile, query, providerPredicate);
+            VerifyBudgets(connection, transaction, dialect, unit, profile, query, providerPredicate, observer, observerOperation);
         var command = providerPredicate is null
             ? RelationalAggregationRenderer.Render(dialect, unit, profile, query)
             : RelationalAggregationRenderer.RenderWithProviderPredicate(dialect, unit, profile, query, providerPredicate);
@@ -103,6 +113,7 @@ public static class RelationalAggregationExecutor
         native.CommandText = command.CommandText;
         RelationalQueryResultReader.AddParameters(native, command);
         AggregationExecutionDiagnostics.Observe("aggregate");
+        observer?.Observe(new ProviderCommandEvent(observerOperation ?? "relational.aggregate", native.CommandText, ProviderCommandKind.Read, IsProbe: false));
         using var reader = native.ExecuteReader();
         var rows = new List<AggregationRow>();
         while (reader.Read())
@@ -165,7 +176,9 @@ public static class RelationalAggregationExecutor
         StorageUnit unit,
         AggregationProfile profile,
         AggregationQuery query,
-        Predicate? providerPredicate)
+        Predicate? providerPredicate,
+        IProviderCommandObserver? observer = null,
+        string? observerOperation = null)
     {
         var probe = providerPredicate is null
             ? RelationalAggregationRenderer.RenderBudgetProbe(dialect, unit, profile, query)
@@ -175,6 +188,7 @@ public static class RelationalAggregationExecutor
         native.CommandText = probe.CommandText;
         RelationalQueryResultReader.AddParameters(native, probe);
         AggregationExecutionDiagnostics.Observe("budget-probe");
+        observer?.Observe(new ProviderCommandEvent(observerOperation ?? "relational.aggregate", native.CommandText, ProviderCommandKind.Read, IsProbe: true));
         using var reader = native.ExecuteReader();
         var groups = 0;
         while (reader.Read())

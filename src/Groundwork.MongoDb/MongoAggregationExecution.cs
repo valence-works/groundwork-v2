@@ -56,7 +56,7 @@ internal sealed partial class MongoStorageSession
             VerifyNativeAggregationBudgets(profile, query, sourceFilter);
         var stages = RenderNativeAggregationPipeline(Unit, profile, query, sourceFilter);
 
-        var documents = RunAggregationPipeline(stages);
+        var documents = RunAggregationPipeline(stages, isProbe: false);
 
         var rows = new List<AggregationRow>(documents.Count);
         foreach (var document in documents)
@@ -348,11 +348,15 @@ internal sealed partial class MongoStorageSession
         return stages;
     }
 
-    private List<BsonDocument> RunAggregationPipeline(IEnumerable<BsonDocument> stages)
+    private List<BsonDocument> RunAggregationPipeline(IEnumerable<BsonDocument> stages, bool isProbe = true)
     {
         var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(stages);
         var options = new AggregateOptions { Collation = new Collation("simple") };
         AggregationExecutionDiagnostics.Observe("aggregate");
+        // The single funnel for native aggregation commands: every call is exactly one provider round
+        // trip, observed here so a budget probe and the main pipeline are both counted at issue.
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "mongodb.aggregate", "MongoDB.Aggregate(pipeline)", ProviderCommandKind.Read, IsProbe: isProbe));
         return (transactionSession is null
             ? collection.Aggregate(pipeline, options)
             : collection.Aggregate(transactionSession, pipeline, options)).ToList();

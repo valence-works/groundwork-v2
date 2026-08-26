@@ -86,7 +86,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         }
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
@@ -97,7 +97,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         if (!isMemory)
             lock (gate) sessionConnections.Add(sessionConnection);
-        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null);
+        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -106,6 +106,13 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
     public IUnitOfWork BeginUnitOfWork(
         StorageAccess access,
         BatchWriteOptions options,
+        params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
         params StorageUnit[] units)
     {
         ThrowIfDisposed();
@@ -129,7 +136,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         try
         {
             var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options);
+            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options, observer);
         }
         catch
         {

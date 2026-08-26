@@ -27,13 +27,14 @@ public sealed class SqliteCompareAndDeleteTests
             Assert.Equal(WriteOutcomeStatus.Deleted,
                 session.CompareAndDelete(Key("claim-decimal"), new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
-            var mismatchObserver = new WritePathObserver();
+            var mismatchObserver = new ProviderCommandObserver();
+            var mismatchSession = connection.OpenSession(unit, StorageAccess.Global, mismatchObserver);
             Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
-                session.CompareAndDelete(Key("claim-1"), new Dictionary<string, object?>
+                mismatchSession.CompareAndDelete(Key("claim-1"), new Dictionary<string, object?>
                 {
                     ["owner"] = "worker-b",
                     ["fence"] = 7L
-                }, new WriteOptions { Observer = mismatchObserver }).Status);
+                }).Status);
             Assert.Equal(2, mismatchObserver.RoundTrips);
             Assert.Contains(mismatchObserver.Commands, command => command.Operation == "sqlite.compare-and-delete-read");
             Assert.NotNull(session.Read(Key("claim-1")));
@@ -202,25 +203,28 @@ public sealed class SqliteCompareAndDeleteTests
             var session = connection.OpenSession(unit, StorageAccess.Global);
             session.Insert(Values("claim-admission", "worker-a", 7L));
 
-            var undeclaredObserver = new WritePathObserver();
-            Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
-                Key("claim-admission"),
-                new Dictionary<string, object?> { ["missing"] = "value" },
-                new WriteOptions { Observer = undeclaredObserver }));
+            var undeclaredObserver = new ProviderCommandObserver();
+            Assert.Throws<ArgumentException>(() => connection
+                .OpenSession(unit, StorageAccess.Global, undeclaredObserver)
+                .CompareAndDelete(
+                    Key("claim-admission"),
+                    new Dictionary<string, object?> { ["missing"] = "value" }));
             Assert.Empty(undeclaredObserver.Commands);
 
-            var wrongTypeObserver = new WritePathObserver();
-            Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
-                Key("claim-admission"),
-                new Dictionary<string, object?> { ["fence"] = "seven" },
-                new WriteOptions { Observer = wrongTypeObserver }));
+            var wrongTypeObserver = new ProviderCommandObserver();
+            Assert.Throws<ArgumentException>(() => connection
+                .OpenSession(unit, StorageAccess.Global, wrongTypeObserver)
+                .CompareAndDelete(
+                    Key("claim-admission"),
+                    new Dictionary<string, object?> { ["fence"] = "seven" }));
             Assert.Empty(wrongTypeObserver.Commands);
 
-            var decimalObserver = new WritePathObserver();
-            Assert.Throws<ArgumentException>(() => session.CompareAndDelete(
-                Key("claim-admission"),
-                new Dictionary<string, object?> { ["amount"] = 7.004m },
-                new WriteOptions { Observer = decimalObserver }));
+            var decimalObserver = new ProviderCommandObserver();
+            Assert.Throws<ArgumentException>(() => connection
+                .OpenSession(unit, StorageAccess.Global, decimalObserver)
+                .CompareAndDelete(
+                    Key("claim-admission"),
+                    new Dictionary<string, object?> { ["amount"] = 7.004m }));
             Assert.Empty(decimalObserver.Commands);
 
             var jsonUnit = unit with
@@ -230,11 +234,10 @@ public sealed class SqliteCompareAndDeleteTests
                 Columns = [..unit.Columns, new ColumnDefinition { Name = "payload", Type = PortableType.Json }]
             };
             connection.Schema.Apply(jsonUnit);
-            var jsonObserver = new WritePathObserver();
-            Assert.Throws<ArgumentException>(() => connection.OpenSession(jsonUnit, StorageAccess.Global).CompareAndDelete(
+            var jsonObserver = new ProviderCommandObserver();
+            Assert.Throws<ArgumentException>(() => connection.OpenSession(jsonUnit, StorageAccess.Global, jsonObserver).CompareAndDelete(
                 Key("claim-admission"),
-                new Dictionary<string, object?> { ["payload"] = "{\"a\":1}" },
-                new WriteOptions { Observer = jsonObserver }));
+                new Dictionary<string, object?> { ["payload"] = "{\"a\":1}" }));
             Assert.Empty(jsonObserver.Commands);
             Assert.NotNull(session.Read(Key("claim-admission")));
         }

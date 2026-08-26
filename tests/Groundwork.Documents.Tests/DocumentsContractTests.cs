@@ -436,17 +436,16 @@ public sealed class DocumentsContractTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         connection.Schema.Apply(unit.StorageUnit);
         var value = new EnumDocument(Guid.NewGuid(), OrderStatus.Paid);
-        var documentObserver = new WritePathObserver();
-        var documentWrite = unit.Upsert(value, new WriteOptions { Observer = documentObserver });
+        var documentObserver = new ProviderCommandObserver();
+        var documentWrite = unit.Upsert(value);
 
-        var documentOutcome = unit.Execute(connection, documentWrite);
+        var documentOutcome = unit.Execute(connection, documentWrite, observer: documentObserver);
 
-        var equivalentObserver = new WritePathObserver();
+        var equivalentObserver = new ProviderCommandObserver();
         var equivalentWrite = RowWrite.Upsert(
             unit.StorageUnit,
-            new StorageValues(documentWrite.Values!.Values),
-            new WriteOptions { Observer = equivalentObserver });
-        var equivalentOutcome = connection.OpenSession(unit.StorageUnit, StorageAccess.Global)
+            new StorageValues(documentWrite.Values!.Values));
+        var equivalentOutcome = connection.OpenSession(unit.StorageUnit, StorageAccess.Global, equivalentObserver)
             .Upsert(equivalentWrite.Values!, equivalentWrite.Options);
 
         Assert.True(documentOutcome.Succeeded);
@@ -702,7 +701,7 @@ public sealed class DocumentsContractTests
         public IProviderCatalog Catalog => throw new NotSupportedException();
         public ISchemaCoordinator Schema => throw new NotSupportedException();
         public IReadOnlyList<CapabilityDescriptor> Capabilities => [];
-        public IStorageSession OpenSession(Groundwork.Kernel.StorageUnit unit, StorageAccess access)
+        public IStorageSession OpenSession(Groundwork.Kernel.StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
         {
             OpenCount++;
             LastAccess = access;
@@ -710,6 +709,7 @@ public sealed class DocumentsContractTests
         }
         public IUnitOfWork BeginUnitOfWork(StorageAccess access, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
         public IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
+        public IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, IProviderCommandObserver? observer, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
         public void Dispose() { }
     }
 

@@ -147,10 +147,10 @@ public sealed class RetentionProofTests
         using var blockingObserver = new BlockingRetentionObserver();
         var tasks = Enumerable.Range(0, concurrentWrites).Select(_ => Task.Factory.StartNew(() =>
         {
-            var writer = connection.OpenSession(unit, StorageAccess.Global);
+            var writer = connection.OpenSession(unit, StorageAccess.Global, blockingObserver);
             ready.Signal();
             start.Wait();
-            Assert.True(writer.Insert(Values("a"), new WriteOptions { Observer = blockingObserver }).Succeeded);
+            Assert.True(writer.Insert(Values("a")).Succeeded);
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
         Assert.True(ready.Wait(TimeSpan.FromSeconds(5)), "Concurrent writers did not reach the start gate.");
         start.Set();
@@ -178,13 +178,15 @@ public sealed class RetentionProofTests
             Assert.True(interruptedSession.Insert(Values(index % 2 == 0 ? "a" : "b")).Succeeded);
 
         using var cancelled = new CancellationTokenSource();
-        var observer = new CancelAfterFirstBatch(cancelled);
-        var interrupted = Assert.Throws<OperationCanceledException>(() => interruptedSession.ApplyRetention(
+        // Cancels on its first command, so it observes a session that does nothing but the retention pass —
+        // on the seeding session above it would fire on the first insert instead.
+        var interruptedRetention = connection.OpenSession(
+            interruptedUnit, StorageAccess.Global, new CancelAfterFirstBatch(cancelled));
+        var interrupted = Assert.Throws<OperationCanceledException>(() => interruptedRetention.ApplyRetention(
             new RetentionExecutionOptions
             {
                 MaxRowsPerBatch = 2,
-                CancellationToken = cancelled.Token,
-                Observer = observer
+                CancellationToken = cancelled.Token
             }));
         Assert.NotNull(interrupted);
         var partiallyRetained = interruptedSession.Query(All(interruptedUnit)).Rows.Count;
@@ -308,11 +310,11 @@ public sealed class RetentionProofTests
         for (var index = 0; index < 120; index++)
             Assert.True(session.Insert(Values(index % 3 == 0 ? "a" : "b")).Succeeded);
 
-        var observer = new WritePathObserver();
-        var result = session.ApplyRetention(new RetentionExecutionOptions
+        var observer = new ProviderCommandObserver();
+        var retentionSession = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var result = retentionSession.ApplyRetention(new RetentionExecutionOptions
         {
-            MaxRowsPerBatch = 7,
-            Observer = observer
+            MaxRowsPerBatch = 7
         });
         Assert.Equal(114, result.DeletedRows);
         Assert.Equal(6, session.Query(All(unit)).Rows.Count);
@@ -468,14 +470,14 @@ public sealed class RetentionProofTests
             }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
-        var observer = new WritePathObserver();
-        static void Append(IStorageSession session, WritePathObserver observer, int index)
+        var observer = new ProviderCommandObserver();
+        static void Append(IStorageSession session, ProviderCommandObserver observer, int index)
         {
             var outcome = session.Insert(new StorageValues(new Dictionary<string, object?>
             {
                 ["id"] = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
                 ["ordering"] = (long)index
-            }), new WriteOptions { Observer = observer });
+            }));
             Assert.True(outcome.Succeeded);
         }
         var stopwatch = new Stopwatch();
@@ -485,7 +487,7 @@ public sealed class RetentionProofTests
             using var ready = new CountdownEvent(writes);
             var tasks = Enumerable.Range(0, writes).Select(index => Task.Factory.StartNew(() =>
             {
-                var session = connection.OpenSession(unit, StorageAccess.Global);
+                var session = connection.OpenSession(unit, StorageAccess.Global, observer);
                 ready.Signal();
                 start.Wait();
                 Append(session, observer, index);
@@ -499,7 +501,7 @@ public sealed class RetentionProofTests
         {
             stopwatch.Start();
             for (var index = 0; index < writes; index++)
-                Append(connection.OpenSession(unit, StorageAccess.Global), observer, index);
+                Append(connection.OpenSession(unit, StorageAccess.Global, observer), observer, index);
         }
         stopwatch.Stop();
 
@@ -542,8 +544,8 @@ public sealed class RetentionProofTests
             }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
-        var observer = new WritePathObserver();
-        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        var observer = new ProviderCommandObserver();
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Default, observer, unit))
         {
             for (var index = 0; index < 12; index++)
             {
@@ -551,12 +553,12 @@ public sealed class RetentionProofTests
                 {
                     ["id"] = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
                     ["ordering"] = (long)index
-                }), new WriteOptions { Observer = observer }));
+                })));
             }
             var summary = work.Commit();
             Assert.Equal(12, summary.Succeeded);
         }
-        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Default, observer, unit))
         {
             for (var index = 12; index < 24; index++)
             {
@@ -564,7 +566,7 @@ public sealed class RetentionProofTests
                 {
                     ["id"] = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
                     ["ordering"] = (long)index
-                }), new WriteOptions { Observer = observer }));
+                })));
             }
             var summary = work.Commit();
             Assert.Equal(12, summary.Succeeded);
@@ -600,9 +602,9 @@ public sealed class RetentionProofTests
             }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
-        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
         var concurrency = Assert.IsAssignableFrom<IConcurrencyStorageSession>(session);
-        var observer = new WritePathObserver();
         for (var index = 0; index < 10; index++)
         {
             var values = new StorageValues(new Dictionary<string, object?>
@@ -610,7 +612,7 @@ public sealed class RetentionProofTests
                 ["id"] = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture),
                 ["ordering"] = (long)index
             });
-            var options = new WriteOptions { Precondition = WritePrecondition.CreateOnly, Observer = observer };
+            var options = new WriteOptions { Precondition = WritePrecondition.CreateOnly };
             Assert.Equal(WriteOutcomeStatus.Inserted, concurrency.ConditionalUpsert(values, options).Status);
             Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, concurrency.ConditionalUpsert(values, options).Status);
         }
@@ -722,12 +724,11 @@ public sealed class RetentionProofTests
             Assert.Equal(rows, work.Commit().Succeeded);
         }
 
-        var observer = new WritePathObserver();
-        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
         var result = session.ApplyRetention(new RetentionExecutionOptions
         {
-            MaxRowsPerBatch = batchSize,
-            Observer = observer
+            MaxRowsPerBatch = batchSize
         });
 
         Assert.Equal(rows - 11, result.DeletedRows);
@@ -780,12 +781,14 @@ public sealed class RetentionProofTests
         }
 
         using var cancellation = new CancellationTokenSource();
-        var interrupted = Assert.Throws<OperationCanceledException>(() => session.ApplyRetention(
+        // The observer cancels on its first command, so retention runs on a session of its own: attached to
+        // the seeding session above it would fire on the inserts instead of on the pass under test.
+        var cancellingSession = connection.OpenSession(unit, StorageAccess.Global, new CancelAfterFirstBatch(cancellation));
+        var interrupted = Assert.Throws<OperationCanceledException>(() => cancellingSession.ApplyRetention(
             new RetentionExecutionOptions
             {
                 MaxRowsPerBatch = 2,
-                CancellationToken = cancellation.Token,
-                Observer = new CancelAfterFirstBatch(cancellation)
+                CancellationToken = cancellation.Token
             }));
         Assert.NotNull(interrupted);
         var consistentIntermediateCount = session.Query(All(unit)).Rows.Count;
@@ -830,11 +833,11 @@ public sealed class RetentionProofTests
     private static QueryRequest All(StorageUnit unit) => new(
         new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None);
 
-    private sealed class CancelAfterFirstBatch(CancellationTokenSource cancellation) : IWritePathObserver
+    private sealed class CancelAfterFirstBatch(CancellationTokenSource cancellation) : IProviderCommandObserver
     {
         private int batches;
 
-        public void Observe(WritePathEvent command)
+        public void Observe(ProviderCommandEvent command)
         {
             if (command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase) &&
                 Interlocked.Increment(ref batches) == 1)
@@ -842,7 +845,7 @@ public sealed class RetentionProofTests
         }
     }
 
-    private sealed class BlockingRetentionObserver : IWritePathObserver, IDisposable
+    private sealed class BlockingRetentionObserver : IProviderCommandObserver, IDisposable
     {
         private int retentionCommands;
 
@@ -852,7 +855,7 @@ public sealed class RetentionProofTests
 
         internal int RetentionCommands => Volatile.Read(ref retentionCommands);
 
-        public void Observe(WritePathEvent command)
+        public void Observe(ProviderCommandEvent command)
         {
             if (!command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase))
                 return;
