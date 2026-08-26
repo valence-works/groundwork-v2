@@ -112,6 +112,30 @@ public sealed class ProviderCommandTests
     }
 
     [Fact]
+    public void InMemory_plain_and_exact_append_each_raise_one_write_event()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://append-events");
+        var unit = Unit("memory-append") with
+        {
+            AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(5) }
+        };
+        connection.Schema.Apply(unit);
+
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var exact = Assert.IsAssignableFrom<IExactAppendStorageSession>(session);
+
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            session.Append(new OperationId(DateTimeOffset.UnixEpoch, "plain"), Values("one", "first", DateTimeOffset.UnixEpoch)).Status);
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            exact.AppendWithOutcomes(new OperationId(DateTimeOffset.UnixEpoch, "exact"), [Values("two", "second", DateTimeOffset.UnixEpoch)]).Status);
+
+        Assert.Equal(2, observer.RoundTrips);
+        Assert.Equal(["in-memory.append", "in-memory.append"], observer.Commands.Select(command => command.Operation));
+        Assert.All(observer.Commands, command => Assert.Equal(ProviderCommandKind.Write, command.Kind));
+    }
+
+    [Fact]
     public void SQLite_ordinary_writes_each_raise_one_write_event()
     {
         using var store = TemporarySqliteStore.Create();

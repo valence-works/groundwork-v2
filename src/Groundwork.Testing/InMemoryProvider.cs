@@ -1205,6 +1205,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ThrowIfDisposed();
             outcome = AppendCore(operationId, values, declaration, exactOutcomes: false);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.append", null, ProviderCommandKind.Write, IsProbe: false));
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
             ApplyOnAppendRetention();
