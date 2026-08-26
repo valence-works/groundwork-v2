@@ -196,7 +196,7 @@ Assert.Equal(0, RecordTable<Customer>.AccessorReflectionInspectionCount);
 | `Groundwork.PublicApi.Acceptance.Tests` | The clean-room package-only consumer journey |
 | `Groundwork.Differential.Tests` | Four-provider query differential + explain plans |
 | `Groundwork.Concurrency.Tests` | W2 concurrency invariants |
-| `Groundwork.WritePath.Tests` | W1 native conditional write path |
+| `Groundwork.ProviderCommands.Tests` | W1 native conditional write path + session-scoped provider-command observation |
 | `Groundwork.StreamCapabilities.Tests` | Sequences, idempotency, retention, lifecycle, aggregation |
 | `Groundwork.Query.Linq.Tests` | The 250-case LINQ corpus and its 10 locked diagnostic codes |
 | `Groundwork.Packaging.Tests` | Package layout and allowlist |

@@ -101,6 +101,11 @@ groundwork apply --schema groundwork.schema.json --provider postgresql \
 
 You cannot authorize destructive work generically. You authorize *these operations, in this plan*.
 
+> **Planned, not current:** the planner emits only **additive** operation kinds today — no operation
+> can produce a drop, so the destructive example above shows the authorization contract for planned
+> functionality ([#82](https://github.com/valence-works/Groundwork/issues/82)). The
+> `--allow-destructive` flag and its exact-identity rule are already enforced by the CLI.
+
 ### Providers and connections
 
 Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories

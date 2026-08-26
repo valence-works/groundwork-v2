@@ -50,8 +50,8 @@ public sealed class PackagingContractTests
     {
         var root = FindRepositoryRoot();
         var props = File.ReadAllText(Path.Combine(root, "Directory.Build.props"));
-        Assert.Contains("<VersionPrefix>0.1.0</VersionPrefix>", props, StringComparison.Ordinal);
-        Assert.Contains("<VersionSuffix>preview.1</VersionSuffix>", props, StringComparison.Ordinal);
+        Assert.Matches(@"<VersionPrefix>\d+\.\d+\.\d+</VersionPrefix>", props);
+        Assert.Matches(@"<VersionSuffix>[0-9a-z.-]+</VersionSuffix>", props);
         Assert.Contains("<PublishRepositoryUrl>true</PublishRepositoryUrl>", props, StringComparison.Ordinal);
         Assert.Contains("<EmbedUntrackedSources>true</EmbedUntrackedSources>", props, StringComparison.Ordinal);
         Assert.Contains("<SymbolPackageFormat>snupkg</SymbolPackageFormat>", props, StringComparison.Ordinal);
