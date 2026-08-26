@@ -149,6 +149,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
@@ -161,7 +162,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 activeTransaction ?? transaction,
                 dialect,
                 Unit,
-                AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+                profile,
                 query,
                 decode,
                 SqlServerSchemaCoordinator.ScopeColumn,
@@ -171,7 +172,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             activeTransaction ?? transaction,
             dialect,
             Unit,
-            AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+            profile,
             query,
             decode);
     });
@@ -321,6 +322,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             {
                 var (noneWhere, noneParameters) = KeyPredicate(key.Values);
                 using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+                commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
                 AddParameters(noneCommand, noneParameters);
                 return noneCommand.ExecuteNonQuery() == 0
                     ? new WriteOutcome(WriteOutcomeStatus.NotFound)
@@ -338,6 +340,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
             }
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             AddParameters(command, parameters);
             if (command.ExecuteNonQuery() == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
@@ -1215,6 +1218,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             var output = SequenceColumnDefinition is null ? string.Empty : $" OUTPUT INSERTED.{Quote(SequenceColumnDefinition.Name)}";
             using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
             AddParameters(insert, parameters);
+            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.insert", insert.CommandText, ProviderCommandKind.Write, IsProbe: false));
             try
             {
                 if (SequenceColumnDefinition is null)
@@ -1259,6 +1263,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});";
         using var command = Command(sql);
         AddParameters(command, parameters);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlserver.insert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             if (SequenceColumnDefinition is null)

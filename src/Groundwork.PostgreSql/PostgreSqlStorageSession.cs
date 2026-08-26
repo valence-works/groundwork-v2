@@ -157,6 +157,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         commandObserver?.Observe(new ProviderCommandEvent("postgresql.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
@@ -169,7 +170,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                 activeTransaction ?? transaction,
                 new PostgreSqlDialect(),
                 Unit,
-                AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+                profile,
                 query,
                 decode,
                 PostgreSqlSchemaCoordinator.ScopeColumn,
@@ -179,7 +180,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             activeTransaction ?? transaction,
             new PostgreSqlDialect(),
             Unit,
-            AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+            profile,
             query,
             decode);
     });
@@ -281,6 +282,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                 var (noneWhere, noneParameters) = KeyPredicate(key.Values);
                 using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
                 AddParameters(noneCommand, noneParameters);
+                commandObserver?.Observe(new ProviderCommandEvent("postgresql.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
                 return noneCommand.ExecuteNonQuery() == 0
                     ? new WriteOutcome(WriteOutcomeStatus.NotFound)
                     : new WriteOutcome(WriteOutcomeStatus.Deleted);
@@ -298,6 +300,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             }
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
             AddParameters(command, parameters);
+            commandObserver?.Observe(new ProviderCommandEvent("postgresql.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             var affected = command.ExecuteNonQuery();
             return affected == 0
                 ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
@@ -1078,6 +1081,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(Quote))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column))}){returning}";
         using var command = Command(sql);
         AddParameters(command, physical);
+        commandObserver?.Observe(new ProviderCommandEvent("postgresql.insert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             if (SequenceColumn is null)
@@ -1182,12 +1186,11 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         AddParameters(command, physical);
         if (exactOutcome && VersionColumn is not null)
             Add(command, "expected", options?.Precondition.Version);
-        if (Unit.Concurrency.IsNone)
-            commandObserver?.Observe(new ProviderCommandEvent(
-                exactOutcome ? "postgresql.conditional-upsert" : "postgresql.upsert",
-                sql,
-                ProviderCommandKind.Write,
-                IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent(
+            exactOutcome ? "postgresql.conditional-upsert" : "postgresql.upsert",
+            sql,
+            ProviderCommandKind.Write,
+            IsProbe: false));
         try
         {
             if (!exactOutcome)

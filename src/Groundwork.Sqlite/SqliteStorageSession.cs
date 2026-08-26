@@ -152,6 +152,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         commandObserver?.Observe(new ProviderCommandEvent("sqlite.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         var decode = (string name, object? value) =>
         {
@@ -164,7 +165,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 activeTransaction ?? transaction,
                 new SqliteDialect(),
                 Unit,
-                AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+                profile,
                 query,
                 decode,
                 SqliteSchemaCoordinator.ScopeColumn,
@@ -174,7 +175,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             activeTransaction ?? transaction,
             new SqliteDialect(),
             Unit,
-            AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+            profile,
             query,
             decode);
     });
@@ -298,6 +299,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             {
                 var (noneWhere, noneParameters) = KeyPredicate(key.Values);
                 using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+                commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
                 AddParameters(noneCommand, noneParameters);
                 return noneCommand.ExecuteNonQuery() == 0
                     ? new WriteOutcome(WriteOutcomeStatus.NotFound)
@@ -315,6 +317,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 parameters["@expected"] = options.Precondition.Version!.Value;
             }
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             AddParameters(command, parameters);
             command.ExecuteNonQuery();
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
@@ -1142,6 +1145,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             var returning = SequenceColumnDefinition is null ? string.Empty : $" RETURNING {Quote(SequenceColumnDefinition.Name)};";
             using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}){returning}");
             AddParameters(insert, parameters);
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.insert", insert.CommandText, ProviderCommandKind.Write, IsProbe: false));
             try
             {
                 if (SequenceColumnDefinition is null)
@@ -1339,6 +1343,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}){returning}";
         using var command = Command(sql);
         AddParameters(command, parameters);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.insert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             if (SequenceColumnDefinition is null)
@@ -1400,8 +1405,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             parameters["@expected"] = options.Precondition.Version!.Value;
         using var command = Command(sql);
         AddParameters(command, parameters);
-        if (Unit.Concurrency.IsNone)
-            commandObserver?.Observe(new ProviderCommandEvent("sqlite.upsert", sql, ProviderCommandKind.Write, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             command.ExecuteNonQuery();

@@ -633,10 +633,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     {
         ArgumentNullException.ThrowIfNull(key);
         RefusePrivilegedPointOperation("read");
-        commandObserver?.Observe(new ProviderCommandEvent("in-memory.read", null, ProviderCommandKind.Read, IsProbe: false));
         lock (database.Gate)
         {
             ThrowIfDisposed();
+            commandObserver?.Observe(new ProviderCommandEvent("in-memory.read", null, ProviderCommandKind.Read, IsProbe: false));
             var entry = Mutation.Read(CurrentState(), partition, key);
             return entry is null
                 ? null
@@ -648,7 +648,6 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     {
         ArgumentNullException.ThrowIfNull(request);
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
-        commandObserver?.Observe(new ProviderCommandEvent("in-memory.query", null, ProviderCommandKind.Read, IsProbe: false));
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
@@ -667,6 +666,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
+            commandObserver?.Observe(new ProviderCommandEvent("in-memory.query", null, ProviderCommandKind.Read, IsProbe: false));
             var rows = CurrentState().Partitions.TryGetValue(partition, out var entries)
                 ? entries.Values
                     .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
@@ -802,6 +802,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public AggregationResult Aggregate(AggregationQuery query)
     {
         RefusePrivilegedPointOperation("aggregate");
+        ArgumentNullException.ThrowIfNull(query);
+        AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         commandObserver?.Observe(new ProviderCommandEvent("in-memory.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         return AggregationSessionExecutor.Execute(this, query);
     }
@@ -995,7 +997,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("insert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return Mutate(values, options, MutationKind.Insert);
+        return Mutate(values, options, MutationKind.Insert, "in-memory.insert");
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
@@ -1003,7 +1005,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("update");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return Mutate(values, options, MutationKind.Update);
+        return Mutate(values, options, MutationKind.Update, "in-memory.update");
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
@@ -1011,7 +1013,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("upsert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return Mutate(values, options, MutationKind.Upsert, preserveCreatedAt: true);
+        return Mutate(values, options, MutationKind.Upsert, "in-memory.upsert", preserveCreatedAt: true);
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
@@ -1019,8 +1021,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("conditional upsert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        commandObserver?.Observe(new ProviderCommandEvent("in-memory.conditional-upsert", null, ProviderCommandKind.Write, IsProbe: false));
-        return Mutate(values, options, MutationKind.Upsert, exactOutcome: true, preserveCreatedAt: true);
+        return Mutate(values, options, MutationKind.Upsert, "in-memory.conditional-upsert", exactOutcome: true, preserveCreatedAt: true);
     }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
@@ -1028,11 +1029,14 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("delete");
         ArgumentNullException.ThrowIfNull(key);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
+        WriteOutcome deleteOutcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Delete(CurrentState(), partition, key, options);
+            deleteOutcome = Mutation.Delete(CurrentState(), partition, key, options);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.delete", null, ProviderCommandKind.Write, IsProbe: false));
+        return deleteOutcome;
     }
 
     public WriteOutcome CompareAndDelete(
@@ -1043,12 +1047,14 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("compare-and-delete");
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
         var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
-        commandObserver?.Observe(new ProviderCommandEvent("in-memory.compare-and-delete", null, ProviderCommandKind.Write, IsProbe: false));
+        WriteOutcome compareOutcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.CompareAndDelete(CurrentState(), partition, canonicalKey, validated, options);
+            compareOutcome = Mutation.CompareAndDelete(CurrentState(), partition, canonicalKey, validated, options);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.compare-and-delete", null, ProviderCommandKind.Write, IsProbe: false));
+        return compareOutcome;
     }
 
     public StorageInspection Inspect()
@@ -1215,6 +1221,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ThrowIfDisposed();
             outcome = AppendCore(operationId, values, declaration, exactOutcomes: true);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.append", null, ProviderCommandKind.Write, IsProbe: false));
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
             ApplyOnAppendRetention();
@@ -1308,6 +1315,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         StorageValues values,
         WriteOptions? options,
         MutationKind kind,
+        string operation,
         bool exactOutcome = false,
         bool preserveCreatedAt = false)
     {
@@ -1319,6 +1327,9 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ThrowIfDisposed();
             outcome = Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
         }
+        // Observed after the provider work ran: an admission failure that throws above issued no command,
+        // and a NotFound/conflict outcome is still one executed command.
+        commandObserver?.Observe(new ProviderCommandEvent(operation, null, ProviderCommandKind.Write, IsProbe: false));
 
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             kind is MutationKind.Insert or MutationKind.Upsert)

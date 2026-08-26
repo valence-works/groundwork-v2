@@ -105,6 +105,73 @@ public sealed class ProviderCommandTests
     }
 
     [Fact]
+    public void InMemory_ordinary_writes_each_raise_one_write_event()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://ordinary-writes");
+        AssertOrdinaryWritesObserved(connection, "in-memory");
+    }
+
+    [Fact]
+    public void SQLite_ordinary_writes_each_raise_one_write_event()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        AssertOrdinaryWritesObserved(connection, "sqlite");
+    }
+
+    [SkippableFact]
+    public void PostgreSQL_ordinary_writes_each_raise_one_write_event()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL provider-command tests.");
+        using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
+        AssertOrdinaryWritesObserved(connection, "postgresql");
+    }
+
+    [SkippableFact]
+    public void SQLServer_ordinary_writes_each_raise_one_write_event()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server provider-command tests.");
+        using var connection = new SqlServerProviderFactory().Create(connectionString!);
+        AssertOrdinaryWritesObserved(connection, "sqlserver");
+    }
+
+    [SkippableFact]
+    public void MongoDB_ordinary_writes_each_raise_one_write_event()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB provider-command tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        AssertOrdinaryWritesObserved(connection, "mongodb");
+    }
+
+    [Fact]
+    public void Rejected_operations_count_no_commands()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://rejected-ops");
+        var unit = Unit("memory-rejected");
+        connection.Schema.Apply(unit);
+
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+
+        // A query for a table this session does not own is refused before any provider work.
+        Assert.Throws<ArgumentException>(() => session.Query(new QueryRequest(
+            new TableId("someone_else"),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.Keyset(10),
+            ResultShape.Rows.Instance)));
+        // An aggregate naming an undeclared profile is refused before any provider work.
+        Assert.Throws<AggregationValidationException>(() => session.Aggregate(new AggregationQuery("no-such-profile")));
+
+        Assert.Equal(0, observer.RoundTrips);
+        Assert.Empty(observer.Commands);
+    }
+
+    [Fact]
     public void One_session_records_reads_and_writes_in_order_and_OfKind_separates_them()
     {
         using var store = TemporarySqliteStore.Create();
@@ -598,6 +665,26 @@ public sealed class ProviderCommandTests
         Assert.Equal(2, observer.RoundTrips);
         Assert.Equal([provider + ".read", provider + ".query"], observer.Commands.Select(command => command.Operation));
         Assert.All(observer.Commands, command => Assert.Equal(ProviderCommandKind.Read, command.Kind));
+        Assert.DoesNotContain(observer.Commands, command => command.IsProbe);
+    }
+
+    private static void AssertOrdinaryWritesObserved(IStorageProviderConnection connection, string provider)
+    {
+        var unit = Unit(provider + "-ordinary-writes", ConcurrencyDeclaration.None);
+        connection.Schema.Apply(unit);
+
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(Values("one", "first", DateTimeOffset.UnixEpoch)).Status);
+        Assert.Equal(WriteOutcomeStatus.Updated, session.Update(Values("one", "second", DateTimeOffset.UnixEpoch)).Status);
+        Assert.Equal(WriteOutcomeStatus.Upserted, session.Upsert(Values("one", "third", DateTimeOffset.UnixEpoch)).Status);
+        Assert.Equal(WriteOutcomeStatus.Deleted, session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = "one" })).Status);
+
+        // Four mutations, four write events. An unobserved ordinary write is a silent undercount in
+        // exactly the seam the store-performance harness depends on, so this proof is per provider.
+        Assert.Equal(4, observer.RoundTrips);
+        Assert.Equal(4, observer.OfKind(ProviderCommandKind.Write).Count);
         Assert.DoesNotContain(observer.Commands, command => command.IsProbe);
     }
 
