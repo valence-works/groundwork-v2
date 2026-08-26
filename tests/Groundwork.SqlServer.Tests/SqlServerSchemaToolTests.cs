@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Groundwork.SchemaTool;
+using Microsoft.Data.SqlClient;
 using Xunit;
 
 namespace Groundwork.SqlServer.Tests;
@@ -13,37 +14,60 @@ public sealed class SqlServerSchemaToolTests : IDisposable
         Skip.If(string.IsNullOrWhiteSpace(connection),
             "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server integration tests.");
         var table = "cli_tickets_" + Guid.NewGuid().ToString("N");
-        var schema = Temp("schema.json", InitialSchema(table));
+        try
+        {
+            var schema = Temp("schema.json", InitialSchema(table));
 
-        var plan = await RunJsonAsync(["plan", "--schema", schema], connection!);
-        Assert.Equal(SchemaToolExitCodes.PendingChanges, plan.Exit);
-        Assert.Equal("pending", plan.Report.RootElement.GetProperty("outcome").GetString());
-        Assert.Equal("SQLServer", plan.Report.RootElement.GetProperty("provider").GetProperty("name").GetString());
-        Assert.True(plan.Report.RootElement.GetProperty("pendingOperations").GetArrayLength() > 0);
+            var plan = await RunJsonAsync(["plan", "--schema", schema], connection!);
+            Assert.Equal(SchemaToolExitCodes.PendingChanges, plan.Exit);
+            Assert.Equal("pending", plan.Report.RootElement.GetProperty("outcome").GetString());
+            Assert.Equal("SQLServer", plan.Report.RootElement.GetProperty("provider").GetProperty("name").GetString());
+            Assert.True(plan.Report.RootElement.GetProperty("pendingOperations").GetArrayLength() > 0);
 
-        var apply = await RunJsonAsync(["apply", "--schema", schema, "--safe"], connection!);
-        Assert.Equal(SchemaToolExitCodes.Success, apply.Exit);
-        Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
-        Assert.True(apply.Report.RootElement.GetProperty("targetMutated").GetBoolean());
+            var apply = await RunJsonAsync(["apply", "--schema", schema, "--safe"], connection!);
+            Assert.Equal(SchemaToolExitCodes.Success, apply.Exit);
+            Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
+            Assert.True(apply.Report.RootElement.GetProperty("targetMutated").GetBoolean());
 
-        var status = await RunJsonAsync(["status", "--schema", schema], connection!);
-        Assert.Equal(SchemaToolExitCodes.Success, status.Exit);
-        Assert.Equal("ready", status.Report.RootElement.GetProperty("outcome").GetString());
-        Assert.Equal(0, status.Report.RootElement.GetProperty("pendingOperations").GetArrayLength());
+            var status = await RunJsonAsync(["status", "--schema", schema], connection!);
+            Assert.Equal(SchemaToolExitCodes.Success, status.Exit);
+            Assert.Equal("ready", status.Report.RootElement.GetProperty("outcome").GetString());
+            Assert.Equal(0, status.Report.RootElement.GetProperty("pendingOperations").GetArrayLength());
 
-        var evolved = Temp("evolved.json", EvolvedSchema(table));
-        var evolvedPlan = await RunJsonAsync(["plan", "--schema", evolved], connection!);
-        Assert.Equal(SchemaToolExitCodes.PendingChanges, evolvedPlan.Exit);
-        var fingerprint = evolvedPlan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
+            var evolved = Temp("evolved.json", EvolvedSchema(table));
+            var evolvedPlan = await RunJsonAsync(["plan", "--schema", evolved], connection!);
+            Assert.Equal(SchemaToolExitCodes.PendingChanges, evolvedPlan.Exit);
+            var fingerprint = evolvedPlan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
 
-        var authorized = await RunJsonAsync(
-            ["apply", "--schema", evolved, "--expected-plan", fingerprint], connection!);
-        Assert.Equal(SchemaToolExitCodes.Success, authorized.Exit);
-        Assert.Equal("applied", authorized.Report.RootElement.GetProperty("outcome").GetString());
+            var authorized = await RunJsonAsync(
+                ["apply", "--schema", evolved, "--expected-plan", fingerprint], connection!);
+            Assert.Equal(SchemaToolExitCodes.Success, authorized.Exit);
+            Assert.Equal("applied", authorized.Report.RootElement.GetProperty("outcome").GetString());
 
-        var settled = await RunJsonAsync(["status", "--schema", evolved], connection!);
-        Assert.Equal(SchemaToolExitCodes.Success, settled.Exit);
-        Assert.Equal("ready", settled.Report.RootElement.GetProperty("outcome").GetString());
+            var settled = await RunJsonAsync(["status", "--schema", evolved], connection!);
+            Assert.Equal(SchemaToolExitCodes.Success, settled.Exit);
+            Assert.Equal("ready", settled.Report.RootElement.GetProperty("outcome").GetString());
+        }
+        finally
+        {
+            Cleanup(connection!, table);
+        }
+    }
+
+    private static void Cleanup(string connectionString, string table)
+    {
+        using var connection = new SqlConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            DROP TABLE IF EXISTS [{table}];
+            IF OBJECT_ID(N'[__groundwork_schema_history]', N'U') IS NOT NULL
+                DELETE FROM [__groundwork_schema_history] WHERE subject_id=@id;
+            IF OBJECT_ID(N'[__groundwork_schema_fences]', N'U') IS NOT NULL
+                DELETE FROM [__groundwork_schema_fences] WHERE subject_id=@id;
+            """;
+        command.Parameters.AddWithValue("@id", table);
+        command.ExecuteNonQuery();
     }
 
     private static string InitialSchema(string table) =>

@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Groundwork.SchemaTool;
-using Npgsql;
 using Xunit;
 
 namespace Groundwork.PostgreSql.Tests;
@@ -18,7 +17,7 @@ public sealed class PostgreSqlSchemaToolTests : IDisposable
     [SkippableFact]
     public async Task Discovered_postgresql_factory_plans_applies_and_reports_status_against_a_live_database()
     {
-        using var database = PostgreSqlSchemaToolFixture.OpenOrSkip();
+        using var database = PostgreSqlFixture.OpenOrSkip();
         var schema = Temp("schema.json", InitialSchema);
 
         var plan = await RunJsonAsync(["plan", "--schema", schema], database.ConnectionString);
@@ -84,57 +83,5 @@ public sealed class PostgreSqlSchemaToolTests : IDisposable
         var path = Path.Combine(directory, name);
         File.WriteAllText(path, contents);
         return path;
-    }
-
-    private sealed class PostgreSqlSchemaToolFixture : IDisposable
-    {
-        private readonly string adminConnectionString;
-        private readonly string schema;
-
-        private PostgreSqlSchemaToolFixture(string adminConnectionString, string schema, string connectionString)
-        {
-            this.adminConnectionString = adminConnectionString;
-            this.schema = schema;
-            ConnectionString = connectionString;
-        }
-
-        public string ConnectionString { get; }
-
-        public static PostgreSqlSchemaToolFixture OpenOrSkip()
-        {
-            var baseConnection = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
-            Skip.If(string.IsNullOrWhiteSpace(baseConnection),
-                "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL integration tests.");
-            var schema = "cli_" + Guid.NewGuid().ToString("N");
-            using var admin = new NpgsqlConnection(baseConnection);
-            try
-            {
-                admin.Open();
-            }
-            catch (Exception exception)
-            {
-                Skip.If(true, $"PostgreSQL is unavailable: {exception.Message}");
-                throw;
-            }
-            using (var command = admin.CreateCommand())
-            {
-                command.CommandText = $"CREATE SCHEMA \"{schema}\";";
-                command.ExecuteNonQuery();
-            }
-            var builder = new NpgsqlConnectionStringBuilder(baseConnection) { SearchPath = schema };
-            return new PostgreSqlSchemaToolFixture(baseConnection, schema, builder.ConnectionString);
-        }
-
-        public void Dispose()
-        {
-            using (var pooled = new NpgsqlConnection(ConnectionString))
-                NpgsqlConnection.ClearPool(pooled);
-
-            using var admin = new NpgsqlConnection(adminConnectionString);
-            admin.Open();
-            using var command = admin.CreateCommand();
-            command.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE;";
-            command.ExecuteNonQuery();
-        }
     }
 }

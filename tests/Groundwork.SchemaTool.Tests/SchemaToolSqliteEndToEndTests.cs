@@ -21,18 +21,18 @@ public sealed class SchemaToolSqliteEndToEndTests : IDisposable
         var database = Path.Combine(directory, "store.db");
         var connection = $"Data Source={database}";
 
-        var plan = await RunJsonAsync(["plan", "--schema", schema], connection);
-        Assert.Equal(SchemaToolExitCodes.PendingChanges, plan.Exit);
-        Assert.Equal("1", plan.Report.RootElement.GetProperty("schemaVersion").GetString());
-        Assert.Equal("pending", plan.Report.RootElement.GetProperty("outcome").GetString());
-        Assert.Equal("SQLite", plan.Report.RootElement.GetProperty("provider").GetProperty("name").GetString());
-        Assert.Equal("1.0", plan.Report.RootElement.GetProperty("provider").GetProperty("version").GetString());
-        Assert.True(plan.Report.RootElement.GetProperty("pendingOperations").GetArrayLength() > 0);
-        Assert.False(plan.Report.RootElement.GetProperty("targetMutated").GetBoolean());
+        var missing = await RunJsonAsync(["plan", "--schema", schema], connection);
+        Assert.Equal(SchemaToolExitCodes.ExecutionFailed, missing.Exit);
+        Assert.Contains("does not exist", missing.Output, StringComparison.Ordinal);
+        Assert.False(File.Exists(database));
+        Assert.False(File.Exists(database + ".schema.lock"));
 
         var apply = await RunJsonAsync(["apply", "--schema", schema, "--safe"], connection);
         Assert.Equal(SchemaToolExitCodes.Success, apply.Exit);
+        Assert.Equal("1", apply.Report.RootElement.GetProperty("schemaVersion").GetString());
         Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
+        Assert.Equal("SQLite", apply.Report.RootElement.GetProperty("provider").GetProperty("name").GetString());
+        Assert.Equal("1.0", apply.Report.RootElement.GetProperty("provider").GetProperty("version").GetString());
         Assert.True(apply.Report.RootElement.GetProperty("targetMutated").GetBoolean());
         Assert.True(File.Exists(database));
         Assert.True(File.Exists(database + ".schema.lock"));
@@ -47,6 +47,8 @@ public sealed class SchemaToolSqliteEndToEndTests : IDisposable
         var evolvedPlan = await RunJsonAsync(["plan", "--schema", evolved], connection);
         Assert.Equal(SchemaToolExitCodes.PendingChanges, evolvedPlan.Exit);
         Assert.Equal("pending", evolvedPlan.Report.RootElement.GetProperty("outcome").GetString());
+        Assert.True(evolvedPlan.Report.RootElement.GetProperty("pendingOperations").GetArrayLength() > 0);
+        Assert.False(evolvedPlan.Report.RootElement.GetProperty("targetMutated").GetBoolean());
         Assert.False(evolvedPlan.Report.RootElement
             .GetProperty("authorization").GetProperty("destructiveRequired").GetBoolean());
         var fingerprint = evolvedPlan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
@@ -71,6 +73,31 @@ public sealed class SchemaToolSqliteEndToEndTests : IDisposable
         var plan = await RunJsonAsync(["plan", "--schema", schema], $"Data Source={database}");
         Assert.Equal(SchemaToolExitCodes.ExecutionFailed, plan.Exit);
         Assert.Contains("GW-CLI-010", plan.Output, StringComparison.Ordinal);
+        Assert.Contains("already in use", plan.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Sqlite_factory_refuses_memory_data_sources_and_missing_connections_as_invocation_errors()
+    {
+        var schema = Temp("refusal-schema.json", InitialSchema);
+
+        var memory = await RunJsonAsync(["plan", "--schema", schema], "Data Source=:memory:");
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation, memory.Exit);
+        Assert.Contains("GW-CLI-001", memory.Output, StringComparison.Ordinal);
+        Assert.Contains("in-memory", memory.Output, StringComparison.Ordinal);
+
+        var output = new StringWriter();
+        var exit = await GroundworkSchemaCli.RunAsync(
+            [
+                "plan", "--schema", schema, "--provider", "sqlite",
+                "--provider-assembly", Path.Combine(AppContext.BaseDirectory, "Groundwork.Sqlite.dll"),
+                "--output", "json"
+            ],
+            output,
+            new StringWriter());
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation, exit);
+        Assert.Contains("GW-CLI-001", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("--connection or --database", output.ToString(), StringComparison.Ordinal);
     }
 
     private async Task<(int Exit, JsonDocument Report, string Output)> RunJsonAsync(

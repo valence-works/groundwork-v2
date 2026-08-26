@@ -241,6 +241,11 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, exception.Code, exception.Message);
             return SchemaToolExitCodes.InvalidInvocation;
         }
+        catch (SchemaToolProviderInvocationException exception)
+        {
+            await WriteErrorAsync(output, error, json, "GW-CLI-001", exception.Message);
+            return SchemaToolExitCodes.InvalidInvocation;
+        }
         catch (OperationCanceledException)
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-009", "The operation was cancelled.");
@@ -251,9 +256,9 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
             return SchemaToolExitCodes.ValidationFailed;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            await WriteErrorAsync(output, error, json, "GW-CLI-010", "Schema tool execution failed.");
+            await WriteErrorAsync(output, error, json, "GW-CLI-010", $"Schema tool execution failed: {exception.Message}");
             return SchemaToolExitCodes.ExecutionFailed;
         }
     }
@@ -508,6 +513,7 @@ public static class GroundworkSchemaCli
             provider,
             Value(arguments, "--connection"),
             Value(arguments, "--database"),
+            arguments.Count != 0 && arguments[0] == "apply",
             cancellationToken));
     }
 

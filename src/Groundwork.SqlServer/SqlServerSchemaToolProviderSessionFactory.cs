@@ -13,13 +13,13 @@ public sealed class SqlServerSchemaToolProviderSessionFactory : ISchemaToolProvi
     {
         ArgumentNullException.ThrowIfNull(options);
         if (string.IsNullOrWhiteSpace(options.Connection))
-            throw new ArgumentException("The SQL Server schema tool requires a connection string.", nameof(options));
+            throw new SchemaToolProviderInvocationException("The SQL Server schema tool requires --connection.");
         var builder = new SqlConnectionStringBuilder(options.Connection);
         if (options.Database is not null)
             builder.InitialCatalog = options.Database;
         var connectionString = builder.ConnectionString;
         return new RelationalSchemaToolSession(
-            new("SQLServer", "1.0"),
+            SqlServerSchemaCoordinator.Identity,
             () => new SqlConnection(connectionString),
             new SqlServerDialect(),
             () =>

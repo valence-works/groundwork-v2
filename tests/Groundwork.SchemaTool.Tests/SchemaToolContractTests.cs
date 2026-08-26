@@ -188,18 +188,18 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
-    public async Task Provider_failures_are_stable_and_do_not_echo_secrets()
+    public async Task Provider_failures_are_stable_and_surface_the_provider_reason()
     {
         var schema = Temp("failure-schema.json", ValidSchema);
-        const string secret = "provider-secret-do-not-echo";
+        const string reason = "connection to host db.internal was refused";
 
         Assert.Equal(SchemaToolExitCodes.ExecutionFailed,
             await RunAsync([
                 "plan", "--schema", schema, "--provider", "fake", "--output", "json"
-            ], _ => throw new InvalidOperationException(secret)));
+            ], _ => throw new InvalidOperationException(reason)));
 
         Assert.Contains("GW-CLI-010", output.ToString(), StringComparison.Ordinal);
-        Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+        Assert.Contains(reason, output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

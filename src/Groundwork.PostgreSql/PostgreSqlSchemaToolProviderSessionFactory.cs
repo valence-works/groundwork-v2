@@ -13,13 +13,13 @@ public sealed class PostgreSqlSchemaToolProviderSessionFactory : ISchemaToolProv
     {
         ArgumentNullException.ThrowIfNull(options);
         if (string.IsNullOrWhiteSpace(options.Connection))
-            throw new ArgumentException("The PostgreSQL schema tool requires a connection string.", nameof(options));
+            throw new SchemaToolProviderInvocationException("The PostgreSQL schema tool requires --connection.");
         var builder = new NpgsqlConnectionStringBuilder(options.Connection);
         if (options.Database is not null)
             builder.Database = options.Database;
         var connectionString = builder.ConnectionString;
         return new RelationalSchemaToolSession(
-            new("PostgreSQL", "1.0"),
+            PostgreSqlSchemaCoordinator.Identity,
             () => new NpgsqlConnection(connectionString),
             new PostgreSqlDialect(),
             () =>
