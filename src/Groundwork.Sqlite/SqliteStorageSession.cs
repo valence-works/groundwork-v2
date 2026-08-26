@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -55,21 +55,26 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             sourceIncludesContinuation: true);
     });
 
-    internal async Task<QueryMaterializedResult> QueryAsync(
+    public Task<QueryMaterializedResult> QueryAsync(
         QueryRequest request,
         QueryRenderOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (transaction is null)
-            lock (owner.Gate) owner.ThrowIfDisposed();
-        var (executionSource, renderOptions, command) = PrepareQuery(request, options);
-        var rows = await RelationalQueryResultReader.ReadAsync(
-            connection, command, DecodeQueryValue, activeTransaction ?? transaction, cancellationToken).ConfigureAwait(false);
-        AssertExplainPlan(command, renderOptions);
-        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
+        // Microsoft.Data.Sqlite's async ADO.NET surface completes synchronously, so the reader
+        // task drains inside the same provider gate that serializes every session command while
+        // the token still interrupts the native statement mid-execution.
+        return Task.FromResult(Execute(() =>
+        {
+            var (executionSource, renderOptions, command) = PrepareQuery(request, options);
+            var rows = RelationalQueryResultReader.ReadAsync(
+                    connection, command, DecodeQueryValue, activeTransaction ?? transaction, cancellationToken)
+                .GetAwaiter().GetResult();
+            AssertExplainPlan(command, renderOptions);
+            return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+                sourceIncludesRequestedOffset: true,
+                sourceIncludesContinuation: true);
+        }));
     }
 
     private (QueryRequest ExecutionSource, QueryRenderOptions RenderOptions, RelationalQueryCommand Command) PrepareQuery(

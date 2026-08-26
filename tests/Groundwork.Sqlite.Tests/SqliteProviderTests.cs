@@ -869,6 +869,66 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public async Task Configured_linq_executor_reads_through_a_unit_of_work_session()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-uow"), Name = "linq_uow",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var unitOfWork = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        var session = unitOfWork.OpenSession(unit);
+        unitOfWork.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["value_col"] = "staged" })));
+
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_uow", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Display), "value_col", QueryType.String)
+            ]));
+
+        Assert.Equal(1, await table.Query.Where(ticket => ticket.Display == "staged").CountAsync(executor));
+        var row = Assert.Single(await table.Query.Where(ticket => ticket.Display == "staged").ToListAsync(executor));
+        Assert.Equal("a", row.Id);
+        unitOfWork.Commit();
+    }
+
+    [Fact]
+    public async Task Concurrent_writes_and_async_counts_on_one_session_stay_serialized()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-serial"), Name = "linq_serial",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_serial", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Display), "value_col", QueryType.String)
+            ]));
+
+        var writes = Task.Run(() =>
+        {
+            for (var iteration = 0; iteration < 200; iteration++)
+                session.Upsert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "row-" + iteration % 10, ["value_col"] = "v" + iteration }));
+        });
+        while (!writes.IsCompleted)
+            Assert.InRange(await table.Query.CountAsync(executor), 0, 10);
+        await writes;
+        Assert.Equal(10, await table.Query.CountAsync(executor));
+    }
+
+    [Fact]
     public void Configured_linq_executor_requires_a_sqlite_session()
     {
         using var database = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));

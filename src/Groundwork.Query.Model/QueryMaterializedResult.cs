@@ -207,6 +207,35 @@ public static class QueryRequestExecution
         };
     }
 
+    /// <summary>
+    /// Builds a provider execution request that answers a count with the provider's total-count
+    /// shape over a single-row page, so the count never materializes the matching rows.
+    /// </summary>
+    public static QueryRequest ForProviderCount(QueryRequest request)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
+            Paging.OffsetLimit(0, 1), ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan)
+        {
+            CanonicalPredicate = request.CanonicalPredicate,
+            ContinuationFingerprint = request.ContinuationFingerprint,
+            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+        };
+    }
+
+    /// <summary>Builds a limit-1 existence probe instead of the caller's full page.</summary>
+    public static QueryRequest ForExistenceProbe(QueryRequest request)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
+            Paging.OffsetLimit(request.Paging.Offset ?? 0, 1), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan)
+        {
+            CanonicalPredicate = request.CanonicalPredicate,
+            ContinuationFingerprint = request.ContinuationFingerprint,
+            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+        };
+    }
+
     /// <summary>Builds a provider execution request with additional internal projection columns.</summary>
     public static QueryRequest WithProjection(QueryRequest request, Projection projection)
     {

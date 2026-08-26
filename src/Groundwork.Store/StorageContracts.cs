@@ -693,6 +693,18 @@ public interface IExactAppendStorageSession
     AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values);
 }
 
+/// <summary>
+/// Internal provider capability for query execution on the async ADO.NET surface. Session
+/// decorators forward it so a wrapped provider session keeps the capability.
+/// </summary>
+internal interface IAsyncQueryStorageSession
+{
+    Task<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default);
+}
+
 /// <summary>Optional query-only capability advertised by a privileged cross-scope session.</summary>
 public interface IPrivilegedCrossScopeQuerySession
 {

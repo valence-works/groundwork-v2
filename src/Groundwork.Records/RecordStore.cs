@@ -234,11 +234,7 @@ public sealed class RecordTableSession<T>
         ArgumentNullException.ThrowIfNull(query);
         var request = query.Count().Request;
         table.ValidateRequest(request);
-        // The provider counts the full predicate; the single-row page keeps the count from
-        // materializing every matching row alongside it.
-        var execution = new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            Paging.OffsetLimit(0, 1), request.Result, request.LatestPerKey, request.AcceptedScan);
-        var result = store.Query(execution, table.CreateRenderOptions(null));
+        var result = store.Query(QueryRequestExecution.ForProviderCount(request), table.CreateRenderOptions(null));
         return result.TotalCount ?? throw new InvalidOperationException(
             $"Count on '{request.Table.Value}' requires a provider-side total count; the store returned a page without one.");
     }
