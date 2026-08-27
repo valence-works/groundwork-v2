@@ -160,12 +160,12 @@ internal sealed class SchemaEvolutionAnalysis
         var desiredColumns = target.Subject.Columns.ToDictionary(column => column.LogicalId, StringComparer.Ordinal);
 
         var rebuiltIndexes = new HashSet<string>(StringComparer.Ordinal);
-        PlanPrimaryStorageRename(target, appliedSubject, operations);
+        PlanPrimaryStorageRename(target, applied, appliedSubject, operations);
         PlanColumnEvolution(target, appliedSubject, appliedColumns, desiredColumns, operations, refusals, rebuiltIndexes);
         PlanRemovals(target, appliedSubject, desiredColumns, operations, refusals);
 
         MarkSatisfied(appliedSubject, target.Subject, desired, desiredColumnIds, operations, satisfied);
-        ReportUnevolvedApplied(desired, appliedByLogicalSlot, desiredColumnIds, refusals);
+        ReportUnevolvedApplied(desired, appliedByLogicalSlot, desiredColumnIds, operations, refusals);
         return new SchemaEvolutionAnalysis(
             [.. refusals],
             [.. operations],
@@ -241,13 +241,22 @@ internal sealed class SchemaEvolutionAnalysis
 
     private static void PlanPrimaryStorageRename(
         PhysicalSchemaTarget target,
+        PhysicalSchemaAppliedState applied,
         SchemaSubject appliedSubject,
         List<PhysicalSchemaOperation> operations)
     {
         // The history row is already keyed on the logical storage-unit id, so a changed physical
         // name arrives as the same subject wearing a new name.
         if (!string.Equals(appliedSubject.Name, target.Subject.Name, StringComparison.Ordinal))
-            operations.Add(new RenamePrimaryStorageOperation(target.Subject, appliedSubject.Name, appliedSubject.Indexes));
+        {
+            // Indexes and provider-owned definitions both name themselves after the storage, so both
+            // have to move with it. One rule, applied to everything that names itself after a table.
+            operations.Add(new RenamePrimaryStorageOperation(
+                target.Subject,
+                appliedSubject.Name,
+                appliedSubject.Indexes,
+                applied.Snapshot.ProviderDefinitions));
+        }
     }
 
     private static void PlanColumnEvolution(
@@ -365,8 +374,13 @@ internal sealed class SchemaEvolutionAnalysis
         IReadOnlyList<PhysicalSchemaOperation> desired,
         IReadOnlyDictionary<string, PhysicalSchemaAppliedOperation> appliedByLogicalSlot,
         IReadOnlyDictionary<string, string> desiredColumnIds,
+        IReadOnlyList<PhysicalSchemaOperation> evolution,
         List<SchemaRefusal> refusals)
     {
+        // A rename re-keys every provider-owned definition, because each names itself after the
+        // storage. Those applied slots vanish by construction and the rename removes them, so they
+        // are superseded rather than stranded.
+        var renamesStorage = evolution.Any(operation => operation is RenamePrimaryStorageOperation);
         var desiredSlots = desired
             .Select(operation => LogicalSlot(
                 operation.Kind,
@@ -378,6 +392,7 @@ internal sealed class SchemaEvolutionAnalysis
         foreach (var (slot, operation) in appliedByLogicalSlot.OrderBy(entry => entry.Key, StringComparer.Ordinal))
         {
             if (desiredSlots.Contains(slot) ||
+                (renamesStorage && operation.Kind == PhysicalSchemaOperationKind.ApplyProviderDefinition) ||
                 operation.Kind is PhysicalSchemaOperationKind.CreatePrimaryStorage or
                     PhysicalSchemaOperationKind.AddColumn or
                     PhysicalSchemaOperationKind.BackfillColumn or

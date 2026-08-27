@@ -191,6 +191,21 @@ internal sealed class SqliteDialect : RelationalDialect
             "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=excluded.\"algorithm_id\";");
     }
 
+    public override void DropProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported SQLite provider definition '{definition.Kind}'.");
+        RelationalSearchKeyCatalog.Drop(
+            connection,
+            transaction,
+            definition,
+            "DELETE FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table AND \"column_name\"=@column;");
+    }
+
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
         DbTransaction? transaction,

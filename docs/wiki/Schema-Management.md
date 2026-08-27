@@ -187,6 +187,12 @@ storage is gone. Delete the declaration afterwards.
 | SQL Server | Native, through `sp_rename`; a column's auto-named default constraint is dropped with it |
 | MongoDB | **Not yet.** MongoDB implements no `IPhysicalSchemaExecutor` and keeps no applied schema ledger, so it cannot tell a renamed field from a new one. A declaration whose logical id has diverged is refused with `GW-SCHEMA-009` rather than silently reading nulls ([#86](https://github.com/valence-works/groundwork-v2/issues/86)) |
 
+> Provider-owned definitions move with their storage for the same reason indexes do: each names
+> itself after the table. SQL Server's batch table type is dropped and recreated under the new name;
+> the derived search-key algorithm record is re-keyed. Neither leaves a dead object behind, and the
+> derived column itself is an ordinary column that travels with its table and is never rebuilt.
+> Retiring a unit removes its provider definitions too.
+
 > An index over a column being altered is dropped before the alteration and recreated after it, so
 > the plan does not depend on the most permissive provider's willingness to alter an indexed column.
 > The same plan puts the index back and the applied ledger still describes it, so that is a

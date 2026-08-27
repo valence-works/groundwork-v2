@@ -106,7 +106,12 @@ public static class PhysicalSchemaDiffPlanner
         var snapshot = new PhysicalSchemaAppliedSnapshot(target.Subject, [], target.ProviderDefinitions);
         var pending = new List<PhysicalSchemaOperation>();
         if (applied?.Snapshot.SemanticOperations.Length > 0)
-            pending.Add(new DropPrimaryStorageOperation(target.Subject, applied.Snapshot.Subject.Name));
+        {
+            pending.Add(new DropPrimaryStorageOperation(
+                target.Subject,
+                applied.Snapshot.Subject.Name,
+                applied.Snapshot.ProviderDefinitions));
+        }
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
             return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint);
 

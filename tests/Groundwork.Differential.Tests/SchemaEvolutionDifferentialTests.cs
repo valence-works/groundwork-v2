@@ -66,6 +66,7 @@ public sealed class SchemaEvolutionDifferentialTests
             [
                 new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
                 new() { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 200, IsNullable = false },
+                new() { Name = "code", Type = PortableType.String, MaxLength = 32, Collation = PortableCollation.OrdinalIgnoreCase },
                 new() { Name = "total", Type = PortableType.Decimal, Precision = 18, Scale = 4 }
             ],
             // by_total survives the storage rename. Every relational dialect Groundwork ships
@@ -98,6 +99,15 @@ public sealed class SchemaEvolutionDifferentialTests
             10m,
             Convert.ToDecimal(store.Scalar(
                 $"SELECT {store.Quote("total")} FROM {store.Quote(renamedTable)} WHERE {store.Quote("id")}='o-1';")));
+
+        // The provider definitions moved with the storage instead of being left behind under the
+        // old name. A stale row or type per rename is exactly the residue this must not leave.
+        Assert.Equal(0L, Convert.ToInt64(store.Scalar(
+            $"SELECT count(*) FROM {store.Quote("__groundwork_search_key_algorithms")} " +
+            $"WHERE {store.Quote("table_name")}='{store.Table}';")));
+        Assert.NotEqual(0L, Convert.ToInt64(store.Scalar(
+            $"SELECT count(*) FROM {store.Quote("__groundwork_search_key_algorithms")} " +
+            $"WHERE {store.Quote("table_name")}='{renamedTable}';")));
 
         // Replanning the same declaration finds nothing left to do, and the ledger has shrunk.
         Assert.Empty(Plan(store, evolved).Operations);
@@ -147,6 +157,10 @@ public sealed class SchemaEvolutionDifferentialTests
         [
             new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
             new() { Name = "customer", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            // Folded, so every relational provider records a search-key provider definition whose
+            // identity embeds the storage name. Without one, only SQL Server (which always emits a
+            // batch type) exercises provider definitions through a rename.
+            new() { Name = "code", Type = PortableType.String, MaxLength = 32, Collation = PortableCollation.OrdinalIgnoreCase },
             new() { Name = "total", Type = PortableType.Decimal, Precision = 18, Scale = 4 },
             ..(includeLegacyTotal
                 ? new[] { new ColumnDefinition { Name = "legacy_total", Type = PortableType.Decimal, Precision = 18, Scale = 4 } }

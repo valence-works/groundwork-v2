@@ -374,18 +374,24 @@ public sealed class RenamePrimaryStorageOperation : PhysicalSchemaOperation
     internal RenamePrimaryStorageOperation(
         SchemaSubject subject,
         string fromName,
-        IEnumerable<IndexDefinition> carriedIndexes)
+        IEnumerable<IndexDefinition> carriedIndexes,
+        IEnumerable<ProviderPhysicalSchemaDefinition> supersededProviderDefinitions)
         : base(
             PhysicalSchemaOperationKind.RenamePrimaryStorage,
             subject.Id,
             subject.Name,
             null,
-            [fromName, .. carriedIndexes.Select(CreatePhysicalIndexOperation.CanonicalIndex)])
+            [
+                fromName,
+                .. carriedIndexes.Select(CreatePhysicalIndexOperation.CanonicalIndex),
+                .. supersededProviderDefinitions.Select(definition => definition.Fingerprint)
+            ])
     {
         Subject = subject;
         FromName = fromName;
         ToName = subject.Name;
         CarriedIndexes = [.. carriedIndexes.Select(CreatePhysicalIndexOperation.Snapshot)];
+        SupersededProviderDefinitions = [.. supersededProviderDefinitions];
         SemanticMigrationId = subject.Evolution.SemanticMigrationId ?? AuthorizationAddress;
     }
 
@@ -401,6 +407,13 @@ public sealed class RenamePrimaryStorageOperation : PhysicalSchemaOperation
     /// with the storage or the catalog stops being addressable by its declaration.
     /// </summary>
     public ImmutableArray<IndexDefinition> CarriedIndexes { get; }
+
+    /// <summary>
+    /// The provider-owned definitions the applied ledger holds at rename time. These name themselves
+    /// after the storage in exactly the way indexes do, so the renamed storage records new ones and
+    /// these are removed. Leaving them would accumulate one dead provider object per rename.
+    /// </summary>
+    public ImmutableArray<ProviderPhysicalSchemaDefinition> SupersededProviderDefinitions { get; }
 }
 
 /// <summary>Renames one column in place, carrying its values with it.</summary>
@@ -542,11 +555,20 @@ public sealed class DropPhysicalIndexOperation : PhysicalSchemaOperation
 /// <summary>Removes the subject's primary storage and every row in it.</summary>
 public sealed class DropPrimaryStorageOperation : PhysicalSchemaOperation
 {
-    internal DropPrimaryStorageOperation(SchemaSubject subject, string name)
-        : base(PhysicalSchemaOperationKind.DropPrimaryStorage, subject.Id, name)
+    internal DropPrimaryStorageOperation(
+        SchemaSubject subject,
+        string name,
+        IEnumerable<ProviderPhysicalSchemaDefinition> supersededProviderDefinitions)
+        : base(
+            PhysicalSchemaOperationKind.DropPrimaryStorage,
+            subject.Id,
+            name,
+            null,
+            [.. supersededProviderDefinitions.Select(definition => definition.Fingerprint)])
     {
         Subject = subject;
         Name = name;
+        SupersededProviderDefinitions = [.. supersededProviderDefinitions];
         RequiresAuthorization = true;
         SemanticMigrationId = subject.Evolution.SemanticMigrationId;
     }
@@ -555,6 +577,12 @@ public sealed class DropPrimaryStorageOperation : PhysicalSchemaOperation
 
     /// <summary>The physical name being removed, as the applied ledger recorded it.</summary>
     public string Name { get; }
+
+    /// <summary>
+    /// The provider-owned definitions that belonged to the removed storage. Retiring a unit and
+    /// leaving its provider objects behind is the same residue a rename would leave.
+    /// </summary>
+    public ImmutableArray<ProviderPhysicalSchemaDefinition> SupersededProviderDefinitions { get; }
 }
 
 public sealed class ApplyProviderPhysicalSchemaDefinitionOperation : PhysicalSchemaOperation

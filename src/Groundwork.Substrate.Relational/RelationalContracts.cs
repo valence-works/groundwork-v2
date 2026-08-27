@@ -316,6 +316,20 @@ public abstract class RelationalDialect
     {
     }
 
+    /// <summary>
+    /// Removes a provider-owned definition that no longer belongs to the deployed schema, because
+    /// the storage it named was renamed or removed. A provider that materializes nothing in
+    /// <see cref="ApplyProviderDefinition"/> has nothing to remove and inherits the empty default;
+    /// one that creates a named object or a catalog row must delete it here, or every rename and
+    /// retirement leaves another dead object behind in the user's database.
+    /// </summary>
+    public virtual void DropProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+    }
+
     public virtual void ValidateTarget(
         DbConnection connection,
         DbTransaction? transaction,

@@ -242,6 +242,10 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                 dialect.RenameTable(connection, transaction, rename.FromName, rename.ToName);
                 foreach (var carried in rename.CarriedIndexes)
                     dialect.RenameIndex(connection, transaction, rename.FromName, rename.ToName, carried);
+                // The renamed storage records provider definitions under its new name later in this
+                // plan; the ones named after the old storage are removed rather than left behind.
+                foreach (var superseded in rename.SupersededProviderDefinitions)
+                    dialect.DropProviderDefinition(connection, transaction, superseded);
                 break;
             case RenameColumnOperation renameColumn:
                 Execute(
@@ -259,6 +263,8 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                 Execute(connection, transaction, RelationalSql.DropIndex(dialect, dropIndex.Subject.Name, dropIndex.Index.Name));
                 break;
             case DropPrimaryStorageOperation dropStorage:
+                foreach (var superseded in dropStorage.SupersededProviderDefinitions)
+                    dialect.DropProviderDefinition(connection, transaction, superseded);
                 Execute(connection, transaction, dialect.DropTableSql(dropStorage.Name));
                 break;
             case ApplyProviderPhysicalSchemaDefinitionOperation applyProvider:

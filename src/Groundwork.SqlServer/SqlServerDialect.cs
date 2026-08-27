@@ -126,6 +126,37 @@ internal sealed class SqlServerDialect : RelationalDialect
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// A batch table type names itself after its storage, so a renamed or retired unit leaves the
+    /// old type behind unless it is dropped here. The search-key row is metadata about a column that
+    /// travels with its table, so removing it deletes a record and no stored value.
+    /// </summary>
+    public override void DropProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+        {
+            RelationalSearchKeyCatalog.Drop(
+                connection,
+                transaction,
+                definition,
+                "DELETE FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table AND [column_name]=@column;");
+            return;
+        }
+        if (!string.Equals(definition.Kind, SqlServerSchemaCoordinator.BatchTypeKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported SQL Server provider definition '{definition.Kind}'.");
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            $"IF TYPE_ID(N'dbo.{definition.SubjectIdentity.Replace("'", "''", StringComparison.Ordinal)}') IS NOT NULL " +
+            $"DROP TYPE [dbo].{SqlServerProviderConnection.QuoteIdentifier(definition.SubjectIdentity)};";
+        command.ExecuteNonQuery();
+    }
+
     private static int? ReadNullableInt(JsonElement element, string name) =>
         element.TryGetProperty(name, out var property) && property.ValueKind != JsonValueKind.Null
             ? property.GetInt32()
