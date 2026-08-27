@@ -338,19 +338,26 @@ public sealed class SchemaToolContractTests
     [Theory]
     [InlineData("plan")]
     [InlineData("status")]
-    public async Task Index_drift_code_appears_in_target_diagnostics_when_blocked(string command)
+    public async Task Index_drift_code_appears_in_target_warnings_not_diagnostics(string command)
     {
+        // Index drift is non-blocking: the store opens, but dependent query shapes refuse.
+        // It must appear in warnings (observable) not diagnostics (blocking), and the
+        // outcome must not be "blocked".
         var schema = Temp("idx-drift.json", ValidSchema);
         using var session = new FakeSession();
-        session.ExecutorImpl.IsAppliedSchemaValid = false;
         session.ExecutorImpl.IndexDrift = [new SchemaRefusal("GW-RUNTIME-002", "Index 'by_owner' is missing.", "index")];
 
-        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+        // Index-only drift does not block; exit is Success (no pending ops on a fresh schema).
+        Assert.Equal(SchemaToolExitCodes.Success,
             await RunAsync([command, "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
 
         using var report = JsonDocument.Parse(output.ToString());
-        var diagnostics = report.RootElement.GetProperty("targets")[0].GetProperty("diagnostics");
-        Assert.Contains(diagnostics.EnumerateArray(),
+        var target = report.RootElement.GetProperty("targets")[0];
+        var warnings = target.GetProperty("warnings");
+        var diagnostics = target.GetProperty("diagnostics");
+        Assert.Contains(warnings.EnumerateArray(),
+            d => d.GetProperty("code").GetString() == "GW-RUNTIME-002");
+        Assert.DoesNotContain(diagnostics.EnumerateArray(),
             d => d.GetProperty("code").GetString() == "GW-RUNTIME-002");
     }
 

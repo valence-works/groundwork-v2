@@ -406,12 +406,12 @@ public static class GroundworkSchemaCli
         plan.Refusals
             .Concat(authorizationRefusals ?? [])
             .Concat(inspection.ColumnDrift.IsDefault ? [] : (IEnumerable<SchemaRefusal>)inspection.ColumnDrift)
-            .Concat(inspection.IndexDrift.IsDefault ? [] : (IEnumerable<SchemaRefusal>)inspection.IndexDrift)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
         false)
     {
         Supersessions = Describe(readiness),
         Warnings = (inspection.ToleratedDrift.IsDefault ? [] : inspection.ToleratedDrift)
+            .Concat(inspection.IndexDrift.IsDefault ? [] : (IEnumerable<SchemaRefusal>)inspection.IndexDrift)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray()
     };
 
