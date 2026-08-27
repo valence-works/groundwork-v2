@@ -270,7 +270,7 @@ Grouped by concern:
 | `GW-CLI-007` | Schema changes require explicit `--safe` authorization |
 | `GW-CLI-008` | A destructive operation was not named through `--allow-destructive` |
 | `GW-CLI-012` | A semantic migration was not named through `--allow-semantic` |
-| `GW-CLI-013` | `adopt` was invoked against a provider that cannot compare a deployed catalog to a compiled target, so it cannot prove a match |
+| `GW-CLI-013` | `adopt` was invoked against a provider that cannot compare a deployed catalog to a compiled target, so it cannot prove a match. Every provider Groundwork ships is such an inspector, MongoDB included, so this names a third-party plug-in |
 | `GW-SCHEMA-TOOL-001` | Schema tool refusal |
 
 ### `GW-SCHEMA-*` — schema planning and evolution
@@ -289,7 +289,7 @@ would make it work, while an unauthorized one is waiting on an operator naming i
 | `GW-SCHEMA-006` | Applied state was recorded under a different persisted schema boundary — discard the catalog | Invalid |
 | `GW-SCHEMA-007` | A planned **destructive** operation is not authorized. The message names the operation's address, e.g. `drop-column:orders.legacy_total` | Needs authorization |
 | `GW-SCHEMA-008` | A planned **semantic** migration is not authorized, e.g. `rename-column:orders.buyer` | Needs authorization |
-| `GW-SCHEMA-009` | The provider cannot honor a declared logical-id rename. MongoDB keeps no applied schema ledger, so it cannot tell a renamed field from a new one ([#86](https://github.com/valence-works/groundwork-v2/issues/86)) | Invalid |
+| `GW-SCHEMA-009` | The schema path cannot honor a declared logical-id rename. MongoDB's in-process `connection.Schema.Apply` plans from the fingerprint in `__groundwork_metadata` rather than from the applied schema ledger, so it cannot tell a renamed field from a new one. `groundwork apply` plans the same rename against that ledger and carries it | Invalid |
 | `GW-SCHEMA-010` | `connection.Schema.Apply` was asked to destroy data re-applying cannot restore — drop a column or its storage, or narrow a column past the values in it. Apply it from the `groundwork` CLI, which authorizes the exact operation against the exact plan | Needs authorization |
 | `GW-SCHEMA-011` | `groundwork adopt` found applied history already recorded for this target. Adoption records a catalog Groundwork has never applied; apply the pending plan instead | Invalid |
 | `GW-SCHEMA-012` | `groundwork adopt` was asked to adopt a subject declared retired, which describes no catalog to verify | Invalid |

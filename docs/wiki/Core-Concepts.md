@@ -48,8 +48,9 @@ new() { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength =
 ```
 
 Renames are **authorized** work, not automatic: the deployment tool needs the plan fingerprint plus
-`--allow-semantic rename-column:orders.buyer`. MongoDB cannot honor them yet and says so
-(`GW-SCHEMA-009`). See **[Schema Management](Schema-Management)**.
+`--allow-semantic rename-column:orders.buyer`. All four providers honor them there; MongoDB's
+in-process `Schema.Apply` reads no ledger and says so instead (`GW-SCHEMA-009`).
+See **[Schema Management](Schema-Management)**.
 
 A storage unit has **no provider knowledge whatsoever**. The same object is handed to SQLite and to
 MongoDB.
