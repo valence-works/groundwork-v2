@@ -1564,6 +1564,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         ThrowIfClosed();
         if (transaction is not null)
             return await Translate(operation).ConfigureAwait(false);
+        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
         var write = (NpgsqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.ReadCommitted).ConfigureAwait(false);
         activeTransaction = write;
         try

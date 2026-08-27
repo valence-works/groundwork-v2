@@ -617,7 +617,13 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
         }
         catch
         {
-            try { inner.Rollback(); }
+            try
+            {
+                // A native unit that already ended on its own failed commit must not be rolled
+                // back again: the rollback would throw and hide the failure the caller needs.
+                if (inner is not IMongoUnitOfWorkState state || state.IsActive)
+                    inner.Rollback();
+            }
             finally { terminal = true; }
             throw;
         }

@@ -90,7 +90,8 @@ public static class RelationalQueryResultReader
         ArgumentNullException.ThrowIfNull(decode);
         mode.CancellationToken.ThrowIfCancellationRequested();
         using var command = CreateCommand(connection, query, transaction);
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = mode.Scope(reader);
         var rows = new List<IReadOnlyDictionary<string, object?>>();
         while (await mode.Read(reader).ConfigureAwait(false))
             rows.Add(MaterializeRow(reader, decode));

@@ -18,13 +18,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         fixture.Reset();
         using (new SqlServerProviderFactory().Create(fixture.ConnectionString))
         {
+            // Both surfaces run against the one live database, without a reset between them:
+            // each proves the whole contract on its own storage units.
             var synchronous = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
             Assert.True(synchronous.Passed, Describe(synchronous));
-        }
 
-        fixture.Reset();
-        using (new SqlServerProviderFactory().Create(fixture.ConnectionString))
-        {
             var asynchronous = await ConformanceSuite.RunAsync(new SqlServerProviderFactory(), fixture.ConnectionString);
             Assert.True(asynchronous.Passed, Describe(asynchronous));
         }

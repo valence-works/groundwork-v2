@@ -55,6 +55,9 @@ bodies, so the two surfaces cannot drift:
 var report = await ConformanceSuite.RunAsync(new MyProviderFactory(), connectionString);
 ```
 
+Each run scopes its own storage unit names, so running both against **one** database is supported
+and neither run depends on the other having been cleaned up first.
+
 ### Custom scenarios
 
 The default scenario uses a shipped probe schema. A storage family can supply its own declaration and

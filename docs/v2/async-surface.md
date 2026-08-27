@@ -76,7 +76,12 @@ is already complete and the entry point does not block on a pending operation.
 
 - `ConformanceSuite.Run` proves the contract on the synchronous surface;
   `ConformanceSuite.RunAsync` proves the same named checks on the asynchronous one, plus
-  `cancellation is refused before provider work`. Both run the same check bodies.
+  `cancellation is refused before provider work` — which covers a read, a query, and a write, so a
+  provider that issues any of them on a surface carrying no token is caught. Both runs execute the
+  same check bodies.
+- Each run scopes its own storage unit names (`ConformanceScenario.WithUnitNameSuffix`), so both
+  surfaces can prove the whole contract independently against one database rather than depending on
+  a reset between them.
 - `ConcurrencyHarness` takes `ConcurrencyProbeOptions.Surface`, so the deterministic invariants are
   proven with writers on the asynchronous surface under contention.
 - `StorageProviderConcurrencyFactory(..., commitThroughUnitOfWork: true)` routes each contended

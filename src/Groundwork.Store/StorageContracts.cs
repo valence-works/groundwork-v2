@@ -303,6 +303,21 @@ public static class WritePreconditionValidator
         }
     }
 
+    /// <summary>
+    /// Refuses a write that would open a second provider transaction on a session already inside
+    /// one. A provider connection carries one transaction at a time, so a nested write can neither
+    /// join nor isolate itself from the transaction it is nested in.
+    /// </summary>
+    public static void EnsureNoNestedTransaction(object? activeTransaction)
+    {
+        if (activeTransaction is not null)
+        {
+            throw new InvalidOperationException(
+                "GW-WRITE-NESTED-001: this storage session is already inside a provider write " +
+                "transaction; open a unit of work and stage the writes instead of nesting them.");
+        }
+    }
+
     public static void Validate(StorageUnit unit, WriteOperation operation, WriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(unit);

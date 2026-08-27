@@ -279,6 +279,20 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public async Task Both_surfaces_prove_the_full_contract_against_one_database()
+    {
+        var factory = new ExternalFactory();
+
+        var synchronous = ConformanceSuite.Run(factory, "memory://contract-both");
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine,
+            synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+
+        var asynchronous = await ConformanceSuite.RunAsync(factory, "memory://contract-both");
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine,
+            asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+    }
+
+    [Fact]
     public async Task Async_surface_proves_every_check_the_sync_surface_proves()
     {
         var synchronous = ConformanceSuite.Run(new ExternalFactory(), "memory://contract-parity-sync");

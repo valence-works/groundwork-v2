@@ -1846,6 +1846,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         if (transaction is not null) return await Translate(operation).ConfigureAwait(false);
+        // The connection gate is a non-reentrant semaphore, so a nested write must be refused
+        // before it is asked for; waiting on a permit this call already holds would never return.
+        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
         using (await owner.EnterGate(mode).ConfigureAwait(false))
         {
             owner.ThrowIfDisposed();

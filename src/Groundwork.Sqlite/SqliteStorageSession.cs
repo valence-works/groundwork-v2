@@ -1665,6 +1665,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         if (transaction is not null) return Translate(operation);
+        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
         lock (owner.Gate)
         {
             owner.ThrowIfDisposed();

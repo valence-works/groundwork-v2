@@ -1138,19 +1138,49 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public void Provider_passes_provider_neutral_conformance()
+    public async Task Nested_write_is_refused_rather_than_blocking()
     {
         using var store = TemporaryStore.Create();
-        var report = ConformanceSuite.Run(new SqliteProviderFactory(), store.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine, report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("nested-write"), Name = "nested_write",
+            Columns =
+            [
+                new() { Name = "Id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "Value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["Value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Provider_passes_provider_neutral_conformance_on_the_async_surface()
+    public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
     {
         using var store = TemporaryStore.Create();
-        var report = await ConformanceSuite.RunAsync(new SqliteProviderFactory(), store.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine, report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+
+        // One store, both surfaces: each run proves the whole contract on its own storage units.
+        var synchronous = ConformanceSuite.Run(new SqliteProviderFactory(), store.ConnectionString);
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine, synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+
+        var asynchronous = await ConformanceSuite.RunAsync(new SqliteProviderFactory(), store.ConnectionString);
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine, asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
     }
 
     [Fact]

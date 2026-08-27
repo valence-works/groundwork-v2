@@ -3,6 +3,18 @@ using System.Data.Common;
 
 namespace Groundwork.Substrate.Relational;
 
+/// <summary>Closes one provider resource on the surface the caller selected.</summary>
+public readonly struct RelationalDisposal(IDisposable resource, bool isAsync) : IAsyncDisposable
+{
+    public ValueTask DisposeAsync()
+    {
+        if (isAsync && resource is IAsyncDisposable asynchronous)
+            return asynchronous.DisposeAsync();
+        resource.Dispose();
+        return default;
+    }
+}
+
 /// <summary>
 /// Selects the synchronous or the asynchronous ADO.NET surface for one shared command body, so a
 /// provider keeps a single implementation of every operation rather than two that can drift.
@@ -69,11 +81,12 @@ public readonly struct RelationalExecution
         return default;
     }
 
-    public ValueTask Dispose(DbTransaction transaction)
-    {
-        if (IsAsync)
-            return transaction.DisposeAsync();
-        transaction.Dispose();
-        return default;
-    }
+    public ValueTask Dispose(DbTransaction transaction) => new RelationalDisposal(transaction, IsAsync).DisposeAsync();
+
+    /// <summary>
+    /// Scopes a provider resource whose close can still talk to the server — a data reader — so
+    /// the asynchronous surface closes it asynchronously and the synchronous surface does not
+    /// block the caller on a pending close.
+    /// </summary>
+    public RelationalDisposal Scope(IDisposable resource) => new(resource, IsAsync);
 }

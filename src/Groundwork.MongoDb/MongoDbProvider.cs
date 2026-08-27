@@ -1010,18 +1010,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 var union = command.Pipeline[unionIndex]["$unionWith"].AsBsonDocument;
                 var countPipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(
                     union["pipeline"].AsBsonArray.Select(value => value.AsBsonDocument).ToArray());
-                documents = await mode.ToList(collection.Aggregate(
-                    transactionSession, dataPipeline, new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false);
-                documents.AddRange(await mode.ToList(collection.Aggregate(
-                    transactionSession, countPipeline, new AggregateOptions { Hint = command.Hint })).ConfigureAwait(false));
+                documents = await mode.Aggregate(collection, transactionSession, dataPipeline,
+                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false);
+                documents.AddRange(await mode.Aggregate(collection, transactionSession, countPipeline,
+                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false));
             }
             else
             {
                 var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
-                documents = await mode.ToList(transactionSession is null
-                    ? collection.Aggregate(pipeline, new AggregateOptions { Hint = command.Hint })
-                    : collection.Aggregate(transactionSession, pipeline, new AggregateOptions { Hint = command.Hint }))
-                    .ConfigureAwait(false);
+                documents = await mode.Aggregate(collection, transactionSession, pipeline,
+                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false);
             }
             if (command.IncludesTotalCount && documents.Count == 1 && documents[0].Contains("metadata") && documents[0].Contains("data"))
             {
@@ -1170,7 +1168,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             sourcePrefix);
         var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
         commandObserver?.Observe(new ProviderCommandEvent("mongodb.query-across-scopes", "MongoDB.Aggregate(cross-scope)", ProviderCommandKind.Read, IsProbe: false));
-        var documents = await mode.ToList(collection.Aggregate(pipeline)).ConfigureAwait(false);
+        var documents = await mode.Aggregate(collection, session: null, pipeline).ConfigureAwait(false);
         var rows = documents.Select(ToCrossScopeQueryRow).ToArray();
         var materialized = QueryResultMaterializer.Materialize(
             executionSource,
@@ -3333,12 +3331,13 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         try
         {
             await MongoStorageSession.CommitTransactionWithRetry(session, mode).ConfigureAwait(false);
-            terminal = true;
-            CloseSessions();
         }
         finally
         {
-            session.Dispose();
+            // A failed commit still ends this unit and still disposes the native session. It must
+            // become terminal in the same step, or a caller's Dispose rolls back through a disposed
+            // session and replaces the commit failure with a lifecycle error.
+            Complete();
         }
     }
 
@@ -3349,13 +3348,18 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         {
             if (session.IsInTransaction)
                 session.AbortTransaction();
-            terminal = true;
-            CloseSessions();
         }
         finally
         {
-            session.Dispose();
+            Complete();
         }
+    }
+
+    private void Complete()
+    {
+        terminal = true;
+        CloseSessions();
+        session.Dispose();
     }
 
     public void Dispose()
@@ -3384,9 +3388,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
     {
         if (terminal)
             return;
-        terminal = true;
-        CloseSessions();
-        session.Dispose();
+        Complete();
     }
 }
 

@@ -29,7 +29,8 @@ public static class ConformanceSuite
     /// Proves the same contract against the asynchronous session surface. Every check the
     /// synchronous run performs is repeated here through the asynchronous members, and the
     /// asynchronous run additionally proves that an already-cancelled token is refused before any
-    /// provider work is issued.
+    /// provider work is issued. Each surface scopes its own storage unit names, so both runs can
+    /// prove the whole contract independently against one database.
     /// </summary>
     public static ValueTask<ConformanceReport> RunAsync(
         IStorageProviderFactory factory,
@@ -53,6 +54,7 @@ public static class ConformanceSuite
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         ArgumentNullException.ThrowIfNull(scenario);
+        scenario = scenario.WithUnitNameSuffix(surface.IsAsync ? "_async" : "_sync");
 
         var checks = new List<ConformanceCheck>();
         try
@@ -290,8 +292,19 @@ public static class ConformanceSuite
                 {
                     var session = connection.OpenSession(global, StorageAccess.Global);
                     var cancelled = ConformanceExecution.Asynchronous(new CancellationToken(canceled: true));
+                    var page = new QueryRequest(
+                        new TableId(global.Name),
+                        Predicate.AlwaysTrue.Instance,
+                        [],
+                        Projection.All,
+                        Paging.Keyset(1));
                     await RequireThrows<OperationCanceledException>(
                         async () => await cancelled.Read(session, scenario.MissingKey("cancelled")).ConfigureAwait(false))
+                        .ConfigureAwait(false);
+                    // A query is proven too: a provider that renders it as a server-side pipeline
+                    // must issue that pipeline on a surface that carries the token.
+                    await RequireThrows<OperationCanceledException>(
+                        async () => await cancelled.Query(session, page).ConfigureAwait(false))
                         .ConfigureAwait(false);
                     await RequireThrows<OperationCanceledException>(
                         async () => await cancelled.Insert(session, scenario.Values("cancelled", "no", null)).ConfigureAwait(false))

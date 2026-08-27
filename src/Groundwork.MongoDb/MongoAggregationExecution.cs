@@ -364,9 +364,7 @@ internal sealed partial class MongoStorageSession
         // trip, observed here so a budget probe and the main pipeline are both counted at issue.
         commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.aggregate", "MongoDB.Aggregate(pipeline)", ProviderCommandKind.Read, IsProbe: isProbe));
-        return mode.ToList(transactionSession is null
-            ? collection.Aggregate(pipeline, options)
-            : collection.Aggregate(transactionSession, pipeline, options));
+        return mode.Aggregate(collection, transactionSession, pipeline, options);
     }
 
     private static BsonDocument RenderPredicate(

@@ -368,31 +368,22 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
-    public void Provider_passes_the_shipped_conformance_suite()
+    public async Task Provider_passes_the_shipped_conformance_suite_on_both_surfaces()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         var url = new MongoUrlBuilder(connectionString) { DatabaseName = "p1conformance_" + Guid.NewGuid().ToString("N") };
+        var database = url.ToMongoUrl().ToString();
 
-        var report = ConformanceSuite.Run(new MongoProviderFactory(), url.ToMongoUrl().ToString());
+        // One database, both surfaces: each run proves the whole contract on its own storage units.
+        var synchronous = ConformanceSuite.Run(new MongoProviderFactory(), database);
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine,
+            synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
 
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
-    }
-
-    [SkippableFact]
-    public async Task Provider_passes_the_shipped_conformance_suite_on_the_async_surface()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString),
-            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
-        var url = new MongoUrlBuilder(connectionString) { DatabaseName = "p21conformance_" + Guid.NewGuid().ToString("N") };
-
-        var report = await ConformanceSuite.RunAsync(new MongoProviderFactory(), url.ToMongoUrl().ToString());
-
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+        var asynchronous = await ConformanceSuite.RunAsync(new MongoProviderFactory(), database);
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine,
+            asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
     }
 
     [SkippableFact]
