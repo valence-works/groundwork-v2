@@ -21,11 +21,10 @@ public static class GroundworkSchemaCanonical
             throw new ArgumentNullException(nameof(document));
 
         var builder = new StringBuilder("{\"tables\":[");
-        var tables = document.Tables.OrderBy(table => table.Name, StringComparer.Ordinal).ToArray();
-        for (var tableIndex = 0; tableIndex < tables.Length; tableIndex++)
+        for (var tableIndex = 0; tableIndex < document.Tables.Count; tableIndex++)
         {
             if (tableIndex != 0) builder.Append(',');
-            var table = tables[tableIndex];
+            var table = document.Tables[tableIndex];
             builder.Append("{\"name\":").Append(String(table.Name)).Append(",\"columns\":[");
             for (var columnIndex = 0; columnIndex < table.Columns.Count; columnIndex++)
             {
@@ -51,11 +50,10 @@ public static class GroundworkSchemaCanonical
             }
 
             builder.Append("],\"indexes\":[");
-            var indexes = table.Indexes.OrderBy(index => index.Name, StringComparer.Ordinal).ToArray();
-            for (var indexIndex = 0; indexIndex < indexes.Length; indexIndex++)
+            for (var indexIndex = 0; indexIndex < table.Indexes.Count; indexIndex++)
             {
                 if (indexIndex != 0) builder.Append(',');
-                var index = indexes[indexIndex];
+                var index = table.Indexes[indexIndex];
                 builder.Append("{\"name\":").Append(String(index.Name)).Append(",\"columns\":[");
                 for (var columnIndex = 0; columnIndex < index.Columns.Count; columnIndex++)
                 {
@@ -80,11 +78,10 @@ public static class GroundworkSchemaCanonical
                 .Append(",\"appendIdempotency\":").Append(Idempotency(table.AppendIdempotency))
                 .Append(",\"retentionIdempotency\":").Append(Idempotency(table.RetentionIdempotency))
                 .Append(",\"aggregations\":[");
-            var aggregations = table.Aggregations.OrderBy(aggregation => aggregation.Name, StringComparer.Ordinal).ToArray();
-            for (var aggregationIndex = 0; aggregationIndex < aggregations.Length; aggregationIndex++)
+            for (var aggregationIndex = 0; aggregationIndex < table.Aggregations.Count; aggregationIndex++)
             {
                 if (aggregationIndex != 0) builder.Append(',');
-                Append(builder, aggregations[aggregationIndex]);
+                Append(builder, table.Aggregations[aggregationIndex]);
             }
 
             builder.Append("]}");
@@ -258,18 +255,46 @@ public static class GroundworkSchemaCanonical
             return new SchemaDefault(null);
         return new SchemaDefault(type switch
         {
-            SchemaValueType.String => literal.GetString(),
-            SchemaValueType.Int32 => literal.GetInt32(),
-            SchemaValueType.Int64 => literal.GetInt64(),
-            SchemaValueType.Decimal => literal.GetDecimal(),
-            SchemaValueType.Boolean => literal.GetBoolean(),
-            SchemaValueType.DateTimeOffset => literal.GetDateTimeOffset(),
-            SchemaValueType.Guid => literal.GetGuid(),
-            SchemaValueType.Binary => literal.GetBytesFromBase64(),
+            SchemaValueType.String => Text(literal, type),
+            SchemaValueType.Int32 => Number(literal, type).GetInt32(),
+            SchemaValueType.Int64 => Number(literal, type).GetInt64(),
+            SchemaValueType.Decimal => Number(literal, type).GetDecimal(),
+            SchemaValueType.Boolean => literal.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? literal.GetBoolean()
+                : throw Mistyped(literal, type),
+            SchemaValueType.DateTimeOffset => Text(literal, type) is { } timestamp &&
+                DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+                    ? parsed
+                    : throw Mistyped(literal, type),
+            SchemaValueType.Guid => Guid.TryParse(Text(literal, type), out var guid) ? guid : throw Mistyped(literal, type),
+            SchemaValueType.Binary => Binary(literal, type),
             SchemaValueType.Json => ReadJson(literal),
-            _ => throw new FormatException($"Schema default values are not supported for '{type}'.")
+            _ => throw Mistyped(literal, type)
         });
     }
+
+    private static string Text(JsonElement literal, SchemaValueType type) =>
+        literal.ValueKind == JsonValueKind.String
+            ? literal.GetString()!
+            : throw Mistyped(literal, type);
+
+    private static JsonElement Number(JsonElement literal, SchemaValueType type) =>
+        literal.ValueKind == JsonValueKind.Number ? literal : throw Mistyped(literal, type);
+
+    private static byte[] Binary(JsonElement literal, SchemaValueType type)
+    {
+        try
+        {
+            return Convert.FromBase64String(Text(literal, type));
+        }
+        catch (FormatException)
+        {
+            throw Mistyped(literal, type);
+        }
+    }
+
+    private static FormatException Mistyped(JsonElement literal, SchemaValueType type) => new(
+        $"Schema JSON property 'default' holds a {literal.ValueKind} literal that is not a valid {type} value.");
 
     private static object? ReadJson(JsonElement value) => value.ValueKind switch
     {
@@ -320,8 +345,10 @@ public static class GroundworkSchemaCanonical
 
     private static IReadOnlyList<SchemaAggregation> ReadAggregations(JsonElement table)
     {
-        if (!table.TryGetProperty("aggregations", out var value) || value.ValueKind != JsonValueKind.Array)
+        if (!table.TryGetProperty("aggregations", out var value) || value.ValueKind == JsonValueKind.Null)
             return Array.Empty<SchemaAggregation>();
+        if (value.ValueKind != JsonValueKind.Array)
+            throw new FormatException("Schema JSON property 'aggregations' must be an array or null.");
         return value.EnumerateArray().Select(element => new SchemaAggregation(
             RequiredString(element, "name"),
             RequiredArray(element, "aggregates").Select(aggregate => SchemaAggregate.Create(

@@ -7,6 +7,7 @@ using Xunit;
 
 namespace Groundwork.SqlServer.Tests;
 
+[Collection(SqlServerLiveDatabase.Name)]
 public sealed class SqlServerSchemaTargetParityTests : IDisposable
 {
     [SkippableFact]
@@ -22,10 +23,10 @@ public sealed class SqlServerSchemaTargetParityTests : IDisposable
             var emitted = Path.Combine(harness.Root, "emitted.json");
 
             var emit = await harness.EmitAsync(declared, emitted);
-            Assert.Equal(SchemaToolExitCodes.Success, emit.ExitCode);
+            Assert.True(SchemaToolExitCodes.Success == emit.ExitCode, emit.Reason);
 
             var apply = await harness.ApplyAuthorizedAsync(emitted, connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, apply.ExitCode);
+            Assert.True(SchemaToolExitCodes.Success == apply.ExitCode, apply.Reason);
             Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
 
             var unit = SchemaToolCliHarness.ParityDeclaration(table);

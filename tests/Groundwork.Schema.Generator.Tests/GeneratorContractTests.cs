@@ -88,7 +88,7 @@ public sealed class GeneratorContractTests
     }
 
     [Fact]
-    public void Lifecycle_policies_round_trip_from_attributes_to_the_compiled_declaration()
+    public void Lifecycle_policies_round_trip_from_attributes_to_the_compiled_declaration_in_canonical_order()
     {
         const string source = """
             #nullable enable
@@ -96,12 +96,13 @@ public sealed class GeneratorContractTests
             using Groundwork.Schema;
 
             [GwTable("orders", Scope = SchemaScope.Scoped, ConcurrencyToken = "version")]
-            [GwIndex("ix_orders_customer", "customer ASC")]
+            [GwIndex("z_orders_status", "status ASC")]
+            [GwIndex("a_orders_customer", "customer ASC")]
             [GwRetention(50, "placed_at", Trigger = SchemaRetentionTrigger.OnAppend, PartitionBy = "status")]
             [GwAppendIdempotency("00:10:00")]
             [GwRetentionIdempotency("01:00:00", LedgerName = "orders_retention_ops")]
-            [GwAggregate("by_customer", "group customer, count orders, sum total amount")]
-            [GwAggregate("daily", "day bucket_day placed_at, count orders, firstBy newest id placed_at DESC")]
+            [GwAggregate("z_daily", "day bucket_day placed_at, count orders, firstBy newest id placed_at DESC")]
+            [GwAggregate("a_by_customer", "group customer, count orders, sum total amount")]
             public partial class Order
             {
                 [GwKey, GwColumn(Length = 64)] public string Id { get; set; } = "";
@@ -136,7 +137,8 @@ public sealed class GeneratorContractTests
         Assert.Equal(TimeSpan.FromMinutes(10), generated.AppendIdempotency!.Window);
         Assert.Equal("orders_retention_ops", generated.RetentionIdempotency!.LedgerName);
         Assert.Equal("pending", generated.Columns.Single(column => column.Name == "status").Default!.Value);
-        Assert.Equal(2, generated.AggregationProfiles.Count);
+        Assert.Equal(["a_orders_customer", "z_orders_status"], generated.Indexes.Select(index => index.Name));
+        Assert.Equal(["a_by_customer", "z_daily"], generated.AggregationProfiles.Select(profile => profile.Name));
     }
 
     [Fact]

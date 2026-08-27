@@ -5,6 +5,7 @@ using Xunit;
 
 namespace Groundwork.SqlServer.Tests;
 
+[Collection(SqlServerLiveDatabase.Name)]
 public sealed class SqlServerSchemaToolTests : IDisposable
 {
     [SkippableFact]
@@ -19,33 +20,33 @@ public sealed class SqlServerSchemaToolTests : IDisposable
             var schema = harness.Temp("schema.json", SchemaToolCliHarness.InitialSchema(table));
 
             var plan = await harness.RunAsync(["plan", "--schema", schema], connection!);
-            Assert.Equal(SchemaToolExitCodes.PendingChanges, plan.ExitCode);
+            Assert.True(SchemaToolExitCodes.PendingChanges == plan.ExitCode, plan.Reason);
             Assert.Equal("pending", plan.Report.RootElement.GetProperty("outcome").GetString());
             Assert.Equal("SQLServer", plan.Report.RootElement.GetProperty("provider").GetProperty("name").GetString());
             Assert.True(plan.Report.RootElement.GetProperty("pendingOperations").GetArrayLength() > 0);
 
             var apply = await harness.RunAsync(["apply", "--schema", schema, "--safe"], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, apply.ExitCode);
+            Assert.True(SchemaToolExitCodes.Success == apply.ExitCode, apply.Reason);
             Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
             Assert.True(apply.Report.RootElement.GetProperty("targetMutated").GetBoolean());
 
             var status = await harness.RunAsync(["status", "--schema", schema], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, status.ExitCode);
+            Assert.True(SchemaToolExitCodes.Success == status.ExitCode, status.Reason);
             Assert.Equal("ready", status.Report.RootElement.GetProperty("outcome").GetString());
             Assert.Equal(0, status.Report.RootElement.GetProperty("pendingOperations").GetArrayLength());
 
             var evolved = harness.Temp("evolved.json", SchemaToolCliHarness.EvolvedSchema(table));
             var evolvedPlan = await harness.RunAsync(["plan", "--schema", evolved], connection!);
-            Assert.Equal(SchemaToolExitCodes.PendingChanges, evolvedPlan.ExitCode);
+            Assert.True(SchemaToolExitCodes.PendingChanges == evolvedPlan.ExitCode, evolvedPlan.Reason);
             var fingerprint = evolvedPlan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
 
             var authorized = await harness.RunAsync(
                 ["apply", "--schema", evolved, "--expected-plan", fingerprint], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, authorized.ExitCode);
+            Assert.True(SchemaToolExitCodes.Success == authorized.ExitCode, authorized.Reason);
             Assert.Equal("applied", authorized.Report.RootElement.GetProperty("outcome").GetString());
 
             var settled = await harness.RunAsync(["status", "--schema", evolved], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, settled.ExitCode);
+            Assert.True(SchemaToolExitCodes.Success == settled.ExitCode, settled.Reason);
             Assert.Equal("ready", settled.Report.RootElement.GetProperty("outcome").GetString());
         }
         finally
@@ -83,4 +84,14 @@ public sealed class SqlServerSchemaToolTests : IDisposable
         Path.Combine(AppContext.BaseDirectory, "Groundwork.SqlServer.dll"));
 
     public void Dispose() => harness.Dispose();
+}
+
+/// <summary>
+/// Serializes the journeys that drive one shared live database. Their schema catalogs are created
+/// on first use, so two concurrent tool sessions would race to create the same catalog.
+/// </summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class SqlServerLiveDatabase
+{
+    public const string Name = "SQL Server live database";
 }

@@ -29,6 +29,40 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task Verify_refuses_a_folded_index_that_exceeds_the_budget_once_its_search_key_is_expanded()
+    {
+        var folded = Temp("folded.json", """
+            {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"customer","type":"String","nullable":false,"length":200,"precision":null,"scale":null,"folding":"UnicodeOrdinalIgnoreCase","generation":"Supplied"}],"key":["id"],"indexes":[{"name":"by_customer","columns":[{"name":"customer","descending":false}],"includeNulls":true,"unique":false}]}]}
+            """);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["validate", "--schema", folded, "--provider", "fake", "--offline", "--output", "json"]));
+        Assert.Contains("GW-PORT-004", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_default_whose_literal_contradicts_the_column_type_is_a_format_refusal()
+    {
+        var mistyped = ValidSchema.Replace(
+            "\"generation\":\"Supplied\"",
+            "\"generation\":\"Supplied\",\"default\":{\"value\":42}");
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Read(mistyped));
+        Assert.Contains("default", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_null_aggregations_member_is_absent_but_a_wrong_typed_one_is_refused()
+    {
+        Assert.Empty(Assert.Single(GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", "\"indexes\":[],\"aggregations\":null"))
+            .Tables).Aggregations);
+
+        Assert.Throws<FormatException>(() => GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", "\"indexes\":[],\"aggregations\":7")));
+    }
+
+    [Fact]
     public async Task Invalid_schema_and_portability_violations_are_validation_failures()
     {
         var malformed = Temp("invalid.json", "{}");

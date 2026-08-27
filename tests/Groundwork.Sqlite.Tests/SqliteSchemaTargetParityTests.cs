@@ -17,11 +17,11 @@ public sealed class SqliteSchemaTargetParityTests : IDisposable
         var connection = $"Data Source={database}";
 
         var emit = await harness.EmitAsync(declared, emitted);
-        Assert.Equal(SchemaToolExitCodes.Success, emit.ExitCode);
+        Assert.True(SchemaToolExitCodes.Success == emit.ExitCode, emit.Reason);
 
         File.Create(database).Dispose();
         var apply = await harness.ApplyAuthorizedAsync(emitted, connection);
-        Assert.Equal(SchemaToolExitCodes.Success, apply.ExitCode);
+        Assert.True(SchemaToolExitCodes.Success == apply.ExitCode, apply.Reason);
         Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
 
         var unit = SchemaToolCliHarness.ParityDeclaration();

@@ -233,19 +233,20 @@ public sealed record SchemaTable
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
         Columns = Snapshot(columns, nameof(columns));
         Key = Snapshot(key, nameof(key));
-        Indexes = Snapshot(indexes ?? Array.Empty<SchemaIndex>(), nameof(indexes));
+        Indexes = Ordered(indexes ?? Array.Empty<SchemaIndex>(), nameof(indexes), index => index.Name);
         Scope = scope;
         Concurrency = concurrency;
         Timestamps = timestamps;
         Retention = retention;
         AppendIdempotency = appendIdempotency;
         RetentionIdempotency = retentionIdempotency;
-        Aggregations = Snapshot(aggregations ?? Array.Empty<SchemaAggregation>(), nameof(aggregations));
+        Aggregations = Ordered(aggregations ?? Array.Empty<SchemaAggregation>(), nameof(aggregations), aggregation => aggregation.Name);
     }
 
     public string Name { get; }
     public IReadOnlyList<SchemaColumn> Columns { get; }
     public IReadOnlyList<string> Key { get; }
+    /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>
     public IReadOnlyList<SchemaIndex> Indexes { get; }
     public SchemaScope Scope { get; }
     public SchemaConcurrency? Concurrency { get; }
@@ -253,18 +254,25 @@ public sealed record SchemaTable
     public SchemaRetention? Retention { get; }
     public SchemaIdempotency? AppendIdempotency { get; }
     public SchemaIdempotency? RetentionIdempotency { get; }
+    /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>
     public IReadOnlyList<SchemaAggregation> Aggregations { get; }
 
     private static IReadOnlyList<T> Snapshot<T>(IEnumerable<T> values, string parameterName) =>
         new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName)).ToArray());
+
+    private static IReadOnlyList<T> Ordered<T>(IEnumerable<T> values, string parameterName, Func<T, string> name) =>
+        new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName))
+            .OrderBy(name, StringComparer.Ordinal).ToArray());
 }
 
 public sealed record SchemaDocument
 {
     public SchemaDocument(IEnumerable<SchemaTable> tables)
     {
-        Tables = new ReadOnlyCollection<SchemaTable>((tables ?? throw new ArgumentNullException(nameof(tables))).ToArray());
+        Tables = new ReadOnlyCollection<SchemaTable>((tables ?? throw new ArgumentNullException(nameof(tables)))
+            .OrderBy(table => table.Name, StringComparer.Ordinal).ToArray());
     }
 
+    /// <summary>Held in canonical name order.</summary>
     public IReadOnlyList<SchemaTable> Tables { get; }
 }

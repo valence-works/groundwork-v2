@@ -41,11 +41,12 @@ public sealed class SchemaToolCliHarness : IDisposable
     /// <summary>
     /// One unit expressed as a canonical schema document. <see cref="ParityDeclaration"/> expresses
     /// the same unit through the fluent kernel builder, so a test can prove that a tool-applied
-    /// target and the runtime's expected target are the same value.
+    /// target and the runtime's expected target are the same value. The document deliberately
+    /// authors its indexes out of canonical order, which the schema model normalizes.
     /// </summary>
     public static string ParitySchema(string table = "parity_orders") =>
         $$$"""
-        {"tables":[{"name":"{{{table}}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":null},{"name":"customer","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"AsciiIgnoreCase","generation":"Supplied","default":null},{"name":"status","type":"String","nullable":false,"length":16,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":{"value":"pending"}}],"key":["id"],"indexes":[{"name":"ix_parity_customer","columns":[{"name":"customer","descending":false}],"includeNulls":true,"unique":false}],"scope":"Scoped","concurrency":{"token":"version"},"timestamps":"None","retention":null,"appendIdempotency":null,"retentionIdempotency":null,"aggregations":[]}]}
+        {"tables":[{"name":"{{{table}}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":null},{"name":"customer","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"AsciiIgnoreCase","generation":"Supplied","default":null},{"name":"status","type":"String","nullable":false,"length":16,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":{"value":"pending"}}],"key":["id"],"indexes":[{"name":"z_parity_customer","columns":[{"name":"customer","descending":false}],"includeNulls":true,"unique":false},{"name":"a_parity_status","columns":[{"name":"status","descending":false}],"includeNulls":true,"unique":false}],"scope":"Scoped","concurrency":{"token":"version"},"timestamps":"None","retention":null,"appendIdempotency":null,"retentionIdempotency":null,"aggregations":[]}]}
         """;
 
     public static StorageUnit ParityDeclaration(string table = "parity_orders") =>
@@ -54,7 +55,8 @@ public sealed class SchemaToolCliHarness : IDisposable
             .String("customer", 64, column => column.Required().Collation(PortableCollation.OrdinalIgnoreCase))
             .String("status", 16, column => column.Required().Default("pending"))
             .Key("id")
-            .Index("ix_parity_customer", "customer")
+            .Index("a_parity_status", "status")
+            .Index("z_parity_customer", "customer")
             .Scoped()
             .OptimisticConcurrency()
             .Build();
@@ -112,4 +114,28 @@ public sealed class SchemaToolCliHarness : IDisposable
     public void Dispose() => Directory.Delete(Root, recursive: true);
 }
 
-public sealed record SchemaToolCliRun(int ExitCode, JsonDocument Report, string Output, string Error);
+public sealed record SchemaToolCliRun(int ExitCode, JsonDocument Report, string Output, string Error)
+{
+    /// <summary>
+    /// The exit code together with the sanitized reasons the tool reported, so a failed exit-code
+    /// assertion names the refusal instead of leaving an operator with a bare number.
+    /// </summary>
+    public string Reason
+    {
+        get
+        {
+            var diagnostics = Report.RootElement.TryGetProperty("diagnostics", out var reported) &&
+                              reported.ValueKind == JsonValueKind.Array
+                ? reported.EnumerateArray()
+                    .Select(diagnostic => string.Join(' ', new[] { "code", "message", "target" }
+                        .Select(name => diagnostic.TryGetProperty(name, out var part) ? part.GetString() : null)
+                        .Where(part => !string.IsNullOrEmpty(part))))
+                    .Where(text => text.Length != 0)
+                    .ToArray()
+                : [];
+            return $"exit {ExitCode}: " + (diagnostics.Length == 0
+                ? Output.Trim()
+                : string.Join(Environment.NewLine, diagnostics));
+        }
+    }
+}
