@@ -1717,7 +1717,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     private const string LedgerFingerprint = "input_fingerprint";
     private const string LedgerResult = "exact_result";
     private const string HighWaterTable = "__groundwork_sequence_high_waters";
-    private const string LazyDdlLockPrefix = "groundwork.lazy-ddl:";
+    private const string LazyDdlLockPrefix = "groundwork:lazy-ddl:";
     private const string HighWaterValue = "high_water";
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
