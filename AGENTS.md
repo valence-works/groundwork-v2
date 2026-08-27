@@ -22,9 +22,15 @@ of them, and neither finds out until a pull request already exists. The claim
 is therefore on the issue, where everyone looks, rather than in any one agent's
 head.
 
+- **Name the branch for the issue**: `<prefix>/<issue number>-<slug>`, for
+  example `claude/203-key-coverage`. Without the number in the name there is no
+  way to ask whether an issue is already being worked short of reading every
+  branch, and two people can pick different reasonable names for the same issue
+  and never recognise each other's work.
 - **Before starting**, the issue must have no assignee, no open pull request
-  referencing it, and no remote branch named for it. Free work is
-  `is:issue is:open no:assignee`.
+  referencing it, and no remote branch carrying its number. Free work is
+  `is:issue is:open no:assignee`; the branch check is
+  `git ls-remote --heads origin | grep -E "/<issue number>-"`.
 - **To claim it**, assign yourself and leave one comment naming the branch you
   will push to and the date. The assignee is the signal that it is taken; the
   comment says who and where, because several agents can share one account and
