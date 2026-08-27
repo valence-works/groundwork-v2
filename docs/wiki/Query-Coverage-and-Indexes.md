@@ -53,7 +53,7 @@ Three details worth knowing:
 
 > **MongoDB caveat.** MongoDB stores the key in `_id` but filters on the declared field names, and
 > creates no index over them, so a key-bounded read is admitted by the gate and then scans. The
-> verdict is portable; the plan is not yet. See issue #238.
+> verdict is portable; the plan is not yet. See [#238](https://github.com/valence-works/groundwork-v2/issues/238).
 
 ## The analyzer
 
