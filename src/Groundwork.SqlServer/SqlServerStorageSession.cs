@@ -1907,22 +1907,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private ColumnDefinition? SequenceColumnDefinition => UserColumns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
     private static string Quote(string value) => SqlServerProviderConnection.QuoteIdentifier(value);
 
-    private static object? FromSqlServer(object value, ColumnDefinition definition)
-    {
-        if (value is DBNull) return null;
-        return definition.Type switch
-        {
-            PortableType.Boolean => Convert.ToBoolean(value, CultureInfo.InvariantCulture),
-            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
-            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
-            PortableType.Decimal => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
-            PortableType.Guid => (Guid)value,
-            PortableType.DateTimeOffset => ((DateTimeOffset)value).ToUniversalTime(),
-            PortableType.Binary => ((byte[])value).ToArray(),
-            PortableType.Json => JsonDocument.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!).RootElement.Clone(),
-            _ => value
-        };
-    }
+    private static object? FromSqlServer(object value, ColumnDefinition definition) =>
+        SqlServerDialect.ReadPortableValue(value, definition);
 
     private sealed class ConcurrencyConflictException(long? version = null) : Exception
     {

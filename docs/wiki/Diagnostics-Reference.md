@@ -264,6 +264,20 @@ Grouped by concern:
 
 ---
 
+## `GW-MIGRATION-*` — data migrations
+
+| Code | Meaning |
+| --- | --- |
+| `GW-MIGRATION-001` | Provider does not advertise a required data-migration capability |
+| `GW-MIGRATION-002` | A migration identity was recorded with a different request fingerprint |
+| `GW-MIGRATION-003` | The provider session offers no data-migration execution |
+| `GW-MIGRATION-004` | The migration cannot be expressed against its subject |
+| `GW-MIGRATION-005` | Data-migration ledger state is missing, malformed, or self-contradictory |
+| `GW-MIGRATION-006` | A transform produced a column it did not declare as a target |
+| `GW-MIGRATION-007` | A migration stopped before its source was exhausted and can be resumed |
+
+---
+
 ## Other
 
 | Code | Meaning |

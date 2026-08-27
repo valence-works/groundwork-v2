@@ -191,6 +191,32 @@ internal sealed class SqlServerDialect : RelationalDialect
     public override object? ConvertValue(object? value, ColumnDefinition definition) =>
         SqlServerProviderConnection.ToSqlServerValue(value, definition);
 
+    public override object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is null ? null : ReadPortableValue(value, definition);
+
+    /// <summary>
+    /// Maps one stored SQL Server value back to the portable CLR shape its declaration names. The
+    /// storage session and the data-migration scan share this one definition, so a host transform
+    /// sees the declared type rather than the driver's native representation.
+    /// </summary>
+    public static object? ReadPortableValue(object value, ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (value is DBNull) return null;
+        return definition.Type switch
+        {
+            PortableType.Boolean => Convert.ToBoolean(value, CultureInfo.InvariantCulture),
+            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
+            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
+            PortableType.Decimal => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+            PortableType.Guid => (Guid)value,
+            PortableType.DateTimeOffset => ((DateTimeOffset)value).ToUniversalTime(),
+            PortableType.Binary => ((byte[])value).ToArray(),
+            PortableType.Json => JsonDocument.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!).RootElement.Clone(),
+            _ => value
+        };
+    }
+
     public override void Validate(ColumnDefinition definition)
     {
         if (definition.MaxLength is <= 0 ||
@@ -298,6 +324,23 @@ internal sealed class SqlServerDialect : RelationalDialect
             throw new InvalidOperationException($"SQL Server schema fence for '{target}' is no longer owned by this operation.");
     }
 
+    public override int ParameterBudget => SqlServerQueryRenderer.ParameterBudget;
+
+    public override string LimitClause(int rows) => $" OFFSET 0 ROWS FETCH NEXT {rows} ROWS ONLY";
+
+    public override string? DataMigrationLedgerUpsertSql =>
+        "MERGE [__groundwork_data_migrations] WITH (HOLDLOCK) AS target " +
+        "USING (SELECT @subject AS subject_id, @provider AS provider_name, @migration AS migration_id) AS source " +
+        "ON target.subject_id=source.subject_id AND target.provider_name=source.provider_name " +
+        "AND target.migration_id=source.migration_id " +
+        "WHEN MATCHED THEN UPDATE SET unit_name=@unit, request_fingerprint=@fingerprint, state=@state, " +
+        "[cursor]=@cursor, rows_scanned=@scanned, rows_changed=@changed, batches=@batches, " +
+        "updated_at=@updated, completed_at=@completed " +
+        "WHEN NOT MATCHED THEN INSERT (subject_id,provider_name,migration_id,unit_name,request_fingerprint," +
+        "state,[cursor],rows_scanned,rows_changed,batches,started_at,updated_at,completed_at) " +
+        "VALUES (@subject,@provider,@migration,@unit,@fingerprint,@state,@cursor,@scanned,@changed,@batches," +
+        "@started,@updated,@completed);";
+
     public override void EnsureInfrastructure(DbConnection connection)
     {
         using var command = connection.CreateCommand();
@@ -322,6 +365,22 @@ internal sealed class SqlServerDialect : RelationalDialect
                 column_name nvarchar(450) NOT NULL,
                 algorithm_id nvarchar(512) NOT NULL,
                 CONSTRAINT [PK___groundwork_search_key_algorithms] PRIMARY KEY NONCLUSTERED (table_name, column_name));
+            IF OBJECT_ID(N'[__groundwork_data_migrations]', N'U') IS NULL
+            CREATE TABLE [__groundwork_data_migrations] (
+                subject_id nvarchar(300) NOT NULL,
+                provider_name nvarchar(128) NOT NULL,
+                migration_id nvarchar(300) NOT NULL,
+                unit_name nvarchar(450) NOT NULL,
+                request_fingerprint nvarchar(128) NOT NULL,
+                state nvarchar(16) NOT NULL,
+                [cursor] nvarchar(max) NULL,
+                rows_scanned bigint NOT NULL,
+                rows_changed bigint NOT NULL,
+                batches int NOT NULL,
+                started_at nvarchar(40) NOT NULL,
+                updated_at nvarchar(40) NOT NULL,
+                completed_at nvarchar(40) NULL,
+                CONSTRAINT [PK___groundwork_data_migrations] PRIMARY KEY NONCLUSTERED (subject_id, provider_name, migration_id));
             """;
         command.ExecuteNonQuery();
     }

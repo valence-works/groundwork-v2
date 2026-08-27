@@ -1716,22 +1716,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     private static string Quote(string value) => SqliteProviderConnection.QuoteIdentifier(value);
     private static object? ToSqlite(object? value, ColumnDefinition definition) => SqliteProviderConnection.ToSqliteValue(value, definition);
 
-    private static object? FromSqlite(object value, ColumnDefinition definition)
-    {
-        if (value is DBNull) return null;
-        return definition.Type switch
-        {
-            PortableType.Boolean => Convert.ToInt64(value, CultureInfo.InvariantCulture) != 0,
-            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
-            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
-            PortableType.Decimal => decimal.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture),
-            PortableType.Guid => Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)! ),
-            PortableType.DateTimeOffset => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            PortableType.Binary => ((byte[])value).ToArray(),
-            PortableType.Json => value is string json ? JsonDocument.Parse(json).RootElement.Clone() : value,
-            _ => value
-        };
-    }
+    private static object? FromSqlite(object value, ColumnDefinition definition) =>
+        SqliteDialect.ReadPortableValue(value, definition);
 
     private void ThrowIfClosed()
     {

@@ -24,6 +24,7 @@ public sealed class RelationalSchemaToolSession : ISchemaToolProviderSession
         Executor = executor ?? throw new ArgumentNullException(nameof(executor));
         Targets = new DeclarationCompiler(compile ?? throw new ArgumentNullException(nameof(compile)));
         Inspector = new DeployedHistoryInspector(inspect ?? executor.InspectDeployedHistory);
+        DataMigrations = executor;
         this.release = release;
     }
 
@@ -34,6 +35,8 @@ public sealed class RelationalSchemaToolSession : ISchemaToolProviderSession
     public IPhysicalSchemaExecutor Executor { get; }
 
     public IPhysicalSchemaHistoryInspector Inspector { get; }
+
+    public IDataMigrationExecutor? DataMigrations { get; }
 
     public void Dispose() => release?.Invoke();
 

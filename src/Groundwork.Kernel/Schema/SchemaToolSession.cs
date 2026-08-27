@@ -17,6 +17,13 @@ public interface ISchemaToolProviderSession : IDisposable
     IPhysicalSchemaTargetCompiler Targets { get; }
     IPhysicalSchemaExecutor Executor { get; }
     IPhysicalSchemaHistoryInspector Inspector { get; }
+
+    /// <summary>
+    /// The provider's data-migration execution, or null when it has none. Reporting pending versus
+    /// applied data migrations needs only the ledger, so status works without a host transform
+    /// catalog; a provider that returns null simply reports no data-migration state.
+    /// </summary>
+    IDataMigrationExecutor? DataMigrations => null;
 }
 
 public sealed record SchemaToolProviderOptions(

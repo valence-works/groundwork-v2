@@ -67,6 +67,9 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
 
     public IMongoSchemaCoordinator Schema { get; }
 
+    /// <summary>Data-migration execution for this connection's database.</summary>
+    public MongoDataMigrationExecutor DataMigrations => new(state.Context);
+
     public ProviderFit ProviderSequenceFit => state.Context.SupportsTransactions()
         ? new ProviderFit.Supported()
         : new ProviderFit.Unsupported([MongoCapabilities.ProviderSequence]);
@@ -402,6 +405,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         return new MongoSchemaApplyResult(new MongoSchemaDiff(changes), changes.Count != 0);
     }
 
+    /// <summary>
+    /// Rows per bulk write. MongoDB has no multi-document update that carries a different value per
+    /// document, so a batch is one <c>bulkWrite</c> command rather than one command per document.
+    /// </summary>
+    private const int SearchKeyBackfillBatchSize = 512;
+
     private static void BackfillSearchKeys(
         IMongoCollection<BsonDocument> collection,
         StorageUnit desired,
@@ -413,28 +422,38 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         if (pending.Length == 0)
             return;
 
+        // The same host-process transform the chunked data-migration runner drives, so a search key
+        // written by a schema apply and one written by a resumable migration are one definition.
+        var transform = new DerivedColumnTransform(desired, pending);
         var columns = desired.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        var batch = new List<WriteModel<BsonDocument>>(SearchKeyBackfillBatchSize);
         foreach (var document in collection.Find(new BsonDocument()).ToEnumerable())
         {
-            var updates = new BsonDocument();
-            foreach (var derived in pending)
+            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var source in transform.SourceColumns)
             {
-                var source = columns[derived.SourceColumn];
-                var hidden = columns[derived.Name];
-                var value = document.TryGetValue(source.Name, out var stored)
-                    ? MongoValueCodec.Decode(stored, source)
+                row[source] = document.TryGetValue(source, out var stored) && !stored.IsBsonNull
+                    ? MongoValueCodec.Decode(stored, columns[source])
                     : null;
-                var projected = SearchKeyProjection.Populate(desired,
-                    new Dictionary<string, object?>(StringComparer.Ordinal) { [source.Name] = value });
-                projected.TryGetValue(derived.Name, out var searchKey);
-                updates[hidden.Name] = MongoValueCodec.Encode(searchKey, hidden);
             }
 
-            if (updates.ElementCount != 0)
-                collection.UpdateOne(
-                    BuildBackfillFilter(document, pending),
-                    new BsonDocument("$set", updates));
+            var produced = transform.Transform(new DataMigrationRow(row));
+            if (!produced.HasValues)
+                continue;
+            var updates = new BsonDocument();
+            foreach (var pair in produced.Values!)
+                updates[pair.Key] = MongoValueCodec.Encode(pair.Value, columns[pair.Key]);
+            batch.Add(new UpdateOneModel<BsonDocument>(
+                BuildBackfillFilter(document, pending),
+                new BsonDocument("$set", updates)));
+            if (batch.Count < SearchKeyBackfillBatchSize)
+                continue;
+            collection.BulkWrite(batch, new BulkWriteOptions { IsOrdered = false });
+            batch.Clear();
         }
+
+        if (batch.Count != 0)
+            collection.BulkWrite(batch, new BulkWriteOptions { IsOrdered = false });
     }
 
     internal static BsonDocument BuildBackfillFilter(

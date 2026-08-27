@@ -1640,20 +1640,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     private static object? ConvertValue(object? value, ColumnDefinition definition) =>
         new PostgreSqlDialect().ConvertValue(value, definition);
 
-    private static object? FromDatabase(object value, ColumnDefinition definition)
-    {
-        if (value is DBNull)
-            return null;
-        return definition.Type switch
-        {
-            PortableType.DateTimeOffset => new DateTimeOffset(Convert.ToInt64(value, CultureInfo.InvariantCulture), TimeSpan.Zero),
-            PortableType.Json when value is string json => JsonDocument.Parse(json).RootElement.Clone(),
-            PortableType.Json when value is JsonDocument document => document.RootElement.Clone(),
-            PortableType.Json when value is JsonElement element => element.Clone(),
-            PortableType.Binary when value is byte[] bytes => bytes.ToArray(),
-            _ => value
-        };
-    }
+    private static object? FromDatabase(object value, ColumnDefinition definition) =>
+        PostgreSqlDialect.ReadPortableValue(value, definition);
 
     private ColumnDefinition Column(string name) => Unit.Columns.First(column => column.Name == name);
 

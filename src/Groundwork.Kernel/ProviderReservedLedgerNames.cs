@@ -14,6 +14,7 @@ internal static class ProviderReservedLedgerNames
         "__groundwork_schema_locks",
         "__groundwork_schema_fences",
         "__groundwork_search_key_algorithms",
+        "__groundwork_data_migrations",
         "__groundwork_sequence_high_waters",
         DefaultAppendLedger,
         DefaultRetentionLedger

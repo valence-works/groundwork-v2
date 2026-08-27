@@ -130,6 +130,15 @@ public abstract class RelationalDialect
 
     public abstract object? ConvertValue(object? value, ColumnDefinition definition);
 
+    /// <summary>
+    /// The read direction of <see cref="ConvertValue"/>: maps one stored value back to the portable
+    /// CLR shape the declaration names. A host-process data-migration transform must see the same
+    /// value type whatever provider it runs against, so the row it is given is mapped through this
+    /// rather than handed the driver's native representation.
+    /// </summary>
+    public virtual object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is DBNull ? null : value;
+
     public abstract void Validate(ColumnDefinition definition);
 
     public abstract bool TryMapUniqueViolation(DbException exception, out string indexName);
@@ -218,6 +227,27 @@ public abstract class RelationalDialect
             : null;
 
     public virtual string? BackfillColumnSql(string table, ColumnDefinition column) => null;
+
+    /// <summary>
+    /// The most parameters one statement may bind on this provider. It bounds a data-migration
+    /// chunk, so a chunk is sized to what the provider can actually bind instead of failing on it.
+    /// The default is the smallest budget any shipped provider has, so an unrevised custom dialect
+    /// is conservative rather than wrong.
+    /// </summary>
+    public virtual int ParameterBudget => 999;
+
+    /// <summary>Caps an ordered scan at <paramref name="rows"/> rows.</summary>
+    public virtual string LimitClause(int rows) => $" LIMIT {rows}";
+
+    /// <summary>
+    /// Upserts one row of the data-migration ledger, keyed by subject, provider, and migration id.
+    /// A dialect that returns non-null must also create
+    /// <see cref="RelationalDataMigrationLedger.TableName"/> in <see cref="EnsureInfrastructure"/>;
+    /// returning null withholds the <see cref="Groundwork.Kernel.Schema.DataMigrationCapabilities.AppliedLedger"/>
+    /// capability, and the kernel then refuses data migrations on this dialect rather than running
+    /// them unrecorded.
+    /// </summary>
+    public virtual string? DataMigrationLedgerUpsertSql => null;
 
     public virtual void ApplyProviderDefinition(
         DbConnection connection,
