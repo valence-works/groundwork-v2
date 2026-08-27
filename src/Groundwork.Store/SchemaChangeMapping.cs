@@ -22,7 +22,12 @@ public static class SchemaChangeMapping
             .Where(operation => operation.Kind is not PhysicalSchemaOperationKind.ValidatePhysicalSchema and
                                 not PhysicalSchemaOperationKind.PublishAppliedState and
                                 not PhysicalSchemaOperationKind.BackfillColumn and
-                                not PhysicalSchemaOperationKind.FinalizeColumn)
+                                not PhysicalSchemaOperationKind.FinalizeColumn and
+                                // A supersession marker performs no physical work at all: it records
+                                // that a column is deliberately retained, or that the DropColumn
+                                // beside it in the contract plan removed it. That removal is already
+                                // described; describing the marker too would double-count it.
+                                not PhysicalSchemaOperationKind.ColumnSupersession)
             .Select(operation => new SchemaChange(Describe(operation), operation.SubjectIdentity))
             .ToArray();
     }

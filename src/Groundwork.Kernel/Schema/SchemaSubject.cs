@@ -11,14 +11,59 @@ public sealed record SchemaEvolutionMetadata
     public SchemaEvolutionMetadata(
         bool isDestructive = false,
         string? semanticMigrationId = null,
-        bool retiresPrimaryStorage = false)
+        bool retiresPrimaryStorage = false,
+        ImmutableArray<ColumnSupersession> supersessions = default,
+        TimeSpan dualPresenceWindow = default)
     {
         if (semanticMigrationId is not null && string.IsNullOrWhiteSpace(semanticMigrationId))
             throw new ArgumentException("A semantic migration id cannot be empty.", nameof(semanticMigrationId));
+        if (dualPresenceWindow < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(dualPresenceWindow), dualPresenceWindow, "A dual-presence window cannot run backwards.");
+        }
 
         IsDestructive = isDestructive;
         SemanticMigrationId = semanticMigrationId;
         RetiresPrimaryStorage = retiresPrimaryStorage;
+        // The parameter is an ImmutableArray rather than an IEnumerable so that its name and type
+        // bind to the property of the same name: this record is round-tripped through
+        // System.Text.Json by PhysicalSchemaAppliedStateSerializer, which refuses a constructor
+        // parameter it cannot match to a property.
+        Supersessions = supersessions.IsDefaultOrEmpty
+            ? []
+            : [.. supersessions
+                .Select(supersession => supersession ?? throw new ArgumentException(
+                    "A column supersession cannot be null.", nameof(supersessions)))
+                    .OrderBy(supersession => supersession.Name, StringComparer.Ordinal)];
+        DualPresenceWindow = dualPresenceWindow;
+        if (Supersessions.IsEmpty)
+            return;
+
+        if (Supersessions.Select(supersession => supersession.Name)
+                .Distinct(StringComparer.Ordinal).Count() != Supersessions.Length)
+        {
+            throw new ArgumentException(
+                "A column can be superseded only once in one declaration.", nameof(supersessions));
+        }
+        // Every supersession is completed by a backfill, and the readiness gate is that backfill's
+        // recorded completion. A supersession with nothing to populate its replacement column is a
+        // data-loss trap wearing the workflow's name, so it is refused rather than documented.
+        if (string.IsNullOrWhiteSpace(semanticMigrationId))
+        {
+            throw new ArgumentException(
+                "A declaration that supersedes a column requires a semantic migration id: the data migration " +
+                "recorded under it is what populates the replacement column, and its recorded completion is " +
+                "what opens the contract gate.",
+                nameof(semanticMigrationId));
+        }
+        if (retiresPrimaryStorage)
+        {
+            throw new ArgumentException(
+                "A retired subject drops its whole primary storage, so superseding one of its columns describes " +
+                "work that cannot happen.",
+                nameof(supersessions));
+        }
     }
 
     public bool IsDestructive { get; }
@@ -33,6 +78,21 @@ public sealed record SchemaEvolutionMetadata
     /// from an absent declaration.
     /// </summary>
     public bool RetiresPrimaryStorage { get; }
+
+    /// <summary>
+    /// Columns this declaration replaces across a dual-presence window, in superseded-column order.
+    /// A superseded column is deliberately absent from <see cref="SchemaSubject.Columns"/>: the
+    /// declaration that supersedes it cannot then read it, write it, alter it, or rename it, which
+    /// is what makes the expand plan invisible to the application version that still owns it.
+    /// </summary>
+    public ImmutableArray<ColumnSupersession> Supersessions { get; }
+
+    /// <summary>
+    /// How long a superseded column must stay in place before the contract plan may remove it,
+    /// measured from the later of the retention being recorded and its backfill being recorded
+    /// complete. It bounds how long a pre-expand application version may still be writing.
+    /// </summary>
+    public TimeSpan DualPresenceWindow { get; }
 }
 
 /// <summary>
@@ -76,8 +136,15 @@ public sealed class SchemaSubject
                 Evolution.SemanticMigrationId,
                 // Appended only when set, so an already-deployed subject keeps the exact
                 // fingerprint it was recorded under instead of hitting a persisted boundary.
-                .. Evolution.RetiresPrimaryStorage ? (string?[])["retired"] : []
+                .. Evolution.RetiresPrimaryStorage ? (string?[])["retired"] : [],
+                .. Evolution.Supersessions.IsEmpty
+                    ? (string?[])[]
+                    : [
+                        .. Evolution.Supersessions.Select(supersession => "supersedes:" + supersession.Canonical),
+                        "dual-presence:" + Evolution.DualPresenceWindow.Ticks.ToString(CultureInfo.InvariantCulture)
+                    ]
             ]);
+        ValidateSupersessions(definition, Evolution);
     }
 
     public StorageUnitId Id => definition.Id;
@@ -167,6 +234,36 @@ public sealed class SchemaSubject
     }
 
     public override string ToString() => Id.Value;
+
+    /// <summary>
+    /// A supersession names a column that is leaving and one that is arriving. The arriving column
+    /// has to be declared, and the leaving one must not be: a column that is still declared is not
+    /// superseded, it is simply present, and the expand plan would keep maintaining it.
+    /// </summary>
+    private static void ValidateSupersessions(StorageUnit unit, SchemaEvolutionMetadata evolution)
+    {
+        if (evolution.Supersessions.IsEmpty)
+            return;
+        var declared = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var supersession in evolution.Supersessions)
+        {
+            if (declared.Contains(supersession.Name))
+            {
+                throw new ArgumentException(
+                    $"Superseded column '{supersession.Name}' is still declared by '{unit.Name}'. " +
+                    "Remove it from the declaration: a superseded column is retained physically and read by " +
+                    "nothing the declaration owns.",
+                    nameof(unit));
+            }
+            if (!declared.Contains(supersession.ReplacementColumn))
+            {
+                throw new ArgumentException(
+                    $"Replacement column '{supersession.ReplacementColumn}' for superseded column " +
+                    $"'{supersession.Name}' is not declared by '{unit.Name}'.",
+                    nameof(unit));
+            }
+        }
+    }
 
     private static void Validate(StorageUnit unit)
     {

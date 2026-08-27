@@ -5,14 +5,16 @@
 ## CLI
 
 ```text
-groundwork plan     --schema groundwork.schema.json --provider <alias>
+groundwork plan     --schema groundwork.schema.json --provider <alias> [--phase expand|contract]
 groundwork validate --schema groundwork.schema.json --provider <alias> [--offline]
-groundwork status   --schema groundwork.schema.json --provider <alias>
-groundwork apply    --schema groundwork.schema.json --provider <alias> --safe
+groundwork status   --schema groundwork.schema.json --provider <alias> [--phase expand|contract]
+groundwork apply    --schema groundwork.schema.json --provider <alias> --safe [--phase expand|contract]
 groundwork schema emit --input schema.json --file groundwork.schema.json
 ```
 
 Use `--output json` for the stable machine-readable report. Exit codes are `0` success, `2` pending changes, `3` validation blocked, `4` authorization required, `5` invalid invocation, `10` execution failure, and `130` cancellation.
+
+`--phase` selects which half of an expand–contract evolution is planned. It defaults to `expand`, the additive half, and changes nothing for a declaration that supersedes no column. `--phase contract` removes superseded columns and refuses with a `GW-EXPAND-*` code until its readiness is established from the applied schema ledger and the data-migration ledger; the report carries a `supersessions` array with `retainedSince`, `backfillCompletedAt`, and `contractableAt` per superseded column. The two phases of one declaration have distinct plan fingerprints, so an `--expected-plan` value that authorizes the expand can never authorize the contract. See `docs/v2/expand-contract.md`.
 
 `apply` mutates nothing unless the invocation selects `--safe` or supplies an exact `--expected-plan` fingerprint. Safe mode refuses protected work. A destructive plan requires its current fingerprint plus every exact operation identity through `--allow-destructive`; semantic migrations require their exact IDs through `--allow-semantic`.
 
