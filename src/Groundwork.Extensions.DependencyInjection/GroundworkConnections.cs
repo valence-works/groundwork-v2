@@ -55,8 +55,14 @@ internal sealed class GroundworkConnections : IGroundworkConnections
     }
 
     /// <summary>Materializes one connection from its named options. Called once per name.</summary>
+    /// <remarks>
+    /// The lifetime guard runs here as well as in the constructor above, so it is on every path that
+    /// can reach a connection — including a keyed resolution that never touches
+    /// <see cref="IGroundworkConnections"/> — rather than only the paths a careful consumer takes.
+    /// </remarks>
     internal static IStorageProviderConnection Open(IServiceProvider provider, string name)
     {
+        provider.GetRequiredService<GroundworkRegistrationGuard>().EnsureLifetimesAreHosting();
         var configured = provider
             .GetRequiredService<IOptionsMonitor<GroundworkConnectionOptions>>()
             .Get(name);
