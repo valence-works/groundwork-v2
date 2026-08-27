@@ -160,6 +160,26 @@ missing column, and index drift are unaffected.
 
 ---
 
+## `GW-SET-*` — set-based mutation
+
+`UpdateWhere` and `DeleteWhere` are admitted by the coverage rule that admits an equivalent read,
+so an uncovered set-based mutation is refused with a `GW-COVER-*` code and is accepted only by the
+same `AcceptScan` a read would need. The codes below cover what is specific to mutating a set.
+
+| Code | Meaning |
+| --- | --- |
+| `GW-SET-001` | Provider does not advertise set-based mutation. Check `ISetMutationStorageSession` / the `groundwork.storage.set-mutation` capability first. |
+| `GW-SET-002` | Assignment column is not an application-declared column of the unit, is provider-owned, or is a declared key column. A set-based update never moves rows between identities. |
+| `GW-SET-003` | A set-based update was issued with no column assignments. |
+| `GW-SET-004` | Assignment to a `PortableType.Json` column. Assign a portable scalar or binary column instead. |
+
+Assignments are values, never column-relative expressions, so a set-based mutation is naturally
+replay-safe: re-issuing one after a lost acknowledgement reaches the same rows with the same result.
+Assigning the optimistic token is refused as `GW-WRITE-CONCURRENCY-003`, by the same rule that
+refuses supplying it to a keyed write; a set-based update bumps the token itself.
+
+---
+
 ## `GW-APPEND-*` / `GW-RETENTION-*` / `GW-INSPECT-*`
 
 | Code | Meaning |

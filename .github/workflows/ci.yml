@@ -115,7 +115,26 @@ jobs:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/q4ci
-        run: dotnet test tests/Groundwork.Differential.Tests --no-restore --configuration Release
+        run: >-
+          dotnet test tests/Groundwork.Differential.Tests --no-restore --configuration Release
+          --logger "trx;LogFileName=differential.trx"
+          --results-directory artifacts/differential
+      # A four-provider proof whose live-provider cases skip is green and proves nothing:
+      # unconfigured, the set-based mutation class reports one passed and three skipped and exit 0.
+      # The job asserts the proofs executed rather than trusting the exit code.
+      - name: Refuse a run whose set-based mutation proofs did not execute
+        run: |
+          outcomes() {
+            grep -o "testName=\"Groundwork.Differential.Tests.SetMutationDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
+              artifacts/differential/*.trx | grep -c "outcome=\"$1\"" || true
+          }
+          executed=$(outcomes Passed)
+          notExecuted=$(outcomes NotExecuted)
+          echo "SetMutationDifferentialTests passed: $executed, not executed: $notExecuted"
+          if [ "$executed" -lt 5 ] || [ "$notExecuted" -ne 0 ]; then
+            echo "::error::The four-provider set-based mutation proofs did not run against every provider." >&2
+            exit 1
+          fi
       - name: Upload native query plans
         if: always()
         uses: actions/upload-artifact@v4

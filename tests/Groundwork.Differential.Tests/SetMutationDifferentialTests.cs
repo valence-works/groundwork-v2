@@ -5,6 +5,7 @@ using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
 using Groundwork.SqlServer;
+using Groundwork.Substrate.Relational;
 using Groundwork.Sqlite;
 using Groundwork.Store;
 using Xunit;
@@ -21,6 +22,42 @@ namespace Groundwork.Differential.Tests;
 public sealed class SetMutationDifferentialTests
 {
     private const string Scan = "GW-SCAN-0089";
+
+    /// <summary>
+    /// The rendered artifact, for each relational dialect. The assignment parameters are numbered
+    /// in their own namespace: the predicate fragment numbers its own values from <c>p0</c>, so
+    /// numbering assignments the same way would collide on the very first one.
+    /// </summary>
+    [Fact]
+    public void Set_mutation_renders_assignments_and_the_predicate_in_disjoint_parameter_namespaces()
+    {
+        AssertRendered(new SqliteQueryRenderer(), "\"label\"", "\"__groundwork_version\"");
+        AssertRendered(new PostgreSqlQueryRenderer(), "\"label\"", "\"__groundwork_version\"");
+        AssertRendered(new SqlServerQueryRenderer(), "[label]", "[__groundwork_version]");
+
+        static void AssertRendered(RelationalQueryRenderer renderer, string label, string version)
+        {
+            var unit = CreateUnit("p43_render");
+            var update = renderer.RenderUpdateWhere(
+                unit.Name, Status(unit, "old"), ["label"], "__groundwork_version");
+            Assert.Equal(new[] { "s0" }, update.AssignmentParameters.ToArray());
+            Assert.Equal(new[] { "p0" }, update.Parameters.Select(parameter => parameter.Name).ToArray());
+            Assert.Contains(label + " = @s0", update.CommandText, StringComparison.Ordinal);
+            Assert.Contains(version + " = " + version + " + 1", update.CommandText, StringComparison.Ordinal);
+            Assert.Contains("@p0", update.CommandText, StringComparison.Ordinal);
+            Assert.StartsWith("UPDATE ", update.CommandText, StringComparison.Ordinal);
+
+            var delete = renderer.RenderDeleteWhere(unit.Name, Status(unit, "old"));
+            Assert.StartsWith("DELETE FROM ", delete.CommandText, StringComparison.Ordinal);
+            Assert.Empty(delete.AssignmentParameters);
+            Assert.Equal(new[] { "p0" }, delete.Parameters.Select(parameter => parameter.Name).ToArray());
+
+            // No token column, no increment: a unit that declares no optimistic concurrency has
+            // nothing to bump, and inventing one would write a column that does not exist.
+            var untracked = renderer.RenderUpdateWhere(unit.Name, Status(unit, "old"), ["label"]);
+            Assert.DoesNotContain(" + 1", untracked.CommandText, StringComparison.Ordinal);
+        }
+    }
 
     [Fact]
     public void SQLite_set_based_mutation_matches_the_portable_contract() =>
