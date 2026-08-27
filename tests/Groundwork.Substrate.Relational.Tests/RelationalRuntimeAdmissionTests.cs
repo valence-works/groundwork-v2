@@ -14,7 +14,7 @@ public sealed class RelationalRuntimeAdmissionTests
         var admission = new RelationalRuntimeAdmission(
             "stub.schema-admission",
             desired => Target(desired),
-            _ =>
+            (_, _) =>
             {
                 inspections++;
                 return new PhysicalSchemaInspectionResult(PhysicalSchemaHistoryState.Empty, IsAppliedSchemaValid: true);
@@ -42,7 +42,7 @@ public sealed class RelationalRuntimeAdmissionTests
         admission = new RelationalRuntimeAdmission(
             "stub.schema-admission",
             desired => Target(desired),
-            _ =>
+            (_, _) =>
             {
                 inspections++;
                 if (inspections == 1)

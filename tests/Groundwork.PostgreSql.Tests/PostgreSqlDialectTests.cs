@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
@@ -878,7 +879,7 @@ public sealed class PostgreSqlDialectTests
         }
 
         using var reopened = new PostgreSqlProviderFactory().Create(database.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
     }

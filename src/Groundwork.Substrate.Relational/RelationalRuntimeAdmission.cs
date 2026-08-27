@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 
@@ -17,7 +18,7 @@ public sealed class RelationalRuntimeAdmission
 {
     private readonly string observerOperation;
     private readonly Func<StorageUnit, PhysicalSchemaTarget> createTarget;
-    private readonly Func<PhysicalSchemaTarget, PhysicalSchemaInspectionResult> inspect;
+    private readonly Func<PhysicalSchemaTarget, DbConnection?, PhysicalSchemaInspectionResult> inspect;
     private readonly ConcurrentDictionary<StorageUnitId, Admission> admitted = new();
     private readonly ConcurrentDictionary<StorageUnitId, long> invalidations = new();
 
@@ -26,7 +27,7 @@ public sealed class RelationalRuntimeAdmission
     public RelationalRuntimeAdmission(
         string observerOperation,
         Func<StorageUnit, PhysicalSchemaTarget> createTarget,
-        Func<PhysicalSchemaTarget, PhysicalSchemaInspectionResult> inspect)
+        Func<PhysicalSchemaTarget, DbConnection?, PhysicalSchemaInspectionResult> inspect)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(observerOperation);
         this.observerOperation = observerOperation;
@@ -34,7 +35,7 @@ public sealed class RelationalRuntimeAdmission
         this.inspect = inspect ?? throw new ArgumentNullException(nameof(inspect));
     }
 
-    public void EnsureAdmitted(StorageUnit desired, IProviderCommandObserver? observer)
+    public void EnsureAdmitted(StorageUnit desired, IProviderCommandObserver? observer, DbConnection? connection = null)
     {
         ArgumentNullException.ThrowIfNull(desired);
         var stamp = invalidations.GetValueOrDefault(desired.Id);
@@ -49,7 +50,7 @@ public sealed class RelationalRuntimeAdmission
             admitted[desired.Id] = new Admission(desired, target.Fingerprint, stamp);
             return;
         }
-        var inspection = inspect(target);
+        var inspection = inspect(target, connection);
         observer?.Observe(new ProviderCommandEvent(
             observerOperation,
             $"Runtime schema admission inspection for '{target.Subject.Name}'",
@@ -64,11 +65,10 @@ public sealed class RelationalRuntimeAdmission
                 var remedy = fingerprintMismatch
                     ? "Apply the declared schema before opening a session."
                     : "Restore the deployed catalog to the applied schema — rebuild derived search-key columns rather than reapplying — before opening a session.";
-                throw new InvalidOperationException(
-                    $"GW-RUNTIME-001: Storage unit '{desired.Name}' has physical schema drift. " + remedy +
-                    (inspection.ColumnDrift.IsDefaultOrEmpty
-                        ? string.Empty
-                        : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => $"{refusal.Code} at {refusal.Path}: {refusal.Message}"))));
+                var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UtcNow);
+                throw new GroundworkRuntimeSchemaAdmissionException(
+                    new GroundworkRuntimeSchemaAdmissionResult(inspection, plan),
+                    $"Storage unit '{desired.Name}' has physical schema drift (GW-RUNTIME-001). {remedy}");
             }
         }
         admitted[desired.Id] = new Admission(desired, target.Fingerprint, stamp);

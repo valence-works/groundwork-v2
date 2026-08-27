@@ -186,12 +186,12 @@ public abstract class RelationalDialect
 
     public abstract bool TableExists(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table);
 
     public abstract IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table);
 
     /// <summary>
@@ -201,12 +201,12 @@ public abstract class RelationalDialect
     /// </summary>
     public virtual IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table) => new Dictionary<string, string>(StringComparer.Ordinal);
 
     public abstract RelationalIndexMetadata? ReadIndex(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string index);
 
@@ -228,7 +228,7 @@ public abstract class RelationalDialect
 
     public virtual void ValidateTarget(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         PhysicalSchemaTarget target)
     {
     }

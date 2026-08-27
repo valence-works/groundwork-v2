@@ -24,9 +24,10 @@ public sealed class SqliteRuntimeAdmissionTests
         Mutate(store, $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";");
 
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(failure.Result.Refusals, refusal => refusal.Code == "GW-RUNTIME-001");
     }
 
     [Fact]
@@ -44,7 +45,7 @@ public sealed class SqliteRuntimeAdmissionTests
             $"ALTER TABLE \"{unit.Name}\" ADD COLUMN \"payload\" INTEGER;");
 
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
     }
@@ -62,7 +63,7 @@ public sealed class SqliteRuntimeAdmissionTests
         Mutate(store, $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";");
 
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(
             () => reopened.BeginUnitOfWork(StorageAccess.Global, unit));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
     }
@@ -80,7 +81,7 @@ public sealed class SqliteRuntimeAdmissionTests
         Mutate(store, "DROP TABLE \"__groundwork_search_key_algorithms\";");
 
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("__groundwork_search_key_algorithms", failure.Message, StringComparison.Ordinal);
     }
@@ -168,7 +169,7 @@ public sealed class SqliteRuntimeAdmissionTests
 
         Mutate(store, $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";");
 
-        var failure = Assert.Throws<InvalidOperationException>(() => connection.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => connection.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
     }
 

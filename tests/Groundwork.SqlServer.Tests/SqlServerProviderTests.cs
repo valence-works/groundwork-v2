@@ -1,6 +1,7 @@
 using Microsoft.Data.SqlClient;
 using Testcontainers.MsSql;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
 using Groundwork.Store;
@@ -412,7 +413,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         }
 
         using var reopened = new SqlServerProviderFactory().Create(fixture.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
     }

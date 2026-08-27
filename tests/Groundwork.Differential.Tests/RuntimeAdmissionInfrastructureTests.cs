@@ -38,6 +38,18 @@ public sealed class RuntimeAdmissionInfrastructureTests
         Assert.Contains(RelationalDialect.SearchKeyAlgorithmsTable, ddl, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SqlServer_table_existence_resolves_via_the_default_schema()
+    {
+        var connection = new RecordingConnection();
+
+        Assert.False(new SqlServerDialect().TableExists(connection, null, RelationalDialect.SchemaHistoryTable));
+
+        var sql = Assert.Single(connection.Commands);
+        Assert.Contains("OBJECT_ID", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("dbo", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
     private sealed class RecordingConnection : DbConnection
     {
         public List<string> Commands { get; } = [];

@@ -167,7 +167,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         ArgumentNullException.ThrowIfNull(connection);
         if (connection.State != ConnectionState.Open)
             connection.Open();
-        if (!dialect.TableExists(connection, null!, RelationalDialect.SchemaHistoryTable))
+        if (!dialect.TableExists(connection, null, RelationalDialect.SchemaHistoryTable))
             return new PhysicalSchemaInspectionResult(PhysicalSchemaHistoryState.Empty, IsAppliedSchemaValid: true);
         var history = dialect.ReadHistory(connection, target.Identity);
         if (history.AppliedState is null)
@@ -179,7 +179,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             applied.Provider,
             applied.Snapshot.ProviderDefinitions);
         if (appliedTarget.Subject.DerivedColumns.Length != 0 &&
-            !dialect.TableExists(connection, null!, RelationalDialect.SearchKeyAlgorithmsTable))
+            !dialect.TableExists(connection, null, RelationalDialect.SearchKeyAlgorithmsTable))
         {
             return new PhysicalSchemaInspectionResult(
                 history,
@@ -189,14 +189,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                     $"Relational search-key algorithm catalog '{RelationalDialect.SearchKeyAlgorithmsTable}' is missing for '{appliedTarget.Subject.Name}'.",
                     "table")]);
         }
-        try
-        {
-            return InspectTarget(connection, null!, appliedTarget, history);
-        }
-        catch (InvalidOperationException)
-        {
-            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: false);
-        }
+        return InspectTarget(connection, null, appliedTarget, history);
     }
 
     public bool TryMapUniqueViolation(DbException exception, out string indexName)
@@ -391,7 +384,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
 
     private PhysicalSchemaInspectionResult InspectTarget(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         PhysicalSchemaTarget target,
         PhysicalSchemaHistoryState history)
     {
