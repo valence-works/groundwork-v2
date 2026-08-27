@@ -33,10 +33,14 @@ public static class QueryCoverageChecker
                 "The normalized predicate is always false and requires no provider read.");
         }
         var declaredKey = candidates.FirstOrDefault(index => index.IsDeclaredKey);
-        var composed = SuggestIndex(request, constraints);
-        // A suggestion over the leading columns of the declared key would only duplicate the
-        // primary key, so it is withheld and the point-read path is named instead.
-        var suggested = DuplicatesDeclaredKey(composed, declaredKey) ? null : composed;
+        // A point read answers exactly one predicate shape: a conjunction of single-value
+        // equalities over every column of the declared key, which can match at most one row. It
+        // does not answer a disjunction, a range, or a partial-key equality — all of which can
+        // mention precisely the key's columns. Only the shape the remedy is true of loses its
+        // index suggestion; every other shape keeps the ordinary one.
+        var isPointRead = declaredKey is not null &&
+            constraints.AreSingleValueEqualities(declaredKey.Columns.Length, declaredKey);
+        var suggested = isPointRead ? null : SuggestIndex(request, constraints);
 
         var refusals = new List<Refusal>();
         foreach (var order in request.Order)
@@ -123,29 +127,13 @@ public static class QueryCoverageChecker
             ? "Nearest index: <none>."
             : "Nearest index '" + nearest.Name + "' (" + Describe(nearest) + ").";
         var fix = suggested is null
-            ? "Those columns are the leading columns of the declared key, which is already indexed;" +
-              " declaring an index over them would duplicate the primary key. Read by key instead:" +
-              " session.Read(key), or the typed Records read."
+            ? "The predicate pins every column of the declared key, so at most one row can match and" +
+              " no index would improve on that. Read it directly instead: session.Read(key), or the" +
+              " typed Records read."
             : "Add: " + suggested.Declaration;
         return "Query on '" + request.Table.Value + "' is not index-covered. " + reason + " " +
                nearestText + " " + fix +
                " Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").";
-    }
-
-    /// <summary>
-    /// Whether the suggested columns are the leading columns of the declared key. Order within the
-    /// suggestion is not compared: an index over the same set of leading key columns is redundant
-    /// however it is spelled, because the key already covers every predicate that set can bound.
-    /// </summary>
-    private static bool DuplicatesDeclaredKey(CoverageIndex suggested, CoverageIndex? declaredKey)
-    {
-        if (declaredKey is null)
-            return false;
-        var leading = declaredKey.Columns
-            .Take(suggested.Columns.Length)
-            .Select(column => column.Column)
-            .ToArray();
-        return suggested.Columns.All(column => leading.Contains(column.Column, StringComparer.Ordinal));
     }
 
     private static Refusal? CheckIndex(QueryRequest request, ConstraintSet constraints, CoverageIndex index)

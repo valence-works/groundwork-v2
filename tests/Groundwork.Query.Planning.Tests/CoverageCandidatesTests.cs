@@ -55,16 +55,18 @@ public sealed class CoverageCandidatesTests
     }
 
     /// <summary>
-    /// Where coverage is genuinely absent but the columns the checker would compose are the leading
-    /// columns of the key, the suggestion is withheld: declaring it would duplicate the primary key
-    /// and would not fix the refusal. The point-read path is named instead.
+    /// The point-read remedy is true of exactly one shape: a conjunction of single-value equalities
+    /// over every key column, which matches at most one row. There the suggestion is withheld —
+    /// declaring an index would duplicate the primary key and would not fix the refusal — and the
+    /// point-read path is named instead.
     /// </summary>
     [Fact]
-    public void A_refusal_over_leading_key_columns_names_the_point_read_instead_of_an_index()
+    public void A_complete_key_equality_names_the_point_read_instead_of_an_index()
     {
-        var result = Check(["tenant", "id"], [], new Predicate.Or([
+        var result = Check(["tenant", "id"], [], new Predicate.And([
             new Predicate.Equal(Tenant, QueryConstant.Of(Tenant, "t1")),
-            new Predicate.Equal(Id, QueryConstant.Of(Id, "a"))]));
+            new Predicate.Equal(Id, QueryConstant.Of(Id, "a")),
+            new Predicate.Substring(Status, "pen", Anchor.Contains)]));
 
         Assert.False(result.IsCovered);
         Assert.Null(result.Refusal!.SuggestedIndex);
@@ -73,7 +75,58 @@ public sealed class CoverageCandidatesTests
         Assert.DoesNotContain("Add: ", result.Refusal.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>A suggestion that is not a leading run of the key is still offered.</summary>
+    /// <summary>
+    /// A disjunction over the key's columns is not a point read — one key lookup cannot preserve an
+    /// Or — so it keeps the ordinary index suggestion rather than being handed a remedy that cannot
+    /// be followed.
+    /// </summary>
+    [Fact]
+    public void A_disjunction_over_key_columns_keeps_the_index_suggestion()
+    {
+        var result = Check(["tenant", "id"], [], new Predicate.Or([
+            new Predicate.Equal(Tenant, QueryConstant.Of(Tenant, "t1")),
+            new Predicate.Equal(Id, QueryConstant.Of(Id, "a"))]));
+
+        Assert.False(result.IsCovered);
+        // Or canonicalizes its terms, so the composed suggestion is in canonical column order
+        // rather than the order the disjunction was written in.
+        Assert.Equal("[GwIndex(\"ix_tickets\", \"id ASC, tenant ASC\")]", result.Refusal!.SuggestedDeclaration);
+        Assert.DoesNotContain("session.Read(key)", result.Refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A range over the key is not a point read either: it can match many rows, so a key lookup is
+    /// not the remedy and the suggestion stands.
+    /// </summary>
+    [Fact]
+    public void A_range_over_the_key_keeps_the_index_suggestion()
+    {
+        var result = Check(["id"], [], new Predicate.And([
+            new Predicate.Range(Id, Bound.Inclusive(QueryConstant.Of(Id, "a")), null),
+            new Predicate.Substring(Status, "pen", Anchor.Contains)]));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("[GwIndex(\"ix_tickets\", \"id ASC, status ASC\")]", result.Refusal!.SuggestedDeclaration);
+        Assert.DoesNotContain("session.Read(key)", result.Refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An equality over only part of a composite key leaves more than one row reachable, so it is
+    /// not a point read and keeps its suggestion.
+    /// </summary>
+    [Fact]
+    public void A_partial_key_equality_keeps_the_index_suggestion()
+    {
+        var result = Check(["tenant", "id"], [], new Predicate.And([
+            new Predicate.Equal(Tenant, QueryConstant.Of(Tenant, "t1")),
+            new Predicate.Substring(Status, "pen", Anchor.Contains)]));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("[GwIndex(\"ix_tickets\", \"tenant ASC, status ASC\")]", result.Refusal!.SuggestedDeclaration);
+        Assert.DoesNotContain("session.Read(key)", result.Refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A suggestion over columns the key does not mention is still offered.</summary>
     [Fact]
     public void A_refusal_over_non_key_columns_still_suggests_an_index()
     {
