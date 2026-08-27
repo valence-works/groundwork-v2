@@ -23,6 +23,7 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
 {
     private readonly IStorageSession session;
     private readonly IStorageProviderConnection? connection;
+    private readonly QueryAdmissionProfile? admission;
     private readonly Lazy<RuntimeCoverageGate> gate;
 
     /// <summary>
@@ -48,9 +49,29 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     /// </para>
     /// </summary>
     public GwLinqExecutor(IStorageSession session, IStorageProviderConnection? connection)
+        : this(session, connection, admission: null)
+    {
+    }
+
+    /// <summary>
+    /// Executes against one open session under budgets the caller already knows, for a
+    /// provider-named adapter that is bound to its provider at compile time and so does not need a
+    /// connection to learn them. Coverage still admits against the declaration alone: without a
+    /// connection there is no catalog, so a declared-but-undeployed index can still satisfy the gate.
+    /// </summary>
+    public GwLinqExecutor(IStorageSession session, QueryAdmissionProfile admission)
+        : this(session, connection: null, admission ?? throw new ArgumentNullException(nameof(admission)))
+    {
+    }
+
+    private GwLinqExecutor(
+        IStorageSession session,
+        IStorageProviderConnection? connection,
+        QueryAdmissionProfile? admission)
     {
         this.session = session ?? throw new ArgumentNullException(nameof(session));
         this.connection = connection;
+        this.admission = admission;
         gate = new Lazy<RuntimeCoverageGate>(CreateGate, LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
@@ -113,7 +134,7 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     private RuntimeCoverageGate CreateGate()
     {
         var declared = DeclaredIndexes(session.Unit);
-        var profile = connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
+        var profile = admission ?? connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
         return new RuntimeCoverageGate(
             declared,
             DeployedIndexes(declared),
