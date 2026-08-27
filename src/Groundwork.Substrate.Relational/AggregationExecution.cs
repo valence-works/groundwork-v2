@@ -123,8 +123,8 @@ public static class RelationalAggregationExecutor
         RelationalQueryResultReader.AddParameters(native, command);
         AggregationExecutionDiagnostics.Observe("aggregate");
         observer?.Observe(new ProviderCommandEvent(observerOperation ?? "relational.aggregate", native.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var reader = await mode.ExecuteReader(native).ConfigureAwait(false);
-        await using var readerScope = mode.Scope(reader);
+        await using var readerScope = await mode.ExecuteReader(native).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         var rows = new List<AggregationRow>();
         while (await mode.Read(reader).ConfigureAwait(false))
         {
@@ -200,8 +200,8 @@ public static class RelationalAggregationExecutor
         RelationalQueryResultReader.AddParameters(native, probe);
         AggregationExecutionDiagnostics.Observe("budget-probe");
         observer?.Observe(new ProviderCommandEvent(observerOperation ?? "relational.aggregate", native.CommandText, ProviderCommandKind.Read, IsProbe: true));
-        var reader = await mode.ExecuteReader(native).ConfigureAwait(false);
-        await using var readerScope = mode.Scope(reader);
+        await using var readerScope = await mode.ExecuteReader(native).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         var groups = 0;
         while (await mode.Read(reader).ConfigureAwait(false))
         {

@@ -227,7 +227,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             using var explain = Command(query.CommandText);
             RelationalQueryResultReader.AddParameters(explain, query);
-            using var reader = await mode.ExecuteReader(explain).ConfigureAwait(false);
+            await using var readerScope = await mode.ExecuteReader(explain).ConfigureAwait(false);
+            var reader = readerScope.Reader;
             var plans = new List<string>();
             do
             {
@@ -508,8 +509,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             commandObserver?.Observe(new ProviderCommandEvent("sqlserver.compare-and-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (VersionColumnDefinition is not null)
             {
-                using (var reader = (await mode.ExecuteReader(command).ConfigureAwait(false)))
+                await using (var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false))
                 {
+                    var reader = readerScope.Reader;
                     if (await mode.Read(reader).ConfigureAwait(false))
                         return new WriteOutcome(WriteOutcomeStatus.Deleted, Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture));
                 }
@@ -710,7 +712,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     {
         using var command = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(table)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
         AddLedgerParameters(command, Unit.Id.Value, scope, operationId.Nonce);
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         if (!(await mode.Read(reader).ConfigureAwait(false)))
             return null;
         return (
@@ -818,7 +821,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
         {
             AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
-            using var reader = await mode.ExecuteReader(existing).ConfigureAwait(false);
+            await using var readerScope = await mode.ExecuteReader(existing).ConfigureAwait(false);
+            var reader = readerScope.Reader;
             if (await mode.Read(reader).ConfigureAwait(false))
             {
                 var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
@@ -858,7 +862,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             {
                 using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
                 AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
-                using var reader = await mode.ExecuteReader(replay).ConfigureAwait(false);
+                await using var readerScope = await mode.ExecuteReader(replay).ConfigureAwait(false);
+                var reader = readerScope.Reader;
                 if (!(await mode.Read(reader).ConfigureAwait(false)) || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
                 {
                     if (!exactOutcomes)
@@ -963,7 +968,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var escapedTable = table.Replace("'", "''", StringComparison.Ordinal);
         using var command = Command($"SELECT c.name, c.collation_name FROM sys.columns c " +
             $"WHERE c.object_id = OBJECT_ID(N'{escapedTable}', N'U') AND c.name IN ({string.Join(", ", columns.Select(column => "N'" + column.Replace("'", "''", StringComparison.Ordinal) + "'"))});");
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         var collations = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         while (await mode.Read(reader).ConfigureAwait(false))
             collations[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
@@ -1223,7 +1229,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         RelationalExecution mode)
     {
         var returned = new Dictionary<string, (string, long?)>(StringComparer.Ordinal);
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         while (await mode.Read(reader).ConfigureAwait(false))
         {
             var values = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -1674,7 +1681,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.conditional-upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+            await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+            var reader = readerScope.Reader;
             if (await mode.Read(reader).ConfigureAwait(false))
             {
                 var status = string.Equals(reader.GetString(0), "INSERT", StringComparison.Ordinal)
@@ -1736,7 +1744,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
         commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         if (!(await mode.Read(reader).ConfigureAwait(false))) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
         for (var i = 0; i < UserColumns.Count; i++) values[UserColumns[i].Name] = FromSqlServer(reader.GetValue(i), UserColumns[i]);

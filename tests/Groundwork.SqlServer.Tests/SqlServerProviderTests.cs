@@ -32,6 +32,42 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}"));
 
     [Fact]
+    public async Task Nested_write_is_refused_rather_than_blocking()
+    {
+        fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var name = "nested_write_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction. The gate is a non-reentrant semaphore, so
+        // a regression here hangs rather than throwing; the timeout turns that into a failure.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Live_compare_and_delete_preserves_revision_cas_and_exact_rollback()
     {
         fixture.Reset();

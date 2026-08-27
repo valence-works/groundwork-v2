@@ -3,16 +3,26 @@ using System.Data.Common;
 
 namespace Groundwork.Substrate.Relational;
 
-/// <summary>Closes one provider resource on the surface the caller selected.</summary>
-public readonly struct RelationalDisposal(IDisposable resource, bool isAsync) : IAsyncDisposable
+/// <summary>
+/// An open data reader bound to the surface that opened it. Closing a reader still talks to the
+/// server whenever its result set is not drained, so this scope is asynchronously disposable and
+/// nothing else: a <c>using</c> declaration over it does not compile, and an asynchronously opened
+/// reader therefore cannot be closed with blocking I/O by forgetting an idiom.
+/// </summary>
+public readonly struct RelationalReader : IAsyncDisposable
 {
-    public ValueTask DisposeAsync()
+    private readonly bool isAsync;
+
+    internal RelationalReader(DbDataReader reader, bool isAsync)
     {
-        if (isAsync && resource is IAsyncDisposable asynchronous)
-            return asynchronous.DisposeAsync();
-        resource.Dispose();
-        return default;
+        Reader = reader;
+        this.isAsync = isAsync;
     }
+
+    /// <summary>The reader, open until this scope is disposed.</summary>
+    public DbDataReader Reader { get; }
+
+    public ValueTask DisposeAsync() => RelationalExecution.Close(Reader, isAsync);
 }
 
 /// <summary>
@@ -45,9 +55,13 @@ public readonly struct RelationalExecution
         ? new(command.ExecuteScalarAsync(CancellationToken))
         : new(command.ExecuteScalar());
 
-    public ValueTask<DbDataReader> ExecuteReader(DbCommand command) => IsAsync
-        ? new(command.ExecuteReaderAsync(CancellationToken))
-        : new(command.ExecuteReader());
+    /// <summary>
+    /// Opens a reader inside a scope that closes it on the same surface. A command needs no such
+    /// scope because disposing one talks to nobody.
+    /// </summary>
+    public ValueTask<RelationalReader> ExecuteReader(DbCommand command) => IsAsync
+        ? Open(command.ExecuteReaderAsync(CancellationToken))
+        : new(new RelationalReader(command.ExecuteReader(), false));
 
     public ValueTask<bool> Read(DbDataReader reader) => IsAsync
         ? new(reader.ReadAsync(CancellationToken))
@@ -81,12 +95,16 @@ public readonly struct RelationalExecution
         return default;
     }
 
-    public ValueTask Dispose(DbTransaction transaction) => new RelationalDisposal(transaction, IsAsync).DisposeAsync();
+    public ValueTask Dispose(DbTransaction transaction) => Close(transaction, IsAsync);
 
-    /// <summary>
-    /// Scopes a provider resource whose close can still talk to the server — a data reader — so
-    /// the asynchronous surface closes it asynchronously and the synchronous surface does not
-    /// block the caller on a pending close.
-    /// </summary>
-    public RelationalDisposal Scope(IDisposable resource) => new(resource, IsAsync);
+    internal static ValueTask Close(IAsyncDisposable resource, bool isAsync)
+    {
+        if (isAsync)
+            return resource.DisposeAsync();
+        ((IDisposable)resource).Dispose();
+        return default;
+    }
+
+    private static async ValueTask<RelationalReader> Open(Task<DbDataReader> pending) =>
+        new(await pending.ConfigureAwait(false), true);
 }

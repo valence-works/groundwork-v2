@@ -72,6 +72,20 @@ public ValueTask<WriteOutcome> InsertAsync(
 to the surface the caller selected. On the synchronous path nothing suspends, so the returned task
 is already complete and the entry point does not block on a pending operation.
 
+Closing a resource is part of that dispatch. A data reader whose result set is not drained still
+talks to the server when it closes, so `ExecuteReader` hands back a `RelationalReader` scope that
+closes it on the surface that opened it:
+
+```csharp
+await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+var reader = readerScope.Reader;
+```
+
+The scope is asynchronously disposable and nothing else, so `using` over it does not compile and an
+asynchronously opened reader cannot be closed with blocking I/O by forgetting the idiom. Commands
+are disposed with a plain `using`, because disposing one talks to nobody; provider transactions go
+through `mode.Dispose`.
+
 ## Proving it
 
 - `ConformanceSuite.Run` proves the contract on the synchronous surface;

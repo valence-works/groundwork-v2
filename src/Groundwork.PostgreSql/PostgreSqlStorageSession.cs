@@ -654,7 +654,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     {
         using var command = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(table)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
         AddLedgerParameters(command, Unit.Id.Value, scope, operationId.Nonce);
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         if (!(await mode.Read(reader).ConfigureAwait(false)))
             return null;
         return (
@@ -739,7 +740,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
         {
             AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
-            using var reader = await mode.ExecuteReader(existing).ConfigureAwait(false);
+            await using var readerScope = await mode.ExecuteReader(existing).ConfigureAwait(false);
+            var reader = readerScope.Reader;
             if (await mode.Read(reader).ConfigureAwait(false))
             {
                 var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
@@ -779,7 +781,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             {
                 using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
                 AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
-                using var reader = await mode.ExecuteReader(replay).ConfigureAwait(false);
+                await using var readerScope = await mode.ExecuteReader(replay).ConfigureAwait(false);
+                var reader = readerScope.Reader;
                 if (!(await mode.Read(reader).ConfigureAwait(false)) || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
                 {
                     if (!exactOutcomes)
@@ -1042,7 +1045,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     private async ValueTask<Dictionary<string, long?>> ReadReturnedRows(NpgsqlCommand command, StorageUnit logicalUnit, RelationalExecution mode)
     {
         var returned = new Dictionary<string, long?>(StringComparer.Ordinal);
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         while (await mode.Read(reader).ConfigureAwait(false))
         {
             var values = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -1236,7 +1240,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         commandObserver?.Observe(new ProviderCommandEvent("postgresql.conditional-upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+            await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+            var reader = readerScope.Reader;
             if (!(await mode.Read(reader).ConfigureAwait(false)))
                 return DeferredConflict(key);
 
@@ -1298,8 +1303,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             }
 
             object? generatedValue;
-            using (var reader = (await mode.ExecuteReader(command).ConfigureAwait(false)))
+            await using (var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false))
             {
+                var reader = readerScope.Reader;
                 if (!(await mode.Read(reader).ConfigureAwait(false)))
                     return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
                 generatedValue = FromDatabase(reader.GetValue(0), SequenceColumn);
@@ -1409,7 +1415,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                     VersionColumn is null ? null : existing is null ? 1 : existing.Version + 1);
             }
 
-            using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+            await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+            var reader = readerScope.Reader;
             if (!(await mode.Read(reader).ConfigureAwait(false)))
                 return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
             var inserted = reader.GetBoolean(0);
@@ -1435,7 +1442,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where}{locking};");
         AddParameters(command, parameters);
         commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         if (!(await mode.Read(reader).ConfigureAwait(false)))
             return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
