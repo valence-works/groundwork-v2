@@ -14,6 +14,15 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     internal const string VersionColumn = "__groundwork_version";
     internal const string ActionColumn = "__groundwork_action";
     internal static readonly ProviderIdentity Identity = new("SQLite", "1.0");
+    // An AUTOINCREMENT column must remain SQLite's sole physical primary key. Its values are
+    // unit-wide, so the generated identity is already globally unique; scope remains an access
+    // predicate rather than part of this key.
+    internal static readonly ProviderOwnedColumnPolicy ColumnPolicy = new()
+    {
+        ProviderName = "SQLite",
+        ScopeJoinsGeneratedKey = false,
+        DeclaresAppendAction = true
+    };
     private readonly SqliteProviderConnection owner;
     private readonly RelationalSchemaExecutor executor;
     private readonly SqliteDialect dialect = new();
@@ -104,8 +113,6 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         ArgumentNullException.ThrowIfNull(source);
         PortabilityValidator.EnsurePhysicalIdentifiers(source);
         EnsurePhysicalIndexNames(source);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(source);
-        ConcurrencyDeclaration.ValidateDeclaration(source);
         if (source.Retention is not null)
         {
             var portability = PortabilityValidator.Validate(source);
@@ -124,53 +131,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
                     portability.Refusals.Select(refusal =>
                         $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
         }
-        source = SearchKeyProjection.Expand(source);
-        var columns = source.Columns.ToList();
-        var key = source.Key.Columns.ToList();
-        var indexes = source.Indexes.ToList();
-        if (columns.Any(column => column.Name is ScopeColumn or VersionColumn or ActionColumn))
-            throw new ArgumentException($"'{ScopeColumn}', '{VersionColumn}', and '{ActionColumn}' are reserved SQLite columns.", nameof(source));
-        if (source.Scope == ScopePolicy.Scoped)
-        {
-            columns.Add(new ColumnDefinition { Name = ScopeColumn, Type = PortableType.String, IsNullable = false, Default = new PortableDefault(string.Empty) });
-            // An AUTOINCREMENT column must remain SQLite's sole physical primary key.
-            // Its values are unit-wide, so the generated identity is already globally
-            // unique; scope remains an access predicate rather than part of this key.
-            if (!source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
-                key.Insert(0, ScopeColumn);
-            indexes = indexes.Select(index => new IndexDefinition
-            {
-                Name = index.Name,
-                Columns = [new IndexColumn(ScopeColumn), .. index.Columns],
-                IsUnique = index.IsUnique,
-                MissingValues = index.MissingValues,
-                SchemaVersion = index.SchemaVersion
-            }).ToList();
-        }
-        if (source.Concurrency.IsOptimistic)
-        {
-            RemoveDeclaredToken(source, columns);
-            columns.Add(new ColumnDefinition { Name = VersionColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) });
-        }
-        else
-            columns.Add(new ColumnDefinition { Name = ActionColumn, Type = PortableType.String, MaxLength = 1, IsNullable = false, Default = new PortableDefault("I") });
-        return new StorageUnit
-        {
-            Id = source.Id,
-            Name = source.Name,
-            Columns = columns,
-            Key = new KeyDefinition { Columns = key },
-            DerivedColumns = source.DerivedColumns,
-            Indexes = indexes,
-            AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
-            Scope = source.Scope,
-            AppendIdempotency = source.AppendIdempotency,
-            RetentionIdempotency = source.RetentionIdempotency,
-            Concurrency = source.Concurrency,
-            Timestamps = source.Timestamps,
-            Retention = source.Retention,
-            SchemaVersion = source.SchemaVersion
-        };
+        return ProviderOwnedColumns.Physicalize(source, ColumnPolicy);
     }
 
     private static void EnsurePhysicalIndexNames(StorageUnit source)
@@ -193,20 +154,6 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
             }
             seen.Add(physicalName, index.Name);
         }
-    }
-
-    private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)
-    {
-        var token = source.Concurrency.TokenColumn!;
-        var declared = columns.FirstOrDefault(column => column.Name == token);
-        if (declared is null) return;
-        if (declared.Type != PortableType.Int64 || declared.IsNullable ||
-            declared.Default?.Value is not long defaultValue || defaultValue != 0)
-        {
-            throw new ArgumentException(
-                $"Optimistic token column '{token}' must be a non-null Int64 with default 0.", nameof(source));
-        }
-        columns.Remove(declared);
     }
 
     private void Remember(StorageUnit original, StorageUnit physical) => units[original.Id] = physical;

@@ -211,8 +211,9 @@ schema boundary:
 > There is no in-place migration, compatibility alias, dual-write, or fallback path between preview
 > catalogs.
 
-`0.2.0-preview.1` marks such a boundary for SQLite. See
-**[Versioning & Support](Versioning-and-Support)**.
+`0.2.0-preview.1` marks such a boundary for SQLite, and `0.2.0-preview.2` marks one for every
+provider: subject fingerprints changed, so an earlier catalog is refused with `GW-SCHEMA-006`
+naming the storage unit and this remedy. See **[Versioning & Support](Versioning-and-Support)**.
 
 ---
 

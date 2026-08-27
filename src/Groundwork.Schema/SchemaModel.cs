@@ -5,6 +5,9 @@ using System.Linq;
 
 namespace Groundwork.Schema;
 
+/// <summary>A declared portable default. A null <see cref="Value"/> declares a NULL default.</summary>
+public sealed record SchemaDefault(object? Value);
+
 public sealed record SchemaColumn
 {
     public SchemaColumn(
@@ -15,7 +18,8 @@ public sealed record SchemaColumn
         int? precision = null,
         int? scale = null,
         TextFolding folding = TextFolding.None,
-        SchemaGeneration generation = SchemaGeneration.Supplied)
+        SchemaGeneration generation = SchemaGeneration.Supplied,
+        SchemaDefault? defaultValue = null)
     {
         Name = Require(name, nameof(name));
         Type = type;
@@ -25,6 +29,7 @@ public sealed record SchemaColumn
         Scale = scale;
         Folding = folding;
         Generation = generation;
+        Default = defaultValue;
     }
 
     public string Name { get; }
@@ -35,6 +40,7 @@ public sealed record SchemaColumn
     public int? Scale { get; }
     public TextFolding Folding { get; }
     public SchemaGeneration Generation { get; }
+    public SchemaDefault? Default { get; }
 
     private static string Require(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value) ? throw new ArgumentException("A non-empty value is required.", parameterName) : value;
@@ -71,35 +77,202 @@ public sealed record SchemaIndex
         new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName)).ToArray());
 }
 
+/// <summary>Declares a system-owned optimistic concurrency token.</summary>
+public sealed record SchemaConcurrency
+{
+    public SchemaConcurrency(string tokenColumn) =>
+        TokenColumn = string.IsNullOrWhiteSpace(tokenColumn)
+            ? throw new ArgumentException("A non-empty value is required.", nameof(tokenColumn))
+            : tokenColumn;
+
+    public string TokenColumn { get; }
+}
+
+/// <summary>Declares how many newest rows survive, optionally independently per partition.</summary>
+public sealed record SchemaRetention
+{
+    public SchemaRetention(
+        int keepNewest,
+        string orderBy,
+        SchemaRetentionTrigger trigger = SchemaRetentionTrigger.Explicit,
+        IEnumerable<string>? partitionBy = null)
+    {
+        KeepNewest = keepNewest;
+        OrderBy = string.IsNullOrWhiteSpace(orderBy) ? throw new ArgumentException("A non-empty value is required.", nameof(orderBy)) : orderBy;
+        Trigger = trigger;
+        PartitionBy = new ReadOnlyCollection<string>((partitionBy ?? Array.Empty<string>()).ToArray());
+    }
+
+    public int KeepNewest { get; }
+    public string OrderBy { get; }
+    public SchemaRetentionTrigger Trigger { get; }
+    public IReadOnlyList<string> PartitionBy { get; }
+}
+
+/// <summary>
+/// Declares a durable replay window and, when overridden, the ledger that records it. A null
+/// ledger name keeps the kernel-owned default rather than restating it in the canonical document.
+/// </summary>
+public sealed record SchemaIdempotency
+{
+    public SchemaIdempotency(TimeSpan window, string? ledgerName = null)
+    {
+        Window = window;
+        LedgerName = string.IsNullOrWhiteSpace(ledgerName) ? null : ledgerName;
+    }
+
+    public TimeSpan Window { get; }
+    public string? LedgerName { get; }
+}
+
+/// <summary>One grouping term of a declared aggregation profile.</summary>
+public sealed record SchemaAggregationGroup
+{
+    private SchemaAggregationGroup(string alias, string? sourceColumn, SchemaTimeBucket bucket, TimeSpan width)
+    {
+        Alias = string.IsNullOrWhiteSpace(alias) ? throw new ArgumentException("A non-empty value is required.", nameof(alias)) : alias;
+        SourceColumn = sourceColumn;
+        Bucket = bucket;
+        Width = width;
+    }
+
+    public static SchemaAggregationGroup Column(string alias) =>
+        new(alias, null, SchemaTimeBucket.None, TimeSpan.Zero);
+
+    public static SchemaAggregationGroup FixedUtcBucket(string alias, string sourceColumn, TimeSpan width) =>
+        new(alias, RequireSource(sourceColumn), SchemaTimeBucket.FixedUtc, width);
+
+    public static SchemaAggregationGroup LocalCalendarDayBucket(string alias, string sourceColumn) =>
+        new(alias, RequireSource(sourceColumn), SchemaTimeBucket.LocalCalendarDay, TimeSpan.Zero);
+
+    public string Alias { get; }
+    public string? SourceColumn { get; }
+    public SchemaTimeBucket Bucket { get; }
+    public TimeSpan Width { get; }
+
+    private static string RequireSource(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? throw new ArgumentException("A non-empty value is required.", nameof(value))
+            : value;
+}
+
+/// <summary>One reduction of a declared aggregation profile.</summary>
+public sealed record SchemaAggregate
+{
+    private SchemaAggregate(SchemaAggregateKind kind, string alias, string? column, string? orderBy, bool descending, int maxValues)
+    {
+        Kind = kind;
+        Alias = string.IsNullOrWhiteSpace(alias) ? throw new ArgumentException("A non-empty value is required.", nameof(alias)) : alias;
+        Column = column;
+        OrderBy = orderBy;
+        Descending = descending;
+        MaxValues = maxValues;
+    }
+
+    public static SchemaAggregate Count(string alias) => new(SchemaAggregateKind.Count, alias, null, null, false, 0);
+
+    public static SchemaAggregate Min(string alias, string column) => new(SchemaAggregateKind.Min, alias, column, null, false, 0);
+
+    public static SchemaAggregate Max(string alias, string column) => new(SchemaAggregateKind.Max, alias, column, null, false, 0);
+
+    public static SchemaAggregate Sum(string alias, string column) => new(SchemaAggregateKind.Sum, alias, column, null, false, 0);
+
+    public static SchemaAggregate SetUnion(string alias, string column, int maxValues) =>
+        new(SchemaAggregateKind.SetUnion, alias, column, null, false, maxValues);
+
+    public static SchemaAggregate FirstBy(string alias, string column, string orderBy, bool descending = false) =>
+        new(SchemaAggregateKind.FirstBy, alias, column, orderBy, descending, 0);
+
+    internal static SchemaAggregate Create(SchemaAggregateKind kind, string alias, string? column, string? orderBy, bool descending, int maxValues) =>
+        new(kind, alias, column, orderBy, descending, maxValues);
+
+    public SchemaAggregateKind Kind { get; }
+    public string Alias { get; }
+    public string? Column { get; }
+    public string? OrderBy { get; }
+    public bool Descending { get; }
+    public int MaxValues { get; }
+}
+
+/// <summary>A named, closed aggregation shape available to callers of a declared table.</summary>
+public sealed record SchemaAggregation
+{
+    public SchemaAggregation(
+        string name,
+        IEnumerable<SchemaAggregate> aggregates,
+        IEnumerable<string>? groupByColumns = null,
+        IEnumerable<SchemaAggregationGroup>? groupBy = null)
+    {
+        Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
+        Aggregates = new ReadOnlyCollection<SchemaAggregate>((aggregates ?? throw new ArgumentNullException(nameof(aggregates))).ToArray());
+        GroupByColumns = new ReadOnlyCollection<string>((groupByColumns ?? Array.Empty<string>()).ToArray());
+        GroupBy = new ReadOnlyCollection<SchemaAggregationGroup>((groupBy ?? Array.Empty<SchemaAggregationGroup>()).ToArray());
+    }
+
+    public string Name { get; }
+    public IReadOnlyList<string> GroupByColumns { get; }
+    public IReadOnlyList<SchemaAggregationGroup> GroupBy { get; }
+    public IReadOnlyList<SchemaAggregate> Aggregates { get; }
+}
+
 public sealed record SchemaTable
 {
     public SchemaTable(
         string name,
         IEnumerable<SchemaColumn> columns,
         IEnumerable<string> key,
-        IEnumerable<SchemaIndex>? indexes = null)
+        IEnumerable<SchemaIndex>? indexes = null,
+        SchemaScope scope = SchemaScope.Global,
+        SchemaConcurrency? concurrency = null,
+        SchemaTimestamps timestamps = SchemaTimestamps.None,
+        SchemaRetention? retention = null,
+        SchemaIdempotency? appendIdempotency = null,
+        SchemaIdempotency? retentionIdempotency = null,
+        IEnumerable<SchemaAggregation>? aggregations = null)
     {
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
         Columns = Snapshot(columns, nameof(columns));
         Key = Snapshot(key, nameof(key));
-        Indexes = Snapshot(indexes ?? Array.Empty<SchemaIndex>(), nameof(indexes));
+        Indexes = Ordered(indexes ?? Array.Empty<SchemaIndex>(), nameof(indexes), index => index.Name);
+        Scope = scope;
+        Concurrency = concurrency;
+        Timestamps = timestamps;
+        Retention = retention;
+        AppendIdempotency = appendIdempotency;
+        RetentionIdempotency = retentionIdempotency;
+        Aggregations = Ordered(aggregations ?? Array.Empty<SchemaAggregation>(), nameof(aggregations), aggregation => aggregation.Name);
     }
 
     public string Name { get; }
     public IReadOnlyList<SchemaColumn> Columns { get; }
     public IReadOnlyList<string> Key { get; }
+    /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>
     public IReadOnlyList<SchemaIndex> Indexes { get; }
+    public SchemaScope Scope { get; }
+    public SchemaConcurrency? Concurrency { get; }
+    public SchemaTimestamps Timestamps { get; }
+    public SchemaRetention? Retention { get; }
+    public SchemaIdempotency? AppendIdempotency { get; }
+    public SchemaIdempotency? RetentionIdempotency { get; }
+    /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>
+    public IReadOnlyList<SchemaAggregation> Aggregations { get; }
 
     private static IReadOnlyList<T> Snapshot<T>(IEnumerable<T> values, string parameterName) =>
         new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName)).ToArray());
+
+    private static IReadOnlyList<T> Ordered<T>(IEnumerable<T> values, string parameterName, Func<T, string> name) =>
+        new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName))
+            .OrderBy(name, StringComparer.Ordinal).ToArray());
 }
 
 public sealed record SchemaDocument
 {
     public SchemaDocument(IEnumerable<SchemaTable> tables)
     {
-        Tables = new ReadOnlyCollection<SchemaTable>((tables ?? throw new ArgumentNullException(nameof(tables))).ToArray());
+        Tables = new ReadOnlyCollection<SchemaTable>((tables ?? throw new ArgumentNullException(nameof(tables)))
+            .OrderBy(table => table.Name, StringComparer.Ordinal).ToArray());
     }
 
+    /// <summary>Held in canonical name order.</summary>
     public IReadOnlyList<SchemaTable> Tables { get; }
 }
