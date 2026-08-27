@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IQueryAdmissionStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -50,12 +50,6 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IQueryAdmissio
     public StorageUnit Unit { get; }
 
     public StorageAccess Access { get; }
-
-    /// <summary>The native budgets this session's queries are admitted under.</summary>
-    public QueryAdmissionProfile QueryAdmission => new()
-    {
-        MaximumParameters = PostgreSqlQueryRenderer.ParameterBudget
-    };
 
     /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
     private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(

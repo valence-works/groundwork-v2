@@ -39,7 +39,7 @@ The async terminals run through `GwLinqExecutor` (package `Groundwork.Query.Linq
 adapter for **all four providers**, because everything an executor does is provider-neutral:
 
 ```csharp
-var executor = new GwLinqExecutor(session, connection.Catalog);
+var executor = new GwLinqExecutor(session, connection);
 
 var rows  = await table.Query.Where(c => c.Email == email).ToListAsync(executor);
 var count = await table.Query.Where(c => c.Email == email).CountAsync(executor);
@@ -217,7 +217,7 @@ except for match-none. This preserves the v1 sparse-index safety rule.
 
 Parameter budgets are enforced against the provider's real limit — **SQLite 999, SQL Server 2,100,
 PostgreSQL 65,535** — including cursor and page parameters. Exceeding it is a refusal, not a
-truncation. Each provider session advertises that limit as a `QueryAdmissionProfile`, so the
+truncation. Each provider connection advertises that limit as a `QueryAdmissionProfile`, so the
 pre-execution fence and the renderer use the same number rather than two guesses at it. MongoDB has
 no bound-parameter budget and keeps the portable default.
 

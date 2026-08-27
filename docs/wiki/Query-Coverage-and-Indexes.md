@@ -106,7 +106,7 @@ acceptance, paging, materialization, and the async terminals are provider-neutra
 per provider would be a second place for coverage to drift.
 
 ```csharp
-var executor = new GwLinqExecutor(session, connection.Catalog);
+var executor = new GwLinqExecutor(session, connection);
 var rows = await db.Table<Customer>().Query
     .Where(c => c.Email == "ada@example.test")
     .ToListAsync(executor);
@@ -117,13 +117,17 @@ render anything. The request that is admitted is the one you wrote — not the n
 existence probe derived from it — so a runtime refusal carries the same code and the same named fix
 the analyzer reported at build time.
 
-- Pass `connection.Catalog` to intersect your declared indexes with the deployed ones. Without it,
-  the gate admits against the declaration alone, and an index that a rolling deploy has not created
-  yet can still satisfy it.
-- Each provider supplies only its native budgets, through `QueryAdmissionProfile`, so the
-  pre-execution value fence uses the provider's real limit instead of a portable guess — SQLite 999,
-  SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter budget of its own (its bound is
-  the 16 MB command document) and keeps the portable default rather than inventing one.
+- **Pass the connection.** It supplies both things admission needs beyond the query itself: the
+  catalog, so declared indexes are intersected with the deployed ones, and the budgets. Without it
+  the gate admits against the declaration alone — an index a rolling deploy has not created yet can
+  still satisfy it — and the fence falls back to portable defaults.
+- Each provider supplies only its native budgets, advertised by the **connection** as a
+  `QueryAdmissionProfile`, so the pre-execution value fence uses the provider's real limit instead of
+  a portable guess — SQLite 999, SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter
+  budget of its own (its bound is the 16 MB command document) and keeps the portable default rather
+  than inventing one. A budget is a deployment property — SQLite's ceiling is a compile-time option
+  of the library you loaded — which is why it is advertised rather than assumed, and why it lives on
+  the connection where a session decorator cannot drop it.
 
 ### A declared key is not a coverage candidate
 

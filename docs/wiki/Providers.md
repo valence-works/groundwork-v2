@@ -105,7 +105,7 @@ using var connection = new PostgreSqlProviderFactory().Create(
   conflict predicate and the generated optimistic version.
 - A declared **secondary unique index** selects the row-attributed fallback so one constraint error
   cannot be reported for every row.
-- Parameter budget: **65,535** — advertised to the runtime value fence, not restated by it.
+- Parameter budget: **65,535** — advertised by the connection to the runtime value fence, not restated by it.
 - No index-hint syntax — declarations are retained for diagnostics but never emitted as hints.
 - Explain assertions use `EXPLAIN (FORMAT JSON)` and are labeled `optimizer-selected`.
 
@@ -126,7 +126,7 @@ using var connection = new SqlServerProviderFactory().Create(
 - Schema coordination uses `sp_getapplock` plus a durable fence/history pair; optimistic concurrency
   uses serializable write transactions.
 - Provider sequences use `IDENTITY(1,1)`, read from `OUTPUT INSERTED`.
-- Parameter budget: **2,100** — advertised to the runtime value fence, not restated by it.
+- Parameter budget: **2,100** — advertised by the connection to the runtime value fence, not restated by it.
 - Supports native index hints when a declaration is `QueryIndexPinning.Pinned`. Explain assertions use
   showplan XML and are labeled `hinted`.
 

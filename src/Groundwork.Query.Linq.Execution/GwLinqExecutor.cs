@@ -22,32 +22,36 @@ namespace Groundwork.Query.Linq.Execution;
 public sealed class GwLinqExecutor : IGwQueryExecutor
 {
     private readonly IStorageSession session;
-    private readonly IProviderCatalog? catalog;
+    private readonly IStorageProviderConnection? connection;
     private readonly Lazy<RuntimeCoverageGate> gate;
-    private readonly Lazy<QueryRenderOptions> renderOptions;
 
     /// <summary>
     /// Executes against one open session, admitting queries against the indexes its storage unit
-    /// declares. Prefer the overload taking the provider catalog: without it an index that was
-    /// declared but never deployed can still satisfy the gate.
+    /// declares and under the portable fence defaults. Prefer the overload taking the connection the
+    /// session came from: without it an index that was declared but never deployed can still satisfy
+    /// the gate, and the fence cannot use the provider's real budgets.
     /// </summary>
     public GwLinqExecutor(IStorageSession session)
-        : this(session, catalog: null)
+        : this(session, connection: null)
     {
     }
 
     /// <summary>
     /// Executes against one open session, admitting queries against the declared indexes the
-    /// provider catalog proves are deployed. An index that exists only in the database is never a
-    /// candidate, so a query cannot pass here and fail after the next clean deploy.
+    /// connection's catalog proves are deployed, and under the budgets that connection advertises.
+    /// An index that exists only in the database is never a candidate, so a query cannot pass here
+    /// and fail after the next clean deploy.
+    /// <para>
+    /// Both inputs come from the connection rather than the session on purpose: a session decorator
+    /// that does not forward an optional interface would silently drop them, and the budgets would
+    /// then fall back to defaults that are not this provider's.
+    /// </para>
     /// </summary>
-    public GwLinqExecutor(IStorageSession session, IProviderCatalog? catalog)
+    public GwLinqExecutor(IStorageSession session, IStorageProviderConnection? connection)
     {
         this.session = session ?? throw new ArgumentNullException(nameof(session));
-        this.catalog = catalog;
+        this.connection = connection;
         gate = new Lazy<RuntimeCoverageGate>(CreateGate, LazyThreadSafetyMode.ExecutionAndPublication);
-        renderOptions = new Lazy<QueryRenderOptions>(
-            () => this.session.Unit.CreateQueryRenderOptions(), LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public async Task<IReadOnlyList<T>> ToListAsync<T>(
@@ -94,15 +98,22 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
         // will never run.
         cancellationToken.ThrowIfCancellationRequested();
         gate.Value.EnsureCovered(admitted, DateTimeOffset.UtcNow);
+        // Deliberately no render options. Passing the unit's declared index metadata would buy
+        // optional index-selection evidence and cost correctness: that conversion is eager over
+        // every declared index and refuses a non-queryable one (GW-QUERY-018), so a single JSON
+        // index column would fail every query against the unit — including ones that never touch
+        // it. Declaration validation does not catch it either, because the guard that refuses a
+        // JSON index key runs only in the fluent builder, not in Schema.Apply. The provider adds
+        // its own identity tie-breaks regardless, so nothing the executor needs is lost.
         return session is IAsyncQueryStorageSession asyncQuery
-            ? asyncQuery.QueryAsync(executed, renderOptions.Value, cancellationToken)
-            : Task.FromResult(session.Query(executed, renderOptions.Value));
+            ? asyncQuery.QueryAsync(executed, options: null, cancellationToken)
+            : Task.FromResult(session.Query(executed));
     }
 
     private RuntimeCoverageGate CreateGate()
     {
         var declared = DeclaredIndexes(session.Unit);
-        var profile = session.GetQueryAdmission();
+        var profile = connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
         return new RuntimeCoverageGate(
             declared,
             DeployedIndexes(declared),
@@ -140,9 +151,9 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     /// </summary>
     private ImmutableArray<CoverageIndex> DeployedIndexes(ImmutableArray<CoverageIndex> declared)
     {
-        if (catalog is null)
+        if (connection is null)
             return declared;
-        var deployed = catalog.ReadIndexes(session.Unit.Id)
+        var deployed = connection.Catalog.ReadIndexes(session.Unit.Id)
             .Select(index => index.Name)
             .ToHashSet(StringComparer.Ordinal);
         return declared.Where(index => deployed.Contains(index.Name)).ToImmutableArray();

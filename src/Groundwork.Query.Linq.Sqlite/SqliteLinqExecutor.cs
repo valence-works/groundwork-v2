@@ -17,16 +17,17 @@ public sealed class SqliteLinqExecutor : IGwQueryExecutor
     private readonly GwLinqExecutor executor;
 
     public SqliteLinqExecutor(IStorageSession session)
-        : this(session, catalog: null)
+        : this(session, connection: null)
     {
     }
 
     /// <summary>
-    /// Admits queries against the declared indexes the provider catalog proves are deployed, so a
-    /// declared-but-undeployed index cannot rescue a query during a rolling deploy.
+    /// Admits queries against the declared indexes the connection's catalog proves are deployed, and
+    /// under the budgets it advertises, so a declared-but-undeployed index cannot rescue a query
+    /// during a rolling deploy and the fence uses SQLite's real parameter ceiling.
     /// </summary>
-    public SqliteLinqExecutor(IStorageSession session, IProviderCatalog? catalog) =>
-        executor = new GwLinqExecutor(session, catalog);
+    public SqliteLinqExecutor(IStorageSession session, IStorageProviderConnection? connection) =>
+        executor = new GwLinqExecutor(session, connection);
 
     public Task<IReadOnlyList<T>> ToListAsync<T>(
         QueryRequest request,

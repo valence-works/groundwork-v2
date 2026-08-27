@@ -175,13 +175,13 @@ public sealed class LinqExecutionDifferentialTests
     }
 
     [SkippableFact]
-    public void Every_provider_session_advertises_the_budget_its_own_renderer_enforces()
+    public void Every_provider_connection_advertises_the_budget_its_own_renderer_enforces()
     {
         using var matrix = LinqExecutionMatrix.OpenAll();
 
         var budgets = matrix.Providers.ToDictionary(
             provider => provider.Name,
-            provider => provider.Session.GetQueryAdmission().MaximumParameters,
+            provider => provider.Connection.GetQueryAdmission().MaximumParameters,
             StringComparer.Ordinal);
 
         Assert.Equal(SqliteQueryRenderer.ParameterBudget, budgets["SQLite"]);

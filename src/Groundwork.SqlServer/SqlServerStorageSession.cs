@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IQueryAdmissionStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -42,12 +42,6 @@ internal sealed class SqlServerStorageSession : IStorageSession, IQueryAdmission
 
     public StorageUnit Unit { get; }
     public StorageAccess Access { get; }
-
-    /// <summary>The native budgets this session's queries are admitted under.</summary>
-    public QueryAdmissionProfile QueryAdmission => new()
-    {
-        MaximumParameters = SqlServerQueryRenderer.ParameterBudget
-    };
 
     /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
     private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(

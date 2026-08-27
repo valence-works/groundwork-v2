@@ -89,12 +89,13 @@ internal sealed class LinqExecutionMatrix : IDisposable
             session.Delete(new StorageKey(new Dictionary<string, object?> { ["id"] = row["id"] }));
             session.Insert(new StorageValues(row));
         }
-        var executor = new GwLinqExecutor(session, connection.Catalog);
+        var executor = new GwLinqExecutor(session, connection);
         Providers.Add(new LinqProvider(
             name,
             executor,
             new GwQueryDatabase(executor).Table(Model),
-            session));
+            session,
+            connection));
     }
 
     private static StorageUnit Declare(string tableName) => new()
@@ -143,7 +144,8 @@ internal sealed record LinqProvider(
     string Name,
     GwLinqExecutor Executor,
     GwQueryTable<Ticket> Table,
-    IStorageSession Session);
+    IStorageSession Session,
+    IStorageProviderConnection Connection);
 
 /// <summary>The mapped row the matrix materializes on every provider.</summary>
 internal sealed class Ticket

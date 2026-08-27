@@ -17,8 +17,17 @@ public sealed class PostgreSqlProviderFactory : IStorageProviderFactory
         new PostgreSqlProviderConnection(connectionString);
 }
 
-public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
+public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
+    /// <summary>
+    /// The budget PostgreSqlQueryRenderer enforces, so the pre-execution fence and the renderer cannot
+    /// disagree about it.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission { get; } = new()
+    {
+        MaximumParameters = PostgreSqlQueryRenderer.ParameterBudget
+    };
+
     private readonly string connectionString;
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly ConcurrentBag<NpgsqlConnection> ownedConnections = [];
