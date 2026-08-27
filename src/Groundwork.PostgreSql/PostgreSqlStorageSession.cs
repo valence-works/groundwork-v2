@@ -835,15 +835,21 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     private async ValueTask EnsureLedgerTable(string table, RelationalExecution mode)
     {
-        using var command = Command($"CREATE TABLE IF NOT EXISTS {Quote(table)} (" +
+        if (await LedgerIsCurrent(table, mode).ConfigureAwait(false))
+            return;
+        await ClaimLazyDdl(table, mode).ConfigureAwait(false);
+        if (await LedgerIsCurrent(table, mode).ConfigureAwait(false))
+            return;
+
+        using (var command = Command($"CREATE TABLE IF NOT EXISTS {Quote(table)} (" +
             $"{Quote(LedgerUnit)} text NOT NULL, " +
             $"{Quote(LedgerScope)} text NOT NULL, " +
             $"{Quote(LedgerNonce)} text NOT NULL, " +
             $"{Quote(LedgerCommittedAt)} text NOT NULL, " +
             $"{Quote(LedgerFingerprint)} text NULL, " +
             $"{Quote(LedgerResult)} text NULL, " +
-            $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}));");
-        await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+            $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}));"))
+            await mode.ExecuteNonQuery(command).ConfigureAwait(false);
 
         await EnsureLedgerColumn(table, LedgerFingerprint, mode).ConfigureAwait(false);
         await EnsureLedgerColumn(table, LedgerResult, mode).ConfigureAwait(false);
@@ -853,6 +859,44 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         await mode.ExecuteNonQuery(cleanupIndex).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Reports whether the ledger already carries every object the bootstrap would create:
+    /// the table, its two additive columns, and the cleanup index. Reading the catalog takes
+    /// no lock, so a steady-state append issues no DDL at all.
+    /// </summary>
+    private async ValueTask<bool> LedgerIsCurrent(string table, RelationalExecution mode)
+    {
+        using var command = Command(
+            "SELECT to_regclass(@ledger) IS NOT NULL AND to_regclass(@cleanup_index) IS NOT NULL AND (" +
+            "SELECT count(*) FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(@ledger) " +
+            "AND NOT attisdropped AND attname::text IN (@fingerprint, @result)) = 2;");
+        Add(command, "ledger", Quote(table));
+        Add(command, "cleanup_index", Quote(IdempotencyRules.CleanupIndexName(table)));
+        Add(command, "fingerprint", LedgerFingerprint);
+        Add(command, "result", LedgerResult);
+        return await mode.ExecuteScalar(command).ConfigureAwait(false) is true;
+    }
+
+    /// <summary>
+    /// Serializes lazy, write-path DDL on the name of the object it creates.
+    /// PostgreSQL's <c>IF NOT EXISTS</c> is check-then-act rather than atomic: concurrent
+    /// creators all pass the check, and every loser fails with <c>23505</c> on a shared catalog
+    /// index instead of returning a Groundwork status. A transaction-scoped advisory lock lets
+    /// exactly one writer create the object, and the writers behind it observe it created.
+    /// </summary>
+    private async ValueTask ClaimLazyDdl(string resource, RelationalExecution mode)
+    {
+        using var command = Command("SELECT pg_advisory_xact_lock(hashtextextended(@resource, 0));");
+        Add(command, "resource", LazyDdlLockPrefix + resource);
+        await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Additive upgrade of a ledger created before the exact-outcome columns existed.
+    /// Unlike <c>CREATE TABLE</c>/<c>CREATE INDEX</c>, <c>ADD COLUMN IF NOT EXISTS</c> re-reads the
+    /// column list after taking the table's ACCESS EXCLUSIVE lock, so concurrent callers do not
+    /// race; only the bootstrap around it needs serializing.
+    /// </summary>
     private async ValueTask EnsureLedgerColumn(string table, string column, RelationalExecution mode)
     {
         using var alter = Command($"ALTER TABLE {Quote(table)} ADD COLUMN IF NOT EXISTS {Quote(column)} text NULL;");
@@ -861,12 +905,25 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     private async ValueTask EnsureHighWaterTable(RelationalExecution mode)
     {
+        if (await TableExists(HighWaterTable, mode).ConfigureAwait(false))
+            return;
+        await ClaimLazyDdl(HighWaterTable, mode).ConfigureAwait(false);
+        if (await TableExists(HighWaterTable, mode).ConfigureAwait(false))
+            return;
+
         using var command = Command($"CREATE TABLE IF NOT EXISTS {Quote(HighWaterTable)} (" +
             $"{Quote(LedgerUnit)} text NOT NULL, " +
             $"{Quote(LedgerScope)} text NOT NULL, " +
             $"{Quote(HighWaterValue)} bigint NOT NULL, " +
             $"PRIMARY KEY ({Quote(LedgerUnit)}, {Quote(LedgerScope)}));");
         await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+    }
+
+    private async ValueTask<bool> TableExists(string table, RelationalExecution mode)
+    {
+        using var command = Command("SELECT to_regclass(@table) IS NOT NULL;");
+        Add(command, "table", Quote(table));
+        return await mode.ExecuteScalar(command).ConfigureAwait(false) is true;
     }
 
     private async ValueTask RecordHighWater(object? generatedValue, RelationalExecution mode)
@@ -1660,6 +1717,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     private const string LedgerFingerprint = "input_fingerprint";
     private const string LedgerResult = "exact_result";
     private const string HighWaterTable = "__groundwork_sequence_high_waters";
+    private const string LazyDdlLockPrefix = "groundwork.lazy-ddl:";
     private const string HighWaterValue = "high_water";
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
