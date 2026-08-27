@@ -207,7 +207,11 @@ public static class ExpandContractWorkflow
                 continue;
             }
 
+            // The recorded marker has to be this supersession, not a different one on the same
+            // column: re-pointing a supersession at another replacement restarts the window rather
+            // than inheriting the retention instant of the one it abandoned.
             if (applied is null || marker is null ||
+                !string.Equals(marker.ReplacementColumn, replacement, StringComparison.Ordinal) ||
                 !applied.Snapshot.Subject.Columns.Any(column =>
                     string.Equals(column.Name, replacement, StringComparison.Ordinal)))
             {

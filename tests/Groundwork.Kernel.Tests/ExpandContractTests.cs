@@ -198,6 +198,36 @@ public sealed class ExpandContractTests
         Assert.StartsWith("Contract readiness was established for 'test-provider:orders'", refusal.Message);
     }
 
+    [Fact]
+    public void Readiness_will_not_reuse_a_marker_recorded_for_another_replacement_column()
+    {
+        var executor = Expanded();
+        // The declaration is re-pointed at a column that is already applied, so the replacement
+        // exists — but the retention recorded in the ledger is the one it abandoned.
+        var repointed = new PhysicalSchemaTarget(
+            new SchemaSubject(
+                After(),
+                new SchemaEvolutionMetadata(
+                    semanticMigrationId: MigrationId,
+                    supersessions:
+                    [
+                        new ColumnSupersession(
+                            new ColumnDefinition { Name = "total", Type = PortableType.Decimal, Precision = 10, Scale = 2 },
+                            "name")
+                    ],
+                    dualPresenceWindow: Window)),
+            Provider);
+
+        var readiness = ExpandContractWorkflow.AssessContractReadiness(
+            repointed, History(executor), executor.Ledger, T0.AddDays(3));
+
+        Assert.Equal("GW-EXPAND-001", Assert.Single(readiness.Refusals).Code);
+        Assert.Equal(
+            "Column 'total' cannot be contracted: the applied ledger does not record it as retained " +
+            "beside replacement column 'name'. Apply the expand plan first.",
+            Assert.Single(readiness.Refusals).Message);
+    }
+
     // ------------------------------------------------------------------ the terminal state
 
     [Fact]
