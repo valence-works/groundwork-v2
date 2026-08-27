@@ -42,6 +42,81 @@ public sealed class SqliteProviderTests
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
+    /// <summary>
+    /// The runtime convenience apply takes no authorization callback, so it is the one path where a
+    /// declaration edit could reach a live catalog unreviewed. It performs what re-applying could
+    /// put back and refuses what it could not, by name — the rows stay put either way.
+    /// </summary>
+    [Fact]
+    public void Schema_apply_refuses_a_drop_it_cannot_undo_and_leaves_the_column_and_its_rows()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = OrdersUnit(includeLegacyTotal: true);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Upsert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "o-1",
+            ["customer"] = "ada",
+            ["legacy_total"] = 7m
+        }));
+
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            connection.Schema.Apply(OrdersUnit(includeLegacyTotal: false)));
+
+        Assert.Contains("GW-SCHEMA-010", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("drop-column:orders.legacy_total", failure.Message, StringComparison.Ordinal);
+        // Refused before any provider work: the column and the row it holds are untouched.
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "o-1" }));
+        Assert.NotNull(stored);
+        Assert.Equal(7m, stored!.Values.Values["legacy_total"]);
+        Assert.Contains(
+            connection.Schema.Diff(OrdersUnit(includeLegacyTotal: false)).Changes,
+            change => change.Kind == SchemaChangeKind.DropColumn && change.Identity == "legacy_total");
+    }
+
+    /// <summary>The same apply still performs a rename, because renaming carries the rows.</summary>
+    [Fact]
+    public void Schema_apply_performs_a_rename_and_carries_the_rows()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = OrdersUnit(includeLegacyTotal: false);
+        connection.Schema.Apply(unit);
+        connection.OpenSession(unit, StorageAccess.Global).Upsert(new StorageValues(
+            new Dictionary<string, object?> { ["id"] = "o-1", ["customer"] = "ada" }));
+
+        var renamed = OrdersUnit(includeLegacyTotal: false) with
+        {
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(renamed).Applied);
+
+        var stored = connection.OpenSession(renamed, StorageAccess.Global).Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "o-1" }));
+        Assert.NotNull(stored);
+        Assert.Equal("ada", stored!.Values.Values["buyer"]);
+    }
+
+    private static StorageUnit OrdersUnit(bool includeLegacyTotal) => new()
+    {
+        Id = new StorageUnitId("orders"),
+        Name = "gw_apply_orders",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "customer", Type = PortableType.String, MaxLength = 64 },
+            ..(includeLegacyTotal
+                ? new[] { new ColumnDefinition { Name = "legacy_total", Type = PortableType.Decimal, Precision = 18, Scale = 4 } }
+                : [])
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
     [Fact]
     public void Native_aggregation_predicates_preserve_typed_null_bool_datetime_guid_and_binary_values()
     {

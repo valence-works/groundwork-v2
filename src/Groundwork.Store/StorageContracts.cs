@@ -624,7 +624,13 @@ public enum SchemaChangeKind
     CreateIndex,
     AddDerivedColumn,
     RebuildIndex,
-    UpdateAggregationProfile
+    UpdateAggregationProfile,
+    RenameStorageUnit,
+    RenameColumn,
+    AlterColumn,
+    DropColumn,
+    DropIndex,
+    DropStorageUnit
 }
 
 public sealed record SchemaChange(SchemaChangeKind Kind, string Identity);

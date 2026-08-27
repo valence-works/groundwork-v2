@@ -321,7 +321,7 @@ internal sealed class SchemaEvolutionAnalysis
             }
             if (!rebuiltIndexes.Add(index.Name))
                 continue;
-            operations.Add(new DropPhysicalIndexOperation(subject, index));
+            operations.Add(new DropPhysicalIndexOperation(subject, index, rebuild: true));
         }
     }
 

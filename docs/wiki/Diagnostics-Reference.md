@@ -280,6 +280,7 @@ would make it work, while an unauthorized one is waiting on an operator naming i
 | `GW-SCHEMA-007` | A planned **destructive** operation is not authorized. The message names the operation's address, e.g. `drop-column:orders.legacy_total` | Needs authorization |
 | `GW-SCHEMA-008` | A planned **semantic** migration is not authorized, e.g. `rename-column:orders.buyer` | Needs authorization |
 | `GW-SCHEMA-009` | The provider cannot honor a declared logical-id rename. MongoDB keeps no applied schema ledger, so it cannot tell a renamed field from a new one ([#86](https://github.com/valence-works/groundwork-v2/issues/86)) | Invalid |
+| `GW-SCHEMA-010` | `connection.Schema.Apply` was asked to destroy data re-applying cannot restore — drop a column or its storage, or narrow a column past the values in it. Apply it from the `groundwork` CLI, which authorizes the exact operation against the exact plan | Needs authorization |
 
 `GW-SCHEMA-007` and `-008` replace the earlier use of `GW-RUNTIME-002` for startup auto-apply
 refusals. `GW-RUNTIME-002` now means only what its own row says: **index drift**.

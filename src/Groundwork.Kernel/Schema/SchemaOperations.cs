@@ -506,17 +506,24 @@ public sealed class DropColumnOperation : PhysicalSchemaOperation
 /// <summary>Removes one declared index.</summary>
 public sealed class DropPhysicalIndexOperation : PhysicalSchemaOperation
 {
-    internal DropPhysicalIndexOperation(SchemaSubject subject, IndexDefinition index)
+    internal DropPhysicalIndexOperation(SchemaSubject subject, IndexDefinition index, bool rebuild = false)
         : base(
             PhysicalSchemaOperationKind.DropIndex,
             subject.Id,
             index.Name,
             null,
-            CreatePhysicalIndexOperation.CanonicalIndex(index))
+            CreatePhysicalIndexOperation.CanonicalIndex(index),
+            rebuild ? "rebuild" : null)
     {
         Subject = subject;
         Index = CreatePhysicalIndexOperation.Snapshot(index);
-        RequiresAuthorization = true;
+        IsRebuild = rebuild;
+        // An index taken out of the way of a column alteration is put back by the same plan, and the
+        // applied ledger ends holding it. Naming that a removal would ask an operator to authorize
+        // destroying something the plan does not destroy, and would teach them to reach for a
+        // blanket grant to widen a column. The alteration it belongs to carries the authorization.
+        if (!rebuild)
+            RequiresAuthorization = true;
         SemanticMigrationId = subject.Evolution.SemanticMigrationId;
     }
 
@@ -524,6 +531,12 @@ public sealed class DropPhysicalIndexOperation : PhysicalSchemaOperation
 
     /// <summary>The index being removed, as the applied ledger recorded it.</summary>
     public IndexDefinition Index { get; }
+
+    /// <summary>
+    /// Whether this drop is the first half of a rebuild the same plan completes, rather than a
+    /// removal. A rebuild is authorized by the alteration that required it.
+    /// </summary>
+    public bool IsRebuild { get; }
 }
 
 /// <summary>Removes the subject's primary storage and every row in it.</summary>

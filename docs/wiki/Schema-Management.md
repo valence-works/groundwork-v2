@@ -131,6 +131,7 @@ removed is planned as an explicit operation that carries its own authorization:
 | Length down, precision down, scale changed, type changed, optional → required | `AlterColumn` (narrowing) | `--allow-destructive` |
 | Index definition changed in any way | `RebuildPhysicalIndex` | `--allow-destructive` |
 | Column, index, or retired unit removed | `DropColumn`, `DropIndex`, `DropPrimaryStorage` | `--allow-destructive` |
+| An index moved out of the way of a column alteration | `DropIndex` + `CreatePhysicalIndex` | carried by the alteration |
 
 Only evolutions with **no portable meaning** are refused outright: dropping a key column
 (`GW-SCHEMA-004`), changing a key column's portable type or renaming onto a name another applied
@@ -188,11 +189,27 @@ storage is gone. Delete the declaration afterwards.
 
 > An index over a column being altered is dropped before the alteration and recreated after it, so
 > the plan does not depend on the most permissive provider's willingness to alter an indexed column.
+> The same plan puts the index back and the applied ledger still describes it, so that is a
+> **rebuild, not a removal**: it needs no `--allow-destructive drop-index:…` of its own and is
+> authorized by the alteration that required it.
 
-> `connection.Schema.Apply(unit)` applies whatever the plan contains, **including drops** — it takes
-> no authorization callback. That is what makes it convenient in tests and wrong in production.
-> Startup admission is the gate that protects a running application: it refuses unauthorized
-> destructive and semantic work with `GW-SCHEMA-007` / `GW-SCHEMA-008`.
+### What `connection.Schema.Apply` will and will not do
+
+`Apply` takes no authorization callback, so it cannot ask anyone anything. It performs everything a
+re-apply of the same declaration could put back, and refuses the rest by name with
+`GW-SCHEMA-010`:
+
+| Work | `Schema.Apply` |
+| --- | --- |
+| Create, add, rename, widen, rebuild an index, recompute a derived backfill, drop an index | **Performs it.** Nothing is lost that re-applying could not restore. |
+| Drop a column, drop retired storage, narrow a column past the values in it | **Refuses.** Nothing re-runs the loss away. |
+
+A refusal throws and names the operation, so a removed column is a message telling you to authorize
+`drop-column:orders.legacy_total` through the CLI — not a silent no-op. `Schema.Diff` still reports
+the pending removal, because reading is what `Diff` is for.
+
+Startup admission remains the gate for a running application: it refuses unauthorized destructive
+and semantic work with `GW-SCHEMA-007` / `GW-SCHEMA-008`.
 
 ### Providers and connections
 

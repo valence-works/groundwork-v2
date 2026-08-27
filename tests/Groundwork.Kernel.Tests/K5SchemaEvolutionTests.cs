@@ -888,17 +888,102 @@ public sealed class K5SchemaEvolutionTests
         Assert.True(Array.IndexOf(operations, dropIndex) < Array.IndexOf(operations, alter));
         Assert.True(Array.IndexOf(operations, alter) < Array.IndexOf(operations, createIndex));
 
+        // The index is put back by this same plan, so it is a rebuild, not a removal. Asking for
+        // `--allow-destructive drop-index:…` to widen a column would describe a loss that does not
+        // happen and teach operators to reach for a blanket destructive grant.
+        Assert.True(dropIndex.IsRebuild);
+        var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+        Assert.DoesNotContain(
+            "drop-index:customer.by_priority",
+            protection.DestructiveOperations.Select(item => item.Address));
+        Assert.Equal("alter-column:customer.priority", Assert.Single(protection.DestructiveOperations).Address);
+
         var applied = PhysicalSchemaApplication.Apply(
             CreateTarget(widened),
             executor,
             PlannedAt.AddMinutes(3),
             _ => PhysicalSchemaPlanAuthorization.Allow);
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        // The ledger still describes the index, which is what makes "rebuild" the truthful word.
+        Assert.Contains(applied.AppliedState!.Snapshot.SemanticOperations,
+            operation => operation.Kind == PhysicalSchemaOperationKind.CreatePhysicalIndex &&
+                operation.SubjectIdentity == "by_priority");
         Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
                 CreateTarget(widened),
-                PhysicalSchemaHistoryState.FromApplied(applied.AppliedState!),
+                PhysicalSchemaHistoryState.FromApplied(applied.AppliedState),
                 PlannedAt.AddMinutes(4))
             .Operations);
+    }
+
+    /// <summary>
+    /// A convenience apply performs what re-applying the same declaration could put back. Dropping a
+    /// column is not that, so it is refused by name rather than silently performed or silently
+    /// skipped.
+    /// </summary>
+    [Fact]
+    public void An_unauthorized_apply_refuses_work_that_destroys_data_it_cannot_restore()
+    {
+        var executor = new FakeExecutor();
+        var unit = CreateOrdersUnit(includeLegacyTotal: true);
+        PhysicalSchemaApplication.ApplyRecoverableWork(CreateTarget(unit), executor, PlannedAt.AddMinutes(1));
+
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            PhysicalSchemaApplication.ApplyRecoverableWork(
+                CreateTarget(CreateOrdersUnit(includeLegacyTotal: false)),
+                executor,
+                PlannedAt.AddMinutes(2)));
+
+        Assert.Contains("GW-SCHEMA-010", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("drop-column:orders.legacy_total", failure.Message, StringComparison.Ordinal);
+        // Refused, not half-applied: the column is still in the ledger.
+        Assert.Contains(executor.AppliedState!.Snapshot.SemanticOperations,
+            operation => operation.SubjectIdentity == "legacy_total");
+    }
+
+    [Fact]
+    public void An_unauthorized_apply_still_performs_work_that_re_applying_could_put_back()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.ApplyRecoverableWork(
+            CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+
+        // Renaming carries the rows, widening keeps every value, and an index rebuild is recomputed
+        // from data that never left. None of those is a loss, so none of them is refused here.
+        var evolved = RenameColumn(CreateUnit(includePriority: true), "name", "full_name");
+        evolved = evolved with
+        {
+            Columns = [.. evolved.Columns.Select(column => column.Name == "full_name"
+                ? column with { MaxLength = 400 }
+                : column)]
+        };
+
+        var result = PhysicalSchemaApplication.ApplyRecoverableWork(
+            CreateTarget(evolved), executor, PlannedAt.AddMinutes(2));
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Outcome);
+        Assert.Contains(result.AppliedState!.Snapshot.SemanticOperations,
+            operation => operation.SubjectIdentity == "full_name");
+    }
+
+    [Fact]
+    public void An_unauthorized_apply_refuses_narrowing_a_column_past_the_values_in_it()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.ApplyRecoverableWork(
+            CreateTarget(CreateUnit(includePriority: false)), executor, PlannedAt.AddMinutes(1));
+        var narrowed = CreateUnit(includePriority: false) with
+        {
+            Columns = [.. CreateUnit(includePriority: false).Columns.Select(column => column.Name == "name"
+                ? column with { MaxLength = 10 }
+                : column)]
+        };
+
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            PhysicalSchemaApplication.ApplyRecoverableWork(
+                CreateTarget(narrowed), executor, PlannedAt.AddMinutes(2)));
+
+        Assert.Contains("GW-SCHEMA-010", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("alter-column:customer.name", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]

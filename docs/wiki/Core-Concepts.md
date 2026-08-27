@@ -220,11 +220,13 @@ A `#pragma warning disable` does **not** work: it silences the analyzer but leav
 ## Schema is deployment-time work
 
 Runtime admission is **inspect-only** by default. `connection.Schema.Apply(unit)` exists and is used
-freely in tests and local development, but it applies whatever the plan contains — **including drops
-and renames** — because it takes no authorization callback. Production physical schema changes belong
-to the `groundwork` CLI, which requires explicit authorization (`--safe`, or an exact plan
-fingerprint plus per-operation ids for destructive/semantic work). Startup admission is the gate that
-protects a running application: it refuses unauthorized destructive (`GW-SCHEMA-007`) and semantic
+freely in tests and local development. It takes no authorization callback, so it performs only what
+re-applying the same declaration could put back — creates, adds, renames, widenings, index rebuilds —
+and **refuses to destroy what it could not restore** (`GW-SCHEMA-010`): dropping a column or its
+storage, or narrowing a column past the values in it. Production physical schema changes belong to
+the `groundwork` CLI, which requires explicit authorization (`--safe`, or an exact plan fingerprint
+plus per-operation ids for destructive/semantic work). Startup admission is the gate that protects a
+running application: it refuses unauthorized destructive (`GW-SCHEMA-007`) and semantic
 (`GW-SCHEMA-008`) work.
 
 At startup, providers compare the deployed catalog against the compiled target:

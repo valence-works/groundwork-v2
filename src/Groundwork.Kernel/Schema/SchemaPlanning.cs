@@ -459,6 +459,42 @@ public sealed record PhysicalSchemaPlanProtection(
     public ImmutableArray<string> DestructiveOperationIdentities =>
         [.. DestructiveOperations.Select(operation => operation.Identity)];
 
+    /// <summary>
+    /// The authorization an unauthenticated convenience apply uses: it performs everything the plan
+    /// contains except work that destroys data it cannot reconstruct.
+    /// </summary>
+    /// <remarks>
+    /// Rebuilding an index or recomputing a derived backfill is recoverable — re-applying the same
+    /// declaration puts the result back from data that never left. Dropping a column or its storage,
+    /// or narrowing a column past the values already in it, is not: nothing re-runs the loss away.
+    /// Treating those as one category is what makes "this API was already destructive" sound like a
+    /// reason to let it drop a column, and it is not one. Removals go through the deployment tool,
+    /// where an operator names the exact operation against the exact plan.
+    /// </remarks>
+    public static PhysicalSchemaPlanAuthorization RefuseIrrecoverableWork(PhysicalSchemaDiffPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        var refusals = plan.Operations
+            .Where(IsIrrecoverable)
+            .Select(operation => new SchemaRefusal(
+                "GW-SCHEMA-010",
+                $"'{operation.AuthorizationAddress}' destroys data that re-applying cannot restore, so it is " +
+                "refused here. Apply it from the deployment tool, which authorizes the exact operation " +
+                "against the exact plan.",
+                $"schema.apply.{operation.Identity}"))
+            .ToArray();
+        return refusals.Length == 0
+            ? PhysicalSchemaPlanAuthorization.Allow
+            : PhysicalSchemaPlanAuthorization.Deny(refusals);
+    }
+
+    private static bool IsIrrecoverable(PhysicalSchemaOperation operation) => operation switch
+    {
+        AlterColumnOperation alter => alter.Alteration == ColumnAlterationKind.Narrowing,
+        _ => operation.Kind is PhysicalSchemaOperationKind.DropColumn or
+            PhysicalSchemaOperationKind.DropPrimaryStorage
+    };
+
     public static PhysicalSchemaPlanProtection Inspect(IReadOnlyList<PhysicalSchemaOperation> operations)
     {
         ArgumentNullException.ThrowIfNull(operations);
