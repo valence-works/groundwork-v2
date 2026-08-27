@@ -22,6 +22,39 @@ Groundwork makes the scan an explicit, attributed, expiring decision instead.
 They share **one** provider-neutral implementation: `QueryCoverageChecker`. There is no second
 approximation that could disagree with the first.
 
+## What counts as a covering index
+
+Two things: a **declared index**, and the **declared key**.
+
+The key counts because it is already an index. Every relational coordinator emits it as the table's
+`PRIMARY KEY`, and PostgreSQL, SQL Server, and SQLite each back that with a unique index the planner
+seeks on. So this needs no `[GwIndex]`:
+
+```csharp
+await db.Table<Customer>().Query.Where(c => c.Id == id).ToListAsync(executor);
+```
+
+Both kinds of candidate come from one derivation, `CoverageCandidates.Derive`, which all three gates
+call — so there is no place for the analyzer, the build gate, and the runtime gate to disagree about
+what a unit offers.
+
+Three details worth knowing:
+
+- **The key is ordered, like any compound index.** A key of `(tenant, id)` covers a filter on
+  `tenant`, and one on `tenant` and `id` together. It does **not** cover a filter on `id` alone —
+  that is a trailing column, not a leading one, and it needs its own index.
+- **The key is exempt from the deployed-catalog intersection.** A declared index can be missing from
+  the catalog part way through a rolling deploy, which is why the runtime gate intersects. The key
+  cannot: it is created with the table.
+- **No refusal will tell you to duplicate your key.** When the columns the checker would suggest are
+  the leading columns of the key, it withholds the suggestion — declaring that index would only add a
+  second copy of the primary key — and names the point-read path instead: `session.Read(key)`, or the
+  typed `Records` read.
+
+> **MongoDB caveat.** MongoDB stores the key in `_id` but filters on the declared field names, and
+> creates no index over them, so a key-bounded read is admitted by the gate and then scans. The
+> verdict is portable; the plan is not yet. See issue #238.
+
 ## The analyzer
 
 `Groundwork.Analyzers` reads your schema from the current assembly's generated `GroundworkSchema`

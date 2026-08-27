@@ -11,6 +11,15 @@ methods. `WhereIf` is enumerated as every 2^n shape for n <= 6. The reassignment
 `if (condition) q = q.Where(...)` is enumerated up to 32 shapes; loops, escapes, unknown helpers,
 and larger compositions are reported as unresolved.
 
+Coverage candidates come from one derivation, `CoverageCandidates.Derive`, shared by this analyzer,
+`SchemaVerifier`, and the runtime gate. It contributes the declared key ahead of the declared
+indexes: every relational coordinator emits the key as the table's `PRIMARY KEY`, which the engine
+backs with a unique index, so a key-bounded read is a seek rather than a scan. The key is an ordered
+candidate, so a composite key `(tenant, id)` bounds a predicate on `tenant` and on `tenant` and `id`
+together, but not on `id` alone. Where a refusal would otherwise suggest an index over the leading
+columns of the key, the suggestion is withheld — that index already exists — and the point-read path
+is named instead.
+
 An uncovered read may opt into a visible, attributed scan with the runtime AST value
 `.AcceptScan("GW-SCAN-0007", "reason", "owner", "yyyy-MM-dd")`. The marker is not a pragma
 suppression: a query suppressed with `#pragma warning disable GW_COVER_006` still has no
