@@ -159,6 +159,22 @@ Published codes appear in messages; Roslyn ids use underscores.
 
 ---
 
+## `GW-HOST-*` — dependency injection and hosting
+
+Raised by `Groundwork.Extensions.DependencyInjection`, carried on
+`GroundworkHostingException.Code`. See **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)**.
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `GW-HOST-001` | A storage connection is registered with a non-singleton lifetime | Register through `AddGroundwork().AddConnection(...)`, which registers connections as process singletons; inject the scoped `IGroundworkStorage` for per-request sessions and units of work |
+| `GW-HOST-002` | Two connections registered under the same name | Name the second one differently, or reconfigure the first with `services.Configure<GroundworkConnectionOptions>(name, …)` |
+| `GW-HOST-003` | A connection name was requested that was never registered | Register it; the message lists the names that exist |
+| `GW-HOST-004` | A registered connection has no provider factory or no connection string | Call `options.UseProvider(factory, connectionString)` |
+| `GW-HOST-005` | Startup admission found pending physical schema work, or could not run | Apply the declaration from the deployment step with `groundwork apply --safe`; runtime is inspect-only |
+| `GW-HOST-006` | The deployed database does not advertise a required capability | Deploy a topology that provides it, or drop the requirement and degrade gracefully |
+
+---
+
 ## `GW-ACCESS-*` — access context
 
 | Code | Meaning |
@@ -247,6 +263,7 @@ Grouped by concern:
 | `GW-COMPARE-DELETE-001` | Invalid compare-and-delete request (e.g. a JSON column in the equality set) |
 | `GW-BATCH-FINGERPRINT-001` | Batch fingerprint refusal |
 | `GW-SQLSERVER-LIFECYCLE-001` | SQL Server lifecycle table has a non-`BIN2` collation — migration required |
+| `GW-SQLITE-LIFETIME-001` | A second Groundwork connection to the same SQLite file — the schema lock is held for the life of a connection. One `IStorageProviderConnection` per database file per process; in tests, one file per test or `Data Source=:memory:` |
 
 ---
 
