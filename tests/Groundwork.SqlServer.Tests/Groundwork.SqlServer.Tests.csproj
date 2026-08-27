@@ -5,6 +5,18 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- Both frameworks run every test in this suite, one after the other rather than at once.
+         dotnet test dispatches a multi-targeted suite's per-framework runs through BuildInParallel,
+         and this suite hosts the W2 concurrency harness: 32 concurrent writers, each write retried
+         up to 128 times, against the one SQL Server the job provides. Two copies of a load harness
+         on one server measure that server's capacity rather than either runtime's behaviour, and
+         CI's container does not have it — the writes stop making progress and whichever run loses
+         fails on the client's command deadline (SQL Server wait timeout 258), which says nothing
+         about .NET 8 or .NET 10. Serializing the two runs keeps both frameworks fully exercised.
+         It is this server's capacity that is the constraint and not the harness: the same harness
+         against MongoDB, SQLite and PostgreSQL runs both frameworks at once in
+         Groundwork.Concurrency.Tests without trouble. -->
+    <TestTfmsInParallel>false</TestTfmsInParallel>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
