@@ -98,6 +98,36 @@ Behavior that matters operationally:
 - Cache eviction emits the `groundwork.runtime.coverage.cache.eviction` metric. Watch it: sustained
   eviction means your shape space is larger than `MaximumCachedShapes` (default 1024).
 
+## The LINQ executor
+
+`GwLinqExecutor` (package `Groundwork.Query.Linq.Execution`) is the one adapter behind the LINQ
+terminals, for **every** provider. There is deliberately no per-provider executor: admission, scan
+acceptance, paging, materialization, and the async terminals are provider-neutral, and a second copy
+per provider would be a second place for coverage to drift.
+
+```csharp
+var executor = new GwLinqExecutor(session, connection.Catalog);
+var rows = await db.Table<Customer>().Query
+    .Where(c => c.Email == "ada@example.test")
+    .ToListAsync(executor);
+```
+
+Every terminal admits the request through `RuntimeCoverageGate` **before** the provider is asked to
+render anything. The request that is admitted is the one you wrote — not the narrowed count or
+existence probe derived from it — so a runtime refusal carries the same code and the same named fix
+the analyzer reported at build time.
+
+- Pass `connection.Catalog` to intersect your declared indexes with the deployed ones. Without it,
+  the gate admits against the declaration alone, and an index that a rolling deploy has not created
+  yet can still satisfy it.
+- **Declaring an index is what makes a query covered; declaring a key is not.** The key is not a
+  coverage index, in the analyzer, in the CLI, or at runtime. All three agree because all three call
+  the same checker.
+- Each provider supplies only its native budgets, through `QueryAdmissionProfile`, so the
+  pre-execution value fence uses the provider's real limit instead of a portable guess — SQLite 999,
+  SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter budget of its own (its bound is
+  the 16 MB command document) and keeps the portable default rather than inventing one.
+
 ## Accepted scans
 
 Some reads genuinely should scan — a small admin export, a one-off migration. Say so explicitly:
@@ -165,9 +195,8 @@ At startup, providers compare the deployed catalog against the compiled physical
 
 MongoDB performs the same inspect-only split at `OpenSession` via its public `InspectSchema` report.
 
-> **Known provider gap:** MongoDB currently has no query executor wired to the runtime coverage gate.
-> Mongo query endpoints must call the shared `RuntimeCoverageGate` before execution to obtain
-> dependent-shape refusal. Extra native indexes are never used to satisfy a declared index.
+All four providers execute LINQ terminals through the same gate — see **[The LINQ executor](#the-linq-executor)**.
+Extra native indexes are never used to satisfy a declared index, on any provider.
 
 ## Designing indexes that cover
 

@@ -99,7 +99,7 @@ using var connection = new PostgreSqlProviderFactory().Create(
   conflict predicate and the generated optimistic version.
 - A declared **secondary unique index** selects the row-attributed fallback so one constraint error
   cannot be reported for every row.
-- Parameter budget: **65,535**.
+- Parameter budget: **65,535** — advertised to the runtime value fence, not restated by it.
 - No index-hint syntax — declarations are retained for diagnostics but never emitted as hints.
 - Explain assertions use `EXPLAIN (FORMAT JSON)` and are labeled `optimizer-selected`.
 
@@ -120,7 +120,7 @@ using var connection = new SqlServerProviderFactory().Create(
 - Schema coordination uses `sp_getapplock` plus a durable fence/history pair; optimistic concurrency
   uses serializable write transactions.
 - Provider sequences use `IDENTITY(1,1)`, read from `OUTPUT INSERTED`.
-- Parameter budget: **2,100**.
+- Parameter budget: **2,100** — advertised to the runtime value fence, not restated by it.
 - Supports native index hints when a declaration is `QueryIndexPinning.Pinned`. Explain assertions use
   showplan XML and are labeled `hinted`.
 
@@ -196,9 +196,17 @@ Standalone MongoDB is fine for basic typed CRUD. It is not fine for streams.
   after a duplicate-key outcome so the portable `UniqueViolation` result surfaces.
 - Explain assertions use `explain` with `executionStats` (winning-plan `IXSCAN`), labeled `hinted`.
 
-> **Known gap:** MongoDB has no query executor wired to the Q3 runtime coverage gate. Mongo query
-> endpoints must call the shared `RuntimeCoverageGate` before execution to obtain dependent-shape
-> refusal. Extra native indexes are never used to satisfy a declared index.
+### Query coverage
+
+MongoDB executes LINQ terminals through `GwLinqExecutor` and the shared `RuntimeCoverageGate`, the
+same as the relational providers. Coverage is decided from the **declaration** — the declared indexes
+intersected with the deployed catalog — not from what the Mongo planner would choose, so an extra
+native index nobody declared never satisfies a declared index. A shape the shared checker cannot
+prove is refused with the same `GW-COVER-*` code and the same named fix as on SQLite, PostgreSQL, and
+SQL Server; it is never silently permitted.
+
+MongoDB has no bound-parameter budget — its real bound is the 16 MB command document — so it states
+the portable literal and membership defaults rather than advertising a Mongo-specific number.
 
 Test/CI connection variables: `GROUNDWORK_MONGO_CONNECTION`,
 `GROUNDWORK_MONGO_STANDALONE_CONNECTION`.
