@@ -65,9 +65,7 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         var member = invocation.Expression as MemberAccessExpressionSyntax;
         if (member is null || !IsTerminal(member.Name.Identifier.ValueText))
             return;
-        if (!QueryResolver.IsClosedSurfaceCandidate(invocation, context.SemanticModel, schema, context.CancellationToken))
-            return;
-        if (!QueryResolver.IsCandidate(invocation))
+        if (!QueryResolver.IsClosedSurfaceCandidate(invocation, context.SemanticModel, context.CancellationToken))
             return;
 
         var resolution = QueryResolver.Resolve(invocation, context.SemanticModel, schema, context.CancellationToken);

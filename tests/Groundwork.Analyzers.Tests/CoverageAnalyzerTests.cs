@@ -305,16 +305,43 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Linq_shaped_terminals_on_non_groundwork_tables_are_ignored()
     {
-        const string foreign = "using System.Collections.Generic; using System.Linq; " +
-            "public sealed class Row { public string Status { get; set; } = \"\"; } " +
+        const string usings = "using System.Collections.Generic; using System.Linq; ";
+        const string foreign = "public sealed class Row { public string Status { get; set; } = \"\"; } " +
             "public sealed class Sheet { public IEnumerable<T> Table<T>() => new List<T>(); } " +
             "public static class Spreadsheet { public static List<Row> Run(Sheet sheet) { var rows = sheet.Table<Row>().Where(r => r.Status == \"open\").ToList(); _ = rows.Count(); _ = rows.Any(); return rows; } }";
 
-        var bare = await Analyze(foreign);
-        var withSchema = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + foreign);
+        var bare = await Analyze(usings + foreign);
+        var withSchema = await Analyze(usings + WithSchema(SchemaWithIndex("ix_status", "status ASC")) + foreign);
 
         Assert.DoesNotContain(bare, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
         Assert.DoesNotContain(withSchema, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Plain_linq_over_a_materialized_schema_row_collection_is_ignored()
+    {
+        const string usings = "using System.Collections.Generic; using System.Linq; ";
+        const string members = "[GwTable(\"tickets\")] public sealed class Ticket { public string Status { get; set; } = \"\"; } " +
+            "public sealed class Db { public Rows<T> Table<T>() => new Rows<T>(); } " +
+            "public sealed class Rows<T> { public Rows<T> Where(System.Func<T, bool> predicate) => this; public List<T> ToList() => new List<T>(); } " +
+            "public static class Report { public static int Run(Db db, string status) { var rows = db.Table<Ticket>().Where(t => t.Status == status).ToList(); return rows.Count(t => t.Status == status); } }";
+
+        var diagnostics = await Analyze(usings + WithSchema(SchemaWithIndex("ix_status", "status ASC")) + members);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Non_generic_query_facades_are_still_analyzed()
+    {
+        const string members = "[GwTable(\"tickets\")] public sealed class Ticket { public string Status { get; set; } = \"\"; } " +
+            "public sealed class Db { public TicketQuery Table<T>() => new TicketQuery(); } " +
+            "public sealed class TicketQuery { public TicketQuery Where(System.Func<Ticket, bool> predicate) => this; public System.Threading.Tasks.Task ToListAsync() => System.Threading.Tasks.Task.CompletedTask; } " +
+            "public static class Report { public static void Run(Db db, string status) { _ = db.Table<Ticket>().Where(t => t.Status == status).ToListAsync(); } }";
+
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) + members);
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_006");
     }
 
     [Fact]

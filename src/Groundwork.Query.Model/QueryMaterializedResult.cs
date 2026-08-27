@@ -65,12 +65,11 @@ public static class QueryResultMaterializer
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (source is null) throw new ArgumentNullException(nameof(source));
 
-        var totalCount = request.Result.IncludesTotalCount
-            ? source.FirstOrDefault(row => row.TryGetValue("__groundwork_total_count", out var count) && count is not null) is { } counted &&
-              counted.TryGetValue("__groundwork_total_count", out var count) && count is not null
-                ? Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture)
-                : 0L
-            : (long?)null;
+        var totalCount = request.Result.IncludesTotalCount &&
+            source.FirstOrDefault(row => row.TryGetValue("__groundwork_total_count", out var value) && value is not null) is { } counted &&
+            counted.TryGetValue("__groundwork_total_count", out var count) && count is not null
+                ? Convert.ToInt64(count, CultureInfo.InvariantCulture)
+                : (long?)null;
         var effectiveSource = source
             .Where(row => !row.TryGetValue("__groundwork_count_only", out var marker) || Convert.ToInt64(marker ?? 0, CultureInfo.InvariantCulture) == 0)
             .ToArray();

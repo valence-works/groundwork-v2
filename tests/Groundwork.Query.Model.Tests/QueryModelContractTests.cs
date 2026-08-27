@@ -283,6 +283,27 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
+    public void Total_count_results_stay_null_when_the_provider_omits_the_count_row()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice")),
+            ImmutableArray<OrderTerm>.Empty,
+            Projection.All,
+            Paging.None,
+            ResultShape.TotalCount.Instance);
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> uncounted =
+            [new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "Alice" }];
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> counted =
+            [new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "Alice", ["__groundwork_total_count"] = 3L }];
+
+        var missing = QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default, uncounted);
+        Assert.Null(missing.TotalCount);
+        Assert.Throws<InvalidOperationException>(() => QueryRequestExecution.RequireTotalCount(request, missing.TotalCount));
+        Assert.Equal(3L, QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default, counted).TotalCount);
+    }
+
+    [Fact]
     public void Rows_result_has_no_count_semantics_and_total_is_nullable()
     {
         Assert.False(ResultShape.Rows.Instance.IncludesTotalCount);
