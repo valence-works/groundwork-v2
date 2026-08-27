@@ -1,5 +1,32 @@
 <Project>
+
+  <!-- Release contract for every public package, declared once rather than repeated 22 times.
+       Source Link is in-box in the .NET 8+ SDK; Microsoft.SourceLink.GitHub stays referenced so a
+       build on an older SDK still embeds the same commit metadata. Groundwork.Packaging.Tests packs
+       for real and asserts the resulting nupkg and snupkg carry all of it. -->
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
     <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
   </ItemGroup>
+
+  <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <!-- Every public package ships its own readme, so a nuget.org listing describes that package
+       rather than the family: one file per package id under docs/v2/package-readmes, wired here so
+       no project repeats the property and the item. This runs as a target rather than as a plain
+       item because PackageId is not yet defaulted when this file is imported. -->
+  <Target Name="GroundworkPackPackageReadme"
+          BeforeTargets="_GetPackageFiles;GenerateNuspec"
+          Condition="'$(IsPackable)' == 'true'">
+    <PropertyGroup>
+      <GroundworkPackageReadme>$(MSBuildThisFileDirectory)docs/v2/package-readmes/$(PackageId).md</GroundworkPackageReadme>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(GroundworkPackageReadme)')"
+           Text="Package $(PackageId) has no readme. Create $(GroundworkPackageReadme): every public package describes itself on nuget.org." />
+    <ItemGroup>
+      <None Include="$(GroundworkPackageReadme)" Pack="true" PackagePath="README.md" Visible="false" />
+    </ItemGroup>
+  </Target>
+
 </Project>

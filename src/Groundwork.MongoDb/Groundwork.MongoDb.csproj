@@ -7,7 +7,6 @@
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.MongoDb</PackageId>
     <Description>Native typed-column MongoDB provider for Groundwork.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,7 +15,6 @@
     <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
     <ProjectReference Include="../Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
   </ItemGroup>
 
 </Project>

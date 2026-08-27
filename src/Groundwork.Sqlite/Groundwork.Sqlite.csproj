@@ -7,7 +7,6 @@
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Sqlite</PackageId>
     <Description>SQLite provider for Groundwork typed storage.</Description>
-    <PackageReadmeFile>sqlite-provider.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,9 +18,6 @@
     <ProjectReference Include="../Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
     <ProjectReference Include="../Groundwork.Substrate.Relational/Groundwork.Substrate.Relational.csproj" />
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="../../docs/sqlite-provider.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>

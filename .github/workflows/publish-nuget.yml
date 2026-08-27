@@ -1,0 +1,235 @@
+# Publishing Groundwork to nuget.org
+#
+# This workflow builds, validates, and — only on an explicit release — publishes the 22-package
+# public set to nuget.org. The Feedz feed remains the nightly preview channel and is unaffected;
+# see publish-feedz.yml.
+#
+# **Nothing here can publish by accident.** Four independent conditions must all hold:
+#
+# 1. There is no `push` and no `pull_request` trigger, so ordinary repository activity cannot
+#    start this workflow at all.
+# 2. A manual run must set `publish: true` **and** type the exact package version into `confirm`.
+#    The job compares them and refuses a mismatch, so a stray click cannot ship a release.
+# 3. The publish job runs in the `nuget-org` GitHub environment. Configure that environment with
+#    required reviewers, and every publish waits for a human approval that GitHub records.
+# 4. The publish job needs `secrets.NUGET_API_KEY`. **This repository does not define that secret,
+#    and this change deliberately does not add or request one.** Until a maintainer creates it, the
+#    publish job stops at its credential check and pushes nothing.
+#
+# Everything before the push — build, full test suite on every shipped target framework, packaging
+# contract tests, pack, layout validation, and the clean-room package-only consumer proof — runs on
+# every trigger, so the release path stays continuously exercised without ever publishing.
+#
+# To do a real release: publish a GitHub release tagged `v<version>` (for example `v0.2.0`), then
+# approve the `nuget-org` environment when GitHub asks.
+
+name: Publish nuget.org packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact SemVer package version to build (defaults to VersionPrefix-preview.<run>)
+        required: false
+        type: string
+      publish:
+        description: Push the validated packages to nuget.org
+        required: true
+        default: false
+        type: boolean
+      confirm:
+        description: Retype the exact version to publish. Must match `version`; publishing is refused otherwise.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-nuget-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+  NUGET_ORG_SOURCE: https://api.nuget.org/v3/index.json
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Resolve package version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == release ]]; then
+            version="${RELEASE_TAG#v}"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            version="$INPUT_VERSION"
+          else
+            prefix=$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' Directory.Build.props)
+            version="${prefix}-preview.${GITHUB_RUN_NUMBER}"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?$ ]] || {
+            echo "Invalid package version: $version" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building Groundwork v2 packages at $version"
+      - name: Confirm a manual publish names the exact version
+        if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$CONFIRM" == "$PACKAGE_VERSION" ]] || {
+            echo "Refusing to publish: 'confirm' is '$CONFIRM' but the resolved version is '$PACKAGE_VERSION'." >&2
+            echo "Publishing to a public feed is deliberate. Retype the exact version to proceed." >&2
+            exit 1
+          }
+      - name: Show the release version pinned by the documentation
+        run: |
+          set -euo pipefail
+          release=$(sed -n 's:.*<GroundworkCurrentRelease>\(.*\)</GroundworkCurrentRelease>.*:\1:p' Directory.Build.props)
+          test -f "docs/v2/releases/$release.md"
+          echo "Documentation pins $release"
+      - name: Restore the full solution
+        run: dotnet restore Groundwork.slnx --nologo
+      - name: Run the full test suite on every shipped target framework
+        run: dotnet test Groundwork.slnx --configuration Release --no-restore --nologo
+      - name: Run packaging contract tests
+        run: dotnet test tests/Groundwork.Packaging.Tests/Groundwork.Packaging.Tests.csproj --configuration Release --no-restore --nologo
+      - name: Pack the explicit public package allowlist
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: eng/pack-public-packages.sh artifacts/packages "$PACKAGE_VERSION"
+      - name: Validate package contents and allowlist
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: eng/verify-package-layout.sh artifacts/packages "$PACKAGE_VERSION"
+      - name: Run the clean-room public API and tool proof from these artifacts
+        env:
+          GROUNDWORK_PUBLIC_API_PACKAGES: artifacts/packages
+          GROUNDWORK_PUBLIC_API_VERSION: ${{ steps.version.outputs.version }}
+        run: tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: groundwork-nuget-packages-${{ steps.version.outputs.version }}
+          path: artifacts/packages
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    # A published GitHub release, or a manual run that explicitly asked to publish. There is no
+    # push or pull_request trigger on this workflow, so no other event can reach this job.
+    if: >-
+      (github.event_name == 'release' && github.event.action == 'published') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+    runs-on: ubuntu-latest
+    # Configure this environment with required reviewers: nuget.org publishes are irreversible,
+    # because a published version is never replaced.
+    environment: nuget-org
+    outputs:
+      version: ${{ needs.package.outputs.version }}
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: groundwork-nuget-packages-*
+          merge-multiple: true
+          path: artifacts/packages
+      - name: Require the nuget.org credential
+        env:
+          NUGET_ORG_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$NUGET_ORG_API_KEY" || {
+            echo "No nuget.org API key is configured for this repository." >&2
+            echo "Add a NUGET_API_KEY secret to the nuget-org environment to enable publishing." >&2
+            exit 1
+          }
+          test -n "$NUGET_ORG_SOURCE"
+      - name: Push packages to nuget.org
+        env:
+          NUGET_ORG_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          PACKAGE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          for package in artifacts/packages/*."$PACKAGE_VERSION".nupkg; do
+            test -f "$package"
+            dotnet nuget push "$package" --api-key "$NUGET_ORG_API_KEY" --source "$NUGET_ORG_SOURCE" --skip-duplicate
+          done
+      - name: Push symbol packages to nuget.org with retry
+        env:
+          NUGET_ORG_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          PACKAGE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          for package in artifacts/packages/*."$PACKAGE_VERSION".snupkg; do
+            test -f "$package"
+            pushed=false
+            for attempt in {1..12}; do
+              if dotnet nuget push "$package" --api-key "$NUGET_ORG_API_KEY" --source "$NUGET_ORG_SOURCE" --skip-duplicate; then
+                pushed=true
+                break
+              fi
+              if [[ "$attempt" -lt 12 ]]; then
+                echo "nuget.org has not admitted the package yet; retrying ($attempt/12)." >&2
+                sleep 20
+              fi
+            done
+            [[ "$pushed" == true ]] || {
+              echo "Could not publish symbol package $package to nuget.org." >&2
+              exit 1
+            }
+          done
+
+  verify-feed:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: groundwork-nuget-packages-*
+          merge-multiple: true
+          path: artifacts/packages
+      - name: Restore every public package and the tool from nuget.org
+        env:
+          PACKAGE_VERSION: ${{ needs.publish.outputs.version }}
+        # nuget.org indexes asynchronously, so a freshly pushed version is not immediately
+        # restorable. Retry rather than fail a release that did in fact publish.
+        run: |
+          set -euo pipefail
+          for attempt in {1..20}; do
+            if eng/verify-published-packages.sh "$NUGET_ORG_SOURCE" "$PACKAGE_VERSION" artifacts/packages; then
+              exit 0
+            fi
+            echo "nuget.org has not indexed $PACKAGE_VERSION yet; retrying ($attempt/20)." >&2
+            sleep 30
+          done
+          echo "nuget.org never served $PACKAGE_VERSION for a clean restore." >&2
+          exit 1

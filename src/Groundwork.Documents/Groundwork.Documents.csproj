@@ -7,13 +7,11 @@
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Documents</PackageId>
     <Description>Provider-neutral typed document declarations and canonical versioned JSON for Groundwork.</Description>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Records/Groundwork.Records.csproj" />
     <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
-    <None Include="README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
 </Project>

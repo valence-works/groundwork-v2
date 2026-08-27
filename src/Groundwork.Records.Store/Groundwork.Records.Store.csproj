@@ -7,11 +7,9 @@
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Records.Store</PackageId>
     <Description>Production provider bridge and typed unit-of-work helpers for Groundwork Records.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
     <ProjectReference Include="../Groundwork.Records/Groundwork.Records.csproj" />
     <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
   </ItemGroup>

@@ -55,11 +55,18 @@ public sealed class PackagingContractTests
         Assert.Contains("<PublishRepositoryUrl>true</PublishRepositoryUrl>", props, StringComparison.Ordinal);
         Assert.Contains("<EmbedUntrackedSources>true</EmbedUntrackedSources>", props, StringComparison.Ordinal);
         Assert.Contains("<SymbolPackageFormat>snupkg</SymbolPackageFormat>", props, StringComparison.Ordinal);
-        Assert.Contains("Microsoft.SourceLink.GitHub", File.ReadAllText(Path.Combine(root, "Directory.Packages.props")), StringComparison.Ordinal);
+
+        // Source Link and the readme are wired once for every packable project rather than repeated
+        // per project. That the wiring actually reaches the artifacts is asserted by
+        // PackedArtifactTests against real packed output; a project property is not evidence.
+        var targets = File.ReadAllText(Path.Combine(root, "Directory.Build.targets"));
+        Assert.Contains("Microsoft.SourceLink.GitHub", targets, StringComparison.Ordinal);
+        Assert.Contains("docs/v2/package-readmes/$(PackageId).md", targets, StringComparison.Ordinal);
 
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/versioning.md")));
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/support-matrix.md")));
         Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-feedz.yml")));
+        Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-nuget.yml")));
     }
 
     [Fact]

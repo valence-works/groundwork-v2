@@ -48,6 +48,7 @@ done < "$consumer_root/public-api.approved.txt"
 
 run_external_consumer() {
   local run_number="$1"
+  local framework="$2"
   local external_root="$build_root/run-$run_number"
   local intermediate="$external_root/obj"
   local output="$external_root/bin"
@@ -77,9 +78,9 @@ run_external_consumer() {
     -p:GroundworkVersion="$version" \
     "${isolation_args[@]}" -m:1 -v:q
   NUGET_PACKAGES="$package_cache" dotnet build "$external_root/Groundwork.PublicApi.Consumer.csproj" \
-    -c Release --no-restore --nologo -p:GroundworkVersion="$version" "${isolation_args[@]}" -m:1 -v:q
+    -c Release --framework "$framework" --no-restore --nologo -p:GroundworkVersion="$version" "${isolation_args[@]}" -m:1 -v:q
   NUGET_PACKAGES="$package_cache" dotnet run --project "$external_root/Groundwork.PublicApi.Consumer.csproj" \
-    -c Release --no-build --no-restore --nologo -p:GroundworkVersion="$version" "${isolation_args[@]}"
+    -c Release --framework "$framework" --no-build --no-restore --nologo -p:GroundworkVersion="$version" "${isolation_args[@]}"
 
   tool_root="$external_root/tool"
   mkdir -p "$tool_root"
@@ -88,6 +89,19 @@ run_external_consumer() {
   test "$("$tool_root/groundwork" --version)" = "Groundwork.Tool $version"
 }
 
-run_external_consumer 1
-run_external_consumer 2
-echo "Groundwork public API clean-room proof passed twice."
+# Twice on the primary framework, because a second clean build from the same artifacts is what
+# catches a first-run-only success. Then once on every other framework the runtime packages ship:
+# a package that restores and runs on one target is no evidence about the other.
+primary_framework=net10.0
+run_external_consumer 1 "$primary_framework"
+run_external_consumer 2 "$primary_framework"
+echo "Groundwork public API clean-room proof passed twice on $primary_framework."
+
+run_number=2
+for framework in $(sed -n 's:.*<TargetFrameworks>\(.*\)</TargetFrameworks>.*:\1:p' \
+                     "$consumer_root/Groundwork.PublicApi.Consumer.csproj" | tr ';' ' '); do
+  [[ "$framework" == "$primary_framework" ]] && continue
+  run_number=$((run_number + 1))
+  run_external_consumer "$run_number" "$framework"
+  echo "Groundwork public API clean-room proof passed on $framework."
+done

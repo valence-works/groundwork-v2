@@ -1,10 +1,17 @@
 # Installation
 
-Groundwork previews are **not on nuget.org**. They are published to a public Feedz source:
+Groundwork previews are **not on nuget.org yet**. They are published to a public Feedz source:
 
 ```text
 https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
+
+> A nuget.org release pipeline exists (`.github/workflows/publish-nuget.yml`) and is exercised on
+> every run, but it publishes nothing: it has no push or pull-request trigger, requires an explicit
+> GitHub release or a manually retyped version, runs behind a protected environment, and needs a
+> credential this repository does not hold. **Until a maintainer decides to publish, install from
+> Feedz.** When that changes, this page will say so and the nuget.org steps will be the shorter
+> ones — no `nuget.config` and no `--add-source`.
 
 ## 1. Configure the feed
 
@@ -63,13 +70,32 @@ See **[Package Map](Package-Map)** for the full list and the dependency rules.
 
 ## 3. Target framework
 
-Runtime packages target **`net10.0`**. Analyzer, schema, and query-model packages target
-`netstandard2.0` so they can be consumed by tooling and older build hosts, but the provider and
-Store packages require .NET 10.
+Runtime packages multi-target **`net8.0`** and **`net10.0`**, so an application on either can
+reference them.
 
 ```xml
-<TargetFramework>net10.0</TargetFramework>
+<TargetFramework>net8.0</TargetFramework>
 ```
+
+| Packages | Target | Why |
+| --- | --- | --- |
+| Providers, `Groundwork.Store`, `Groundwork.Kernel`, `Groundwork.Records*`, `Groundwork.Documents`, `Groundwork.Testing`, the substrates, `Groundwork.Diagnostics`, `Groundwork.Query.Linq.Sqlite` | `net8.0`, `net10.0` | Referenced by your application |
+| `Groundwork.Analyzers`, `Groundwork.Schema.Generator`, `Groundwork.Schema`, `Groundwork.Query.Model`, `Groundwork.Query.Linq`, `Groundwork.Query.Planning` | `netstandard2.0` | Loaded by Roslyn and by build hosts |
+| `Groundwork.Tool` | `net8.0`, `net10.0` | A `dotnet tool` runs on the deployment host's own runtime |
+| `Groundwork.SchemaTool.MSBuild` | `net10.0` | See below |
+
+The two runtime targets are the same code, not two variants. Nothing in the product is compiled
+conditionally per target: where a .NET 9+ API was used, both targets now run one shared
+implementation instead. Schema subject fingerprints, portable comparison keys, and the canonical
+schema documents the CLI emits are pinned to literal values by tests that run on **each** target, so
+a catalog applied from one and admitted from the other cannot disagree.
+
+> ⚠️ **One deliberate exception.** `Groundwork.SchemaTool.MSBuild` targets `net10.0` only. An
+> MSBuild task loads into the SDK's own MSBuild process rather than into your application, so its
+> framework tracks the SDK you build *with*, not the framework you build *for* — and its
+> `Microsoft.Build` dependency does not support `net8.0`. Your application can target `net8.0`;
+> adding build-time schema verification to it requires a .NET 10 SDK on the build machine. Nothing
+> else in Groundwork imposes that.
 
 ## 4. Verify the install
 
@@ -111,9 +137,15 @@ The command is `groundwork`. See **[Schema Management](Schema-Management)**.
 
 Every public package ships:
 
-- **SourceLink** — step into Groundwork source in the debugger.
+- **Its own readme** — the listing describes that package, not the family.
+- **Source Link** — step into Groundwork source in the debugger, at the exact commit the package was
+  built from. The commit is recorded in the package metadata and the map is embedded in the PDB.
 - **A symbol package (`.snupkg`)** — published alongside the `.nupkg` on the same feed.
-- **Deterministic builds** — the same commit produces byte-identical assemblies.
+- **Deterministic builds** — the same commit produces byte-identical assemblies, and source paths are
+  normalized so they carry no trace of the machine that built them.
+
+None of that is a claim about project settings: `Groundwork.Packaging.Tests` packs the real
+allowlist and asserts it against the resulting `.nupkg` and `.snupkg`.
 
 ## Next
 

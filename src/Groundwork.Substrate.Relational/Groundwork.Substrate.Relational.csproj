@@ -7,13 +7,11 @@
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Substrate.Relational</PackageId>
     <Description>Provider-neutral relational sessions, schema coordination, and SQL substrate for Groundwork.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
   </ItemGroup>
 
 </Project>

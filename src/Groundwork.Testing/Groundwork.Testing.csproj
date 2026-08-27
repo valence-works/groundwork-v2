@@ -7,7 +7,6 @@
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Testing</PackageId>
     <Description>Provider-neutral Groundwork storage conformance contracts and reference provider.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,7 +14,6 @@
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
     <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
     <ProjectReference Include="../Groundwork.Diagnostics/Groundwork.Diagnostics.csproj" />
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
   </ItemGroup>
 
 </Project>
