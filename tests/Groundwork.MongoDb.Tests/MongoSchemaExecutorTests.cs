@@ -156,6 +156,48 @@ public sealed class MongoSchemaExecutorTests : IDisposable
     }
 
     /// <summary>
+    /// Renaming a subject's storage renames every collection it owns, including the per-scope ones,
+    /// and rewrites the scope registry that names them. Leaving those rows behind would make the
+    /// next scoped session report <c>GW-ACCESS-006</c> registry drift.
+    /// </summary>
+    [SkippableFact]
+    public void Renaming_storage_carries_every_per_scope_collection_and_the_scope_registry()
+    {
+        var context = Context();
+        var executor = new MongoSchemaExecutor(context);
+        var id = "mongo_rename_" + Guid.NewGuid().ToString("N")[..12];
+        var from = id + "_before";
+        var to = id + "_after";
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.Applied,
+            PhysicalSchemaApplication.Apply(Target(Scoped(id, from)), executor).Outcome);
+
+        // The runtime materializes the scope collection and registers it.
+        var scope = new StorageScope("tenant-a");
+        using (var store = new MongoDbProviderConnection(new MongoClientContext(ConnectionString(context))))
+            store.OpenSession(Scoped(id, from), MongoStorageAccess.Scoped(scope));
+        var scopedBefore = MongoSchemaExecutor.ScopedCollectionName(from, scope.Value);
+        Assert.Contains(scopedBefore, context.Database.ListCollectionNames().ToList());
+
+        var renamed = PhysicalSchemaApplication.Apply(Target(Scoped(id, to)), executor);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, renamed.Outcome);
+        Assert.Contains(
+            PhysicalSchemaOperationKind.RenamePrimaryStorage,
+            renamed.Plan.Operations.Select(operation => operation.Kind));
+        var collections = context.Database.ListCollectionNames().ToList();
+        Assert.Contains(to, collections);
+        Assert.Contains(MongoSchemaExecutor.ScopedCollectionName(to, scope.Value), collections);
+        Assert.DoesNotContain(from, collections);
+        Assert.DoesNotContain(scopedBefore, collections);
+        Assert.Equal(
+            MongoSchemaExecutor.ScopedCollectionName(to, scope.Value),
+            context.Database.GetCollection<BsonDocument>("__groundwork_metadata")
+                .Find(new BsonDocument { ["kind"] = "scope", ["unit"] = id })
+                .Single()["collection"].AsString);
+    }
+
+    /// <summary>
     /// A rebuild is planned from the applied ledger, not from the catalog, and a subject owns more
     /// than one collection: a per-scope collection materialized by an application whose declaration
     /// predates the index never carried it. Redirecting the index must therefore tolerate its
@@ -291,6 +333,19 @@ public sealed class MongoSchemaExecutorTests : IDisposable
         ]
     };
 
+    private static StorageUnit Scoped(string id, string table) => new()
+    {
+        Id = new StorageUnitId(id),
+        Name = table,
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new ColumnDefinition { Name = "owner", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Scope = ScopePolicy.Scoped
+    };
+
     private static PhysicalSchemaTarget Target(StorageUnit unit, SchemaEvolutionMetadata? evolution = null) =>
         new(new SchemaSubject(MongoSchemaTargets.Physicalize(unit), evolution), MongoSchemaTargets.Provider);
 
@@ -302,6 +357,9 @@ public sealed class MongoSchemaExecutorTests : IDisposable
     private static IMongoCollection<BsonDocument> Collection(MongoClientContext context, string name) =>
         context.Database.GetCollection<BsonDocument>(name);
 
+    private static string ConnectionString(MongoClientContext context) =>
+        connectionStrings[context];
+
     private static string Table() => "mongo_exec_" + Guid.NewGuid().ToString("N")[..12];
 
     /// <summary>A database of this test's own, dropped when the class finishes.</summary>
@@ -309,12 +367,16 @@ public sealed class MongoSchemaExecutorTests : IDisposable
     {
         var url = new MongoUrlBuilder(LiveMongo.Required());
         url.DatabaseName = url.DatabaseName + "_exec_" + Guid.NewGuid().ToString("N")[..8];
-        var context = new MongoClientContext(url.ToMongoUrl().ToString());
+        var connectionString = url.ToMongoUrl().ToString();
+        var context = new MongoClientContext(connectionString);
+        connectionStrings[context] = connectionString;
         contexts.Add(context);
         return context;
     }
 
     private readonly List<MongoClientContext> contexts = [];
+
+    private static readonly Dictionary<MongoClientContext, string> connectionStrings = [];
 
     public void Dispose()
     {

@@ -682,7 +682,9 @@ public sealed class MongoSchemaExecutor
         foreach (var superseded in operation.SupersededProviderDefinitions)
             DropProviderDefinition(superseded);
         // The scope registry names the collection each scope lives in, so a rename that left those
-        // rows behind would make GW-ACCESS-006 fire on the next scoped session.
+        // rows behind would make GW-ACCESS-006 fire on the next scoped session. The new name is
+        // recomputed from the recorded scope value rather than parsed out of the old one, so it is
+        // the same value the runtime derives.
         foreach (var registration in Metadata
                      .Find(new BsonDocument { ["kind"] = "scope", ["unit"] = operation.Subject.Id.Value })
                      .ToList())
@@ -691,16 +693,15 @@ public sealed class MongoSchemaExecutor
                 new BsonDocument("_id", registration["_id"]),
                 new BsonDocument("$set", new BsonDocument(
                     "collection",
-                    operation.ToName + ScopeCollectionSeparator + ScopeHash(registration))));
+                    ScopedCollectionName(operation.ToName, registration["scope"].AsString))));
         }
     }
 
-    private static string ScopeHash(BsonDocument registration)
-    {
-        var collection = registration["collection"].AsString;
-        var separator = collection.LastIndexOf(ScopeCollectionSeparator, StringComparison.Ordinal);
-        return separator < 0 ? string.Empty : collection[(separator + ScopeCollectionSeparator.Length)..];
-    }
+    /// <summary>The collection one scope of a subject lives in, as the runtime coordinator names it.</summary>
+    internal static string ScopedCollectionName(string primary, string scope) =>
+        primary + ScopeCollectionSeparator +
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(scope)));
 
     private void ApplyProviderDefinition(ProviderPhysicalSchemaDefinition definition)
     {
