@@ -234,6 +234,7 @@ public sealed class SqliteCompareAndDeleteTests
                 Columns = [..unit.Columns, new ColumnDefinition { Name = "payload", Type = PortableType.Json }]
             };
             connection.Schema.Apply(jsonUnit);
+            _ = connection.OpenSession(jsonUnit, StorageAccess.Global);
             var jsonObserver = new ProviderCommandObserver();
             Assert.Throws<ArgumentException>(() => connection.OpenSession(jsonUnit, StorageAccess.Global, jsonObserver).CompareAndDelete(
                 Key("claim-admission"),

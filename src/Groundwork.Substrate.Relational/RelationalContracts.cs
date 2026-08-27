@@ -15,6 +15,8 @@ public abstract class RelationalDialect
     public const string SearchKeyDefinitionKind = "search-key-algorithm";
     public const string SearchKeyDefinitionSeparator = "\u001f";
 
+    public const string SchemaHistoryTable = "__groundwork_schema_history";
+
     public abstract string ProviderName { get; }
 
     /// <summary>Creates the provider's ordinary query renderer for shared predicate fragments.</summary>

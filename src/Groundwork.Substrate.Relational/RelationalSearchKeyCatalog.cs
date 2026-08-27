@@ -39,12 +39,11 @@ public static class RelationalSearchKeyCatalog
 
     public static IReadOnlyDictionary<string, string> Read(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string selectSql)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        ArgumentNullException.ThrowIfNull(transaction);
         ArgumentException.ThrowIfNullOrWhiteSpace(table);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;

@@ -81,7 +81,7 @@ public sealed class SqliteRuntimeAdmissionTests
 
         var executor = new RelationalSchemaExecutor(
             () => new SqliteConnection(store.ConnectionString), new SqliteDialect());
-        var inspection = executor.InspectHistory(
+        var inspection = executor.InspectDeployedHistory(
             SqliteSchemaCoordinator.Target(SqliteSchemaCoordinator.Physicalize(unit)));
         Assert.True(inspection.IsAppliedSchemaValid);
         Assert.Empty(inspection.ColumnDrift);
@@ -124,16 +124,90 @@ public sealed class SqliteRuntimeAdmissionTests
     }
 
     [Fact]
-    public void Apply_admits_the_unit_for_the_applying_connection()
+    public void Apply_then_first_open_verifies_the_catalog_once()
     {
         using var store = TemporaryStore.Create();
         var unit = PlainUnit("admission-apply");
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         Assert.True(connection.Schema.Apply(unit).Applied);
 
-        var observer = new ProviderCommandObserver();
-        _ = connection.OpenSession(unit, StorageAccess.Global, observer);
-        Assert.Equal(0, observer.RoundTrips);
+        var firstObserver = new ProviderCommandObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global, firstObserver);
+        Assert.Equal("sqlite.schema-admission", Assert.Single(firstObserver.Commands).Operation);
+
+        var secondObserver = new ProviderCommandObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global, secondObserver);
+        Assert.Equal(0, secondObserver.RoundTrips);
+    }
+
+    [Fact]
+    public void Tamper_between_apply_and_first_open_is_detected_on_the_same_connection()
+    {
+        using var store = TemporaryStore.Create();
+        var unit = PlainUnit("admission-tamper");
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Mutate(store, $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";");
+
+        var failure = Assert.Throws<InvalidOperationException>(() => connection.OpenSession(unit, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Never_applied_unit_is_admitted_read_only_and_cached()
+    {
+        using var store = TemporaryStore.Create();
+        var unit = PlainUnit("admission-unapplied");
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+
+        var firstObserver = new ProviderCommandObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global, firstObserver);
+        Assert.Equal("sqlite.schema-admission", Assert.Single(firstObserver.Commands).Operation);
+
+        using (var raw = new SqliteConnection(store.ConnectionString))
+        {
+            raw.Open();
+            using var command = raw.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table';";
+            Assert.Equal(0L, command.ExecuteScalar());
+        }
+
+        var secondObserver = new ProviderCommandObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global, secondObserver);
+        Assert.Equal(0, secondObserver.RoundTrips);
+    }
+
+    [Fact]
+    public void Read_only_store_opens_sessions_without_writing()
+    {
+        using var store = TemporaryStore.Create();
+        var unit = PlainUnit("admission-readonly");
+        using (var connection = new SqliteProviderFactory().Create(store.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            connection.OpenSession(unit, StorageAccess.Global).Insert(Values("one", "first"));
+        }
+        SqliteConnection.ClearAllPools();
+
+        using var readOnly = new SqliteProviderFactory().Create(store.ConnectionString + ";Mode=ReadOnly");
+        var session = readOnly.OpenSession(unit, StorageAccess.Global);
+        Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "one" })));
+    }
+
+    [Fact]
+    public void Private_memory_store_admission_is_read_only_and_cached()
+    {
+        using var connection = new SqliteProviderFactory().Create("Data Source=:memory:");
+        var unit = PlainUnit("admission-memory");
+
+        var firstObserver = new ProviderCommandObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global, firstObserver);
+        Assert.Equal("sqlite.schema-admission", Assert.Single(firstObserver.Commands).Operation);
+
+        var secondObserver = new ProviderCommandObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global, secondObserver);
+        Assert.Equal(0, secondObserver.RoundTrips);
     }
 
     private static void Mutate(TemporaryStore store, string sql)

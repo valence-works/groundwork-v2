@@ -170,41 +170,22 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly PostgreSqlDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
-    private readonly ConcurrentDictionary<StorageUnitId, string> admitted = new();
+    private readonly RelationalRuntimeAdmission admission;
 
     internal PostgreSqlSchemaCoordinator(PostgreSqlProviderConnection owner)
     {
         this.owner = owner;
         executor = new RelationalSchemaExecutor(owner.OpenConnection, dialect);
+        admission = new RelationalRuntimeAdmission(
+            "postgresql.schema-admission",
+            desired => Target(Physicalize(desired)),
+            executor.InspectDeployedHistory);
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired, IProviderCommandObserver? observer = null)
-    {
-        var physical = Physicalize(desired);
-        var target = Target(physical);
-        if (admitted.TryGetValue(physical.Id, out var admittedFingerprint) &&
-            string.Equals(admittedFingerprint, target.Fingerprint, StringComparison.Ordinal))
-            return;
-        var inspection = executor.InspectHistory(target);
-        observer?.Observe(new ProviderCommandEvent(
-            "postgresql.schema-admission",
-            $"Runtime schema admission inspection for '{physical.Name}'",
-            ProviderCommandKind.Read,
-            IsProbe: false));
-        var applied = inspection.History.AppliedState;
-        if (applied is null)
-            return;
-        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
-            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
-        {
-            throw new InvalidOperationException(
-                $"GW-RUNTIME-001: Storage unit '{desired.Name}' has physical schema drift. Apply the exact schema before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => $"{refusal.Code} at {refusal.Path}: {refusal.Message}"))));
-        }
-        admitted[physical.Id] = target.Fingerprint;
-    }
+    internal void EnsureRuntimeAdmission(StorageUnit desired, IProviderCommandObserver? observer = null) =>
+        admission.EnsureAdmitted(desired, observer);
 
     public SchemaDiff Diff(StorageUnit desired)
     {
@@ -224,12 +205,11 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
+        admission.Invalidate(desired.Id);
         var result = PhysicalSchemaApplication.Apply(target, executor);
         owner.Remember(desired);
-        var succeeded = result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges;
-        if (succeeded)
-            admitted[physical.Id] = target.Fingerprint;
-        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)), succeeded);
+        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
+            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>

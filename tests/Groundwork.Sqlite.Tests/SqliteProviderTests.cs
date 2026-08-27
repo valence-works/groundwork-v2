@@ -988,6 +988,7 @@ public sealed class SqliteProviderTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Model(includePriority: false, includeUniqueIndex: false);
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
         var observer = new ProviderCommandObserver();
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
@@ -1120,6 +1121,7 @@ public sealed class SqliteProviderTests
             Key = new KeyDefinition { Columns = ["id"] }
         };
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
         var observer = new ProviderCommandObserver();
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,

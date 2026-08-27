@@ -147,6 +147,47 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         }
     }
 
+    /// <summary>
+    /// Read-only variant of <see cref="InspectHistory"/> for runtime admission: it provisions no
+    /// infrastructure and takes no provider locks, so it stays safe on read-only stores, hot
+    /// standbys, and roles without DDL rights. A missing history catalog reports as no applied
+    /// state instead of being created.
+    /// </summary>
+    public PhysicalSchemaInspectionResult InspectDeployedHistory(PhysicalSchemaTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        using var connection = OpenConnection();
+        return InspectDeployedHistory(target, connection);
+    }
+
+    /// <summary>Read-only inspection against a caller-owned connection, which is left open.</summary>
+    public PhysicalSchemaInspectionResult InspectDeployedHistory(PhysicalSchemaTarget target, DbConnection connection)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(connection);
+        if (connection.State != ConnectionState.Open)
+            connection.Open();
+        if (!dialect.TableExists(connection, null!, RelationalDialect.SchemaHistoryTable))
+            return new PhysicalSchemaInspectionResult(PhysicalSchemaHistoryState.Empty, IsAppliedSchemaValid: true);
+        var history = dialect.ReadHistory(connection, target.Identity);
+        if (history.AppliedState is null)
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+
+        var applied = history.AppliedState;
+        var appliedTarget = new PhysicalSchemaTarget(
+            applied.Snapshot.Subject,
+            applied.Provider,
+            applied.Snapshot.ProviderDefinitions);
+        try
+        {
+            return InspectTarget(connection, null!, appliedTarget, history);
+        }
+        catch (InvalidOperationException)
+        {
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: false);
+        }
+    }
+
     public bool TryMapUniqueViolation(DbException exception, out string indexName)
     {
         ArgumentNullException.ThrowIfNull(exception);
