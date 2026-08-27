@@ -76,7 +76,7 @@ inspects compiled assembly references — not by convention.
 | Package | What it does |
 | --- | --- |
 | `Groundwork.Analyzers` | Roslyn analyzer: flags uncovered queries and portability problems **in the editor and at build**. Ships its dependencies under `analyzers/dotnet/cs`, so it has no runtime footprint. |
-| `Groundwork.Schema` | The `[GwTable]`, `[GwColumn]`, `[GwKey]`, `[GwIndex]` attributes and the canonical schema model |
+| `Groundwork.Schema` | The `[GwTable]`, `[GwColumn]`, `[GwKey]`, `[GwIndex]`, `[GwRetention]`, `[GwAppendIdempotency]`, `[GwRetentionIdempotency]`, `[GwAggregate]` attributes and the canonical schema model |
 | `Groundwork.Schema.Generator` | Source generator producing the canonical schema + fingerprint as an assembly attribute |
 | `Groundwork.Tool` | The `groundwork` CLI (`plan`/`validate`/`status`/`apply`/`schema emit`). Assembly and namespace remain `Groundwork.SchemaTool`. |
 | `Groundwork.SchemaTool.MSBuild` | Fails the build on portability refusals and uncovered queries |

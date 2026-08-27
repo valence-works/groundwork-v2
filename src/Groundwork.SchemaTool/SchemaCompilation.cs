@@ -17,29 +17,31 @@ public static class SchemaCompilation
     public static StorageUnit Compile(SchemaTable table)
     {
         ArgumentNullException.ThrowIfNull(table);
-        var unit = new StorageUnit
+        var columns = table.Columns.Select(column => new ColumnDefinition
+        {
+            Name = column.Name,
+            Type = Map(column.Type),
+            IsNullable = column.IsNullable,
+            MaxLength = column.Length,
+            Precision = column.Precision,
+            Scale = column.Scale,
+            Collation = column.Folding switch
+            {
+                TextFolding.None => null,
+                TextFolding.AsciiIgnoreCase => PortableCollation.OrdinalIgnoreCase,
+                TextFolding.UnicodeOrdinalIgnoreCase => PortableCollation.UnicodeOrdinalIgnoreCase,
+                _ => throw new ArgumentOutOfRangeException(nameof(column.Folding), column.Folding, null)
+            },
+            Default = column.Default is null ? null : new PortableDefault(column.Default.Value),
+            Generation = column.Generation == SchemaGeneration.ProviderSequence
+                ? ColumnGeneration.ProviderSequence
+                : ColumnGeneration.Supplied
+        }).ToList();
+        return new StorageUnit
         {
             Id = new StorageUnitId(table.Name),
             Name = table.Name,
-            Columns = table.Columns.Select(column => new ColumnDefinition
-            {
-                Name = column.Name,
-                Type = Map(column.Type),
-                IsNullable = column.IsNullable,
-                MaxLength = column.Length,
-                Precision = column.Precision,
-                Scale = column.Scale,
-                Collation = column.Folding switch
-                {
-                    TextFolding.None => null,
-                    TextFolding.AsciiIgnoreCase => PortableCollation.OrdinalIgnoreCase,
-                    TextFolding.UnicodeOrdinalIgnoreCase => PortableCollation.UnicodeOrdinalIgnoreCase,
-                    _ => throw new ArgumentOutOfRangeException(nameof(column.Folding), column.Folding, null)
-                },
-                Generation = column.Generation == SchemaGeneration.ProviderSequence
-                    ? ColumnGeneration.ProviderSequence
-                    : ColumnGeneration.Supplied
-            }).ToArray(),
+            Columns = ApplyConcurrencyToken(columns, table.Concurrency?.TokenColumn),
             Key = new KeyDefinition { Columns = table.Key.ToArray() },
             Indexes = table.Indexes.Select(index => new IndexDefinition
             {
@@ -51,16 +53,89 @@ public static class SchemaCompilation
                 MissingValues = index.IncludeNulls
                     ? MissingValueBehavior.Included
                     : MissingValueBehavior.Excluded
-            }).ToArray()
+            }).ToArray(),
+            AggregationProfiles = table.Aggregations.Select(Compile).ToArray(),
+            Scope = table.Scope == SchemaScope.Scoped ? ScopePolicy.Scoped : ScopePolicy.Global,
+            Concurrency = table.Concurrency is null
+                ? ConcurrencyDeclaration.None
+                : ConcurrencyDeclaration.Optimistic(table.Concurrency.TokenColumn),
+            Timestamps = TimestampDeclaration.None,
+            Retention = table.Retention is null ? null : new RetentionDeclaration
+            {
+                KeepNewest = table.Retention.KeepNewest,
+                OrderColumn = table.Retention.OrderBy,
+                Trigger = table.Retention.Trigger == SchemaRetentionTrigger.OnAppend
+                    ? RetentionTrigger.OnAppend
+                    : RetentionTrigger.Explicit,
+                PartitionColumns = table.Retention.PartitionBy.ToArray()
+            },
+            AppendIdempotency = table.AppendIdempotency is null ? null : Named(
+                new AppendIdempotencyDeclaration { Window = table.AppendIdempotency.Window },
+                table.AppendIdempotency.LedgerName),
+            RetentionIdempotency = table.RetentionIdempotency is null ? null : Named(
+                new RetentionIdempotencyDeclaration { Window = table.RetentionIdempotency.Window },
+                table.RetentionIdempotency.LedgerName)
         };
-        return SearchKeyProjection.Expand(unit);
     }
 
+    /// <summary>
+    /// Mirrors the fluent builder, which supplies the system-owned token column when a declaration
+    /// opts into optimistic concurrency without spelling it out.
+    /// </summary>
+    private static IReadOnlyList<ColumnDefinition> ApplyConcurrencyToken(List<ColumnDefinition> columns, string? token)
+    {
+        if (token is null)
+            return columns;
+        var index = columns.FindIndex(column => string.Equals(column.Name, token, StringComparison.Ordinal));
+        if (index < 0)
+            columns.Add(new ColumnDefinition { Name = token, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) });
+        else if (columns[index] is { Type: PortableType.Int64, IsNullable: false, Default: null } declared)
+            columns[index] = declared with { Default = new PortableDefault(0L) };
+        return columns;
+    }
+
+    private static AppendIdempotencyDeclaration Named(AppendIdempotencyDeclaration declaration, string? ledgerName) =>
+        ledgerName is null ? declaration : declaration with { LedgerName = ledgerName };
+
+    private static RetentionIdempotencyDeclaration Named(RetentionIdempotencyDeclaration declaration, string? ledgerName) =>
+        ledgerName is null ? declaration : declaration with { LedgerName = ledgerName };
+
+    private static AggregationProfile Compile(SchemaAggregation aggregation) => new()
+    {
+        Name = aggregation.Name,
+        GroupByColumns = aggregation.GroupByColumns.ToArray(),
+        GroupByExpressions = aggregation.GroupBy.Select(group => (AggregationGroup)(group.Bucket switch
+        {
+            SchemaTimeBucket.None => new AggregationGroup.Column(group.Alias),
+            SchemaTimeBucket.FixedUtc => AggregationGroup.TimeBucket.FixedUtc(group.Alias, group.SourceColumn!, group.Width),
+            _ => AggregationGroup.TimeBucket.LocalCalendarDay(group.Alias, group.SourceColumn!)
+        })).ToArray(),
+        Aggregates = aggregation.Aggregates.Select(aggregate => (Aggregate)(aggregate.Kind switch
+        {
+            SchemaAggregateKind.Min => new Aggregate.Min(aggregate.Alias, aggregate.Column!),
+            SchemaAggregateKind.Max => new Aggregate.Max(aggregate.Alias, aggregate.Column!),
+            SchemaAggregateKind.Count => new Aggregate.Count(aggregate.Alias),
+            SchemaAggregateKind.Sum => new Aggregate.Sum(aggregate.Alias, aggregate.Column!),
+            SchemaAggregateKind.SetUnion => new Aggregate.SetUnion(aggregate.Alias, aggregate.Column!, aggregate.MaxValues),
+            _ => new Aggregate.FirstBy(
+                aggregate.Alias,
+                aggregate.Column!,
+                aggregate.OrderBy!,
+                aggregate.Descending ? SortDirection.Descending : SortDirection.Ascending)
+        })).ToArray()
+    };
+
+    /// <summary>
+    /// Compiles the declared schema through the provider's own physicalization, so a deployed
+    /// target is byte-identical to the target its runtime coordinator expects.
+    /// </summary>
     public static IReadOnlyList<PhysicalSchemaTarget> CompileTargets(
         SchemaDocument schema,
-        ProviderIdentity provider) => Compile(schema)
-        .Select(unit => new PhysicalSchemaTarget(new SchemaSubject(unit), provider))
-        .ToArray();
+        IPhysicalSchemaTargetCompiler targets)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        return Compile(schema).Select(targets.Compile).ToArray();
+    }
 
     private static PortableType Map(SchemaValueType type) => type switch
     {

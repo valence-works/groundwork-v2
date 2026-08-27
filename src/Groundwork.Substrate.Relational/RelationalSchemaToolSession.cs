@@ -16,22 +16,32 @@ public sealed class RelationalSchemaToolSession : ISchemaToolProviderSession
     public RelationalSchemaToolSession(
         ProviderIdentity provider,
         RelationalSchemaExecutor executor,
+        Func<StorageUnit, PhysicalSchemaTarget> compile,
         Action? release = null,
         Func<PhysicalSchemaTarget, PhysicalSchemaInspectionResult>? inspect = null)
     {
         Provider = provider ?? throw new ArgumentNullException(nameof(provider));
         Executor = executor ?? throw new ArgumentNullException(nameof(executor));
+        Targets = new DeclarationCompiler(compile ?? throw new ArgumentNullException(nameof(compile)));
         Inspector = new DeployedHistoryInspector(inspect ?? executor.InspectDeployedHistory);
         this.release = release;
     }
 
     public ProviderIdentity Provider { get; }
 
+    public IPhysicalSchemaTargetCompiler Targets { get; }
+
     public IPhysicalSchemaExecutor Executor { get; }
 
     public IPhysicalSchemaHistoryInspector Inspector { get; }
 
     public void Dispose() => release?.Invoke();
+
+    private sealed class DeclarationCompiler(
+        Func<StorageUnit, PhysicalSchemaTarget> compile) : IPhysicalSchemaTargetCompiler
+    {
+        public PhysicalSchemaTarget Compile(StorageUnit declaration) => compile(declaration);
+    }
 
     private sealed class DeployedHistoryInspector(
         Func<PhysicalSchemaTarget, PhysicalSchemaInspectionResult> inspect) : IPhysicalSchemaHistoryInspector

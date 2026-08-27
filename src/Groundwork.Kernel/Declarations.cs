@@ -155,6 +155,96 @@ public static class ProviderOwnedColumns
     internal static bool IsAllowedPhysicalColumn(string name) =>
         name is Scope or ScopeToken or Version or Action ||
         SearchKeyProjection.IsProviderOwnedColumn(name);
+
+    /// <summary>
+    /// Expands a logical declaration into the provider-owned physical shape shared by the runtime
+    /// coordinators and the deployment tool: derived search keys, the scope column and its key and
+    /// index prefixes, and the optimistic version or append-action column.
+    /// </summary>
+    public static StorageUnit Physicalize(StorageUnit source, ProviderOwnedColumnPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(policy);
+        ValidateLogicalDeclaration(source);
+        ConcurrencyDeclaration.ValidateDeclaration(source);
+        source = SearchKeyProjection.Expand(source);
+        var columns = source.Columns.Select(column => column with { }).ToList();
+        var key = source.Key.Columns.ToList();
+        var indexes = source.Indexes.ToList();
+        if (columns.Any(column => column.Name is Scope or Version or Action))
+        {
+            throw new ArgumentException(
+                $"'{Scope}', '{Version}', and '{Action}' are reserved {policy.ProviderName} columns.", nameof(source));
+        }
+        if (source.Scope == ScopePolicy.Scoped)
+        {
+            columns.Add(new ColumnDefinition
+            {
+                Name = Scope,
+                Type = PortableType.String,
+                MaxLength = policy.ScopeMaxLength,
+                IsNullable = false,
+                Default = new PortableDefault(string.Empty)
+            });
+            if (policy.ScopeJoinsGeneratedKey ||
+                !source.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+            {
+                key.Insert(0, Scope);
+            }
+            indexes = indexes.Select(index => index with { Columns = [new IndexColumn(Scope), .. index.Columns] }).ToList();
+        }
+        if (source.Concurrency.IsOptimistic)
+        {
+            RemoveDeclaredToken(source, columns);
+            columns.Add(new ColumnDefinition { Name = Version, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) });
+        }
+        else if (policy.DeclaresAppendAction)
+        {
+            columns.Add(new ColumnDefinition { Name = Action, Type = PortableType.String, MaxLength = 1, IsNullable = false, Default = new PortableDefault("I") });
+        }
+        return source with
+        {
+            Columns = columns,
+            Key = new KeyDefinition { Columns = key },
+            Indexes = indexes,
+            AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
+        };
+    }
+
+    private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)
+    {
+        var token = source.Concurrency.TokenColumn!;
+        var declared = columns.FirstOrDefault(column => column.Name == token);
+        if (declared is null) return;
+        if (declared.Type != PortableType.Int64 || declared.IsNullable ||
+            declared.Default?.Value is not long defaultValue || defaultValue != 0)
+        {
+            throw new ArgumentException(
+                $"Optimistic token column '{token}' must be a non-null Int64 with default 0.", nameof(source));
+        }
+        columns.Remove(declared);
+    }
+}
+
+/// <summary>
+/// The provider-owned physical column choices a coordinator contributes to
+/// <see cref="ProviderOwnedColumns.Physicalize"/>. Everything else about the expansion is shared.
+/// </summary>
+public sealed record ProviderOwnedColumnPolicy
+{
+    public required string ProviderName { get; init; }
+
+    /// <summary>The declared length of the scope column, when the provider bounds it.</summary>
+    public int? ScopeMaxLength { get; init; }
+
+    /// <summary>
+    /// Whether scope joins the physical key of a unit that owns a provider-generated sequence.
+    /// A provider whose generated identity must remain the sole physical key declares false.
+    /// </summary>
+    public bool ScopeJoinsGeneratedKey { get; init; } = true;
+
+    /// <summary>Whether a non-optimistic unit carries the provider's append-action column.</summary>
+    public bool DeclaresAppendAction { get; init; }
 }
 
 public enum TimestampDeclaration

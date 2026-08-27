@@ -15,6 +15,11 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     internal const string VersionColumn = "__groundwork_version";
     internal const string BatchTypeKind = "table-valued-parameter";
     internal static readonly ProviderIdentity Identity = new("SQLServer", "1.0");
+    internal static readonly ProviderOwnedColumnPolicy ColumnPolicy = new()
+    {
+        ProviderName = "SQL Server",
+        ScopeMaxLength = 128
+    };
     private readonly RelationalSchemaExecutor executor;
     private readonly SqlServerDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
@@ -131,82 +136,13 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         ArgumentNullException.ThrowIfNull(source);
         PortabilityValidator.EnsurePhysicalIdentifiers(source);
         EnsurePhysicalIndexNames(source);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(source);
-        ConcurrencyDeclaration.ValidateDeclaration(source);
-        source = SearchKeyProjection.Expand(source);
-        var columns = source.Columns.Select(column => column with { }).ToList();
-        var key = source.Key.Columns.ToList();
-        var indexes = source.Indexes.ToList();
-        if (columns.Any(column => column.Name is ScopeColumn or VersionColumn))
-            throw new ArgumentException($"'{ScopeColumn}' and '{VersionColumn}' are reserved SQL Server columns.", nameof(source));
-
-        if (source.Scope == ScopePolicy.Scoped)
+        return ProviderOwnedColumns.Physicalize(source, ColumnPolicy) with
         {
-            columns.Add(new ColumnDefinition
-            {
-                Name = ScopeColumn,
-                Type = PortableType.String,
-                MaxLength = 128,
-                IsNullable = false,
-                Default = new PortableDefault(string.Empty)
-            });
-            key.Insert(0, ScopeColumn);
-            indexes = indexes.Select(index => new IndexDefinition
-            {
-                Name = index.Name,
-                Columns = [new IndexColumn(ScopeColumn), .. index.Columns],
-                IsUnique = index.IsUnique,
-                MissingValues = index.MissingValues,
-                SchemaVersion = index.SchemaVersion
-            }).ToList();
-        }
-
-        if (source.Concurrency.IsOptimistic)
-        {
-            RemoveDeclaredToken(source, columns);
-            columns.Add(new ColumnDefinition
-            {
-                Name = VersionColumn,
-                Type = PortableType.Int64,
-                IsNullable = false,
-                Default = new PortableDefault(0L)
-            });
-        }
-
-        return new StorageUnit
-        {
-            Id = source.Id,
-            Name = SqlServerPhysicalName.Normalize(source.Name),
-            Columns = columns,
-            Key = new KeyDefinition { Columns = key },
-            DerivedColumns = source.DerivedColumns,
-            Indexes = indexes,
-            AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
-            Scope = source.Scope,
-            AppendIdempotency = source.AppendIdempotency,
-            RetentionIdempotency = source.RetentionIdempotency,
-            Concurrency = source.Concurrency,
-            Timestamps = source.Timestamps,
-            Retention = source.Retention,
-            SchemaVersion = source.SchemaVersion
+            Name = SqlServerPhysicalName.Normalize(source.Name)
         };
     }
 
-    private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)
-    {
-        var token = source.Concurrency.TokenColumn!;
-        var declared = columns.FirstOrDefault(column => column.Name == token);
-        if (declared is null) return;
-        if (declared.Type != PortableType.Int64 || declared.IsNullable ||
-            declared.Default?.Value is not long defaultValue || defaultValue != 0)
-        {
-            throw new ArgumentException(
-                $"Optimistic token column '{token}' must be a non-null Int64 with default 0.", nameof(source));
-        }
-        columns.Remove(declared);
-    }
-
-    private static StorageUnit Prepare(StorageUnit desired)
+    internal static StorageUnit Prepare(StorageUnit desired)
     {
         var physical = Physicalize(desired);
         SqlServerIndexKeyBudgetValidator.Validate(physical);

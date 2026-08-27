@@ -25,6 +25,7 @@ public static class SchemaVerifier
     {
         var schema = GroundworkSchemaCanonical.Read(schemaJson);
         var errors = SchemaCompilation.Compile(schema)
+            .Select(SearchKeyProjection.Expand)
             .SelectMany(unit => PortabilityValidator.Validate(unit).Refusals)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path))
             .ToList();

@@ -17,6 +17,25 @@ public static class PhysicalSchemaTargetCompiler
     }
 }
 
+/// <summary>
+/// Signals applied schema state that this build cannot reproduce: the recorded target fingerprint
+/// disagrees with the one its own subject snapshot now yields, which a release note marks as a
+/// persisted schema boundary. The catalog is not migrated in place — it is discarded.
+/// </summary>
+public sealed class GroundworkSchemaBoundaryException : InvalidOperationException
+{
+    public const string Code = "GW-SCHEMA-006";
+
+    public GroundworkSchemaBoundaryException(PhysicalSchemaTargetIdentity target)
+        : base($"{Code}: applied schema state for '{target}' was recorded under a different persisted " +
+               "schema boundary, so its target fingerprint no longer matches its own subject snapshot. " +
+               "Discard that catalog and create a fresh one from the current declarations; Groundwork " +
+               "ships no in-place migration, compatibility alias, dual-write, or fallback between them.") =>
+        Target = target;
+
+    public PhysicalSchemaTargetIdentity Target { get; }
+}
+
 /// <summary>Canonical JSON persistence for the CAS schema history snapshot.</summary>
 public static class PhysicalSchemaAppliedStateSerializer
 {
@@ -56,7 +75,7 @@ public static class PhysicalSchemaAppliedStateSerializer
         var subject = new SchemaSubject(payload.Definition, payload.Evolution);
         var target = new PhysicalSchemaTarget(subject, payload.Provider, payload.ProviderDefinitions ?? []);
         if (!string.Equals(target.Fingerprint, payload.TargetFingerprint, StringComparison.Ordinal))
-            throw new InvalidOperationException("Applied schema state target fingerprint does not match its subject snapshot.");
+            throw new GroundworkSchemaBoundaryException(target.Identity);
         var snapshot = new PhysicalSchemaAppliedSnapshot(
             subject,
             payload.SemanticOperations ?? [],
