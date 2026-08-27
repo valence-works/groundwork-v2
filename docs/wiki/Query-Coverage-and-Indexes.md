@@ -46,10 +46,12 @@ Three details worth knowing:
 - **The key is exempt from the deployed-catalog intersection.** A declared index can be missing from
   the catalog part way through a rolling deploy, which is why the runtime gate intersects. The key
   cannot: it is created with the table.
-- **No refusal will tell you to duplicate your key.** When the columns the checker would suggest are
-  the leading columns of the key, it withholds the suggestion — declaring that index would only add a
-  second copy of the primary key — and names the point-read path instead: `session.Read(key)`, or the
-  typed `Records` read.
+- **A refusal that pins your whole key points you at the point read, not at a duplicate index.** When
+  the predicate fixes every key column with a single-value equality, at most one row can match, so no
+  index would help: the suggestion is withheld and the message names `session.Read(key)`, or the typed
+  `Records` read. Only that shape gets it. A disjunction, a range, or an equality over part of a
+  composite key can mention exactly the key's columns and still need an index, so those keep the
+  ordinary `[GwIndex(...)]` suggestion.
 
 > **MongoDB caveat.** MongoDB stores the key in `_id` but filters on the declared field names, and
 > creates no index over them, so a key-bounded read is admitted by the gate and then scans. The
