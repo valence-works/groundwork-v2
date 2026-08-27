@@ -13,5 +13,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../../src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Store/Groundwork.Store.csproj" />
   </ItemGroup>
 </Project>

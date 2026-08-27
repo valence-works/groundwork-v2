@@ -427,21 +427,36 @@ jobs:
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w2ci?replicaSet=w2rs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+        # The trx is what makes a *fast* failure here readable. --blame-hang produces a dump only
+        # when a test stalls, and this job's own service containers flood the end of the log, so a
+        # plain assertion failure leaves nothing anyone can retrieve afterwards — which is exactly
+        # what happened on main at fd08d2a (see #210).
         run: >-
           dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj
           --no-restore --configuration Release
+          --logger "trx;LogFileName=w2-concurrency.trx"
           --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type full
-      - name: Upload W2 hang diagnostics
+      - name: Upload W2 diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: w2-hang-diagnostics
+          name: w2-diagnostics
           path: tests/Groundwork.Concurrency.Tests/TestResults/**
           if-no-files-found: ignore
       - name: Run SQL Server W2 concurrency conformance
         env:
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj --no-restore --configuration Release --filter "W2"
+        run: >-
+          dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
+          --no-restore --configuration Release --filter "W2"
+          --logger "trx;LogFileName=w2-sqlserver.trx"
+      - name: Upload SQL Server W2 diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w2-sqlserver-diagnostics
+          path: tests/Groundwork.SqlServer.Tests/TestResults/**
+          if-no-files-found: ignore
       - name: Run W1 native provider-command proof across all providers
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w1ci?replicaSet=w2rs&directConnection=true

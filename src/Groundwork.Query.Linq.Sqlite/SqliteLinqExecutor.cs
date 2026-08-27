@@ -1,4 +1,5 @@
 using Groundwork.Query.Linq.Execution;
+using Groundwork.Sqlite;
 using Groundwork.Query.Model;
 using Groundwork.Store;
 
@@ -16,6 +17,15 @@ public sealed class SqliteLinqExecutor : IGwQueryExecutor
 {
     private readonly GwLinqExecutor executor;
 
+    /// <summary>
+    /// SQLite's real parameter ceiling, stated here so the session-only constructor still admits
+    /// under SQLite's budget rather than the portable default. This adapter is bound to SQLite at
+    /// compile time, so it can know the number without being handed a connection — and it reads it
+    /// from the renderer that enforces it rather than restating it.
+    /// </summary>
+    private static readonly QueryAdmissionProfile SqliteAdmission =
+        new() { MaximumParameters = SqliteQueryRenderer.ParameterBudget };
+
     public SqliteLinqExecutor(IStorageSession session)
         : this(session, connection: null)
     {
@@ -27,7 +37,11 @@ public sealed class SqliteLinqExecutor : IGwQueryExecutor
     /// during a rolling deploy and the fence uses SQLite's real parameter ceiling.
     /// </summary>
     public SqliteLinqExecutor(IStorageSession session, IStorageProviderConnection? connection) =>
-        executor = new GwLinqExecutor(session, connection);
+        // With a connection, its advertised profile wins — it is the same number, read from the
+        // deployment rather than from this constant. Without one, the constant is still SQLite's.
+        executor = connection is null
+            ? GwLinqExecutor.WithAdmission(session, SqliteAdmission)
+            : new GwLinqExecutor(session, connection);
 
     public Task<IReadOnlyList<T>> ToListAsync<T>(
         QueryRequest request,
