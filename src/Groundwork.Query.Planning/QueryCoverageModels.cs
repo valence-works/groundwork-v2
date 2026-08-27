@@ -82,8 +82,12 @@ public sealed record CoverageIndex
     /// <summary>
     /// Whether this candidate is the unit's declared key rather than a declared secondary index.
     /// It is set by <see cref="CoverageCandidates.Derive"/>, the one place candidates are derived.
-    /// A refusal never advises declaring an index over the leading columns of the key: that index
-    /// already exists as the primary key, so declaring it again only duplicates storage.
+    /// The checker reads it to recognise the one predicate shape a point read answers — a
+    /// conjunction of single-value equalities over every key column, which matches at most one row
+    /// — and withholds the index suggestion there, because no index improves on a single key
+    /// lookup. Naming the key's columns is not itself that shape: a disjunction, a range, or an
+    /// equality over part of a composite key can name exactly those columns and still need an
+    /// index, and each keeps the ordinary suggestion.
     /// </summary>
     public bool IsDeclaredKey { get; init; }
 

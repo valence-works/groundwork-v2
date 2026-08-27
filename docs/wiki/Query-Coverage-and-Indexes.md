@@ -164,31 +164,6 @@ the analyzer reported at build time.
   of the library you loaded — which is why it is advertised rather than assumed, and why it lives on
   the connection where a session decorator cannot drop it.
 
-### A declared key is not a coverage candidate
-
-**Filtering on a key column is refused unless you also declare an index over it.**
-
-```csharp
-table.Query.Where(c => c.Id == id).ToListAsync(executor);   // GW-COVER-006
-```
-
-This is not specific to the runtime. Coverage candidates are built from `Indexes` and never from
-`Key` — in the analyzer, in the CLI, and now at runtime — so all three agree, and they agree on the
-wrong answer: every provider does physically index a declared key (a relational `PRIMARY KEY`, or
-Mongo's `_id`), so the deployed catalog *can* serve that read.
-
-Until that is fixed, your options are:
-
-- **Read the row by key instead.** `session.Read(key)` is a point read. It is not a query, does not
-  go through coverage, and is the right call for "fetch this row".
-- **Declare an index over the key column** if you genuinely need the query surface for it — and be
-  aware of what you are buying. The refusal's suggested `[GwIndex(...)]` names the key column, and
-  following it creates a *second* physical index duplicating the primary key: extra storage and
-  write amplification on every insert, on every provider. Prefer the point read.
-
-Tracked in [#203](https://github.com/valence-works/groundwork-v2/issues/203). Fixing it changes what
-the analyzer reports, which regenerates the conformance corpus, so it is its own piece of work.
-
 ## Accepted scans
 
 Some reads genuinely should scan — a small admin export, a one-off migration. Say so explicitly:

@@ -56,9 +56,9 @@ public sealed class CoverageCandidatesTests
 
     /// <summary>
     /// The point-read remedy is true of exactly one shape: a conjunction of single-value equalities
-    /// over every key column, which matches at most one row. There the suggestion is withheld —
-    /// declaring an index would duplicate the primary key and would not fix the refusal — and the
-    /// point-read path is named instead.
+    /// over every key column, which matches at most one row. There the suggestion is withheld — no
+    /// index improves on a single key lookup, whatever residual columns it would also carry — and
+    /// the point-read path is named instead.
     /// </summary>
     [Fact]
     public void A_complete_key_equality_names_the_point_read_instead_of_an_index()

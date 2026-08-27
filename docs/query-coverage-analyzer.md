@@ -16,9 +16,11 @@ Coverage candidates come from one derivation, `CoverageCandidates.Derive`, share
 indexes: every relational coordinator emits the key as the table's `PRIMARY KEY`, which the engine
 backs with a unique index, so a key-bounded read is a seek rather than a scan. The key is an ordered
 candidate, so a composite key `(tenant, id)` bounds a predicate on `tenant` and on `tenant` and `id`
-together, but not on `id` alone. Where a refusal would otherwise suggest an index over the leading
-columns of the key, the suggestion is withheld — that index already exists — and the point-read path
-is named instead.
+together, but not on `id` alone. Where a refused predicate pins every key column with a single-value
+equality, at most one row can match and no index would improve on that, so the suggestion is withheld
+and the point-read path is named instead. Every other shape — a disjunction, a range, an equality
+over part of a composite key — keeps the ordinary suggestion, even when it names the key's own
+columns.
 
 An uncovered read may opt into a visible, attributed scan with the runtime AST value
 `.AcceptScan("GW-SCAN-0007", "reason", "owner", "yyyy-MM-dd")`. The marker is not a pragma
