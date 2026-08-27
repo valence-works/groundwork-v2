@@ -8,4 +8,9 @@ public interface IConcurrencyStorageSession
     /// available through the returned outcome when the provider can disambiguate it lazily.
     /// </summary>
     WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null);
+
+    ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default);
 }

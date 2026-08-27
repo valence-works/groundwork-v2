@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -61,27 +61,120 @@ internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorage
             sourceIncludesContinuation: true);
     });
 
-    public Task<QueryMaterializedResult> QueryAsync(
+    /// <summary>
+    /// Reads the page on the async ADO.NET surface so the token still interrupts the native
+    /// statement mid-execution, inside the gate that serializes every session command.
+    /// </summary>
+    public ValueTask<QueryMaterializedResult> QueryAsync(
         QueryRequest request,
         QueryRenderOptions? options = null,
-        CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        // Microsoft.Data.Sqlite's async ADO.NET surface completes synchronously, so the reader
-        // task drains inside the same provider gate that serializes every session command while
-        // the token still interrupts the native statement mid-execution.
-        return Task.FromResult(Execute(() =>
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Execute(() =>
         {
             cancellationToken.ThrowIfCancellationRequested();
             var (executionSource, renderOptions, command) = PrepareQuery(request, options);
-            var rows = RelationalQueryResultReader.ReadAsync(
-                    connection, command, DecodeQueryValue, activeTransaction ?? transaction, cancellationToken)
+            var rows = RelationalQueryResultReader.Read(
+                    connection, command, DecodeQueryValue, activeTransaction ?? transaction,
+                    RelationalExecution.Asynchronous(cancellationToken))
                 .GetAwaiter().GetResult();
             AssertExplainPlan(command, renderOptions);
             return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
                 sourceIncludesRequestedOffset: true,
                 sourceIncludesContinuation: true);
         }));
+
+    public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Read(key));
+
+    public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => QueryAcrossScopes(request, options));
+
+    public ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Aggregate(query));
+
+    public ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Insert(values, options));
+
+    public ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Update(values, options));
+
+    public ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Upsert(values, options));
+
+    public ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Delete(key, options));
+
+    public ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => ConditionalUpsert(values, options));
+
+    public ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => CompareAndDelete(key, expectedValues, options));
+
+    public ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Append(operationId, values));
+
+    public ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => AppendWithOutcomes(operationId, values));
+
+    public ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken,
+            () => ((IBatchedStorageSession)this).ApplyBatch(writes, exactOutcomes));
+
+    public ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, Inspect);
+
+    public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None, () => ApplyRetention(options));
+
+    public ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None,
+            () => ApplyRetention(operationId, options));
+
+    /// <summary>
+    /// Microsoft.Data.Sqlite completes its asynchronous ADO.NET surface synchronously, and this
+    /// provider serializes every session command on a gate that a suspended continuation cannot
+    /// hold. The asynchronous surface therefore observes cancellation, runs the same gated body on
+    /// the calling thread, and returns an already-completed task: it never yields the thread.
+    /// </summary>
+    private static ValueTask<T> Completed<T>(CancellationToken cancellationToken, Func<T> operation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(operation());
     }
 
     private (QueryRequest ExecutionSource, QueryRenderOptions RenderOptions, RelationalQueryCommand Command) PrepareQuery(
@@ -187,12 +280,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorage
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        var mode = RelationalExecution.Synchronous;
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
         };
-        return Unit.Scope == ScopePolicy.Scoped
+        return (Unit.Scope == ScopePolicy.Scoped
             ? RelationalAggregationExecutor.ExecuteScoped(
                 connection,
                 activeTransaction ?? transaction,
@@ -203,6 +297,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorage
                 decode,
                 SqliteSchemaCoordinator.ScopeColumn,
                 Access.Scope!,
+                mode,
                 commandObserver,
                 "sqlite.aggregate")
             : RelationalAggregationExecutor.Execute(
@@ -213,8 +308,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorage
             profile,
             query,
             decode,
+            mode,
             commandObserver,
-            "sqlite.aggregate");
+            "sqlite.aggregate")).GetAwaiter().GetResult();
     });
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
@@ -1569,6 +1665,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorage
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         if (transaction is not null) return Translate(operation);
+        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
         lock (owner.Gate)
         {
             owner.ThrowIfDisposed();
@@ -1580,9 +1677,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorage
                 writeTransaction.Commit();
                 return result;
             }
-            catch
+            catch (Exception failure)
             {
-                writeTransaction.Rollback();
+                WriteFailureCleanup.Run(failure, writeTransaction.Rollback);
                 throw;
             }
             finally

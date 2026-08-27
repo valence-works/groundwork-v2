@@ -211,7 +211,7 @@ internal sealed class SqlServerProviderCatalog(SqlServerProviderConnection owner
         owner.ThrowIfDisposed();
         var unit = ((SqlServerSchemaCoordinator)owner.Schema).Find(storageUnitId)
             ?? throw new InvalidOperationException($"Storage unit '{storageUnitId.Value}' has not been applied by this connection.");
-        lock (owner.Gate)
+        using (owner.EnterGate())
         {
             using var connection = owner.CreateIndependentConnection();
             return unit.Indexes

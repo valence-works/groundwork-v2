@@ -15,6 +15,12 @@ those limits while applying the declaration, using declared worst-case widths (f
 unbounded strings, binary values, JSON, and unsupported collations are refused before opening a
 provider connection. Decimal keys use SQL Server's native precision tiers.
 
+`IStorageSession`'s asynchronous members run on Microsoft.Data.SqlClient's asynchronous ADO.NET
+surface and genuinely yield the calling thread, including the write transaction and the
+unit-of-work commit. The connection gate that serializes write transactions across the sessions of
+one provider connection is a `SemaphoreSlim` rather than a monitor, because the asynchronous write
+path holds it across an await.
+
 The provider uses `sp_getapplock` plus a durable fence/history pair for schema coordination and
 serializable write transactions for optimistic concurrency. The conformance test can run against
 an existing server by setting `GROUNDWORK_SQLSERVER_CONNECTION`; otherwise its fixture starts the

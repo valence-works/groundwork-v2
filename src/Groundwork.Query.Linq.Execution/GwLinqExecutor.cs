@@ -105,9 +105,7 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
         // it. Declaration validation does not catch it either, because the guard that refuses a
         // JSON index key runs only in the fluent builder, not in Schema.Apply. The provider adds
         // its own identity tie-breaks regardless, so nothing the executor needs is lost.
-        return session is IAsyncQueryStorageSession asyncQuery
-            ? asyncQuery.QueryAsync(executed, options: null, cancellationToken)
-            : Task.FromResult(session.Query(executed));
+        return session.QueryAsync(executed, options: null, cancellationToken).AsTask();
     }
 
     private RuntimeCoverageGate CreateGate()
