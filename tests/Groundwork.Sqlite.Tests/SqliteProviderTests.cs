@@ -7,6 +7,7 @@ using Groundwork.Sqlite;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq.Sqlite;
+using Groundwork.Query.Planning;
 using Groundwork.Substrate.Relational;
 using Xunit;
 
@@ -1081,6 +1082,40 @@ public sealed class SqliteProviderTests
     private static IGwQueryable<LinqCountTicket> Scanned(GwQueryTable<LinqCountTicket> table) =>
         table.AcceptScan("GW-SCAN-0001", "provider execution mechanics", "groundwork-tests",
             DateTimeOffset.UtcNow.AddYears(10));
+
+    [Fact]
+    public async Task Session_only_executor_still_admits_under_sqlites_own_parameter_budget()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-budget"), Name = "linq_budget",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        // No connection is handed over, so there is nothing to advertise a budget. The adapter is
+        // bound to SQLite at compile time and supplies SQLite's own 999 anyway, so a request SQLite
+        // cannot bind is refused at admission rather than reaching the renderer.
+        var table = new TableId("linq_budget");
+        var id = new ColumnRef(table, "Id", QueryType.String, isNullable: false, maxLength: 64);
+        var request = new QueryRequest(
+            table,
+            new Predicate.In(id, Enumerable.Range(0, 1_000).Select(value => QueryConstant.Of(id, "id" + value))),
+            [],
+            Projection.All,
+            Paging.OffsetLimit(0, 1));
+
+        var refusal = await Assert.ThrowsAsync<RuntimeValueFenceException>(
+            () => new SqliteLinqExecutor(session).ToListAsync<LinqCountTicket>(request));
+
+        Assert.Equal("GW-RUNTIME-011", refusal.Code);
+        Assert.Contains("999", refusal.Message, StringComparison.Ordinal);
+    }
 
     private sealed class LinqCountTicket
     {
