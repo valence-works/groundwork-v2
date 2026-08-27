@@ -1,3 +1,4 @@
+using System.Globalization;
 using Groundwork.Kernel;
 using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Model;
@@ -115,6 +116,43 @@ public sealed class LinqExecutorTests
     }
 
     [Fact]
+    public async Task Supplying_a_known_budget_does_not_cost_callers_the_explicit_null_connection()
+    {
+        using var fixture = Fixture.Open();
+
+        // That both calls below compile is half the assertion. Expressing "budgets known at compile
+        // time" as a second two-argument constructor would have made the first one ambiguous with
+        // the connection constructor: a null literal converts to both reference types and neither is
+        // more specific, so a caller who already wrote it would stop compiling with CS0121.
+        var explicitNull = new GwLinqExecutor(fixture.Session, null);
+        var known = GwLinqExecutor.WithAdmission(
+            fixture.Session,
+            new QueryAdmissionProfile { MaximumParameters = 999 });
+
+        // Neither has a connection to advertise a budget. The first falls back to the portable
+        // default and the second uses the one it was handed, so the two refuse at different numbers.
+        var fellBack = Assert.IsType<RuntimeValueFenceException>(
+            await Record.ExceptionAsync(() => explicitNull.ToListAsync(OverBudgetRequest(), Fixture.Model)));
+        var supplied = Assert.IsType<RuntimeValueFenceException>(
+            await Record.ExceptionAsync(() => known.ToListAsync(OverBudgetRequest(), Fixture.Model)));
+
+        Assert.Equal("GW-RUNTIME-011", fellBack.Code);
+        Assert.Equal("GW-RUNTIME-011", supplied.Code);
+        Assert.Contains(
+            QueryAdmissionProfile.Default.MaximumParameters.ToString(CultureInfo.InvariantCulture),
+            fellBack.Message,
+            StringComparison.Ordinal);
+        Assert.Contains("999", supplied.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_supplied_budget_is_required_rather_than_quietly_replaced_by_the_default()
+    {
+        using var fixture = Fixture.Open();
+        Assert.Throws<ArgumentNullException>(() => GwLinqExecutor.WithAdmission(fixture.Session, null!));
+    }
+
+    [Fact]
     public async Task Session_decorator_cannot_drop_the_providers_budget()
     {
         using var fixture = Fixture.Open();
@@ -144,6 +182,50 @@ public sealed class LinqExecutorTests
         public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
         public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
         public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) => inner.Append(operationId, values);
+
+        public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
+            inner.ReadAsync(key, cancellationToken);
+
+        public ValueTask<QueryMaterializedResult> QueryAsync(
+            QueryRequest request,
+            QueryRenderOptions? options = null,
+            CancellationToken cancellationToken = default) =>
+            inner.QueryAsync(request, options, cancellationToken);
+
+        public ValueTask<AggregationResult> AggregateAsync(
+            AggregationQuery query,
+            CancellationToken cancellationToken = default) =>
+            inner.AggregateAsync(query, cancellationToken);
+
+        public ValueTask<WriteOutcome> InsertAsync(
+            StorageValues values,
+            WriteOptions? options = null,
+            CancellationToken cancellationToken = default) =>
+            inner.InsertAsync(values, options, cancellationToken);
+
+        public ValueTask<WriteOutcome> UpdateAsync(
+            StorageValues values,
+            WriteOptions? options = null,
+            CancellationToken cancellationToken = default) =>
+            inner.UpdateAsync(values, options, cancellationToken);
+
+        public ValueTask<WriteOutcome> UpsertAsync(
+            StorageValues values,
+            WriteOptions? options = null,
+            CancellationToken cancellationToken = default) =>
+            inner.UpsertAsync(values, options, cancellationToken);
+
+        public ValueTask<WriteOutcome> DeleteAsync(
+            StorageKey key,
+            WriteOptions? options = null,
+            CancellationToken cancellationToken = default) =>
+            inner.DeleteAsync(key, options, cancellationToken);
+
+        public ValueTask<WriteOutcome> AppendAsync(
+            OperationId operationId,
+            IReadOnlyList<StorageValues> values,
+            CancellationToken cancellationToken = default) =>
+            inner.AppendAsync(operationId, values, cancellationToken);
     }
 
     /// <summary>

@@ -7,6 +7,7 @@ using Groundwork.Sqlite;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq.Sqlite;
+using Groundwork.Query.Planning;
 using Groundwork.Substrate.Relational;
 using Xunit;
 
@@ -933,7 +934,7 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public async Task Configured_linq_executor_completes_synchronously_without_the_async_capability()
+    public async Task Configured_linq_executor_completes_synchronously_over_an_in_process_provider()
     {
         using var database = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
         var unit = new StorageUnit
@@ -982,7 +983,8 @@ public sealed class SqliteProviderTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).Status);
 
-        var executor = new SqliteLinqExecutor(new PassThroughStorageSession(session));
+        var decorated = new PassThroughStorageSession(session);
+        var executor = new SqliteLinqExecutor(decorated);
         var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
             new GwTableModel<LinqCountTicket>("linq_decorated", [
                 new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
@@ -990,20 +992,47 @@ public sealed class SqliteProviderTests
 
         Assert.Equal(1, await Scanned(table).CountAsync(executor));
         Assert.Equal("a", Assert.Single(await Scanned(table).ToListAsync(executor)).Id);
+
+        // The executor reaches storage through the session contract's asynchronous member, which is
+        // the only one that carries the caller's token. Reading through the synchronous member would
+        // still return these rows, so the counters are what distinguish the two routes.
+        Assert.Equal(0, decorated.SynchronousQueries);
+        Assert.Equal(2, decorated.AsynchronousQueries);
     }
 
     private sealed class PassThroughStorageSession(IStorageSession inner) : IStorageSession
     {
+        internal int SynchronousQueries { get; private set; }
+
+        internal int AsynchronousQueries { get; private set; }
+
         public StorageUnit Unit => inner.Unit;
         public StorageAccess Access => inner.Access;
         public StoredEntry? Read(StorageKey key) => inner.Read(key);
-        public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => inner.Query(request, options);
+        public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) => inner.ReadAsync(key, cancellationToken);
+        public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+        {
+            SynchronousQueries++;
+            return inner.Query(request, options);
+        }
+
+        public ValueTask<QueryMaterializedResult> QueryAsync(QueryRequest request, QueryRenderOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            AsynchronousQueries++;
+            return inner.QueryAsync(request, options, cancellationToken);
+        }
         public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);
+        public ValueTask<AggregationResult> AggregateAsync(AggregationQuery query, CancellationToken cancellationToken = default) => inner.AggregateAsync(query, cancellationToken);
         public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
+        public ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.InsertAsync(values, options, cancellationToken);
         public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => inner.Update(values, options);
+        public ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.UpdateAsync(values, options, cancellationToken);
         public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
+        public ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.UpsertAsync(values, options, cancellationToken);
         public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
+        public ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.DeleteAsync(key, options, cancellationToken);
         public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) => inner.Append(operationId, values);
+        public ValueTask<WriteOutcome> AppendAsync(OperationId operationId, IReadOnlyList<StorageValues> values, CancellationToken cancellationToken = default) => inner.AppendAsync(operationId, values, cancellationToken);
     }
 
     [Fact]
@@ -1082,6 +1111,40 @@ public sealed class SqliteProviderTests
         table.AcceptScan("GW-SCAN-0001", "provider execution mechanics", "groundwork-tests",
             DateTimeOffset.UtcNow.AddYears(10));
 
+    [Fact]
+    public async Task Session_only_executor_still_admits_under_sqlites_own_parameter_budget()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-budget"), Name = "linq_budget",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        // No connection is handed over, so there is nothing to advertise a budget. The adapter is
+        // bound to SQLite at compile time and supplies SQLite's own 999 anyway, so a request SQLite
+        // cannot bind is refused at admission rather than reaching the renderer.
+        var table = new TableId("linq_budget");
+        var id = new ColumnRef(table, "Id", QueryType.String, isNullable: false, maxLength: 64);
+        var request = new QueryRequest(
+            table,
+            new Predicate.In(id, Enumerable.Range(0, 1_000).Select(value => QueryConstant.Of(id, "id" + value))),
+            [],
+            Projection.All,
+            Paging.OffsetLimit(0, 1));
+
+        var refusal = await Assert.ThrowsAsync<RuntimeValueFenceException>(
+            () => new SqliteLinqExecutor(session).ToListAsync<LinqCountTicket>(request));
+
+        Assert.Equal("GW-RUNTIME-011", refusal.Code);
+        Assert.Contains("999", refusal.Message, StringComparison.Ordinal);
+    }
+
     private sealed class LinqCountTicket
     {
         public string Id { get; set; } = string.Empty;
@@ -1089,11 +1152,111 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public void Provider_passes_provider_neutral_conformance()
+    public async Task Async_write_waits_for_the_provider_gate()
     {
         using var store = TemporaryStore.Create();
-        var report = ConformanceSuite.Run(new SqliteProviderFactory(), store.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine, report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("async-gate"), Name = "async_gate",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        Task<WriteOutcome> pending;
+        lock (((SqliteProviderConnection)connection).Gate)
+        {
+            pending = Task.Run(() =>
+                session.InsertAsync(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).AsTask());
+            Thread.Sleep(250);
+            Assert.False(pending.IsCompleted);
+        }
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, (await pending).Status);
+        Assert.NotNull(await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" })));
+    }
+
+    [Fact]
+    public async Task Async_unit_of_work_commit_stages_flushes_and_reads_back()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("async-uow"), Name = "async_uow",
+            Columns =
+            [
+                new() { Name = "Id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "Value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using (var unitOfWork = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
+        {
+            var staged = unitOfWork.OpenSession(unit);
+            unitOfWork.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+            {
+                ["Id"] = "a", ["Value"] = "staged"
+            })));
+            var flushed = await staged.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
+            Assert.Equal("staged", flushed?.Values.Values["Value"]);
+            var report = await unitOfWork.CommitWithOutcomesAsync();
+            Assert.Equal(1, report.Succeeded);
+        }
+
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var committed = await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
+        Assert.Equal("staged", committed?.Values.Values["Value"]);
+    }
+
+    [Fact]
+    public async Task Nested_write_is_refused_rather_than_blocking()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("nested-write"), Name = "nested_write",
+            Columns =
+            [
+                new() { Name = "Id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "Value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["Value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
+    {
+        using var store = TemporaryStore.Create();
+
+        // One store, both surfaces: each run proves the whole contract on its own storage units.
+        var synchronous = ConformanceSuite.Run(new SqliteProviderFactory(), store.ConnectionString);
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine, synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+
+        var asynchronous = await ConformanceSuite.RunAsync(new SqliteProviderFactory(), store.ConnectionString);
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine, asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
     }
 
     [Fact]

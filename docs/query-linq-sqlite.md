@@ -16,11 +16,11 @@ SQLite's own contribution is its dialect — already owned by `SqliteQueryRender
 fence uses SQLite's limit rather than a portable guess. SQLite's ceiling is a compile-time option of
 the native library, so it is genuinely a property of the deployment rather than a constant.
 
-The async terminals run on the async ADO.NET surface with real cancellation propagation into the
-native statement, but they still complete synchronously: Microsoft.Data.Sqlite executes its async
-operations synchronously, and the provider serializes every command on the connection's gate, so a
-call waiting for that gate blocks its thread. `Count()` executes the provider's total-count shape
-over a single-row page and `Any()` a limit-1 probe; neither materializes the matching rows, and a
-result without a provider-side total count is refused rather than counted client-side. A session
-that does not advertise the provider's async capability — for example a custom `IStorageSession`
-decorator — executes the ordinary synchronous query path directly.
+The async terminals call `IStorageSession.QueryAsync`, so any session — including a custom consumer
+decorator — reaches the provider's async query path. They run on the async ADO.NET surface with real
+cancellation propagation into the native statement, but they still complete synchronously:
+Microsoft.Data.Sqlite executes its async operations synchronously, and the provider serializes every
+command on the connection's gate, so a call waiting for that gate blocks its thread. `Count()`
+executes the provider's total-count shape over a single-row page and `Any()` a limit-1 probe;
+neither materializes the matching rows, and a result without a provider-side total count is refused
+rather than counted client-side.

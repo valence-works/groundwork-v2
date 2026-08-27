@@ -143,6 +143,14 @@ Published codes appear in messages; Roslyn ids use underscores.
 
 ---
 
+## `GW-WRITE-NESTED-*`
+
+| Code | Meaning |
+| --- | --- |
+| `GW-WRITE-NESTED-001` | A write re-entered a session already inside its own provider write transaction. A provider connection carries one transaction at a time, so the nested write can neither join nor isolate itself from the outer one; open a unit of work and stage the writes instead. |
+
+---
+
 ## `GW-APPEND-*` / `GW-RETENTION-*` / `GW-INSPECT-*`
 
 | Code | Meaning |

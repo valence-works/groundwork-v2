@@ -29,6 +29,8 @@ public sealed record RetentionResult(
 public interface IRetentionStorageSession
 {
     RetentionResult ApplyRetention(RetentionExecutionOptions? options = null);
+
+    ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null);
 }
 
 /// <summary>Public retention entry point shared by all provider-neutral sessions.</summary>
@@ -54,8 +56,16 @@ public static class RetentionSessionExtensions
 
     public static ValueTask<RetentionResult> ApplyRetentionAsync(
         this IStorageSession session,
-        RetentionExecutionOptions? options = null) =>
-        ValueTask.FromResult(ApplyRetention(session, options));
+        RetentionExecutionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "retention");
+        options ??= new RetentionExecutionOptions();
+        ValidateExecutionOptions(options);
+        return session is IRetentionStorageSession native
+            ? native.ApplyRetentionAsync(options)
+            : ApplyReferenceAsync(session, options);
+    }
 
     private static RetentionResult ApplyReference(
         IStorageSession session,
@@ -76,6 +86,56 @@ public static class RetentionSessionExtensions
             EffectiveKeepNewest(session.Unit, options),
             rows);
         return DeleteVictims(session, victims, options);
+    }
+
+    private static async ValueTask<RetentionResult> ApplyReferenceAsync(
+        IStorageSession session,
+        RetentionExecutionOptions options)
+    {
+        var declaration = session.Unit.Retention ??
+            throw new InvalidOperationException($"Storage unit '{session.Unit.Name}' does not declare retention.");
+        var request = new QueryRequest(
+            new TableId(session.Unit.Name),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+        var rows = (await session.QueryAsync(request, cancellationToken: options.CancellationToken)
+            .ConfigureAwait(false)).Rows;
+        var victims = RetentionRows.OrderVictims(
+            session.Unit,
+            declaration,
+            EffectiveKeepNewest(session.Unit, options),
+            rows);
+        return await DeleteVictimsAsync(session, victims, options).ConfigureAwait(false);
+    }
+
+    internal static async ValueTask<RetentionResult> DeleteVictimsAsync(
+        IStorageSession session,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> victims,
+        RetentionExecutionOptions options)
+    {
+        var deleted = 0;
+        var batches = 0;
+        foreach (var batch in victims.Chunk(options.MaxRowsPerBatch))
+        {
+            options.CancellationToken.ThrowIfCancellationRequested();
+            foreach (var row in batch)
+            {
+                options.CancellationToken.ThrowIfCancellationRequested();
+                var key = session.Unit.Key.Columns.ToDictionary(
+                    column => column,
+                    column => row.GetValueOrDefault(column),
+                    StringComparer.Ordinal);
+                var outcome = await session.DeleteAsync(new StorageKey(key),
+                    cancellationToken: options.CancellationToken).ConfigureAwait(false);
+                if (outcome.Status == WriteOutcomeStatus.Deleted)
+                    deleted++;
+            }
+            batches++;
+        }
+
+        return new RetentionResult(deleted, batches);
     }
 
     internal static RetentionResult DeleteVictims(
@@ -256,12 +316,23 @@ internal static class OnAppendRetentionCoordinator
         string? scope,
         Action cleanup)
     {
+        ArgumentNullException.ThrowIfNull(cleanup);
+        Run(owner, unit, scope, () => { cleanup(); return ValueTask.CompletedTask; })
+            .GetAwaiter().GetResult();
+    }
+
+    internal static ValueTask Run(
+        object owner,
+        StorageUnit unit,
+        string? scope,
+        Func<ValueTask> cleanup)
+    {
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(cleanup);
         var state = State(owner, unit, scope);
         Interlocked.Exchange(ref state.Pending, 1);
-        Drain(state, cleanup);
+        return Drain(state, cleanup);
     }
 
     /// <summary>
@@ -284,7 +355,7 @@ internal static class OnAppendRetentionCoordinator
             .GetOrAdd(identity, static _ => new DrainState());
     }
 
-    private static void Drain(DrainState state, Action cleanup)
+    private static async ValueTask Drain(DrainState state, Func<ValueTask> cleanup)
     {
         while (true)
         {
@@ -293,7 +364,7 @@ internal static class OnAppendRetentionCoordinator
             try
             {
                 while (Interlocked.Exchange(ref state.Pending, 0) != 0)
-                    cleanup();
+                    await cleanup().ConfigureAwait(false);
             }
             catch
             {
@@ -320,12 +391,20 @@ internal static class OnAppendRetentionCoordinator
         internal void Complete(bool cleanupRequired, Action cleanup)
         {
             ArgumentNullException.ThrowIfNull(cleanup);
+            Complete(cleanupRequired, () => { cleanup(); return ValueTask.CompletedTask; })
+                .GetAwaiter().GetResult();
+        }
+
+        internal ValueTask Complete(bool cleanupRequired, Func<ValueTask> cleanup)
+        {
+            ArgumentNullException.ThrowIfNull(cleanup);
             if (Interlocked.Exchange(ref completed, 1) != 0)
                 throw new InvalidOperationException("An OnAppend registration can only be completed once.");
             if (cleanupRequired)
                 Interlocked.Exchange(ref state.Pending, 1);
-            if (Interlocked.Decrement(ref state.Appenders) == 0 && Volatile.Read(ref state.Pending) != 0)
-                Drain(state, cleanup);
+            return Interlocked.Decrement(ref state.Appenders) == 0 && Volatile.Read(ref state.Pending) != 0
+                ? Drain(state, cleanup)
+                : ValueTask.CompletedTask;
         }
 
         public void Dispose()

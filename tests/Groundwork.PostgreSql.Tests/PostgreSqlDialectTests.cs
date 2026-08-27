@@ -647,12 +647,96 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
-    public void Provider_passes_the_shipped_conformance_suite()
+    public async Task Nested_write_is_refused_rather_than_blocking()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();
-        var report = ConformanceSuite.Run(new PostgreSqlProviderFactory(), database.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_nested_write_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public async Task Provider_passes_the_shipped_conformance_suite_on_both_surfaces()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+
+        // One database, both surfaces: each run proves the whole contract on its own storage units.
+        var synchronous = ConformanceSuite.Run(new PostgreSqlProviderFactory(), database.ConnectionString);
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine,
+            synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+
+        var asynchronous = await ConformanceSuite.RunAsync(new PostgreSqlProviderFactory(), database.ConnectionString);
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine,
+            asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+    }
+
+    [SkippableFact]
+    public void Async_writes_hold_every_named_concurrency_invariant_under_contention()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("postgresql", new PostgreSqlProviderFactory()),
+            database.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 16,
+                KeyCount = 1,
+                RepeatCount = 1,
+                Seed = 8245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, report.ToString());
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+    }
+
+    [SkippableFact]
+    public void Async_unit_of_work_commits_hold_every_named_concurrency_invariant_under_contention()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory(
+                "postgresql", new PostgreSqlProviderFactory(), commitThroughUnitOfWork: true),
+            database.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 8,
+                KeyCount = 1,
+                RepeatCount = 1,
+                Seed = 9245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, report.ToString());
     }
 
     [SkippableFact]
