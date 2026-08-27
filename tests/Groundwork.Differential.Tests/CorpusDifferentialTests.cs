@@ -15,6 +15,7 @@ using Xunit;
 
 namespace Groundwork.Differential.Tests;
 
+[Collection(NativeProviderDifferentialCollection.Name)]
 public sealed class CorpusDifferentialTests
 {
     private static readonly string RunTableName = "g2_edge_row_" + Guid.NewGuid().ToString("N");
