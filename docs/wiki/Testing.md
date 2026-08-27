@@ -252,7 +252,7 @@ Assert.Equal(0, RecordTable<Customer>.AccessorReflectionInspectionCount);
 CI builds a consumer **outside the repository source graph**, from packed artifacts only:
 
 ```bash
-dotnet pack Groundwork.slnx --configuration Release --output artifacts/packages
+dotnet pack Groundwork.slnx --configuration Release --output artifacts/acceptance-packages
 dotnet test tests/Groundwork.PublicApi.Acceptance.Tests --configuration Release
 ```
 
