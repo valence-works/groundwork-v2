@@ -16,6 +16,7 @@ public abstract class RelationalDialect
     public const string SearchKeyDefinitionSeparator = "\u001f";
 
     public const string SchemaHistoryTable = "__groundwork_schema_history";
+    public const string SearchKeyAlgorithmsTable = "__groundwork_search_key_algorithms";
 
     public abstract string ProviderName { get; }
 

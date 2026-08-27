@@ -178,6 +178,17 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             applied.Snapshot.Subject,
             applied.Provider,
             applied.Snapshot.ProviderDefinitions);
+        if (appliedTarget.Subject.DerivedColumns.Length != 0 &&
+            !dialect.TableExists(connection, null!, RelationalDialect.SearchKeyAlgorithmsTable))
+        {
+            return new PhysicalSchemaInspectionResult(
+                history,
+                IsAppliedSchemaValid: false,
+                ColumnDrift: [new SchemaRefusal(
+                    "GW-RUNTIME-001",
+                    $"Relational search-key algorithm catalog '{RelationalDialect.SearchKeyAlgorithmsTable}' is missing for '{appliedTarget.Subject.Name}'.",
+                    "table")]);
+        }
         try
         {
             return InspectTarget(connection, null!, appliedTarget, history);

@@ -58,11 +58,17 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
-        admission.Invalidate(desired.Id);
-        var result = PhysicalSchemaApplication.Apply(target, executor);
-        owner.RefreshSchema();
-        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        try
+        {
+            var result = PhysicalSchemaApplication.Apply(target, executor);
+            owner.RefreshSchema();
+            return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
+        finally
+        {
+            admission.Invalidate(desired.Id);
+        }
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
