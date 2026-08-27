@@ -556,7 +556,15 @@ public static class GroundworkSchemaCli
                 $"Targets: {value.Targets.Count}",
                 $"Pending operations: {value.Targets.Sum(target => target.PendingOperations.Count)}",
                 $"Applied operations: {value.Targets.Sum(target => target.AppliedOperations.Count)}"
-            }.Concat(value.Targets.SelectMany(target => target.DataMigrations)
+            }.Concat(value.Targets.SelectMany(target => target.Supersessions)
+                .OrderBy(supersession => supersession.SupersededColumn, StringComparer.Ordinal)
+                .Select(supersession =>
+                    $"Superseded column {supersession.SupersededColumn} -> {supersession.ReplacementColumn}: " +
+                    $"{supersession.State.ToLowerInvariant()}" +
+                    (supersession.IsContractable
+                        ? ", contractable"
+                        : $", not contractable{(supersession.ContractableAt is null ? string.Empty : " until " + supersession.ContractableAt)}")))
+            .Concat(value.Targets.SelectMany(target => target.DataMigrations)
                 .OrderBy(migration => migration.Identity, StringComparer.Ordinal)
                 .Select(migration => $"Data migration {migration.Identity}: {migration.State}" +
                     (migration.State == SchemaToolDataMigrationReport.PendingState
