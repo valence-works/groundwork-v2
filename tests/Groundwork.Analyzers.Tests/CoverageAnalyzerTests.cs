@@ -303,6 +303,21 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Linq_shaped_terminals_on_non_groundwork_tables_are_ignored()
+    {
+        const string foreign = "using System.Collections.Generic; using System.Linq; " +
+            "public sealed class Row { public string Status { get; set; } = \"\"; } " +
+            "public sealed class Sheet { public IEnumerable<T> Table<T>() => new List<T>(); } " +
+            "public static class Spreadsheet { public static List<Row> Run(Sheet sheet) { var rows = sheet.Table<Row>().Where(r => r.Status == \"open\").ToList(); _ = rows.Count(); _ = rows.Any(); return rows; } }";
+
+        var bare = await Analyze(foreign);
+        var withSchema = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + foreign);
+
+        Assert.DoesNotContain(bare, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+        Assert.DoesNotContain(withSchema, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Unresolvable_reassignment_has_a_working_where_if_code_fix()
     {
         var source = WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QueryInfrastructure +

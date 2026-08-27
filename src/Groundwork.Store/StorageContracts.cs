@@ -694,8 +694,9 @@ public interface IExactAppendStorageSession
 }
 
 /// <summary>
-/// Internal provider capability for query execution on the async ADO.NET surface. Session
-/// decorators forward it so a wrapped provider session keeps the capability.
+/// Internal provider capability for query execution on the async ADO.NET surface. The capability
+/// is best-effort: decorators forward it when their inner session advertises it, and callers fall
+/// back to the synchronous query path when a session does not.
 /// </summary>
 internal interface IAsyncQueryStorageSession
 {

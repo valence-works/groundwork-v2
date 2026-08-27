@@ -38,6 +38,51 @@ internal static class QueryResolver
     internal static readonly ImmutableHashSet<string> TerminalNames =
         ImmutableHashSet.Create(StringComparer.Ordinal, "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync");
 
+    /// <summary>
+    /// Semantic gate that keeps LINQ-shaped terminals on unrelated types out of the analysis: a
+    /// receiver must be the closed query surface itself or a query facade whose row type is
+    /// declared in the visible Groundwork schema. A receiver that resolves to any other type is
+    /// rejected before any method-body scan; only an unresolvable receiver falls back to the
+    /// resolver's own Table&lt;T&gt;() discovery.
+    /// </summary>
+    public static bool IsClosedSurfaceCandidate(
+        InvocationExpressionSyntax terminal,
+        SemanticModel model,
+        AnalyzerSchema schema,
+        CancellationToken cancellationToken)
+    {
+        if (terminal.Expression is not MemberAccessExpressionSyntax member)
+            return false;
+        if (model.GetTypeInfo(member.Expression, cancellationToken).Type is INamedTypeSymbol receiver &&
+            receiver.TypeKind != TypeKind.Error)
+        {
+            if (IsClosedSurfaceType(receiver.OriginalDefinition) ||
+                receiver.AllInterfaces.Any(item => IsClosedSurfaceType(item.OriginalDefinition)))
+                return true;
+            return receiver.TypeArguments.Length == 1 &&
+                   receiver.TypeArguments[0] is INamedTypeSymbol row &&
+                   schema.TryGetTable(row, out _);
+        }
+
+        var chain = GetInvocationChain(member.Expression);
+        if (chain.Count != 0)
+            return TryFindTableInvocation(chain, model, cancellationToken, out _, out var tableType) &&
+                   schema.TryGetTable(tableType, out _);
+        if (member.Expression is not IdentifierNameSyntax local)
+            return false;
+        var method = terminal.FirstAncestorOrSelf<BaseMethodDeclarationSyntax>();
+        var initializer = method?.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .FirstOrDefault(item => item.Identifier.ValueText == local.Identifier.ValueText)
+            ?.Initializer?.Value;
+        return initializer is InvocationExpressionSyntax invocation &&
+               TryFindTableInvocation(GetInvocationChain(invocation), model, cancellationToken, out _, out var localTableType) &&
+               schema.TryGetTable(localTableType, out _);
+    }
+
+    private static bool IsClosedSurfaceType(INamedTypeSymbol definition) =>
+        definition is { Arity: 1, Name: "IGwQueryable" or "GwQueryTable" } &&
+        definition.ContainingNamespace.ToDisplayString() == "Groundwork.Query.Linq";
+
     public static bool IsCandidate(InvocationExpressionSyntax terminal)
     {
         if (terminal.Expression is not MemberAccessExpressionSyntax member)

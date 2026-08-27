@@ -929,7 +929,7 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public void Configured_linq_executor_requires_a_sqlite_session()
+    public async Task Configured_linq_executor_completes_synchronously_without_the_async_capability()
     {
         using var database = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
         var unit = new StorageUnit
@@ -939,10 +939,61 @@ public sealed class SqliteProviderTests
             Key = new KeyDefinition { Columns = ["Id"] }
         };
         Assert.True(database.Schema.Apply(unit).Applied);
+        var session = database.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).Status);
 
-        Assert.Throws<ArgumentException>(() => new SqliteLinqExecutor(database.OpenSession(unit, StorageAccess.Global)));
-        using var unitOfWork = database.BeginUnitOfWork(StorageAccess.Global, unit);
-        Assert.Throws<ArgumentException>(() => new SqliteLinqExecutor(unitOfWork.OpenSession(unit)));
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_foreign", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
+            ]));
+
+        var pending = table.Query.Where(ticket => ticket.Id == "a").CountAsync(executor);
+        Assert.True(pending.IsCompleted);
+        Assert.Equal(1, await pending);
+        Assert.True(await table.Query.Where(ticket => ticket.Id == "a").AnyAsync(executor));
+        Assert.Equal("a", Assert.Single(await table.Query.ToListAsync(executor)).Id);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            table.Query.CountAsync(executor, new CancellationToken(canceled: true)));
+    }
+
+    [Fact]
+    public async Task Configured_linq_executor_reads_through_a_consumer_session_decorator()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-decorated"), Name = "linq_decorated",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).Status);
+
+        var executor = new SqliteLinqExecutor(new PassThroughStorageSession(session));
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_decorated", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
+            ]));
+
+        Assert.Equal(1, await table.Query.CountAsync(executor));
+        Assert.Equal("a", Assert.Single(await table.Query.ToListAsync(executor)).Id);
+    }
+
+    private sealed class PassThroughStorageSession(IStorageSession inner) : IStorageSession
+    {
+        public StorageUnit Unit => inner.Unit;
+        public StorageAccess Access => inner.Access;
+        public StoredEntry? Read(StorageKey key) => inner.Read(key);
+        public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => inner.Query(request, options);
+        public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);
+        public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
+        public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => inner.Update(values, options);
+        public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
+        public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
+        public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) => inner.Append(operationId, values);
     }
 
     [Fact]
