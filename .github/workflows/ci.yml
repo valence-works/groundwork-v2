@@ -35,26 +35,7 @@ jobs:
             8.0.x
             10.0.x
       - run: dotnet restore Groundwork.slnx
-      - run: dotnet test Groundwork.slnx --no-restore --configuration Release --logger "trx;LogFileName=solution.trx"
-      # TEMPORARY (#209 diagnosis): a trx uploaded as an artifact is unreadable from
-      # the agent environment -- the artifact URL is a blob host the proxy refuses.
-      # Annotations come back through the check-run API, which is not blocked.
-      - name: Name the failing tests
-        if: failure()
-        run: |
-          python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
-          tag = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}UnitTestResult"
-          named = 0
-          for path in sorted(glob.glob("**/TestResults/*.trx", recursive=True)):
-              for result in ET.parse(path).getroot().iter(tag):
-                  if result.get("outcome") != "Failed":
-                      continue
-                  named += 1
-                  detail = " | ".join(p.strip() for p in result.itertext() if p.strip())
-                  print("::error title=" + result.get("testName", "?") + "::" + detail[:1500])
-          print("Named " + str(named) + " failed test(s) from trx.")
-          PY
+      - run: dotnet test Groundwork.slnx --no-restore --configuration Release
 
   documents-package-boundary:
     runs-on: ubuntu-latest
@@ -288,24 +269,7 @@ jobs:
       - name: Run SQL Server conformance suite
         env:
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj --no-restore --configuration Release --logger "trx;LogFileName=sqlserver-conformance.trx"
-      # TEMPORARY (#209 diagnosis): see the note in build-and-test.
-      - name: Name the failing tests
-        if: failure()
-        run: |
-          python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
-          tag = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}UnitTestResult"
-          named = 0
-          for path in sorted(glob.glob("**/TestResults/*.trx", recursive=True)):
-              for result in ET.parse(path).getroot().iter(tag):
-                  if result.get("outcome") != "Failed":
-                      continue
-                  named += 1
-                  detail = " | ".join(p.strip() for p in result.itertext() if p.strip())
-                  print("::error title=" + result.get("testName", "?") + "::" + detail[:1500])
-          print("Named " + str(named) + " failed test(s) from trx.")
-          PY
+        run: dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj --no-restore --configuration Release
 
   provider-infrastructure:
     runs-on: ubuntu-latest
