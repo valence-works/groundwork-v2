@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
@@ -25,13 +26,18 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         admission = new RelationalRuntimeAdmission(
             "sqlserver.schema-admission",
             desired => Target(Prepare(desired)),
-            executor.InspectDeployedHistory);
+            (target, connection) => connection is null
+                ? executor.InspectDeployedHistory(target)
+                : executor.InspectDeployedHistory(target, connection));
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired, IProviderCommandObserver? observer = null) =>
-        admission.EnsureAdmitted(desired, observer);
+    internal void EnsureRuntimeAdmission(
+        StorageUnit desired,
+        IProviderCommandObserver? observer = null,
+        DbConnection? connection = null) =>
+        admission.EnsureAdmitted(desired, observer, connection);
 
     public SchemaDiff Diff(StorageUnit desired)
     {
@@ -51,11 +57,17 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         var physical = Prepare(desired);
         Remember(desired, physical);
         var target = Target(physical);
-        admission.Invalidate(desired.Id);
-        var result = PhysicalSchemaApplication.Apply(target, executor);
-        return new SchemaApplyResult(
-            new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        try
+        {
+            var result = PhysicalSchemaApplication.Apply(target, executor);
+            return new SchemaApplyResult(
+                new SchemaDiff(MapChanges(result.Plan.Operations)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
+        finally
+        {
+            admission.Invalidate(desired.Id);
+        }
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
@@ -267,7 +279,7 @@ internal sealed class SqlServerProviderCatalog(SqlServerProviderConnection owner
         {
             using var connection = owner.CreateIndependentConnection();
             return unit.Indexes
-                .Select(index => (index, metadata: dialect.ReadIndex(connection, null!, unit.Name, index.Name)))
+                .Select(index => (index, metadata: dialect.ReadIndex(connection, null, unit.Name, index.Name)))
                 .Where(item => item.metadata is not null)
                 .Select(item => new ProviderIndex(
                     item.index.Name,

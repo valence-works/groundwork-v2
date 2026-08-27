@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Store;
@@ -31,14 +32,19 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired, IProviderCommandObserver? observer = null) =>
-        admission.EnsureAdmitted(desired, observer);
+    internal void EnsureRuntimeAdmission(
+        StorageUnit desired,
+        IProviderCommandObserver? observer = null,
+        DbConnection? connection = null) =>
+        admission.EnsureAdmitted(desired, observer, connection);
 
-    private PhysicalSchemaInspectionResult InspectDeployed(PhysicalSchemaTarget target)
+    private PhysicalSchemaInspectionResult InspectDeployed(PhysicalSchemaTarget target, DbConnection? connection)
     {
         if (owner.UsesSharedSessionConnection)
             lock (owner.Gate) return executor.InspectDeployedHistory(target, owner.Connection);
-        return executor.InspectDeployedHistory(target);
+        return connection is null
+            ? executor.InspectDeployedHistory(target)
+            : executor.InspectDeployedHistory(target, connection);
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -59,11 +65,17 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
-        admission.Invalidate(desired.Id);
-        var result = PhysicalSchemaApplication.Apply(target, executor);
-        owner.RefreshSchema();
-        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        try
+        {
+            var result = PhysicalSchemaApplication.Apply(target, executor);
+            owner.RefreshSchema();
+            return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
+        finally
+        {
+            admission.Invalidate(desired.Id);
+        }
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
@@ -234,7 +246,7 @@ internal sealed class SqliteProviderCatalog : IProviderCatalog
             var indexes = new List<ProviderIndex>();
             foreach (var index in unit.Indexes)
             {
-                var metadata = dialect.ReadIndex(catalogConnection, null!, unit.Name, index.Name);
+                var metadata = dialect.ReadIndex(catalogConnection, null, unit.Name, index.Name);
                 if (metadata is null) continue;
                 indexes.Add(new ProviderIndex(index.Name,
                     metadata.Columns.Where(column => column.Name != SqliteSchemaCoordinator.ScopeColumn)

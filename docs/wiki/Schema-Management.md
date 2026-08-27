@@ -33,6 +33,12 @@ At startup, providers compare the deployed catalog with the compiled physical ta
 The split is deliberate: a missing column means data cannot be read correctly (fail hard), while a
 missing index means *some queries* are no longer safe (fail those, keep the app up).
 
+Admission runs **once per storage unit per provider connection**: the first session (or unit of
+work) that touches a unit verifies the deployed catalog read-only and caches the verdict for the
+connection's lifetime; a schema apply re-arms verification for that unit. Detection is therefore
+per connection lifetime — out-of-band tampering while a connection stays open is out of scope and
+surfaces on the next new connection.
+
 MongoDB does the same inspect-only split at `OpenSession` via its public `InspectSchema` report.
 
 ## The `groundwork` CLI

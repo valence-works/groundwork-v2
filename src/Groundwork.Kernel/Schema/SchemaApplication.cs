@@ -203,12 +203,12 @@ public sealed record GroundworkRuntimeSchemaAdmissionResult(
 
 public sealed class GroundworkRuntimeSchemaAdmissionException : InvalidOperationException
 {
-    public GroundworkRuntimeSchemaAdmissionException(GroundworkRuntimeSchemaAdmissionResult result)
-        : base(CreateMessage(result)) => Result = result;
+    public GroundworkRuntimeSchemaAdmissionException(GroundworkRuntimeSchemaAdmissionResult result, string? detail = null)
+        : base(CreateMessage(result, detail)) => Result = result;
 
     public GroundworkRuntimeSchemaAdmissionResult Result { get; }
 
-    private static string CreateMessage(GroundworkRuntimeSchemaAdmissionResult result)
+    private static string CreateMessage(GroundworkRuntimeSchemaAdmissionResult result, string? detail)
     {
         var reason = result.Inspection.HasColumnDrift || !result.Inspection.IsAppliedSchemaValid
             ? "found column drift in the applied schema"
@@ -218,6 +218,7 @@ public sealed class GroundworkRuntimeSchemaAdmissionException : InvalidOperation
         var refusals = string.Join("; ", result.Refusals.Select(refusal =>
             $"{refusal.Code}: {refusal.Message}"));
         return $"Groundwork runtime schema admission {reason}." +
+               (detail is null ? string.Empty : " " + detail) +
                (refusals.Length == 0 ? string.Empty : Environment.NewLine + refusals);
     }
 }

@@ -965,7 +965,7 @@ public sealed class SqliteProviderTests
             command.ExecuteNonQuery();
         }
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var admission = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(folded, StorageAccess.Global));
+        var admission = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(folded, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", admission.Message, StringComparison.Ordinal);
         Assert.Contains("search-key algorithm", admission.Message, StringComparison.Ordinal);
     }

@@ -71,8 +71,16 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
         var connection = CreateIndependentConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
         lock (gate)
             sessionConnections.Add(connection);
         return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer);
@@ -104,16 +112,16 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
             throw new ArgumentException("A unit of work cannot contain a null storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
-        foreach (var unit in units)
-        {
-            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
-            SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
-        }
-
         var connection = CreateIndependentConnection();
         try
         {
+            foreach (var unit in units)
+            {
+                PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+                SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+                schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            }
+
             var transaction = connection.BeginTransaction(IsolationLevel.Serializable);
             return new SqlServerUnitOfWork(this, connection, transaction, units, access, options, observer);
         }

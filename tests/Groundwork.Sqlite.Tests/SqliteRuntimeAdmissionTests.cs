@@ -24,9 +24,10 @@ public sealed class SqliteRuntimeAdmissionTests
         Mutate(store, $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";");
 
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(failure.Result.Refusals, refusal => refusal.Code == "GW-RUNTIME-001");
     }
 
     [Fact]
@@ -44,7 +45,7 @@ public sealed class SqliteRuntimeAdmissionTests
             $"ALTER TABLE \"{unit.Name}\" ADD COLUMN \"payload\" INTEGER;");
 
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
     }
@@ -62,9 +63,27 @@ public sealed class SqliteRuntimeAdmissionTests
         Mutate(store, $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";");
 
         using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
-        var failure = Assert.Throws<InvalidOperationException>(
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(
             () => reopened.BeginUnitOfWork(StorageAccess.Global, unit));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Missing_search_key_catalog_is_classified_as_drift_not_a_raw_provider_error()
+    {
+        using var store = TemporaryStore.Create();
+        var unit = FoldedUnit("admission-algorithms");
+        using (var connection = new SqliteProviderFactory().Create(store.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        Mutate(store, "DROP TABLE \"__groundwork_search_key_algorithms\";");
+
+        using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("__groundwork_search_key_algorithms", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -150,7 +169,7 @@ public sealed class SqliteRuntimeAdmissionTests
 
         Mutate(store, $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";");
 
-        var failure = Assert.Throws<InvalidOperationException>(() => connection.OpenSession(unit, StorageAccess.Global));
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => connection.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
     }
 
@@ -234,6 +253,15 @@ public sealed class SqliteRuntimeAdmissionTests
     private static StorageUnit IndexedUnit(string id) => PlainUnit(id) with
     {
         Indexes = [new IndexDefinition { Name = "by_payload", Columns = [new IndexColumn("payload")] }]
+    };
+
+    private static StorageUnit FoldedUnit(string id) => PlainUnit(id) with
+    {
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+            new ColumnDefinition { Name = "payload", Type = PortableType.String, MaxLength = 64, Collation = PortableCollation.OrdinalIgnoreCase }
+        ]
     };
 
     private static StorageValues Values(string id, string payload) => new(
