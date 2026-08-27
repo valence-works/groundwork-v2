@@ -22,42 +22,8 @@ public sealed class ExplainAssertionException : InvalidOperationException
 public static class ExplainAssertionMode
 {
     private static long sequence;
-    private static readonly AsyncLocal<bool> Suppressed = new();
 
-    public static bool Enabled =>
-        IsEnabled(Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT")) && !Suppressed.Value;
-
-    /// <summary>
-    /// Withholds the native-plan claim for the duration of the returned scope.
-    ///
-    /// The assertion asks a provider's optimizer to choose a declared index. That is a claim about
-    /// the rendered query only where the index is genuinely the cheapest plan; on a table small
-    /// enough that a sequential scan wins, a correct optimizer declines the index and the assertion
-    /// turns that correct decision into a failure. A caller whose data cannot honour the claim
-    /// declares so here rather than depending on the provider never learning its own statistics.
-    ///
-    /// The suppression is <see cref="AsyncLocal{T}"/>, so it is scoped to one asynchronous flow and
-    /// does not leak into tests running in parallel with it.
-    /// </summary>
-    public static IDisposable Suppress()
-    {
-        var previous = Suppressed.Value;
-        Suppressed.Value = true;
-        return new Scope(previous);
-    }
-
-    private sealed class Scope(bool previous) : IDisposable
-    {
-        private bool disposed;
-
-        public void Dispose()
-        {
-            if (disposed)
-                return;
-            disposed = true;
-            Suppressed.Value = previous;
-        }
-    }
+    public static bool Enabled => IsEnabled(Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT"));
 
     /// <summary>Whether a rendered query carrying a proven index should be explained.</summary>
     public static bool ShouldAssert(string? selectedIndex) =>

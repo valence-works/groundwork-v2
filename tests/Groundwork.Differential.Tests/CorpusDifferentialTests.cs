@@ -259,17 +259,6 @@ public sealed class CorpusDifferentialTests
         using var mongoSession = OpenMongo(mongo);
         var providers = new[] { sqlite, pg, sql, mongoSession };
 
-        // This corpus proves four providers return bit-identical rows for 300 shapes over 40 rows.
-        // It is not a native-plan proof and cannot be one at that size: the table is a single page,
-        // so once PostgreSQL has statistics it correctly costs a sequential scan below an index scan
-        // and declines ix_number. The assertion only ever passed while the table's statistics were
-        // still absent, which made it a race against autovacuum — three tests here seed the same
-        // table, crossing the analyze threshold partway through the class. The native-plan proof
-        // lives in Explain_assert_uses_a_selective_compound_index_after_postgresql_statistics_are_current,
-        // which seeds 2,000 rows and runs ANALYZE so the index really is the cheaper plan.
-        // Rendering, index pinning, and refusal parity across providers are unchanged.
-        using var withoutNativePlanClaim = ExplainAssertionMode.Suppress();
-
         Assert.Equal(G2Q1Corpus.ExpectedShapeCount, G2Q1Corpus.Shapes.Count);
         Assert.Equal(251, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Normalize));
         Assert.Equal(49, G2Q1Corpus.Shapes.Count(shape => shape.Decision == Q1CorpusDecision.Refuse));
