@@ -12,7 +12,12 @@ public sealed class SnowflakeIdentityGenerator : IIdentityGenerator
 
     private readonly TimeProvider timeProvider;
     private readonly SnowflakeIdentityGeneratorOptions options;
-    private readonly Lock gate = new();
+    // System.Threading.Lock arrived in .NET 9 and is unavailable on the net8.0 target. Monitor over a
+    // plain object gives this generator exactly the same mutual exclusion on both targets; the only
+    // thing given up is Lock's uncontended fast path, which is noise next to the clock read and the
+    // Base62 encode inside the critical section. A target-conditional field would instead give the
+    // two targets two different lock implementations for no observable gain.
+    private readonly object gate = new();
 
     private long lastTimestamp = -1;
     private long sequence;

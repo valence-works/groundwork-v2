@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
@@ -13,5 +13,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../../src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Store/Groundwork.Store.csproj" />
   </ItemGroup>
 </Project>

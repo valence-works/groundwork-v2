@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -18,6 +18,11 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.*/Groundwork.*.csproj" />
+    <!-- The MSBuild verification task exists only on the build-task framework, so on the other
+         runtime targets there is nothing of its to inspect. Its layering is proved by the
+         build-task-framework run of this same suite. -->
+    <ProjectReference Remove="../../src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj"
+                      Condition="'$(TargetFramework)' != '$(GroundworkBuildTaskTargetFramework)'" />
   </ItemGroup>
 
 </Project>

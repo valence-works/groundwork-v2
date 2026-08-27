@@ -89,7 +89,7 @@ internal static class ExactAppendCodec
         writer.WriteInt32(values.Count);
         foreach (var value in values)
             WriteMap(writer, value.Values, types);
-        return Convert.ToHexStringLower(SHA256.HashData(writer.ToArray()));
+        return PortableHex.Lower(SHA256.HashData(writer.ToArray()));
     }
 
     internal static string FingerprintRowWrite(
@@ -114,7 +114,7 @@ internal static class ExactAppendCodec
             writer.WriteInt64(version);
         WriteMap(writer, key.Values, types);
         WriteMap(writer, expectedValues, types);
-        return Convert.ToHexStringLower(SHA256.HashData(writer.ToArray()));
+        return PortableHex.Lower(SHA256.HashData(writer.ToArray()));
     }
 
     internal static string SerializeOutcomes(IReadOnlyList<WriteOutcome> outcomes)

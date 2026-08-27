@@ -1,3 +1,4 @@
+using Groundwork.LiveDatabases;
 using Groundwork.SchemaTool;
 using Groundwork.Testing;
 using Microsoft.Data.SqlClient;
@@ -11,7 +12,7 @@ public sealed class SqlServerSchemaToolTests : IDisposable
     [SkippableFact]
     public async Task Discovered_sqlserver_factory_plans_applies_and_reports_status_against_a_live_database()
     {
-        var connection = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connection = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connection),
             "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server integration tests.");
         var table = "cli_tickets_" + Guid.NewGuid().ToString("N");
@@ -94,11 +95,13 @@ public sealed class SqlServerSchemaToolTests : IDisposable
 }
 
 /// <summary>
-/// Serializes the journeys that drive one shared live database. Their schema catalogs are created
-/// on first use, so two concurrent tool sessions would race to create the same catalog.
+/// Serializes every suite that drives this process's one live SQL Server database. Their schema
+/// catalogs are created on first use and the provider suite resets them wholesale, so two of these
+/// running at once would each be tearing down the other's catalog. xUnit runs distinct collections
+/// in parallel, so there is exactly one for the database rather than one per suite.
 /// </summary>
 [CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class SqlServerLiveDatabase
+public sealed class SqlServerLiveDatabase : ICollectionFixture<SqlServerFixture>
 {
     public const string Name = "SQL Server live database";
 }

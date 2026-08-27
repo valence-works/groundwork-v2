@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
@@ -46,7 +47,7 @@ public sealed class UnitOfWorkQueryConformanceTests
     [SkippableFact]
     public void SQLServer_unit_of_work_query_and_versioned_write_contract_is_preserved()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server UOW query conformance.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertProvider(connection, "sqlserver");

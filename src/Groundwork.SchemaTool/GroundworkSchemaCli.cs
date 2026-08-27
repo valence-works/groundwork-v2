@@ -353,7 +353,7 @@ public static class GroundworkSchemaCli
     {
         var parts = new[] { target.Fingerprint, plan.ExpectedAppliedTargetFingerprint ?? string.Empty }
             .Concat(plan.Operations.SelectMany(operation => new[] { operation.Identity, operation.Fingerprint }));
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', parts))));
+        return PortableHex.Lower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', parts))));
     }
 
     private static async Task WriteErrorAsync(

@@ -458,7 +458,7 @@ public static class SchemaFingerprint
             $"{(part?.Length ?? -1).ToString(CultureInfo.InvariantCulture)}:{part ?? string.Empty};"));
 
     public static string CreateCanonical(string canonical) =>
-        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+        PortableHex.Lower(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(canonical)));
 
     internal static bool TryParseCanonical(string canonical, out ImmutableArray<string?> parts)

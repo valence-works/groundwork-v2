@@ -14,6 +14,14 @@ public sealed class KernelBoundaryTests
     private static readonly ImmutableArray<string> ForbiddenContractVocabulary =
         ["Document", "Envelope", "Record", "Stream", "Diagnostic"];
 
+    // Platform assemblies that Microsoft.NETCore.App carries in-box on the newest target Groundwork
+    // ships for, but delivers as a servicing package on an older one. They are the BCL either way:
+    // no Groundwork layering rule is about how the platform chooses to deliver its own libraries.
+    // System.IO.Pipelines reaches Groundwork.Kernel only as a transitive dependency of the pinned
+    // System.Text.Json, which both targets deliberately share so their JSON behavior is identical.
+    private static readonly ImmutableHashSet<string> PlatformServicingAssemblies =
+        ImmutableHashSet.Create(StringComparer.Ordinal, "System.IO.Pipelines");
+
     private static readonly ImmutableHashSet<string> KnownContractFamilies =
         ImmutableHashSet.Create(StringComparer.Ordinal,
             "Groundwork.Records",
@@ -349,13 +357,19 @@ public sealed class KernelBoundaryTests
             var assemblies = groundworkAssemblies
                 .Select(context.LoadFromAssemblyPath)
                 .ToImmutableArray();
+            // What counts as the BCL is the shared framework's own contents, not the trusted-platform
+            // assembly list. Groundwork ships for more than one target framework and this suite runs
+            // once per target, so the classification has to survive two differences. Where the repo
+            // pins a platform package (System.Text.Json, System.Collections.Immutable) the app-local
+            // copy takes the assembly's slot in the trusted list and the in-box path never appears
+            // there, even though the platform does provide it. And a few platform assemblies are
+            // in-box on the newest supported target but delivered as a servicing package on an older
+            // one, so they are named below.
             var runtimeDirectory = Path.TrimEndingDirectorySeparator(RuntimeEnvironment.GetRuntimeDirectory());
-            var bclNames = trustedPlatformAssemblies
-                .Where(path => string.Equals(
-                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(path)!),
-                    runtimeDirectory,
-                    StringComparison.Ordinal))
+            var bclNames = Directory
+                .EnumerateFiles(runtimeDirectory, "*.dll", SearchOption.TopDirectoryOnly)
                 .Select(path => Path.GetFileNameWithoutExtension(path)!)
+                .Concat(PlatformServicingAssemblies)
                 .ToImmutableHashSet(StringComparer.Ordinal);
 
             return new AssemblyUniverse(context, assemblies, bclNames);

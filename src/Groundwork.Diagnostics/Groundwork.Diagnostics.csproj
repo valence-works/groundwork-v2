@@ -1,16 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Diagnostics</PackageId>
     <Description>Opt-in native query-plan evidence diagnostics for Groundwork providers.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
-  <ItemGroup>
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
-  </ItemGroup>
 
 </Project>

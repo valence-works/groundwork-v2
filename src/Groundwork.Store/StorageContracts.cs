@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Collections.ObjectModel;
 using System.Collections;
 using System.Text.Json.Nodes;
@@ -385,11 +386,60 @@ public static class WriteFailureCleanup
         }
     }
 
-    private static void Record(Exception failure, Exception cleanupFailure)
+    /// <summary>
+    /// Runs every step in order, and runs the later ones even when an earlier one throws. Releasing
+    /// a connection is not optional because disposing its transaction failed: a connection abandoned
+    /// mid-transaction goes back to the driver's pool carrying that state, and the next caller to
+    /// open it meets a refusal that has nothing to do with what it asked for.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="Run(Exception, Action)"/> there is no original failure to defer to, so the
+    /// first step failure is thrown once every step has run — a disposal that fails on an otherwise
+    /// successful commit is a signal, not noise. Later failures are recorded against it under
+    /// <see cref="CleanupFailureKey"/>. Composes with <c>Run</c>: called inside a cleanup that is
+    /// already handling a write failure, the exception this throws is recorded rather than raised.
+    /// </remarks>
+    public static void RunAll(params Action[] steps)
+    {
+        ArgumentNullException.ThrowIfNull(steps);
+        Exception? first = null;
+        List<Exception>? rest = null;
+        foreach (var step in steps)
+        {
+            ArgumentNullException.ThrowIfNull(step);
+            try
+            {
+                step();
+            }
+            catch (Exception stepFailure)
+            {
+                if (first is null)
+                    first = stepFailure;
+                else
+                    (rest ??= []).Add(stepFailure);
+            }
+        }
+        if (first is null)
+            return;
+        if (rest is not null)
+            Record(first, rest);
+        // Rethrow rather than `throw first`, which would reset the stack trace to this line and
+        // lose where the disposal actually failed.
+        ExceptionDispatchInfo.Capture(first).Throw();
+    }
+
+    private static void Record(Exception failure, Exception cleanupFailure) =>
+        Record(failure, [cleanupFailure]);
+
+    private static void Record(Exception failure, IReadOnlyList<Exception> cleanupFailures)
     {
         try
         {
-            failure.Data[CleanupFailureKey] = cleanupFailure.ToString();
+            // One key, however many steps failed: a reader looking for what went wrong during
+            // cleanup should find all of it, not whichever failure happened to be recorded last.
+            failure.Data[CleanupFailureKey] = string.Join(
+                Environment.NewLine + "--- and then ---" + Environment.NewLine,
+                cleanupFailures.Select(cleanupFailure => cleanupFailure.ToString()));
         }
         catch (Exception attachFailure) when (attachFailure is ArgumentException or NotSupportedException)
         {

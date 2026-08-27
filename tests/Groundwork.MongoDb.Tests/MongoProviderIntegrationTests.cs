@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
@@ -397,7 +398,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public async Task Provider_passes_the_shipped_conformance_suite_on_both_surfaces()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         var url = new MongoUrlBuilder(connectionString) { DatabaseName = "p1conformance_" + Guid.NewGuid().ToString("N") };
@@ -416,7 +417,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void Live_compare_and_delete_is_transactional_and_exact()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var native = OpenConnection();
@@ -548,7 +549,7 @@ public sealed class MongoProviderIntegrationTests
         var second = connection.Schema.Apply(unit);
         var indexes = connection.Catalog.ReadIndexes(unit.Id);
         using var reopened = new MongoDbProviderFactory().Create(
-            Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION")!);
+            LiveMongo.ConnectionString!);
         var reopenedIndexes = reopened.Catalog.ReadIndexes(unit.Id);
         var native = Assert.IsType<MongoDbProviderConnection>(connection).Database
             .GetCollection<BsonDocument>(unit.Name);
@@ -619,7 +620,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void Composite_key_reordering_is_refused_after_reopening_the_provider()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         var unit = new StorageUnit
@@ -931,7 +932,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void StartsWithUsesIndex_for_the_optimizer_selected_folded_physical_index_without_a_hint()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB explain proofs.");
         var previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
@@ -1159,7 +1160,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public async Task Concurrent_transactional_create_only_reservations_report_a_conflict_instead_of_leaking_wiredtiger_error()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var nativeSetup = new MongoDbProviderFactory().Create(connectionString!);
@@ -1227,7 +1228,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void Transaction_body_retries_a_transient_write_conflict_before_returning_success()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var native = new MongoDbProviderFactory().Create(connectionString!);
@@ -1305,7 +1306,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void Provider_sequence_is_capability_gated_by_mongodb_transactions()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var connection = OpenConnection();
@@ -1532,7 +1533,7 @@ public sealed class MongoProviderIntegrationTests
 
     private static IMongoProviderConnection OpenConnection()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         return new MongoDbProviderFactory().Create(connectionString!);

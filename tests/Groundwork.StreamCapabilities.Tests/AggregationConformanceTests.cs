@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -57,7 +58,7 @@ public sealed class AggregationConformanceTests
     [SkippableFact]
     public void SQLServer_native_aggregation_is_bit_identical_to_the_portable_oracle()
     {
-        var connection = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connection = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connection),
             "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server aggregation conformance.");
         AssertProvider(new SqlServerProviderFactory(), connection!, "SQLServer");
@@ -66,7 +67,7 @@ public sealed class AggregationConformanceTests
     [SkippableFact]
     public void MongoDB_native_aggregation_is_bit_identical_through_the_testing_adapter()
     {
-        var connection = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connection = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connection),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB aggregation conformance.");
         AssertProvider(new MongoProviderFactory(), connection!, "MongoDB");
@@ -151,7 +152,7 @@ public sealed class AggregationConformanceTests
     [SkippableFact]
     public void SQLServer_native_guid_source_ranges_and_column_comparisons_match_the_portable_oracle()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server GUID aggregation conformance.");
 

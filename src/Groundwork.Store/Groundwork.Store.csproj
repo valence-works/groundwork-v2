@@ -1,19 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Store</PackageId>
     <Description>Provider-neutral Groundwork storage contracts and runtime unit-of-work behaviors.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
   </ItemGroup>
 
 </Project>

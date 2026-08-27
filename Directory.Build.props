@@ -1,5 +1,20 @@
 <Project>
   <PropertyGroup>
+    <!-- The single source of truth for what Groundwork targets. Projects write one of these two
+         properties, or netstandard2.0, and never a literal framework of their own, so the set cannot
+         drift apart per project. Groundwork.Packaging.Tests enforces the split.
+
+           GroundworkRuntimeTargetFrameworks  the runtime packages an application references, plus
+                                              every test suite that exercises them.
+           GroundworkBuildTaskTargetFramework the MSBuild verification task, which loads into the
+                                              SDK's own MSBuild process rather than into the
+                                              consumer's application. Microsoft.Build 18.x does not
+                                              support net8.0, so this one cannot follow the runtime
+                                              set and deliberately does not.
+
+         Portable contract, analyzer, and source-generator assemblies stay netstandard2.0. -->
+    <GroundworkRuntimeTargetFrameworks>net8.0;net10.0</GroundworkRuntimeTargetFrameworks>
+    <GroundworkBuildTaskTargetFramework>net10.0</GroundworkBuildTaskTargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

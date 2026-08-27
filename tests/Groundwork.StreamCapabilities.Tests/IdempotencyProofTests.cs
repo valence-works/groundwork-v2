@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
@@ -134,7 +135,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_idempotency_cleanup_index_covers_unit_and_provider_time()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB ledger index proof.");
         using var connection = new MongoDbProviderFactory().Create(connectionString!);
         var nativeConnection = Assert.IsType<MongoDbProviderConnection>(connection);
@@ -171,7 +172,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void SQLServer_scoped_append_returns_inserted_and_is_readable_in_its_scope()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server scoped idempotency proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertScopedAppend(connection, "sqlserver");
@@ -233,7 +234,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void SQLServer_append_allows_multiple_provider_sequence_rows()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server generated-key append proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertGeneratedAppend(connection, "sqlserver");
@@ -242,7 +243,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_append_allows_multiple_provider_sequence_rows()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB generated-key append proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         try
@@ -267,7 +268,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void SQLServer_duplicate_append_keys_are_refused_and_leave_no_payload_or_ledger()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server duplicate idempotency proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertDuplicateAppendRejected(connection, "sqlserver");
@@ -276,7 +277,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_duplicate_append_keys_are_refused_and_leave_no_payload_or_ledger()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB duplicate idempotency proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         try
@@ -439,7 +440,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_manifest_rejects_cross_unit_case_folded_ledger_collision_before_schema_io()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB manifest collision proof.");
         using var connection = new MongoDbProviderFactory().Create(connectionString!);
         var ledger = Unit("manifest-mongo-ledger-owner-" + Guid.NewGuid().ToString("N"), ledgerName: "CrossUnitLedger");
@@ -450,7 +451,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_concurrent_duplicate_nonce_aborts_only_the_losing_whole_unit_of_work()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB duplicate race proof.");
         using var firstConnection = new MongoProviderFactory().Create(connectionString!);
         using var secondConnection = new MongoProviderFactory().Create(connectionString!);
@@ -509,7 +510,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_schema_drift_surfaces_idempotency_window_and_ledger_changes()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB idempotency schema drift proof.");
         using var connection = new MongoDbProviderFactory().Create(connectionString!);
         var name = "idempotency-mongo-drift-" + Guid.NewGuid().ToString("N");
@@ -533,7 +534,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void SQLServer_replay_within_window_returns_replayed_and_writes_nothing()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server idempotency proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertReplaySemantics(connection, "sqlserver");
@@ -542,7 +543,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_replay_within_window_returns_replayed_and_writes_nothing()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB idempotency proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         try
@@ -589,7 +590,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void SQLServer_replay_expiry_uses_commit_time_and_failed_batches_roll_back()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server expiry proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertExpiryAndRollback(connection, "sqlserver");
@@ -598,7 +599,7 @@ public sealed class IdempotencyProofTests
     [SkippableFact]
     public void MongoDB_replay_expiry_uses_commit_time_and_failed_batches_roll_back()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB expiry proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         try
