@@ -1,7 +1,10 @@
+using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
 using Groundwork.Substrate.Relational;
+using Microsoft.Data.SqlClient;
 using Xunit;
 
 namespace Groundwork.Differential.Tests;
@@ -62,6 +65,73 @@ public sealed class SchemaEvolutionDdlTests
             "sys.default_constraints",
             new SqlServerDialect().DropColumnSql("orders", "legacy_total"),
             StringComparison.Ordinal);
+
+    /// <summary>
+    /// Asserting the text of a statement proves it says the right thing, not that SQL Server can
+    /// parse it. Those came apart once already: <c>QUOTENAME</c> inside <c>EXEC(...)</c> reads
+    /// correctly and does not parse, because that form concatenates only literals and variables.
+    /// SET PARSEONLY makes the server check syntax without executing or binding names, so this
+    /// creates nothing and touches no data.
+    /// </summary>
+    [SkippableFact]
+    public void Every_sql_server_statement_this_dialect_emits_parses_on_the_server()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_SQLSERVER_CONNECTION to parse-check SQL Server DDL.");
+        var dialect = new SqlServerDialect();
+        var column = new ColumnDefinition
+        {
+            Name = "legacy_total",
+            Type = PortableType.Decimal,
+            Precision = 18,
+            Scale = 4
+        };
+        var index = new IndexDefinition { Name = "by_customer", Columns = [new IndexColumn("customer")] };
+        var statements = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["DropColumnSql"] = dialect.DropColumnSql("orders", "legacy_total"),
+            ["DropTableSql"] = dialect.DropTableSql("orders"),
+            ["RenameTableSql"] = dialect.RenameTableSql("orders", "purchase_orders"),
+            ["RenameColumnSql"] = dialect.RenameColumnSql("orders", "customer", "buyer"),
+            ["DropIndexSql"] = dialect.DropIndexSql("orders", "by_customer"),
+            ["CreateIndexSql"] = dialect.CreateIndexSql("orders", index, dialect.IndexFilter(index)),
+            ["FinalizeColumnSql"] = dialect.FinalizeColumnSql("orders", column.Name, column)
+        };
+
+        using var connection = new SqlConnection(connectionString);
+        connection.Open();
+        var refused = new List<string>();
+        foreach (var (name, sql) in statements)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SET PARSEONLY ON; " + sql + " SET PARSEONLY OFF;";
+            try
+            {
+                command.ExecuteNonQuery();
+            }
+            catch (SqlException exception) when (IsSyntaxError(exception))
+            {
+                refused.Add($"{name}: {exception.Message}");
+            }
+            catch (SqlException)
+            {
+                // The statement parsed. SET PARSEONLY still resolves object names, so a complaint
+                // that "orders" does not exist means the syntax was accepted and binding failed —
+                // which is the expected outcome against a database these fixtures never create.
+            }
+        }
+
+        Assert.Empty(refused);
+    }
+
+    /// <summary>
+    /// SQL Server reports a syntax error under its own error numbers, distinct from the ones it uses
+    /// for an object that cannot be resolved. 102 is the "Incorrect syntax near" that QUOTENAME
+    /// inside EXEC produced.
+    /// </summary>
+    private static bool IsSyntaxError(SqlException exception) =>
+        exception.Errors.Cast<SqlError>().Any(error => error.Number is 102 or 103 or 105 or 155 or 156 or 170 or 178);
 
     [Fact]
     public void SqlServer_renames_through_sp_rename_rather_than_an_alter_clause()

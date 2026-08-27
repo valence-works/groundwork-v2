@@ -139,6 +139,11 @@ public sealed class SchemaEvolutionDifferentialTests
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, Apply(store, retired, retires: true).Outcome);
 
         Assert.False(store.TableExists(store.Table));
+        // Retiring a unit removes its provider-owned definitions too. Leaving them is the same
+        // residue a rename would leave, and nothing would ever come back to collect them.
+        Assert.Equal(0L, Convert.ToInt64(store.Scalar(
+            $"SELECT count(*) FROM {store.Quote("__groundwork_search_key_algorithms")} " +
+            $"WHERE {store.Quote("table_name")}='{store.Table}';")));
         Assert.Empty(Plan(store, retired, retires: true).Operations);
     }
 

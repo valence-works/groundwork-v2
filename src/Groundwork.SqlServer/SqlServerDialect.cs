@@ -203,7 +203,9 @@ internal sealed class SqlServerDialect : RelationalDialect
     /// <summary>
     /// SQL Server binds a column default to an auto-named constraint and then refuses to drop the
     /// column while that constraint exists, so the constraint is looked up and dropped by name in
-    /// the same statement batch.
+    /// the same statement batch. The drop is composed into a variable and run through
+    /// <c>sp_executesql</c> because <c>EXEC(...)</c> concatenates only string literals and
+    /// variables — a function call such as <c>QUOTENAME</c> does not parse there.
     /// </summary>
     public override string DropColumnSql(string table, string column) =>
         $"""
@@ -214,7 +216,11 @@ internal sealed class SqlServerDialect : RelationalDialect
             ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
         WHERE dc.parent_object_id = OBJECT_ID(N'{Escape(table)}') AND c.name = N'{Escape(column)}';
         IF @constraint IS NOT NULL
-            EXEC(N'ALTER TABLE {Escape(QuoteIdentifier(table))} DROP CONSTRAINT ' + QUOTENAME(@constraint));
+        BEGIN
+            DECLARE @dropDefault nvarchar(max) =
+                N'ALTER TABLE {Escape(QuoteIdentifier(table))} DROP CONSTRAINT ' + QUOTENAME(@constraint);
+            EXEC sp_executesql @dropDefault;
+        END;
         ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(column)};
         """;
 
