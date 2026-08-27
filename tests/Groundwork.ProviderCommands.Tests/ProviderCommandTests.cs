@@ -690,6 +690,7 @@ public sealed class ProviderCommandTests
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
         var unit = Unit("postgresql-scoped", ConcurrencyDeclaration.Optimistic(), scope: ScopePolicy.Scoped);
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
         var observer = new ProviderCommandObserver();
         var result = connection
             .OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")), observer)
