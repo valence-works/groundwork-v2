@@ -82,7 +82,7 @@ public sealed class SchemaToolSqliteEndToEndTests : IDisposable
             var plan = await harness.RunAsync(["plan", "--schema", schema], connection);
             Assert.True(SchemaToolExitCodes.ExecutionFailed == plan.ExitCode, plan.Reason);
             Assert.Contains("GW-CLI-010", plan.Output, StringComparison.Ordinal);
-            Assert.Contains("already in use", plan.Output, StringComparison.Ordinal);
+            Assert.Contains("GW-SQLITE-LIFETIME-001", plan.Output, StringComparison.Ordinal);
         }
         finally
         {

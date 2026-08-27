@@ -75,6 +75,11 @@ closed around individual writes.
 > This is the single most common SQLite surprise. One `IStorageProviderConnection` per database file,
 > for the life of the process. Don't create one per request.
 
+The second opener — another process, or this one — is refused with `GW-SQLITE-LIFETIME-001`, whose
+message names the file and the fix. Under a host, register the connection with
+`AddGroundwork().AddConnection(...)`: see
+**[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)**.
+
 ### Other notes
 
 - SQLite index names are **database-global**, so logical names are stored with a provider prefix while

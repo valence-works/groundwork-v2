@@ -1,6 +1,6 @@
 # Package Map
 
-Groundwork ships 22 public packages. Most applications reference **two or three**. This page tells
+Groundwork ships 23 public packages. Most applications reference **two or three**. This page tells
 you which, and explains the layering — because the layering is what the whole design rests on.
 
 ## The dependency rule
@@ -55,6 +55,7 @@ inspects compiled assembly references — not by convention.
 | **`Groundwork.MongoDb`** | Targeting MongoDB (replica set / sharded) | same + MongoDB.Driver |
 | **`Groundwork.Records.Store`** | You want typed rows (`RecordTable<T>`) — **this is the one to reference**, not `Groundwork.Records` | Records + Store |
 | **`Groundwork.Documents`** | You want typed JSON documents with schema versioning | Records + Store |
+| **`Groundwork.Extensions.DependencyInjection`** | You are hosting Groundwork in an ASP.NET Core or generic host | Store, Kernel, `Microsoft.Extensions.*` — **no provider** |
 
 > **Common mistake:** referencing `Groundwork.Records` directly. That package deliberately has *no*
 > provider dependency, so it has no `table.Open(connection)`. Reference **`Groundwork.Records.Store`**,
@@ -94,6 +95,15 @@ inspects compiled assembly references — not by convention.
 
 ## Quick recipes
 
+**An ASP.NET Core service on SQLite:**
+```xml
+<PackageReference Include="Groundwork.Sqlite" Version="0.2.0-preview.1" />
+<PackageReference Include="Groundwork.Records.Store" Version="0.2.0-preview.1" />
+<PackageReference Include="Groundwork.Extensions.DependencyInjection" Version="0.2.0-preview.1" />
+```
+See **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)**. The DI package references
+no provider: you hand it the factory from whichever provider package you chose.
+
 **Typed rows on PostgreSQL, with build-time coverage enforcement:**
 ```xml
 <PackageReference Include="Groundwork.PostgreSql" Version="0.2.0-preview.1" />
@@ -117,3 +127,4 @@ See **[Testing](Testing)**.
 ## Next
 
 - **[Core Concepts](Core-Concepts)** — what the objects in these packages actually are
+- **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)** — wiring them into a host

@@ -25,6 +25,7 @@
 - [Multi-Tenancy & Scopes](Multi-Tenancy-and-Scopes)
 
 **Operating**
+- [Hosting & DI](Hosting-and-Dependency-Injection)
 - [Providers](Providers)
 - [Testing](Testing)
 - [Troubleshooting](Troubleshooting)

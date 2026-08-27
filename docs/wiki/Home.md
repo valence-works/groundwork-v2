@@ -91,6 +91,7 @@ If you want a storage contract you can reason about and move between databases, 
 - **[Multi-Tenancy & Scopes](Multi-Tenancy-and-Scopes)** — scoped units and audited cross-scope recovery
 
 ### Operating
+- **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)** — `AddGroundwork()`, named connections, the connection lifetime, startup admission, health checks
 - **[Providers](Providers)** — per-provider behavior, connection strings, deployment requirements
 - **[Testing](Testing)** — the in-memory provider, conformance suites, concurrency harness
 - **[Troubleshooting](Troubleshooting)** — symptom → cause → fix

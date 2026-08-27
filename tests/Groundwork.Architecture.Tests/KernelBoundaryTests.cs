@@ -126,6 +126,30 @@ public sealed class KernelBoundaryTests
         Assert.Empty(testingReferences);
     }
 
+    // The hosting integration sits outside the Store contract, so it is the one assembly that could
+    // quietly make "reference Groundwork" mean "reference four database drivers". It must reach
+    // providers only through IStorageProviderFactory, which the application supplies.
+    [Fact]
+    public void Hosting_integration_reaches_providers_only_through_the_factory_seam()
+    {
+        using var universe = AssemblyUniverse.Load();
+        var hosting = universe.Assemblies.Single(assembly => string.Equals(
+            assembly.GetName().Name, "Groundwork.Extensions.DependencyInjection", StringComparison.Ordinal));
+        var violations = universe.NonBclReferenceClosure(hosting)
+            .Where(reference => reference.Name.StartsWith("Groundwork.", StringComparison.Ordinal))
+            .Where(reference => IsProviderAssemblyName(reference.Name) ||
+                                reference.Name.StartsWith("Groundwork.Substrate.", StringComparison.Ordinal) ||
+                                KnownContractFamilies.Contains(reference.Name) ||
+                                reference.Name.StartsWith("Groundwork.Testing", StringComparison.Ordinal))
+            .Select(reference => reference.Path)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(violations.Length == 0,
+            "Groundwork.Extensions.DependencyInjection must not reference a provider, a substrate, a " +
+            "contract family, or the testing package:" + Environment.NewLine + string.Join(Environment.NewLine, violations));
+    }
+
     [Fact]
     public void Store_public_lifetime_contract_keeps_resource_ownership_explicit()
     {
@@ -151,6 +175,7 @@ public sealed class KernelBoundaryTests
                string.Equals(name, "Groundwork.Records.Store", StringComparison.Ordinal) ||
                string.Equals(name, "Groundwork.Query.Planning", StringComparison.Ordinal) ||
                string.Equals(name, "Groundwork.Testing", StringComparison.Ordinal) ||
+               name?.StartsWith("Groundwork.Extensions.", StringComparison.Ordinal) == true ||
                name?.StartsWith("Groundwork.Tool", StringComparison.Ordinal) == true;
     }
 
@@ -162,15 +187,15 @@ public sealed class KernelBoundaryTests
     private static bool IsSubstrateAssembly(string? name) =>
         name?.StartsWith("Groundwork.Substrate.", StringComparison.Ordinal) == true;
 
-    private static bool IsProviderAssembly(Assembly assembly)
-    {
-        var name = assembly.GetName().Name;
-        return name?.StartsWith("Groundwork.MongoDb", StringComparison.Ordinal) == true ||
-               name?.StartsWith("Groundwork.PostgreSql", StringComparison.Ordinal) == true ||
-               name?.StartsWith("Groundwork.Sqlite", StringComparison.Ordinal) == true ||
-               name?.StartsWith("Groundwork.SqlServer", StringComparison.Ordinal) == true ||
-               HasMetadata(assembly, "Groundwork.Provider", "true");
-    }
+    private static bool IsProviderAssembly(Assembly assembly) =>
+        IsProviderAssemblyName(assembly.GetName().Name) ||
+        HasMetadata(assembly, "Groundwork.Provider", "true");
+
+    private static bool IsProviderAssemblyName(string? name) =>
+        name?.StartsWith("Groundwork.MongoDb", StringComparison.Ordinal) == true ||
+        name?.StartsWith("Groundwork.PostgreSql", StringComparison.Ordinal) == true ||
+        name?.StartsWith("Groundwork.Sqlite", StringComparison.Ordinal) == true ||
+        name?.StartsWith("Groundwork.SqlServer", StringComparison.Ordinal) == true;
 
     private static bool IsContractFamily(Assembly assembly) =>
         HasMetadata(assembly, "Groundwork.ContractFamily", "true");

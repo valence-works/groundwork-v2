@@ -216,8 +216,17 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         }
         catch (IOException exception)
         {
+            // The lock is held for the whole life of a connection, so this is just as likely to be a
+            // second connection inside this process — the reflex an ASP.NET Core developer brings from
+            // per-request data-access libraries — as it is a second process. Name both, and name the fix.
             throw new InvalidOperationException(
-                $"SQLite store '{fullPath}' is already in use by another Groundwork process.", exception);
+                $"GW-SQLITE-LIFETIME-001: SQLite store '{fullPath}' already has an open Groundwork connection " +
+                "holding its schema lock, in this process or another one. A SQLite store allows exactly one " +
+                "IStorageProviderConnection per database file, held for the life of the process. Keep the one " +
+                "connection and open a session or unit of work per request from it — under a host, register it " +
+                "with AddGroundwork().AddConnection(...), which registers connections as process singletons. " +
+                "In tests, give each test its own database file or use 'Data Source=:memory:'.",
+                exception);
         }
     }
 
