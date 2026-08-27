@@ -27,8 +27,7 @@ public sealed class PostgreSqlLedgerBootstrapTests
         var (statuses, failures) = AppendConcurrently(fixture, unit, index =>
             new StorageValues(new Dictionary<string, object?> { ["id"] = "row-" + index, ["payload"] = "row-" + index }));
 
-        Assert.Empty(failures.Select(failure => failure.GetType().Name + ": " + failure.Message));
-        Assert.Equal(Writers, statuses.Count(status => status == WriteOutcomeStatus.Inserted));
+        AssertEveryWriterInserted(statuses, failures);
     }
 
     [SkippableFact]
@@ -42,7 +41,16 @@ public sealed class PostgreSqlLedgerBootstrapTests
         var (statuses, failures) = AppendConcurrently(fixture, unit, index =>
             new StorageValues(new Dictionary<string, object?> { ["payload"] = "row-" + index }));
 
-        Assert.Empty(failures.Select(failure => failure.GetType().Name + ": " + failure.Message));
+        AssertEveryWriterInserted(statuses, failures);
+    }
+
+    private static void AssertEveryWriterInserted(
+        IReadOnlyList<WriteOutcomeStatus> statuses,
+        IReadOnlyList<Exception> failures)
+    {
+        Assert.True(failures.Count == 0,
+            $"{failures.Count} of {Writers} concurrent first appends failed instead of returning a status: " +
+            string.Join(" | ", failures.Select(failure => failure.GetType().Name + ": " + failure.Message)));
         Assert.Equal(Writers, statuses.Count(status => status == WriteOutcomeStatus.Inserted));
     }
 
