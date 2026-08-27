@@ -184,8 +184,9 @@ differ across providers, rather than delegating to each database's dialect:
   the exact complement of `p`.
 - Text accepted for provider planning is **`Ordinal`**. Culture, ICU, and accent-sensitive semantics
   are refused. Case-insensitive prefix matching requires a declared, versioned persisted search key.
-- Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` are portable. **Binary floating point is
-  refused** in predicates, ordering, and indexes.
+- Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` are portable for **comparison**. Binary
+  floating point is **storable but not comparable**: a `Double` column can be declared, written, and
+  read back bit-for-bit, and is refused in predicates, ordering, and indexes.
 - Date/times are compared as **UTC ticks**; `DateTime` and unspecified/local kinds are not accepted.
 - GUID equality and ordering use an **RFC-4122 network-byte key**, so ordering is stable across
   providers rather than following each store's internal byte layout.
