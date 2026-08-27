@@ -55,7 +55,7 @@ public sealed class RetentionProofTests
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
 
         var serial = await MeasureOnAppend(connection, "pgs", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "pgc", concurrent: true);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "pgc");
         AssertNativeOnAppendCoalesces(serial, concurrent, "PostgreSQL");
     }
 
@@ -76,7 +76,7 @@ public sealed class RetentionProofTests
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
 
         var serial = await MeasureOnAppend(connection, "sqls", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "sqlc", concurrent: true);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "sqlc");
         AssertNativeOnAppendCoalesces(serial, concurrent, "SQL Server");
     }
 
@@ -88,7 +88,7 @@ public sealed class RetentionProofTests
         {
             using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
             var serial = await MeasureOnAppend(connection, "lites", concurrent: false);
-            var concurrent = await MeasureOnAppend(connection, "litec", concurrent: true);
+            var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "litec");
             AssertNativeOnAppendCoalesces(serial, concurrent, "SQLite");
         }
         finally
@@ -106,7 +106,7 @@ public sealed class RetentionProofTests
         using var connection = new SqliteProviderFactory().Create(connectionString);
 
         var serial = await MeasureOnAppend(connection, "mems", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "memc", concurrent: true);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "memc");
         AssertNativeOnAppendCoalesces(serial, concurrent, "SQLite in-memory");
     }
 
@@ -129,7 +129,7 @@ public sealed class RetentionProofTests
         using var connection = new MongoProviderFactory().Create(connectionString!);
 
         var serial = await MeasureOnAppend(connection, "mngs", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "mngc", concurrent: true);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "mngc");
         AssertNativeOnAppendCoalesces(serial, concurrent, "MongoDB");
     }
 
@@ -551,17 +551,50 @@ public sealed class RetentionProofTests
         return max;
     }
 
+    /// <summary>
+    /// A starved scheduler that serializes writers past the start gate is a scheduling accident, not a
+    /// property of the code under test, so a single unlucky sample is not grounds to give up on the proof.
+    /// This re-measures the concurrent run up to <see cref="OnAppendOverlapAttempts"/> times — each attempt
+    /// against a freshly named unit, so retries never collide with a prior attempt's rows — and returns as
+    /// soon as one attempt overlaps enough to make the ratio assertion meaningful. Only when every attempt
+    /// fails to overlap does the caller reach the <c>Skip.If</c> in <see cref="AssertNativeOnAppendCoalesces"/>.
+    /// </summary>
+    private const int OnAppendOverlapAttempts = 3;
+
+    private static async Task<OnAppendMeasurement> MeasureConcurrentOnAppendWithOverlapRetries(
+        IStorageProviderConnection connection,
+        string provider)
+    {
+        var measurement = await MeasureOnAppend(connection, provider, concurrent: true);
+        for (var attempt = 2; attempt <= OnAppendOverlapAttempts && !HasConclusiveOverlap(measurement); attempt++)
+            measurement = await MeasureOnAppend(connection, provider, concurrent: true);
+        return measurement;
+    }
+
+    /// <summary>
+    /// The peak overlap the ratio assertion in <see cref="AssertNativeOnAppendCoalesces"/> needs to be
+    /// meaningful. That assertion requires the concurrent run to issue at most half the serial run's retention
+    /// commands, i.e. an average of at least two appends folded into every surviving retention command. A
+    /// batch can only plausibly land on that average if, at its busiest instant, at least half of the writers
+    /// were genuinely in flight together — with anything less, the coalescing coordinator never has more than
+    /// one appender's cleanup in flight to fold another appender's cleanup into.
+    /// </summary>
+    private static int MinimumConclusiveOverlap(int writes) => writes / 2;
+
+    private static bool HasConclusiveOverlap(OnAppendMeasurement measurement) =>
+        measurement.MaxOverlap >= MinimumConclusiveOverlap(measurement.Writes);
+
     private static void AssertNativeOnAppendCoalesces(
         OnAppendMeasurement serial,
         OnAppendMeasurement concurrent,
         string provider)
     {
-        var minimumConclusiveOverlap = concurrent.Writes / 2;
-        Skip.If(concurrent.MaxOverlap < minimumConclusiveOverlap,
+        Skip.If(!HasConclusiveOverlap(concurrent),
             $"{provider}: only {concurrent.MaxOverlap} of {concurrent.Writes} concurrent writers were ever in " +
-            $"flight at the same instant (needed at least {minimumConclusiveOverlap}). The scheduler serialized " +
-            "the writers past the start gate instead of keeping them overlapped, so this run cannot prove or " +
-            "disprove OnAppend coalescing; it is inconclusive, not a pass.");
+            $"flight at the same instant across {OnAppendOverlapAttempts} attempts (needed at least " +
+            $"{MinimumConclusiveOverlap(concurrent.Writes)}). The scheduler kept serializing the writers past " +
+            "the start gate instead of keeping them overlapped, so this run cannot prove or disprove OnAppend " +
+            "coalescing; it is inconclusive, not a pass.");
 
         Assert.True(concurrent.RetentionCommands * 2 <= serial.RetentionCommands,
             $"Concurrent OnAppend issued {concurrent.RetentionCommands} retention commands in {concurrent.Elapsed}; " +
