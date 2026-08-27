@@ -15,7 +15,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - run: dotnet test tests/Groundwork.Architecture.Tests/Groundwork.Architecture.Tests.csproj --no-restore --configuration Release
 
@@ -25,7 +27,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - run: dotnet test Groundwork.slnx --no-restore --configuration Release
 
@@ -35,7 +39,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Build Documents from a local package feed only
         run: tests/Groundwork.Documents.External/verify-local-package.sh
 
@@ -45,7 +51,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Restore the full solution
         run: dotnet restore Groundwork.slnx --nologo
       - name: Pack the public artifacts used by the acceptance consumer
@@ -92,7 +100,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj
       - name: Run four-provider query differential suite
         env:
@@ -117,7 +127,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
       - run: dotnet test tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj --no-restore --configuration Release
 
@@ -151,7 +163,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set
         run: |
           docker run --detach --name groundwork-event-log-mongo --publish 27017:27017 \
@@ -211,7 +225,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj
       - name: Run typed Records proof across all four providers
         env:
@@ -242,7 +258,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
       - name: Run SQL Server conformance suite
         env:
@@ -294,7 +312,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set
         run: |
           docker run --detach --name groundwork-mongo --publish 27017:27017 \
@@ -329,7 +349,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - name: Run standalone MongoDB exact-append capability refusal
         env:
@@ -369,7 +391,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set
         run: |
           docker run --detach --name groundwork-w2-mongo --publish 27017:27017 \
@@ -471,7 +495,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - name: Run PostgreSQL provider conformance
         env:
@@ -508,7 +534,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set for native retention
         run: |
           docker run --detach --name groundwork-s3-mongo --publish 27017:27017 \
