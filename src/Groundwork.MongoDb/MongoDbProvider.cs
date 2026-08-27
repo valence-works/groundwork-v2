@@ -3561,8 +3561,13 @@ internal static class SchemaIdentity
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
-        string.Join("|", unit.Indexes.Select(Index)),
-        SchemaFingerprint.Canonicalize(unit.AggregationProfiles.Select(AggregationProfile)));
+        // Indexes and aggregation profiles are sets, not sequences, exactly as SchemaSubject
+        // treats them: naming the same ones in a different order describes the same unit. A
+        // schema document canonicalizes their order and the fluent builder does not, so an
+        // order-sensitive hash here would refuse a declaration the deployment tool just applied.
+        string.Join("|", unit.Indexes.Select(Index).OrderBy(canonical => canonical, StringComparer.Ordinal)),
+        SchemaFingerprint.Canonicalize(unit.AggregationProfiles.Select(AggregationProfile)
+            .OrderBy(canonical => canonical, StringComparer.Ordinal)));
 
     internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
         string.Equals(Column(left), Column(right), StringComparison.Ordinal);
