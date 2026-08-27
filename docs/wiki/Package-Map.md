@@ -48,7 +48,7 @@ framework, so the layering is proved for the `net8.0` and the `net10.0` assembli
 
 | Group | Target | Packages |
 | --- | --- | --- |
-| Runtime | `net8.0`, `net10.0` | The providers, `Groundwork.Store`, `Groundwork.Kernel`, `Groundwork.Records`, `Groundwork.Records.Store`, `Groundwork.Documents`, `Groundwork.Testing`, both substrates, `Groundwork.Diagnostics`, `Groundwork.Query.Linq.Sqlite` |
+| Runtime | `net8.0`, `net10.0` | The providers, `Groundwork.Store`, `Groundwork.Kernel`, `Groundwork.Records`, `Groundwork.Records.Store`, `Groundwork.Documents`, `Groundwork.Extensions.DependencyInjection`, `Groundwork.Testing`, both substrates, `Groundwork.Diagnostics`, `Groundwork.Query.Linq.Execution`, `Groundwork.Query.Linq.Sqlite` |
 | Portable | `netstandard2.0` | `Groundwork.Query.Model`, `Groundwork.Query.Linq`, `Groundwork.Query.Planning`, `Groundwork.Schema`, `Groundwork.Analyzers`, `Groundwork.Schema.Generator` |
 | Tooling | `net8.0`, `net10.0` | `Groundwork.Tool` — a `dotnet tool` runs on the deployment host's own runtime |
 | Build task | `net10.0` | `Groundwork.SchemaTool.MSBuild` — its task loads into the SDK's MSBuild process, not your application |
