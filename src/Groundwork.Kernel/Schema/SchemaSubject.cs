@@ -35,7 +35,7 @@ public sealed record SchemaEvolutionMetadata
             : [.. supersessions
                 .Select(supersession => supersession ?? throw new ArgumentException(
                     "A column supersession cannot be null.", nameof(supersessions)))
-                    .OrderBy(supersession => supersession.Name, StringComparer.Ordinal)];
+                .OrderBy(supersession => supersession.Name, StringComparer.Ordinal)];
         DualPresenceWindow = dualPresenceWindow;
         if (Supersessions.IsEmpty)
             return;
