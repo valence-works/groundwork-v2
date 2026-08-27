@@ -175,6 +175,12 @@ public sealed class LinqExecutionDifferentialTests
     {
         using var matrix = LinqExecutionMatrix.OpenAll();
 
+        // Named rather than counted, so a matrix that quietly lost a provider fails here instead of
+        // passing as a narrower proof than the test claims to be.
+        Assert.Equal(
+            ["SQLite", "PostgreSQL", "SQL Server", "MongoDB"],
+            matrix.Providers.Select(provider => provider.Name));
+
         var rows = await AssertSameAsync(matrix, provider => provider.Table.Query
             .Where(ticket => ticket.Id == 4L)
             .ToListAsync(provider.Executor));
