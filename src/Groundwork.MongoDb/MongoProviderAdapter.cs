@@ -325,13 +325,11 @@ internal class MongoStoreSession(
         SetMutation.DeleteWhereAsync(where, cancellationToken);
 
     /// <summary>
-    /// Set-based mutation has no per-row fallback — building one would be the row-at-a-time loop
-    /// this operation exists to replace — so a native session that does not implement it is refused
-    /// by name rather than approximated. Access is checked by the native session, not restated here.
+    /// Total by construction: this adapter is built only by <see cref="MongoProviderFactory"/> over
+    /// the MongoDB provider connection, whose sessions implement set-based mutation. Admission,
+    /// capability and access are all decided before a call reaches here.
     /// </summary>
-    private ISetMutationStorageSession SetMutation =>
-        inner as ISetMutationStorageSession ?? throw new NotSupportedException(
-            "GW-SET-001: this MongoDB session does not advertise set-based mutation.");
+    private ISetMutationStorageSession SetMutation => (ISetMutationStorageSession)inner;
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {

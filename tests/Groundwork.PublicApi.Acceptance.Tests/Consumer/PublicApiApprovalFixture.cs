@@ -52,6 +52,8 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RetentionExecutionOptions);
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
+        _ = typeof(ISetMutationStorageSession);
+        _ = typeof(SetMutationResult);
         _ = typeof(StorageAccess);
         _ = typeof(StorageAccessAudit);
         _ = typeof(StorageAccessEvent);

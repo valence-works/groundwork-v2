@@ -108,7 +108,7 @@ public static class SetMutationSessionExtensions
         IReadOnlyDictionary<string, object?> assignments,
         SetMutationOptions? options)
     {
-        var native = Require(session, "update-where");
+        var native = Require(session);
         var validated = SetMutationValidation.ValidateAssignments(session.Unit, assignments);
         return (native, SetMutationValidation.Admit(session.Unit, where, options), validated);
     }
@@ -118,14 +118,19 @@ public static class SetMutationSessionExtensions
         Predicate where,
         SetMutationOptions? options)
     {
-        var native = Require(session, "delete-where");
+        var native = Require(session);
         return (native, SetMutationValidation.Admit(session.Unit, where, options));
     }
 
-    private static ISetMutationStorageSession Require(IStorageSession session, string operation)
+    /// <summary>
+    /// There is deliberately no access check here. A privileged cross-scope session has no scope to
+    /// write to, and every provider session refuses one itself — which is also the refusal a caller
+    /// who reaches the capability interface directly meets, so restating it here would add a second
+    /// copy of a rule without adding a case it catches.
+    /// </summary>
+    private static ISetMutationStorageSession Require(IStorageSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        StorageAccessValidation.EnsurePointOperation(session.Access, operation);
         return session as ISetMutationStorageSession ?? throw new NotSupportedException(
             "GW-SET-001: this provider session does not advertise set-based mutation; " +
             "inspect ISetMutationStorageSession before using UpdateWhere or DeleteWhere.");
