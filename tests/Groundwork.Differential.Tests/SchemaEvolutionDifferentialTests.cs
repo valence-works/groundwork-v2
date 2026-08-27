@@ -16,7 +16,13 @@ namespace Groundwork.Differential.Tests;
 /// column, drop an index — run against every relational provider through the same public schema
 /// machinery the deployment tool uses. Each case asserts on the rows themselves, because the point
 /// of a rename is that the data is still there afterwards.
+///
+/// These share one live SQL Server and one live MongoDB with every other differential class, and
+/// provider infrastructure DDL is created on first use rather than per test. Running alongside the
+/// other live-provider classes therefore races that creation, so this class joins the collection
+/// that already serializes them.
 /// </summary>
+[Collection(NativeProviderDifferentialCollection.Name)]
 public sealed class SchemaEvolutionDifferentialTests
 {
     [Fact]
@@ -46,7 +52,7 @@ public sealed class SchemaEvolutionDifferentialTests
     private static void RunEvolution(EvolutionProvider provider)
     {
         using var store = provider.Open();
-        var initial = Orders(store.Table, includeLegacyTotal: true);
+        var initial = Orders(store.Table, store.Table, includeLegacyTotal: true);
         Apply(store, initial);
         store.Execute(
             $"INSERT INTO {store.Quote(store.Table)} ({store.Quote("id")}, {store.Quote("customer")}, " +
@@ -54,7 +60,7 @@ public sealed class SchemaEvolutionDifferentialTests
 
         // Rename the storage and one column, widen another, and drop the legacy one — all at once.
         var renamedTable = store.Table + "_v2";
-        var evolved = Orders(renamedTable, includeLegacyTotal: false) with
+        var evolved = Orders(store.Table, renamedTable, includeLegacyTotal: false) with
         {
             Columns =
             [
@@ -109,10 +115,10 @@ public sealed class SchemaEvolutionDifferentialTests
     private static void RunRetirement(EvolutionProvider provider)
     {
         using var store = provider.Open();
-        Apply(store, Orders(store.Table, includeLegacyTotal: false));
+        Apply(store, Orders(store.Table, store.Table, includeLegacyTotal: false));
         Assert.True(store.TableExists(store.Table));
 
-        var retired = Orders(store.Table, includeLegacyTotal: false);
+        var retired = Orders(store.Table, store.Table, includeLegacyTotal: false);
         var plan = Plan(store, retired, retires: true);
         Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
         Assert.Single(plan.Operations.OfType<DropPrimaryStorageOperation>());
@@ -126,9 +132,16 @@ public sealed class SchemaEvolutionDifferentialTests
         Assert.Empty(Plan(store, retired, retires: true).Operations);
     }
 
-    private static StorageUnit Orders(string table, bool includeLegacyTotal) => new()
+    /// <summary>
+    /// The logical id is per store, not the constant "orders". Schema history is keyed on
+    /// (logical id, provider), and every SQL Server case in this suite shares one database — so a
+    /// constant id makes two tests with different physical tables claim one history row, and the
+    /// second one legitimately plans a rename away from a table the first already dropped. The
+    /// physical name still varies independently, which is what the rename case needs.
+    /// </summary>
+    private static StorageUnit Orders(string id, string table, bool includeLegacyTotal) => new()
     {
-        Id = new StorageUnitId("orders"),
+        Id = new StorageUnitId(id),
         Name = table,
         Columns =
         [
@@ -203,7 +216,7 @@ public sealed class SchemaEvolutionDifferentialTests
                 new SchemaToolProviderOptions("sqlite", connectionString, null, AllowCreate: true, CancellationToken.None));
             return new EvolutionStore(
                 session,
-                "gw_evo",
+                "gw_evo_" + Guid.NewGuid().ToString("N")[..12],
                 () =>
                 {
                     // This assertion connection is not the provider's, so it has to register the
@@ -242,7 +255,7 @@ public sealed class SchemaEvolutionDifferentialTests
                 new SchemaToolProviderOptions("postgresql", connectionString, null, AllowCreate: true, CancellationToken.None));
             return new EvolutionStore(
                 session,
-                "gw_evo",
+                "gw_evo_" + Guid.NewGuid().ToString("N")[..12],
                 () => new NpgsqlConnection(connectionString),
                 identifier => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"",
                 () =>
