@@ -165,6 +165,23 @@ public sealed class LinqExecutionDifferentialTests
         Assert.Contains("GW-SCAN-0044", lapsed.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The declared key is a coverage candidate on every provider. The matrix unit declares indexes
+    /// on <c>status</c> and <c>region</c> only, so nothing but the key admits a read filtered on
+    /// <c>id</c>, and every provider must admit it and answer with the same row.
+    /// </summary>
+    [SkippableFact]
+    public async Task Linq_declared_key_equality_is_admitted_on_every_provider()
+    {
+        using var matrix = LinqExecutionMatrix.OpenAll();
+
+        var rows = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Id == 4L)
+            .ToListAsync(provider.Executor));
+
+        Assert.Equal("4/open/us/40", Assert.Single(rows).ToString());
+    }
+
     [Fact]
     public void Documented_parameter_budgets_are_the_ones_the_renderers_enforce()
     {
