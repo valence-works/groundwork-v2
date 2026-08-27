@@ -406,6 +406,30 @@ public sealed class SchemaToolContractTests
         Assert.NotEmpty(engine.Errors);
     }
 
+    /// <summary>
+    /// Adoption is a proof, so a provider that cannot compare a deployed catalog to a compiled
+    /// target is refused by name rather than through a generic execution failure. Every shipped
+    /// provider is a catalog inspector, so the case this guards is a third-party plug-in — which is
+    /// exactly what this fake is.
+    /// </summary>
+    [Fact]
+    public async Task Adopt_refuses_a_provider_that_cannot_compare_a_catalog_to_a_target()
+    {
+        var schema = Temp("adopt-uninspectable.json", ValidSchema);
+
+        Assert.Equal(
+            SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(
+                ["adopt", "--schema", schema, "--provider", "fake", "--safe", "--output", "json"],
+                _ => new FakeSession()));
+        using var report = JsonDocument.Parse(output.ToString());
+        Assert.Equal("GW-CLI-013", report.RootElement.GetProperty("diagnostics")[0].GetProperty("code").GetString());
+        Assert.Contains(
+            "cannot compare a deployed catalog",
+            report.RootElement.GetProperty("diagnostics")[0].GetProperty("message").GetString()!,
+            StringComparison.Ordinal);
+    }
+
     private readonly string directory = Path.Combine(Path.GetTempPath(), "groundwork-schema-tool-" + Guid.NewGuid().ToString("N"));
     private readonly StringWriter output = new();
     private readonly StringWriter error = new();
