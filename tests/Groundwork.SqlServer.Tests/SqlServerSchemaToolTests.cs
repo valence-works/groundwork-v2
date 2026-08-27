@@ -1,5 +1,5 @@
-using System.Text.Json;
 using Groundwork.SchemaTool;
+using Groundwork.Testing;
 using Microsoft.Data.SqlClient;
 using Xunit;
 
@@ -16,36 +16,36 @@ public sealed class SqlServerSchemaToolTests : IDisposable
         var table = "cli_tickets_" + Guid.NewGuid().ToString("N");
         try
         {
-            var schema = Temp("schema.json", InitialSchema(table));
+            var schema = harness.Temp("schema.json", SchemaToolCliHarness.InitialSchema(table));
 
-            var plan = await RunJsonAsync(["plan", "--schema", schema], connection!);
-            Assert.Equal(SchemaToolExitCodes.PendingChanges, plan.Exit);
+            var plan = await harness.RunAsync(["plan", "--schema", schema], connection!);
+            Assert.Equal(SchemaToolExitCodes.PendingChanges, plan.ExitCode);
             Assert.Equal("pending", plan.Report.RootElement.GetProperty("outcome").GetString());
             Assert.Equal("SQLServer", plan.Report.RootElement.GetProperty("provider").GetProperty("name").GetString());
             Assert.True(plan.Report.RootElement.GetProperty("pendingOperations").GetArrayLength() > 0);
 
-            var apply = await RunJsonAsync(["apply", "--schema", schema, "--safe"], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, apply.Exit);
+            var apply = await harness.RunAsync(["apply", "--schema", schema, "--safe"], connection!);
+            Assert.Equal(SchemaToolExitCodes.Success, apply.ExitCode);
             Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
             Assert.True(apply.Report.RootElement.GetProperty("targetMutated").GetBoolean());
 
-            var status = await RunJsonAsync(["status", "--schema", schema], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, status.Exit);
+            var status = await harness.RunAsync(["status", "--schema", schema], connection!);
+            Assert.Equal(SchemaToolExitCodes.Success, status.ExitCode);
             Assert.Equal("ready", status.Report.RootElement.GetProperty("outcome").GetString());
             Assert.Equal(0, status.Report.RootElement.GetProperty("pendingOperations").GetArrayLength());
 
-            var evolved = Temp("evolved.json", EvolvedSchema(table));
-            var evolvedPlan = await RunJsonAsync(["plan", "--schema", evolved], connection!);
-            Assert.Equal(SchemaToolExitCodes.PendingChanges, evolvedPlan.Exit);
+            var evolved = harness.Temp("evolved.json", SchemaToolCliHarness.EvolvedSchema(table));
+            var evolvedPlan = await harness.RunAsync(["plan", "--schema", evolved], connection!);
+            Assert.Equal(SchemaToolExitCodes.PendingChanges, evolvedPlan.ExitCode);
             var fingerprint = evolvedPlan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
 
-            var authorized = await RunJsonAsync(
+            var authorized = await harness.RunAsync(
                 ["apply", "--schema", evolved, "--expected-plan", fingerprint], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, authorized.Exit);
+            Assert.Equal(SchemaToolExitCodes.Success, authorized.ExitCode);
             Assert.Equal("applied", authorized.Report.RootElement.GetProperty("outcome").GetString());
 
-            var settled = await RunJsonAsync(["status", "--schema", evolved], connection!);
-            Assert.Equal(SchemaToolExitCodes.Success, settled.Exit);
+            var settled = await harness.RunAsync(["status", "--schema", evolved], connection!);
+            Assert.Equal(SchemaToolExitCodes.Success, settled.ExitCode);
             Assert.Equal("ready", settled.Report.RootElement.GetProperty("outcome").GetString());
         }
         finally
@@ -57,7 +57,14 @@ public sealed class SqlServerSchemaToolTests : IDisposable
     private static void Cleanup(string connectionString, string table)
     {
         using var connection = new SqlConnection(connectionString);
-        connection.Open();
+        try
+        {
+            connection.Open();
+        }
+        catch (SqlException)
+        {
+            return;
+        }
         using var command = connection.CreateCommand();
         command.CommandText = $"""
             DROP TABLE IF EXISTS [{table}];
@@ -70,47 +77,10 @@ public sealed class SqlServerSchemaToolTests : IDisposable
         command.ExecuteNonQuery();
     }
 
-    private static string InitialSchema(string table) =>
-        $$"""
-        {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}
-        """;
+    private readonly SchemaToolCliHarness harness = new(
+        static (arguments, output, error) => GroundworkSchemaCli.RunAsync(arguments, output, error),
+        "sqlserver",
+        Path.Combine(AppContext.BaseDirectory, "Groundwork.SqlServer.dll"));
 
-    private static string EvolvedSchema(string table) =>
-        $$"""
-        {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"priority","type":"Int32","nullable":true,"length":null,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[{"name":"by_priority","columns":[{"name":"priority","descending":false}],"includeNulls":true,"unique":false}]}]}
-        """;
-
-    private static async Task<(int Exit, JsonDocument Report)> RunJsonAsync(
-        string[] arguments,
-        string connection)
-    {
-        var output = new StringWriter();
-        var error = new StringWriter();
-        var exit = await GroundworkSchemaCli.RunAsync(
-            [
-                .. arguments,
-                "--provider", "sqlserver",
-                "--connection", connection,
-                "--provider-assembly", Path.Combine(AppContext.BaseDirectory, "Groundwork.SqlServer.dll"),
-                "--output", "json"
-            ],
-            output,
-            error);
-        Assert.Equal(string.Empty, error.ToString());
-        return (exit, JsonDocument.Parse(output.ToString()));
-    }
-
-    private readonly string directory = Path.Combine(
-        Path.GetTempPath(), "groundwork-schema-tool-sqlserver-" + Guid.NewGuid().ToString("N"));
-
-    public SqlServerSchemaToolTests() => Directory.CreateDirectory(directory);
-
-    public void Dispose() => Directory.Delete(directory, recursive: true);
-
-    private string Temp(string name, string contents)
-    {
-        var path = Path.Combine(directory, name);
-        File.WriteAllText(path, contents);
-        return path;
-    }
+    public void Dispose() => harness.Dispose();
 }

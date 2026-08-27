@@ -256,9 +256,14 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
             return SchemaToolExitCodes.ValidationFailed;
         }
-        catch (Exception exception)
+        catch (SchemaToolProviderException exception)
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-010", $"Schema tool execution failed: {exception.Message}");
+            return SchemaToolExitCodes.ExecutionFailed;
+        }
+        catch (Exception)
+        {
+            await WriteErrorAsync(output, error, json, "GW-CLI-010", "Schema tool execution failed.");
             return SchemaToolExitCodes.ExecutionFailed;
         }
     }

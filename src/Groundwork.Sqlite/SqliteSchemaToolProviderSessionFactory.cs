@@ -12,18 +12,30 @@ public sealed class SqliteSchemaToolProviderSessionFactory : ISchemaToolProvider
     public ISchemaToolProviderSession Open(SchemaToolProviderOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        var connectionString = Builder(options).ConnectionString;
-        var store = new SqliteProviderConnection(connectionString);
+        var builder = Builder(options);
+        var connectionString = builder.ConnectionString;
+        var path = SqliteDataSource.FullPath(builder.DataSource);
+        var store = new Lazy<SqliteProviderConnection>(() => OpenStore(connectionString));
+        if (!options.AllowCreate)
+            _ = store.Value;
+        var executor = new RelationalSchemaExecutor(
+            () => store.Value.CreateIndependentConnection(),
+            new SqliteDialect());
         return new RelationalSchemaToolSession(
             SqliteSchemaCoordinator.Identity,
-            store.CreateIndependentConnection,
-            new SqliteDialect(),
-            () =>
+            executor,
+            release: () =>
             {
-                store.Dispose();
+                if (store.IsValueCreated)
+                    store.Value.Dispose();
                 using var pooled = new SqliteConnection(connectionString);
                 SqliteConnection.ClearPool(pooled);
-            });
+            },
+            inspect: options.AllowCreate
+                ? target => File.Exists(path)
+                    ? executor.InspectDeployedHistory(target)
+                    : new PhysicalSchemaInspectionResult(PhysicalSchemaHistoryState.Empty, IsAppliedSchemaValid: true)
+                : null);
     }
 
     private static SqliteConnectionStringBuilder Builder(SchemaToolProviderOptions options)
@@ -36,26 +48,29 @@ public sealed class SqliteSchemaToolProviderSessionFactory : ISchemaToolProvider
             : new SqliteConnectionStringBuilder(options.Connection);
         if (options.Database is not null)
             builder.DataSource = options.Database;
-        if (builder.Mode == SqliteOpenMode.Memory ||
-            string.IsNullOrWhiteSpace(builder.DataSource) ||
-            builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase))
+        if (SqliteDataSource.IsMemory(builder))
             throw new SchemaToolProviderInvocationException(
                 "The SQLite schema tool requires a file-backed database; an in-memory data source has no durable schema.");
         if (!options.AllowCreate)
         {
-            var path = DatabasePath(builder.DataSource);
-            if (!File.Exists(path))
-                throw new InvalidOperationException(
-                    $"SQLite database '{path}' does not exist. Only 'apply' creates the database.");
-            builder.Mode = SqliteOpenMode.ReadWrite;
+            if (!File.Exists(SqliteDataSource.FullPath(builder.DataSource)))
+                throw new SchemaToolProviderException(
+                    $"SQLite database '{SqliteDataSource.FullPath(builder.DataSource)}' does not exist. Only 'apply' creates the database.");
+            if (builder.Mode == SqliteOpenMode.ReadWriteCreate)
+                builder.Mode = SqliteOpenMode.ReadWrite;
         }
         return builder;
     }
 
-    private static string DatabasePath(string dataSource)
+    private static SqliteProviderConnection OpenStore(string connectionString)
     {
-        if (dataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
-            dataSource = dataSource[5..].Split('?', 2)[0];
-        return Path.GetFullPath(dataSource);
+        try
+        {
+            return new SqliteProviderConnection(connectionString);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new SchemaToolProviderException(exception.Message);
+        }
     }
 }

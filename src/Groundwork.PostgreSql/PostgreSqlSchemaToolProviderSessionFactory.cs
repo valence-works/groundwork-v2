@@ -20,8 +20,7 @@ public sealed class PostgreSqlSchemaToolProviderSessionFactory : ISchemaToolProv
         var connectionString = builder.ConnectionString;
         return new RelationalSchemaToolSession(
             PostgreSqlSchemaCoordinator.Identity,
-            () => new NpgsqlConnection(connectionString),
-            new PostgreSqlDialect(),
+            new RelationalSchemaExecutor(() => new NpgsqlConnection(connectionString), new PostgreSqlDialect()),
             () =>
             {
                 using var pooled = new NpgsqlConnection(connectionString);

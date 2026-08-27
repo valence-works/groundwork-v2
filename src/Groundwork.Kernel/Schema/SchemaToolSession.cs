@@ -18,6 +18,12 @@ public sealed record SchemaToolProviderOptions(
 /// <summary>Signals a schema-tool invocation the provider cannot honor; the tool reports it as an invocation error.</summary>
 public sealed class SchemaToolProviderInvocationException(string message) : Exception(message);
 
+/// <summary>
+/// A provider-session failure whose message the factory authored for operator display; the schema
+/// tool echoes it. Raw driver errors must not use this type — the tool keeps those generic.
+/// </summary>
+public sealed class SchemaToolProviderException(string message) : Exception(message);
+
 /// <summary>Discoverable plug-in seam that opens provider sessions for the schema tool.</summary>
 public interface ISchemaToolProviderSessionFactory
 {
