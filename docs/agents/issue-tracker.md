@@ -1,15 +1,17 @@
 # Issue tracker
 
-The Groundwork v2 program is tracked in GitHub Issues in
-`valence-works/Groundwork` and in
-[GitHub Project 5](https://github.com/orgs/valence-works/projects/5).
+The Groundwork v2 program is tracked in GitHub Issues in this repository,
+`valence-works/groundwork-v2`, and on the roadmap project board, which picks up
+issues by their `roadmap-*` label.
 
-Implementation pull requests are created in `valence-works/groundwork-v2` and
-target `codex/groundwork-v2`. Their descriptions must use an explicit
-cross-repository closing keyword, for example:
+Implementation pull requests are created in the same repository and target
+`main`. Their descriptions close the issue with a plain reference:
 
 ```text
-Closes valence-works/Groundwork#232
+Closes #232
 ```
 
-Use `gh issue view <number> --repo valence-works/Groundwork` to fetch a spec.
+Read an issue with the GitHub MCP tools — `mcp__github__issue_read` — rather
+than the `gh` CLI, which is not available in these sessions.
+
+Before starting one, claim it: see "Claiming an issue" in `AGENTS.md`.
