@@ -1,5 +1,12 @@
 <Project>
   <PropertyGroup>
+    <!-- The single source of truth for what the runtime packages target. Every packable runtime
+         project writes <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks> and
+         nothing else, so the set cannot drift apart per project. Analyzers, source generators, and
+         the portable contract assemblies stay netstandard2.0; Groundwork.SchemaTool.MSBuild stays
+         net10.0 because its task loads into the SDK's MSBuild, not into the consumer's app.
+         Groundwork.Packaging.Tests enforces all three rules. -->
+    <GroundworkRuntimeTargetFrameworks>net8.0;net10.0</GroundworkRuntimeTargetFrameworks>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

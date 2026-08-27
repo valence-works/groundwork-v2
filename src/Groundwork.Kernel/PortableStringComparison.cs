@@ -152,7 +152,7 @@ public static class PortableStringComparison
     public static string CreateHash(string comparisonKey)
     {
         ArgumentNullException.ThrowIfNull(comparisonKey);
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(comparisonKey)));
+        return PortableHex.Lower(SHA256.HashData(Encoding.UTF8.GetBytes(comparisonKey)));
     }
 
     public static PortableStringIdentityProjection ProjectIdentity(
@@ -212,7 +212,7 @@ public static class PortableStringComparison
             System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(pair[4..], mapped);
             hash.AppendData(pair);
         }
-        var fingerprint = Convert.ToHexStringLower(hash.GetHashAndReset());
+        var fingerprint = PortableHex.Lower(hash.GetHashAndReset());
         return new($"{UnicodeOrdinalIgnoreCaseAlgorithmName}-{fingerprint}");
     }
 

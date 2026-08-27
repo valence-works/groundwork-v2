@@ -109,7 +109,7 @@ internal static class RetentionOperationCodec
             .. retention.PartitionColumns,
             options.MaxRowsPerBatch.ToString(CultureInfo.InvariantCulture)
         ]);
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        return PortableHex.Lower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     internal static string SerializeResult(RetentionOperationResult result) => string.Join(

@@ -7,3 +7,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Groundwork.MongoDb")]
 [assembly: InternalsVisibleTo("Groundwork.Store")]
 [assembly: InternalsVisibleTo("Groundwork.Differential.Tests")]
+[assembly: InternalsVisibleTo("Groundwork.SchemaTool")]
