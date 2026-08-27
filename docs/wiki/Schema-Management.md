@@ -53,6 +53,7 @@ groundwork plan     --schema groundwork.schema.json --provider <alias>
 groundwork validate --schema groundwork.schema.json --provider <alias> [--offline]
 groundwork status   --schema groundwork.schema.json --provider <alias>
 groundwork apply    --schema groundwork.schema.json --provider <alias> --safe
+groundwork adopt    --schema groundwork.schema.json --provider <alias> --safe
 groundwork schema emit --input schema.json --file groundwork.schema.json
 ```
 
@@ -307,6 +308,81 @@ kind of change. Plan it as a rebuild.
 
 ---
 
+## Adopting a catalog Groundwork has never applied
+
+A database can already hold exactly the storage a declaration describes — created by an earlier
+release, restored from a backup, or provisioned by the platform team — while Groundwork has no
+history row saying so. Starting against it refuses, and applying would try to create what is
+already there.
+
+`groundwork adopt` is the way in. It **executes no DDL**. Under the schema application lock it
+inspects the deployed catalog, proves it matches the compiled target exactly — every column's type,
+nullability, default, collation, key position and generation, plus every declared index — and then
+CAS-publishes the applied-state row that applying the target *would* have published. The row is
+produced from the same plan and the same completion the applier uses, so an adopted catalog and an
+applied one are indistinguishable to every later diff.
+
+```bash
+groundwork adopt --schema groundwork.schema.json --provider postgresql --safe
+groundwork status --schema groundwork.schema.json --provider postgresql   # ready, nothing pending
+```
+
+Authorization is `apply`'s: `--safe`, or an exact `--expected-plan` fingerprint. The report's
+`outcome` is `adopted` when history was written and `ready` when it was already recorded.
+
+**Any difference is a refusal that names it** — `GW-RUNTIME-001` for a column, `GW-RUNTIME-002` for
+an index — and nothing is published. Adoption never infers: it does not decide what a deployed
+column probably corresponds to, and arbitrary legacy-schema mapping stays out of scope
+(`GW-SCHEMA-001`).
+
+It also refuses, by name, where the question does not apply:
+
+- `GW-SCHEMA-011` — the target already has applied history. Run `apply`, not `adopt`.
+- `GW-SCHEMA-012` — the subject is declared retired, so it describes no catalog to verify.
+- `GW-SCHEMA-013` — the provider called the catalog invalid without saying what differs.
+
+**Known limitation.** A subject with a folded column has a derived search-key column whose
+algorithm registration lives in Groundwork's own catalog, which a database Groundwork never applied
+to does not have. Adoption cannot prove the column's contents were produced by the declared
+algorithm, so it refuses with `GW-RUNTIME-001` naming the search-key algorithm. Adopt such a unit by
+creating a fresh catalog with `apply` instead.
+
+---
+
+## Coexisting with a catalog another tool extends
+
+By default every deployed column the declaration does not describe is drift (`GW-RUNTIME-001`).
+Where another system owns columns in the same table, a unit can opt into tolerating them:
+
+```csharp
+StorageUnit.Declare("orders", "orders")
+    .String("id", 64, column => column.Required())
+    .Key("id")
+    .TolerateForeignColumns()
+    .Build();
+```
+
+```json
+{ "name": "orders", "foreignColumns": "TolerateDatabaseSupplied", "...": "..." }
+```
+
+The opt-in is deliberately narrow:
+
+- It covers **only** a foreign column the database supplies a value for — nullable, defaulted, or
+  generated. Those are reported as `GW-RUNTIME-003` warnings, and Groundwork neither reads nor
+  writes them.
+- A foreign column that is not nullable, not defaulted and not generated stays `GW-RUNTIME-001`. No
+  policy could make it writable: every insert Groundwork emits omits it.
+- Nothing else changes. A declared column that differs, a missing column, and index drift are
+  unaffected.
+
+The policy is **not** part of the subject fingerprint and is not recorded in applied state: it
+governs what to do about things outside the target, not the shape of the target. Turning it on
+therefore does not force a no-op apply, and the deployment tool and the host reach the same verdict
+because both read it from the same declaration.
+
+---
+
 ## The clean-break preview rule
 
 Groundwork v2 is a **clean-break pre-1.0 product**. When a preview release note marks a persisted
@@ -332,6 +408,9 @@ naming the storage unit and this remedy. See **[Versioning & Support](Versioning
    plan fingerprint and operation ids.
 6. **Start** — the application starts inspect-only; column drift is fatal, index drift refuses
    dependent shapes.
+
+Where the catalog already exists but Groundwork has never recorded applying it, `groundwork adopt
+--safe` replaces step 5 once, and the flow is unchanged from then on.
 
 ## Next
 

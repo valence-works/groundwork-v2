@@ -108,6 +108,13 @@ public sealed class SchemaSubject
 
     public int SchemaVersion => definition.SchemaVersion;
 
+    /// <summary>
+    /// How deployed columns this subject does not describe are treated. Read from the live
+    /// declaration, never from persisted applied state, and deliberately not part of
+    /// <see cref="Fingerprint"/> — see <see cref="StorageUnit.ForeignColumns"/>.
+    /// </summary>
+    public ForeignColumnPolicy ForeignColumns => definition.ForeignColumns;
+
     public SchemaEvolutionMetadata Evolution { get; }
 
     public string Fingerprint { get; }
@@ -276,6 +283,7 @@ public sealed class SchemaSubject
         }).ToImmutableArray(),
         AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
+        ForeignColumns = source.ForeignColumns,
         AppendIdempotency = source.AppendIdempotency is null ? null : source.AppendIdempotency with { },
         RetentionIdempotency = source.RetentionIdempotency is null ? null : source.RetentionIdempotency with { },
         Concurrency = source.Concurrency,

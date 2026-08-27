@@ -1,13 +1,5 @@
-using System.Data.Common;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
-using Groundwork.LiveDatabases;
-using Groundwork.PostgreSql;
-using Groundwork.Sqlite;
-using Groundwork.SqlServer;
-using Microsoft.Data.SqlClient;
-using Microsoft.Data.Sqlite;
-using Npgsql;
 using Xunit;
 
 namespace Groundwork.Differential.Tests;
@@ -28,29 +20,29 @@ public sealed class SchemaEvolutionDifferentialTests
 {
     [Fact]
     public void Sqlite_carries_rows_through_an_authorized_rename_alter_and_drop() =>
-        RunEvolution(SqliteProvider());
+        RunEvolution(RelationalSchemaProvider.Sqlite("gw_evo"));
 
     [SkippableFact]
     public void PostgreSql_carries_rows_through_an_authorized_rename_alter_and_drop() =>
-        RunEvolution(PostgreSqlProvider());
+        RunEvolution(RelationalSchemaProvider.PostgreSql("gw_evo"));
 
     [SkippableFact]
     public void SqlServer_carries_rows_through_an_authorized_rename_alter_and_drop() =>
-        RunEvolution(SqlServerProvider());
+        RunEvolution(RelationalSchemaProvider.SqlServer("gw_evo"));
 
     [Fact]
     public void Sqlite_retires_primary_storage_under_authorization() =>
-        RunRetirement(SqliteProvider());
+        RunRetirement(RelationalSchemaProvider.Sqlite("gw_evo"));
 
     [SkippableFact]
     public void PostgreSql_retires_primary_storage_under_authorization() =>
-        RunRetirement(PostgreSqlProvider());
+        RunRetirement(RelationalSchemaProvider.PostgreSql("gw_evo"));
 
     [SkippableFact]
     public void SqlServer_retires_primary_storage_under_authorization() =>
-        RunRetirement(SqlServerProvider());
+        RunRetirement(RelationalSchemaProvider.SqlServer("gw_evo"));
 
-    private static void RunEvolution(EvolutionProvider provider)
+    private static void RunEvolution(RelationalSchemaProvider provider)
     {
         using var store = provider.Open();
         var initial = Orders(store.Table, store.Table, includeLegacyTotal: true);
@@ -128,7 +120,7 @@ public sealed class SchemaEvolutionDifferentialTests
         Assert.Contains(applied.Snapshot.SemanticOperations, operation => operation.SubjectIdentity == "buyer");
     }
 
-    private static void RunRetirement(EvolutionProvider provider)
+    private static void RunRetirement(RelationalSchemaProvider provider)
     {
         using var store = provider.Open();
         Apply(store, Orders(store.Table, store.Table, includeLegacyTotal: false));
@@ -187,7 +179,7 @@ public sealed class SchemaEvolutionDifferentialTests
             : []
     };
 
-    private static PhysicalSchemaTarget Target(EvolutionStore store, StorageUnit unit, bool retires)
+    private static PhysicalSchemaTarget Target(RelationalSchemaStore store, StorageUnit unit, bool retires)
     {
         var target = store.Session.Targets.Compile(unit);
         return retires
@@ -198,17 +190,17 @@ public sealed class SchemaEvolutionDifferentialTests
             : target;
     }
 
-    private static PhysicalSchemaDiffPlan Plan(EvolutionStore store, StorageUnit unit, bool retires = false)
+    private static PhysicalSchemaDiffPlan Plan(RelationalSchemaStore store, StorageUnit unit, bool retires = false)
     {
         var target = Target(store, unit, retires);
         return PhysicalSchemaDiffPlanner.Plan(target, Inspect(store, unit, retires).History, DateTimeOffset.UnixEpoch);
     }
 
-    private static PhysicalSchemaInspectionResult Inspect(EvolutionStore store, StorageUnit unit, bool retires = false) =>
+    private static PhysicalSchemaInspectionResult Inspect(RelationalSchemaStore store, StorageUnit unit, bool retires = false) =>
         store.Session.Inspector.InspectHistory(Target(store, unit, retires));
 
     private static PhysicalSchemaApplicationResult Apply(
-        EvolutionStore store,
+        RelationalSchemaStore store,
         StorageUnit unit,
         bool authorize = true,
         bool retires = false)
@@ -230,158 +222,5 @@ public sealed class SchemaEvolutionDifferentialTests
                         $"Destructive operation '{operation.Address ?? operation.Identity}' requires explicit authorization.",
                         "authorization.destructive")));
             });
-    }
-
-    private static EvolutionProvider SqliteProvider() => new(
-        () =>
-        {
-            var path = Path.Combine(Path.GetTempPath(), "gw_evo_" + Guid.NewGuid().ToString("N") + ".db");
-            var connectionString = "Data Source=" + path;
-            var session = new SqliteSchemaToolProviderSessionFactory().Open(
-                new SchemaToolProviderOptions("sqlite", connectionString, null, AllowCreate: true, CancellationToken.None));
-            return new EvolutionStore(
-                session,
-                "gw_evo_" + Guid.NewGuid().ToString("N")[..12],
-                () =>
-                {
-                    // This assertion connection is not the provider's, so it has to register the
-                    // ordinal collation the provider declares its string columns with.
-                    var connection = new SqliteConnection(connectionString);
-                    connection.Open();
-                    connection.CreateCollation(
-                        "GROUNDWORK_UTF16_ORDINAL",
-                        static (left, right) => string.CompareOrdinal(left, right));
-                    return connection;
-                },
-                identifier => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"",
-                () =>
-                {
-                    session.Dispose();
-                    File.Delete(path);
-                });
-        });
-
-    private static EvolutionProvider PostgreSqlProvider() => new(
-        () =>
-        {
-            var baseConnection = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
-            Skip.If(string.IsNullOrWhiteSpace(baseConnection),
-                "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL evolution tests.");
-            var schema = "gw_evo_" + Guid.NewGuid().ToString("N");
-            using (var admin = new NpgsqlConnection(baseConnection))
-            {
-                admin.Open();
-                using var create = admin.CreateCommand();
-                create.CommandText = $"CREATE SCHEMA \"{schema}\";";
-                create.ExecuteNonQuery();
-            }
-            var connectionString = new NpgsqlConnectionStringBuilder(baseConnection) { SearchPath = schema }.ConnectionString;
-            var session = new PostgreSqlSchemaToolProviderSessionFactory().Open(
-                new SchemaToolProviderOptions("postgresql", connectionString, null, AllowCreate: true, CancellationToken.None));
-            return new EvolutionStore(
-                session,
-                "gw_evo_" + Guid.NewGuid().ToString("N")[..12],
-                () => new NpgsqlConnection(connectionString),
-                identifier => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"",
-                () =>
-                {
-                    session.Dispose();
-                    using (var pooled = new NpgsqlConnection(connectionString))
-                        NpgsqlConnection.ClearPool(pooled);
-                    using var admin = new NpgsqlConnection(baseConnection);
-                    admin.Open();
-                    using var drop = admin.CreateCommand();
-                    drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE;";
-                    drop.ExecuteNonQuery();
-                });
-        });
-
-    private static EvolutionProvider SqlServerProvider() => new(
-        () =>
-        {
-            // The database this test process owns, from #209. Each target framework runs as its own
-            // process, so a shared database would give schema application two writers taking
-            // key-range locks on the same server catalog. Per-store naming separates identities
-            // within a process; this separates the catalog between them.
-            var connectionString = LiveSqlServer.Required();
-            var table = "gw_evo_" + Guid.NewGuid().ToString("N")[..12];
-            var session = new SqlServerSchemaToolProviderSessionFactory().Open(
-                new SchemaToolProviderOptions("sqlserver", connectionString, null, AllowCreate: true, CancellationToken.None));
-            return new EvolutionStore(
-                session,
-                table,
-                () => new SqlConnection(connectionString),
-                identifier => "[" + identifier.Replace("]", "]]", StringComparison.Ordinal) + "]",
-                () =>
-                {
-                    session.Dispose();
-                    using var connection = new SqlConnection(connectionString);
-                    connection.Open();
-                    foreach (var name in new[] { table, table + "_v2" })
-                    {
-                        using var drop = connection.CreateCommand();
-                        drop.CommandText = $"DROP TABLE IF EXISTS [{name}];";
-                        drop.ExecuteNonQuery();
-                    }
-                });
-        });
-
-    private sealed record EvolutionProvider(Func<EvolutionStore> Open);
-
-    private sealed class EvolutionStore(
-        ISchemaToolProviderSession session,
-        string table,
-        Func<DbConnection> connect,
-        Func<string, string> quote,
-        Action release) : IDisposable
-    {
-        public ISchemaToolProviderSession Session { get; } = session;
-
-        public string Table { get; } = table;
-
-        public string Quote(string identifier) => quote(identifier);
-
-        public void Execute(string sql)
-        {
-            using var connection = Connect();
-            using var command = connection.CreateCommand();
-            command.CommandText = sql;
-            command.ExecuteNonQuery();
-        }
-
-        public object? Scalar(string sql)
-        {
-            using var connection = Connect();
-            using var command = connection.CreateCommand();
-            command.CommandText = sql;
-            var value = command.ExecuteScalar();
-            return value == DBNull.Value ? null : value;
-        }
-
-        public bool TableExists(string name)
-        {
-            using var connection = Connect();
-            using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT 1 FROM {quote(name)} WHERE 1=0;";
-            try
-            {
-                command.ExecuteNonQuery();
-                return true;
-            }
-            catch (DbException)
-            {
-                return false;
-            }
-        }
-
-        public void Dispose() => release();
-
-        private DbConnection Connect()
-        {
-            var connection = connect();
-            if (connection.State != System.Data.ConnectionState.Open)
-                connection.Open();
-            return connection;
-        }
     }
 }

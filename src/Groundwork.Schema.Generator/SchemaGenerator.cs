@@ -307,7 +307,8 @@ public sealed class SchemaGenerator : ISourceGenerator
             ReadIdempotency(context, symbol, tableName, "GwAppendIdempotencyAttribute"),
             ReadIdempotency(context, symbol, tableName, "GwRetentionIdempotencyAttribute"),
             aggregations,
-            StringNamedArgument(tableAttribute, "Id"));
+            StringNamedArgument(tableAttribute, "Id"),
+            EnumNamedArgument(tableAttribute, "ForeignColumns", SchemaForeignColumns.Refuse));
     }
 
     private static SchemaRetention? ReadRetention(
@@ -649,6 +650,8 @@ public sealed class SchemaGenerator : ISourceGenerator
         }
         if (table.Scope == SchemaScope.Scoped)
             builder.AppendLine("            .Scoped()");
+        if (table.ForeignColumns == SchemaForeignColumns.TolerateDatabaseSupplied)
+            builder.AppendLine("            .TolerateForeignColumns()");
         if (table.Concurrency is { } concurrency)
             builder.Append("            .OptimisticConcurrency(").Append(Literal(concurrency.TokenColumn)).AppendLine(")");
         if (table.Retention is { } retention)

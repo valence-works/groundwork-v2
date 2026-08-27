@@ -88,6 +88,12 @@ public sealed class GwTableAttribute : Attribute
     /// <summary>Names the system-owned optimistic concurrency token, opting the table into it.</summary>
     public string? ConcurrencyToken { get; set; }
     public SchemaTimestamps Timestamps { get; set; } = SchemaTimestamps.None;
+
+    /// <summary>
+    /// How a deployed column this table does not declare is treated. Set it only to coexist with a
+    /// catalog another tool extends; it never covers a column the database will not fill in.
+    /// </summary>
+    public SchemaForeignColumns ForeignColumns { get; set; } = SchemaForeignColumns.Refuse;
 }
 
 /// <summary>Declares how many newest rows survive, optionally independently per partition.</summary>

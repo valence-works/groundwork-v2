@@ -1,4 +1,30 @@
+using System.Text.Json.Serialization;
+
 namespace Groundwork.Kernel;
+
+/// <summary>
+/// How a deployed column that the declaration does not describe is treated when the catalog is
+/// compared to it.
+/// </summary>
+/// <remarks>
+/// This is the only opt-out Groundwork offers from "the deployed catalog is exactly the compiled
+/// target", and it is deliberately the narrowest one that makes coexistence possible: it never
+/// touches a column the declaration does describe, never touches an index, and never covers a
+/// foreign column the database will not fill in on its own. Everything else stays a refusal.
+/// </remarks>
+public enum ForeignColumnPolicy
+{
+    /// <summary>Any deployed column the declaration does not describe is drift.</summary>
+    Refuse,
+
+    /// <summary>
+    /// A foreign column the database supplies a value for — nullable, defaulted, or generated — is
+    /// reported as a tolerated-drift warning instead of refusing. A foreign column that a writer
+    /// omitting it would fail on stays a refusal, because nothing about tolerating it would let
+    /// Groundwork write the row.
+    /// </summary>
+    TolerateDatabaseSupplied
+}
 
 public enum PortableType
 {
@@ -299,6 +325,22 @@ public sealed record IndexDefinition
     public bool IsUnique { get; init; }
     public MissingValueBehavior MissingValues { get; init; } = MissingValueBehavior.Included;
     public int SchemaVersion { get; init; } = 1;
+
+    /// <summary>
+    /// How columns this declaration does not describe are treated when a deployed catalog is
+    /// compared to it. Opt in per unit to coexist read-side with a catalog another tool extends.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately absent from <see cref="SchemaSubject.Fingerprint"/> and from the persisted
+    /// applied state. The fingerprint answers one question — is the deployed catalog the shape this
+    /// build compiled — and a foreign column is by construction not part of that shape; folding a
+    /// tolerance setting into it would make changing the setting look like a schema change, force a
+    /// no-op apply to clear it, and split the deployment tool's compiled target from the host's.
+    /// Applied state records what was applied, and tolerating a column applies nothing, so the
+    /// policy is read from the live declaration at every comparison rather than from history.
+    /// </remarks>
+    [JsonIgnore]
+    public ForeignColumnPolicy ForeignColumns { get; init; } = ForeignColumnPolicy.Refuse;
 }
 
 public sealed record DerivedColumnDefinition
@@ -344,4 +386,20 @@ public sealed record StorageUnit
     /// <summary>Optional durable replay contract for operation-identified retention.</summary>
     public RetentionIdempotencyDeclaration? RetentionIdempotency { get; init; }
     public int SchemaVersion { get; init; } = 1;
+
+    /// <summary>
+    /// How columns this declaration does not describe are treated when a deployed catalog is
+    /// compared to it. Opt in per unit to coexist read-side with a catalog another tool extends.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately absent from <see cref="SchemaSubject.Fingerprint"/> and from the persisted
+    /// applied state. The fingerprint answers one question — is the deployed catalog the shape this
+    /// build compiled — and a foreign column is by construction not part of that shape; folding a
+    /// tolerance setting into it would make changing the setting look like a schema change, force a
+    /// no-op apply to clear it, and split the deployment tool's compiled target from the host's.
+    /// Applied state records what was applied, and tolerating a column applies nothing, so the
+    /// policy is read from the live declaration at every comparison rather than from history.
+    /// </remarks>
+    [JsonIgnore]
+    public ForeignColumnPolicy ForeignColumns { get; init; } = ForeignColumnPolicy.Refuse;
 }

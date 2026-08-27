@@ -63,6 +63,11 @@ public sealed class RelationalRuntimeAdmission
                 ProviderCommandKind.Read,
                 IsProbe: false));
         }
+        // Foreign columns the declaration's policy tolerated are reported rather than dropped: an
+        // opt-in that made drift invisible would be indistinguishable from ignoring drift.
+        foreach (var tolerated in inspection.HasToleratedDrift ? inspection.ToleratedDrift : [])
+            System.Diagnostics.Trace.TraceWarning("{0}: {1}", tolerated.Code, tolerated.Message);
+
         var applied = inspection.History.AppliedState;
         if (applied is not null)
         {
