@@ -82,11 +82,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         }
         catch (Exception failure)
         {
-            WriteFailureCleanup.Run(failure, () =>
-            {
-                try { transaction.Rollback(); }
-                finally { Complete(); }
-            });
+            WriteFailureCleanup.Run(failure, RollbackAndComplete);
             throw;
         }
         finally
@@ -116,8 +112,34 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
     public void Rollback()
     {
         ThrowIfTerminal();
-        try { transaction.Rollback(); }
-        finally { Complete(); }
+        RollbackAndComplete();
+    }
+
+    /// <summary>
+    /// Microsoft.Data.Sqlite's <see cref="SqliteTransaction.Dispose"/> marks a transaction completed
+    /// in a <c>finally</c> block even when the ROLLBACK it issues fails, so a connection whose
+    /// rollback throws still reports itself as clean. Returned to the pool as-is, the driver hands
+    /// that same native handle — still mid-transaction — to the next caller, who meets "cannot start
+    /// a transaction within a transaction" or a PRAGMA refused for running inside one, attributed to
+    /// whatever unrelated work it was attempting. Clearing the pool group before disposal, only on
+    /// this failure path, ensures a connection that might still be carrying an open transaction is
+    /// torn down rather than recirculated.
+    /// </summary>
+    private void RollbackAndComplete()
+    {
+        try
+        {
+            transaction.Rollback();
+        }
+        catch
+        {
+            SqliteConnection.ClearPool(connection);
+            throw;
+        }
+        finally
+        {
+            Complete();
+        }
     }
 
     public void Dispose()
