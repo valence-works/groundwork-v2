@@ -67,10 +67,12 @@ These are properties of the model, not conventions:
   expand plan that names the superseded column is the supersession marker, and the marker performs
   no physical work at all. Nothing renames, alters, or removes the column the old version owns.
   `ExpandContractTests` asserts this as a property of the plan.
-- **The superseded column's continued physical presence is not drift.**
-  `PhysicalSchemaInspection.Compare` checks that every declared column exists and matches; a column
-  the declaration does not name is not compared. A running application therefore admits cleanly
-  through the whole window.
+- **The superseded column's continued physical presence is not drift.** A deployed column the
+  declaration does not describe is refused as drift, but a retained superseded column is described:
+  the declaration names it in `Evolution.Supersessions` and keeps it in the catalog on purpose, and
+  `RelationalSchemaExecutor` exempts it from the foreign-column scan for exactly that reason. A
+  running application therefore admits cleanly through the whole window, and the two live proofs in
+  `SqliteExpandContractTests` fail without the exemption.
 - **Indexes over the superseded column are not retained.** An index cannot reference an undeclared
   column, so any index the previous declaration had over it is dropped by the expand plan under the
   ordinary `DropIndex` authorization. An index is derivable and its removal destroys nothing; the
