@@ -160,6 +160,33 @@ public sealed class ExactAppendProofTests
         Assert.Equal(2L, afterConflict.Outcomes[0].GeneratedValue<long>("sequence"));
     }
 
+    /// <summary>
+    /// Exact append fingerprints the payload, so a Double column has to have an encoding. The
+    /// binary64 bit pattern is the encoding: two writes of the same bits replay, and two values
+    /// a lossy encoding would fold together do not.
+    /// </summary>
+    [Fact]
+    public void InMemory_exact_append_fingerprints_a_double_by_its_bits()
+    {
+        using var connection = new InMemoryProviderFactory().Create("exact-append-double-" + Guid.NewGuid().ToString("N"));
+        var unit = DoubleUnit("exact-append-double-" + Guid.NewGuid().ToString("N"));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var operation = new OperationId(DateTimeOffset.UtcNow, "double-operation");
+
+        var first = session.AppendWithOutcomes(operation, [DoubleValues(0.1d)]);
+        var replayed = session.AppendWithOutcomes(operation, [DoubleValues(0.1d)]);
+        Assert.Equal(WriteOutcomeStatus.Replayed, replayed.Status);
+        Assert.Equal(first.Outcomes[0].GeneratedValue<long>("sequence"), replayed.Outcomes[0].GeneratedValue<long>("sequence"));
+
+        // One unit in the last place apart. Anything short of the full bit pattern — a decimal
+        // rounding, a G15 rendering — would call these the same payload and replay instead.
+        var oneUlpAway = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.1d) + 1);
+        Assert.NotEqual(0.1d, oneUlpAway);
+        Assert.Throws<AppendIdempotencyConflictException>(() =>
+            session.AppendWithOutcomes(operation, [DoubleValues(oneUlpAway)]));
+    }
+
     [Fact]
     public void InMemory_exact_append_normalizes_numeric_json_lexemes_without_lossy_conversion()
     {
@@ -493,6 +520,9 @@ public sealed class ExactAppendProofTests
         ["occurredAt"] = occurredAt
     });
 
+    private static StorageValues DoubleValues(double reading) =>
+        new(new Dictionary<string, object?> { ["reading"] = reading });
+
     private static StorageValues JsonValues(object json, object number) => new(new Dictionary<string, object?>
     {
         ["body"] = json,
@@ -515,6 +545,19 @@ public sealed class ExactAppendProofTests
             new() { Name = "body", Type = PortableType.Json, IsNullable = false },
             new() { Name = "number", Type = PortableType.Int64, IsNullable = false },
             new() { Name = "optional", Type = PortableType.String, IsNullable = true }
+        ],
+        Key = new KeyDefinition { Columns = ["sequence"] },
+        AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
+    };
+
+    private static StorageUnit DoubleUnit(string name) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = PhysicalName(name),
+        Columns =
+        [
+            new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+            new() { Name = "reading", Type = PortableType.Double, IsNullable = false }
         ],
         Key = new KeyDefinition { Columns = ["sequence"] },
         AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }

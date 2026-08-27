@@ -184,6 +184,38 @@ public sealed class Q2SemanticsTests
         }
     }
 
+    /// <summary>
+    /// Storage-only Double: a binary64 column can be written and read, and no comparison over it
+    /// is portable — equality included. Exact equality is well defined on binary64 but is the
+    /// trap the type is famous for (0.1 + 0.2), so it is refused with ordering rather than
+    /// carved out as the one comparison that survives.
+    /// </summary>
+    [Fact]
+    public void No_comparison_over_a_double_column_is_portable_including_equality()
+    {
+        // Equality and membership cannot even be spelled: a Double constant is refused at
+        // construction, so there is no Equal or In node to validate.
+        Assert.Throws<ArgumentException>(() => QueryConstant.Of(Double, 0.1d));
+        Assert.Throws<ArgumentException>(() => QueryConstant.Of(Double, null));
+
+        // 0.1 + 0.2 is the reason. The two sides are not the same binary64 value, so an exact
+        // equality that looked portable would answer a question the caller did not ask.
+        Assert.NotEqual(0.3d, 0.1d + 0.2d);
+
+        // The shapes that need no typed constant are refused by validation instead.
+        var compare = PortableQuerySemantics.Validate(new Predicate.ColumnCompare(Double, CompareOp.Equal, Double));
+        Assert.Contains(compare.Refusals, refusal => refusal.Code == "GW-SEM-TYPE-006");
+
+        var ordered = PortableQuerySemantics.Validate(new QueryRequest(
+            Table,
+            new Predicate.AlwaysTrue(),
+            [new OrderTerm(Double, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.OffsetLimit(0, 10)));
+        Assert.Contains(ordered.Refusals, refusal => refusal.Code == "GW-SEM-TYPE-006");
+        Assert.Contains(ordered.Refusals, refusal => refusal.Code == "GW-SEM-ORDER-001");
+    }
+
     [Fact]
     public void Constants_require_exact_supported_types_without_implicit_coercion()
     {
