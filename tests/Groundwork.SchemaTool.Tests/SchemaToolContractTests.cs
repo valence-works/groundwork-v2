@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
@@ -315,6 +316,44 @@ public sealed class SchemaToolContractTests
         Assert.Equal("blocked", report.RootElement.GetProperty("outcome").GetString());
     }
 
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("status")]
+    public async Task Column_drift_code_appears_in_target_diagnostics_when_blocked(string command)
+    {
+        var schema = Temp("col-drift.json", ValidSchema);
+        using var session = new FakeSession();
+        session.ExecutorImpl.IsAppliedSchemaValid = false;
+        session.ExecutorImpl.ColumnDrift = [new SchemaRefusal("GW-RUNTIME-001", "Column 'id' type differs.", "column")];
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync([command, "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+
+        using var report = JsonDocument.Parse(output.ToString());
+        var diagnostics = report.RootElement.GetProperty("targets")[0].GetProperty("diagnostics");
+        Assert.Contains(diagnostics.EnumerateArray(),
+            d => d.GetProperty("code").GetString() == "GW-RUNTIME-001");
+    }
+
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("status")]
+    public async Task Index_drift_code_appears_in_target_diagnostics_when_blocked(string command)
+    {
+        var schema = Temp("idx-drift.json", ValidSchema);
+        using var session = new FakeSession();
+        session.ExecutorImpl.IsAppliedSchemaValid = false;
+        session.ExecutorImpl.IndexDrift = [new SchemaRefusal("GW-RUNTIME-002", "Index 'by_owner' is missing.", "index")];
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync([command, "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+
+        using var report = JsonDocument.Parse(output.ToString());
+        var diagnostics = report.RootElement.GetProperty("targets")[0].GetProperty("diagnostics");
+        Assert.Contains(diagnostics.EnumerateArray(),
+            d => d.GetProperty("code").GetString() == "GW-RUNTIME-002");
+    }
+
     [Fact]
     public async Task Raw_provider_failures_are_stable_and_do_not_echo_secrets()
     {
@@ -479,12 +518,15 @@ public sealed class SchemaToolContractTests
         private PhysicalSchemaAppliedState? applied;
         public List<string> AppliedOperations { get; } = [];
         public bool IsAppliedSchemaValid { get; set; } = true;
+        public ImmutableArray<SchemaRefusal> ColumnDrift { get; set; } = [];
+        public ImmutableArray<SchemaRefusal> IndexDrift { get; set; } = [];
 
         public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target) => new FakeLock(target);
         public PhysicalSchemaHistoryState ReadHistory(PhysicalSchemaTargetIdentity target, IPhysicalSchemaApplicationLock applicationLock) =>
             applied is null ? PhysicalSchemaHistoryState.Empty : PhysicalSchemaHistoryState.FromApplied(applied);
         public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target) =>
-            new(ReadHistory(target.Identity, new FakeLock(target.Identity)), IsAppliedSchemaValid);
+            new(ReadHistory(target.Identity, new FakeLock(target.Identity)), IsAppliedSchemaValid,
+                ColumnDrift: ColumnDrift, IndexDrift: IndexDrift);
         public PhysicalSchemaOperationAcknowledgement ApplyOperation(PhysicalSchemaTargetIdentity target, PhysicalSchemaOperation operation, IPhysicalSchemaApplicationLock applicationLock)
         {
             AppliedOperations.Add(operation.Identity);

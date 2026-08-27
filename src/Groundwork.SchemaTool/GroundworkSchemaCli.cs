@@ -403,7 +403,10 @@ public static class GroundworkSchemaCli
         inspection.History.AppliedState?.TargetFingerprint,
         plan.Operations.Select(operation => SchemaToolOperationReport.FromPending(operation, PhysicalSchemaPlanProtection.Inspect(plan.Operations))).ToArray(),
         inspection.History.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
-        plan.Refusals.Concat(authorizationRefusals ?? [])
+        plan.Refusals
+            .Concat(authorizationRefusals ?? [])
+            .Concat(inspection.ColumnDrift.IsDefault ? [] : (IEnumerable<SchemaRefusal>)inspection.ColumnDrift)
+            .Concat(inspection.IndexDrift.IsDefault ? [] : (IEnumerable<SchemaRefusal>)inspection.IndexDrift)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
         false)
     {
