@@ -24,6 +24,13 @@ namespace Groundwork.LiveDatabases;
 /// </summary>
 internal static class LiveSqlServer
 {
+    /// <summary>
+    /// How long a <c>groundwork_run_*</c> database survives after its creation before a sibling
+    /// process is willing to drop it on the assumption its owner is never coming back. Well past
+    /// any plausible test run, so a run still in progress is never mistaken for an abandoned one.
+    /// </summary>
+    private static readonly TimeSpan StaleAfter = TimeSpan.FromHours(2);
+
     private static readonly Lazy<string?> Claimed = new(Claim, LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>
@@ -48,12 +55,64 @@ internal static class LiveSqlServer
         if (string.IsNullOrWhiteSpace(configured))
             return null;
 
+        // ProcessExit is not a reliable place to reclaim: it does not run on a crash, a kill, or a
+        // heavily-loaded shutdown — exactly the conditions that leave one of these behind. Acquire
+        // is the hook every run passes through, so a run reclaims whatever a prior one abandoned
+        // before it claims its own.
+        ReclaimStale(configured, StaleAfter);
+
         var name = "groundwork_run_" + Guid.NewGuid().ToString("N");
         // A fresh database inherits the model database's recovery model. Simple recovery keeps the
         // log from growing across a concurrency probe that submits tens of thousands of writes.
         Execute(configured, $"CREATE DATABASE [{name}]; ALTER DATABASE [{name}] SET RECOVERY SIMPLE;");
         AppDomain.CurrentDomain.ProcessExit += (_, _) => Release(configured, name);
         return new SqlConnectionStringBuilder(configured) { InitialCatalog = name }.ConnectionString;
+    }
+
+    /// <summary>
+    /// Drops every <c>groundwork_run_*</c> database on <paramref name="configured"/> whose
+    /// <c>sys.databases.create_date</c> is older than <paramref name="olderThan"/>, skipping any
+    /// still within that window because that is indistinguishable from a run still in progress.
+    /// <c>create_date</c> and <c>GETDATE()</c> are read from the same server, so a comparison done
+    /// in the query itself sidesteps whatever time zone the server's clock happens to be in.
+    /// </summary>
+    internal static void ReclaimStale(string configured, TimeSpan olderThan)
+    {
+        var candidates = new List<string>();
+        try
+        {
+            using var connection = new SqlConnection(configured);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT name FROM sys.databases
+                WHERE name LIKE 'groundwork\_run\_%' ESCAPE '\'
+                  AND create_date < DATEADD(minute, -@minutes, GETDATE());
+                """;
+            command.Parameters.AddWithValue("@minutes", olderThan.TotalMinutes);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                candidates.Add(reader.GetString(0));
+        }
+        catch (SqlException)
+        {
+            // Reclamation is best-effort housekeeping; a server that cannot be reached for it is
+            // the run's own connection failure to report, not this step's.
+            return;
+        }
+
+        foreach (var name in candidates)
+        {
+            try
+            {
+                Execute(configured, $"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}];");
+            }
+            catch (SqlException)
+            {
+                // Another sibling reclaiming the same abandoned database, or one whose owner is
+                // still attached, is not this run's failure.
+            }
+        }
     }
 
     private static void Release(string configured, string name)
