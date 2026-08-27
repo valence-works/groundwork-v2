@@ -131,9 +131,10 @@ internal sealed class SqlServerUnitOfWork : IUnitOfWork
     private void Complete()
     {
         terminal = true;
-        foreach (var session in sessions) session.Close();
-        transaction.Dispose();
-        connection.Dispose();
+        WriteFailureCleanup.RunAll(
+            () => { foreach (var session in sessions) session.Close(); },
+            transaction.Dispose,
+            connection.Dispose);
     }
 
     private void ThrowIfTerminal()
