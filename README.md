@@ -77,5 +77,6 @@ dotnet restore Groundwork.slnx
 dotnet test Groundwork.slnx --no-restore
 ```
 
-The shared integration branch is `codex/groundwork-v2`; issue branches merge
-there before the completed program is integrated into `main`.
+Issue branches merge into `main` directly. Agents working this repository should
+read `AGENTS.md` first: it covers claiming an issue, the release-note and
+diagnostics conventions, and how to run the provider suites on a shared machine.

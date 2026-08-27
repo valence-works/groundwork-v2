@@ -1,5 +1,4 @@
 using Microsoft.Data.SqlClient;
-using Testcontainers.MsSql;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.LiveDatabases;
@@ -13,18 +12,18 @@ namespace Groundwork.SqlServer.Tests;
 [Collection(SqlServerLiveDatabase.Name)]
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
-    [Fact]
+    [SkippableFact]
     public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
     {
-        fixture.Reset();
-        using (new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        var connectionString = fixture.Reset();
+        using (new SqlServerProviderFactory().Create(connectionString))
         {
             // Both surfaces run against the one live database, without a reset between them:
             // each proves the whole contract on its own storage units.
-            var synchronous = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
+            var synchronous = ConformanceSuite.Run(new SqlServerProviderFactory(), connectionString);
             Assert.True(synchronous.Passed, Describe(synchronous));
 
-            var asynchronous = await ConformanceSuite.RunAsync(new SqlServerProviderFactory(), fixture.ConnectionString);
+            var asynchronous = await ConformanceSuite.RunAsync(new SqlServerProviderFactory(), connectionString);
             Assert.True(asynchronous.Passed, Describe(asynchronous));
         }
     }
@@ -32,11 +31,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     private static string Describe(ConformanceReport report) => string.Join(Environment.NewLine,
         report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}"));
 
-    [Fact]
+    [SkippableFact]
     public async Task Nested_write_is_refused_rather_than_blocking()
     {
-        fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
         var name = "nested_write_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
@@ -68,11 +67,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Live_compare_and_delete_preserves_revision_cas_and_exact_rollback()
     {
-        fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
         var name = "compare_delete_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
@@ -193,15 +192,15 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             new StorageKey(new Dictionary<string, object?> { ["id"] = "marker" })));
     }
 
-    [Fact]
+    [SkippableFact]
     public void W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix()
     {
         foreach (var (keyCount, includePartialUniqueIndex, optimistic) in W2Shapes())
         {
-            fixture.Reset();
+            var connectionString = fixture.Reset();
             var report = ConcurrencyHarness.Run(
                 new StorageProviderConcurrencyFactory("sqlserver", new SqlServerProviderFactory()),
-                fixture.ConnectionString,
+                connectionString,
                 new ConcurrencyProbeOptions
                 {
                     WriterCount = 32,
@@ -228,11 +227,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             yield return (keyCount, includePartialUniqueIndex, optimistic);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Customer_email_320_is_a_native_unique_index()
     {
-        fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
         var name = "customer_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
@@ -253,11 +252,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Equal("email", Assert.Single(email.Columns).Column);
     }
 
-    [Fact]
+    [SkippableFact]
     public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
     {
-        fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
         // A per-run GUID keeps the name unique across reruns while still landing exactly on the
         // boundary length the test exists to prove.
         var name = BoundaryName();
@@ -273,11 +272,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Exact_batch_writes_with_an_unconstrained_logical_id_use_the_validated_physical_type_name()
     {
-        fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("logical.id/with spaces/" + new string('x', 80)),
@@ -309,11 +308,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.All(report.Outcomes, outcome => Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Outcome.Status));
     }
 
-    [Fact]
+    [SkippableFact]
     public void Lifecycle_identity_columns_use_binary_collation_and_preserve_case_distinct_scopes_and_nonces()
     {
-        fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
         var name = "s7_sqlserver_lifecycle_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
         {
@@ -359,7 +358,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Equal(RetentionOperationStatus.Executed,
             lower.ApplyRetention(new OperationId(DateTimeOffset.UtcNow, "CaseNonce")).Status);
 
-        using var sql = new SqlConnection(fixture.ConnectionString);
+        using var sql = new SqlConnection(connectionString);
         sql.Open();
         using var command = sql.CreateCommand();
         command.CommandText = """
@@ -384,11 +383,11 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Equal("Latin1_General_100_BIN2", collations["__groundwork_operations.nonce"]);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Existing_lifecycle_table_with_legacy_collation_is_refused_with_migration_guidance()
     {
-        fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
         var name = "s7_sqlserver_legacy_lifecycle_" + Guid.NewGuid().ToString("N");
         var ledger = "s7_legacy_retention_" + Guid.NewGuid().ToString("N");
         var unit = new StorageUnit
@@ -410,7 +409,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         };
 
         Assert.True(connection.Schema.Apply(unit).Applied);
-        using (var sql = new SqlConnection(fixture.ConnectionString))
+        using (var sql = new SqlConnection(connectionString))
         {
             sql.Open();
             using var create = sql.CreateCommand();
@@ -441,18 +440,18 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Contains("bounded String key column", exception.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Live_dropped_column_on_a_plain_unit_is_fatal_at_session_open()
     {
-        fixture.Reset();
+        var connectionString = fixture.Reset();
         var name = "w2_sqlserver_admission_drop_" + Guid.NewGuid().ToString("N");
         var unit = AdmissionUnit(name);
-        using (var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        using (var connection = new SqlServerProviderFactory().Create(connectionString))
         {
             Assert.True(connection.Schema.Apply(unit).Applied);
         }
 
-        using (var sql = new SqlConnection(fixture.ConnectionString))
+        using (var sql = new SqlConnection(connectionString))
         {
             sql.Open();
             using var alter = sql.CreateCommand();
@@ -460,24 +459,24 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             alter.ExecuteNonQuery();
         }
 
-        using var reopened = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        using var reopened = new SqlServerProviderFactory().Create(connectionString);
         var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
         Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
         Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Live_admission_inspects_once_per_unit_per_connection()
     {
-        fixture.Reset();
+        var connectionString = fixture.Reset();
         var name = "w2_sqlserver_admission_cache_" + Guid.NewGuid().ToString("N");
         var unit = AdmissionUnit(name);
-        using (var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        using (var connection = new SqlServerProviderFactory().Create(connectionString))
         {
             Assert.True(connection.Schema.Apply(unit).Applied);
         }
 
-        using var reopened = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        using var reopened = new SqlServerProviderFactory().Create(connectionString);
         var firstObserver = new ProviderCommandObserver();
         _ = reopened.OpenSession(unit, StorageAccess.Global, firstObserver);
         var admissionEvent = Assert.Single(firstObserver.Commands);
@@ -520,15 +519,21 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 
 }
 
-public sealed class SqlServerFixture : IAsyncLifetime
+/// <summary>
+/// The live SQL Server database this test process owns, emptied of everything the suite creates.
+/// </summary>
+public sealed class SqlServerFixture
 {
-    private MsSqlContainer? container;
-
-    public string ConnectionString { get; private set; } = string.Empty;
-
-    public void Reset()
+    /// <summary>
+    /// The connection string for the live database, with the suite's tables dropped, and a skip
+    /// for the calling test when no SQL Server is configured. Every live suite in the repository
+    /// is dormant in a job that provisions no server; this one is no exception, and a job that
+    /// wants these proofs names <c>GROUNDWORK_SQLSERVER_CONNECTION</c> and gets them all.
+    /// </summary>
+    public string Reset()
     {
-        using var connection = new SqlConnection(ConnectionString);
+        var connectionString = LiveSqlServer.Required();
+        using var connection = new SqlConnection(connectionString);
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -547,24 +552,6 @@ public sealed class SqlServerFixture : IAsyncLifetime
             IF @sql <> N'' EXEC sys.sp_executesql @sql;
             """;
         command.ExecuteNonQuery();
-    }
-
-    public async Task InitializeAsync()
-    {
-        // A configured server hands out a database this process owns; without one the suite starts
-        // a container that is already its own.
-        ConnectionString = LiveSqlServer.ConnectionString ?? string.Empty;
-        if (ConnectionString.Length != 0) return;
-
-        container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04")
-            .WithPassword("Groundwork!2026")
-            .Build();
-        await container.StartAsync();
-        ConnectionString = container.GetConnectionString();
-    }
-
-    public async Task DisposeAsync()
-    {
-        if (container is not null) await container.DisposeAsync();
+        return connectionString;
     }
 }

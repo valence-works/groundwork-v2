@@ -138,6 +138,9 @@ A quick local matrix with Docker:
 ```bash
 docker run -d --name gw-pg -e POSTGRES_PASSWORD=groundwork -p 5432:5432 postgres:17.6-alpine3.22
 
+docker run -d --name gw-mssql -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=Groundwork!2026 -p 1433:1433 \
+  mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04
+
 docker run -d --name gw-mongo -p 27017:27017 mongo:7.0.24 --replSet rs0 --bind_ip_all
 docker exec gw-mongo mongosh --quiet --eval \
   'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
