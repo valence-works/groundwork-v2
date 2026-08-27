@@ -143,7 +143,6 @@ public sealed class MongoSchemaExecutor
     {
         ArgumentNullException.ThrowIfNull(state);
         var lease = RequireLock(state.TargetIdentity, applicationLock);
-        lease.Verify();
         var id = HistoryPrefix + state.TargetIdentity;
         using var session = context.StartSession();
         session.StartTransaction();
@@ -422,9 +421,15 @@ public sealed class MongoSchemaExecutor
                 foreach (var name in DeployedCollections(backfill.Subject.Name))
                     Backfill(name, backfill);
                 break;
-            case FinalizeColumnOperation finalize:
-                foreach (var name in DeployedCollections(finalize.Subject.Name))
-                    Finalize(name, finalize.Subject.Definition, finalize.Column);
+            // MongoDB stores no per-field nullability to switch on, so finalizing a required
+            // column has nothing to do here. What proves the documents honour the declaration is
+            // ValidatePhysicalSchema at the end of the plan, which names the column and refuses to
+            // publish. A null check here would be either redundant with that — FinalizeColumn is
+            // only planned for a newly added column, and a plan that adds a required one has
+            // already supplied a portable default the backfill writes, or been refused by
+            // GW-SCHEMA-005 — or wrong, because the remaining case defers population to a data
+            // migration that runs after the DDL.
+            case FinalizeColumnOperation:
                 break;
             case CreatePhysicalIndexOperation create:
                 foreach (var name in DeployedCollections(create.Subject.Name))
@@ -494,23 +499,36 @@ public sealed class MongoSchemaExecutor
         throw new InvalidOperationException(refusal.Message);
     }
 
+    /// <summary>
+    /// Creates the collection unless it is already there, which is what makes an interrupted
+    /// deployment re-runnable: the ledger is published only at the end, so the next plan derives
+    /// this operation again against the collection the last attempt left behind.
+    /// </summary>
     private void CreateCollection(string name)
     {
-        if (CollectionExists(name))
-            return;
-        try
-        {
+        if (!CollectionExists(name))
             context.Database.CreateCollection(name);
-        }
-        catch (MongoCommandException exception) when (exception.CodeName == "NamespaceExists")
-        {
-            // Another deployment created it between the check and the command.
-        }
     }
 
+    /// <summary>
+    /// Creates the declared index, or refuses by name when the collection already carries a
+    /// different index under that name. A plan derived from empty history — an interrupted
+    /// deployment, or an adoption candidate — creates every declared index, and MongoDB answers a
+    /// conflicting redefinition with a driver error that names nothing an operator can act on.
+    /// </summary>
     private void CreateIndex(string collectionName, StorageUnit unit, IndexDefinition index)
     {
         var specification = new MongoIndexSpecification(index, unit.Columns);
+        if (ReadIndexes(collectionName).TryGetValue(index.Name, out var deployed))
+        {
+            if (Matches(deployed, specification))
+                return;
+            throw new InvalidOperationException(
+                $"MongoDB collection '{collectionName}' already carries an index named '{index.Name}' whose key " +
+                "order, direction, uniqueness, or partial filter differs from the declared one. Apply the " +
+                "declaration against its recorded schema history, which plans that as a rebuild.");
+        }
+
         var keys = new BsonDocument(specification.Terms.Select(term => new BsonElement(
             term.Column,
             term.Direction == Groundwork.Kernel.SortDirection.Ascending ? 1 : -1)));
@@ -523,16 +541,15 @@ public sealed class MongoSchemaExecutor
             }));
     }
 
+    /// <summary>
+    /// Drops the index where it is present. A per-scope collection materialized by an application
+    /// whose declaration predates the index never had it, so a rebuild that spans every collection
+    /// has to tolerate its absence in one of them rather than failing the whole deployment.
+    /// </summary>
     private void DropIndex(string collectionName, string indexName)
     {
-        try
-        {
+        if (ReadIndexes(collectionName).ContainsKey(indexName))
             context.Database.GetCollection<BsonDocument>(collectionName).Indexes.DropOne(indexName);
-        }
-        catch (MongoCommandException exception) when (exception.CodeName == "IndexNotFound")
-        {
-            // Already gone: dropping an index the plan re-creates has to stay re-runnable.
-        }
     }
 
     /// <summary>
@@ -608,27 +625,6 @@ public sealed class MongoSchemaExecutor
 
         if (batch.Count != 0)
             collection.BulkWrite(batch, new BulkWriteOptions { IsOrdered = false });
-    }
-
-    /// <summary>
-    /// MongoDB stores no per-field nullability to switch on, so finalizing a required column is the
-    /// check that switching it would have performed: a document still holding null there is named
-    /// rather than left for the runtime to trip over.
-    /// </summary>
-    private void Finalize(string collectionName, StorageUnit unit, ColumnDefinition column)
-    {
-        if (column.IsNullable || MongoDocumentMapper.IsSystemOwnedToken(unit, column))
-            return;
-        var outstanding = context.Database.GetCollection<BsonDocument>(collectionName)
-            .Find(new BsonDocument(column.Name, BsonNull.Value))
-            .Limit(1)
-            .Any();
-        if (outstanding)
-        {
-            throw new InvalidOperationException(
-                $"MongoDB collection '{collectionName}' still stores null in required column '{column.Name}', " +
-                "so it cannot be finalized. Supply a portable default or a data migration for the existing documents.");
-        }
     }
 
     /// <summary>

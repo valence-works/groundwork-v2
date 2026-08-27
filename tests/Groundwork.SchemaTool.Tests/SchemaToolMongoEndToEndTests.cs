@@ -261,7 +261,8 @@ public sealed class SchemaToolMongoEndToEndTests : IDisposable
         foreach (var name in scoped)
             Assert.Contains("by_owner", IndexNames(connection, name));
 
-        // Adoption reads the same collection set: dropping the index from one scope alone refuses.
+        // Adoption reads the same collection set: dropping the index from one scope alone refuses,
+        // naming the scope collection that differs.
         ForgetHistory(connection);
         Collection(connection, scoped[0]).Indexes.DropOne("by_owner");
         var refused = await harness.RunAsync(["adopt", "--schema", evolved, "--safe"], connection);
