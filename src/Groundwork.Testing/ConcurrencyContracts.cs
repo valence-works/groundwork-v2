@@ -22,6 +22,15 @@ public sealed record ConcurrencyProbeOptions
     public ConcurrencyKind Concurrency { get; init; } = ConcurrencyKind.Optimistic;
 
     public bool IncludePartialUniqueIndex { get; init; }
+
+    /// <summary>The session surface every writer submits its reads and writes on.</summary>
+    public ConcurrencySurface Surface { get; init; } = ConcurrencySurface.Synchronous;
+}
+
+public enum ConcurrencySurface
+{
+    Synchronous,
+    Asynchronous
 }
 
 /// <summary>One deterministic logical write submitted by the harness.</summary>
@@ -75,7 +84,13 @@ public interface IConcurrencyProviderSession : IDisposable
 {
     ConcurrencyWriteOutcome ConditionalUpsert(ConcurrencyWriteRequest request);
 
+    ValueTask<ConcurrencyWriteOutcome> ConditionalUpsertAsync(
+        ConcurrencyWriteRequest request,
+        CancellationToken cancellationToken = default);
+
     ConcurrencyStoredRow? Read(string key);
+
+    ValueTask<ConcurrencyStoredRow?> ReadAsync(string key, CancellationToken cancellationToken = default);
 }
 
 /// <summary>One named invariant result, retained individually for diagnostics and negative tests.</summary>
@@ -241,7 +256,7 @@ public static class ConcurrencyHarness
                 outcomes,
                 accepted,
                 firstAccepted,
-                errors)))
+                errors).AsTask()))
             .ToArray();
 
         ready.Wait();
@@ -262,7 +277,7 @@ public static class ConcurrencyHarness
             for (var key = 0; key < options.KeyCount; key++)
             {
                 var keyName = Key(seed, key);
-                finalRows[keyName] = reader.Read(keyName);
+                finalRows[keyName] = Read(reader, keyName, options).GetAwaiter().GetResult();
             }
         }
 
@@ -284,7 +299,23 @@ public static class ConcurrencyHarness
             errors.OrderBy(error => error, StringComparer.Ordinal).ToArray());
     }
 
-    private static void RunWriter(
+    private static ValueTask<ConcurrencyStoredRow?> Read(
+        IConcurrencyProviderSession session,
+        string key,
+        ConcurrencyProbeOptions options) =>
+        options.Surface == ConcurrencySurface.Asynchronous
+            ? session.ReadAsync(key)
+            : new(session.Read(key));
+
+    private static ValueTask<ConcurrencyWriteOutcome> Write(
+        IConcurrencyProviderSession session,
+        ConcurrencyWriteRequest request,
+        ConcurrencyProbeOptions options) =>
+        options.Surface == ConcurrencySurface.Asynchronous
+            ? session.ConditionalUpsertAsync(request)
+            : new(session.ConditionalUpsert(request));
+
+    private static async ValueTask RunWriter(
         IConcurrencyProviderConnection connection,
         ConcurrencyProbeOptions options,
         int seed,
@@ -312,7 +343,7 @@ public static class ConcurrencyHarness
             {
                 if (attempt > 0)
                 {
-                    var current = session.Read(key);
+                    var current = await Read(session, key, options).ConfigureAwait(false);
                     precondition = options.Concurrency == ConcurrencyKind.Optimistic
                         ? current is null
                             ? WritePrecondition.CreateOnly
@@ -321,7 +352,7 @@ public static class ConcurrencyHarness
                 }
 
                 var request = new ConcurrencyWriteRequest(key, value, createdAt, precondition);
-                var result = session.ConditionalUpsert(request);
+                var result = await Write(session, request, options).ConfigureAwait(false);
                 outcomes.Add(result);
                 if (result.Status == ConcurrencyWriteOutcomeStatus.ConcurrencyConflict)
                     continue;
@@ -496,32 +527,45 @@ public static class ConcurrencyHarness
 public sealed class StorageProviderConcurrencyFactory : IConcurrencyProviderFactory
 {
     private readonly IStorageProviderFactory provider;
+    private readonly bool commitThroughUnitOfWork;
 
-    public StorageProviderConcurrencyFactory(string providerName, IStorageProviderFactory provider)
+    /// <param name="commitThroughUnitOfWork">
+    /// Stages each write into a unit of work and commits it instead of writing straight through the
+    /// session, so a commit path is proven under the same contention as a direct write.
+    /// </param>
+    public StorageProviderConcurrencyFactory(
+        string providerName,
+        IStorageProviderFactory provider,
+        bool commitThroughUnitOfWork = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(providerName);
         ProviderName = providerName;
         this.provider = provider ?? throw new ArgumentNullException(nameof(provider));
+        this.commitThroughUnitOfWork = commitThroughUnitOfWork;
     }
 
     public string ProviderName { get; }
 
     public IConcurrencyProviderConnection Create(string connectionString, StorageUnit declaration) =>
-        new StorageProviderConcurrencyConnection(provider.Create(connectionString), declaration);
+        new StorageProviderConcurrencyConnection(
+            provider.Create(connectionString), declaration, commitThroughUnitOfWork);
 }
 
 internal sealed class StorageProviderConcurrencyConnection : IConcurrencyProviderConnection
 {
     private readonly IStorageProviderConnection connection;
     private readonly StorageUnit declaration;
+    private readonly bool commitThroughUnitOfWork;
     private readonly ConcurrentDictionary<string, long> logicalVersions = new(StringComparer.Ordinal);
 
     internal StorageProviderConcurrencyConnection(
         IStorageProviderConnection connection,
-        StorageUnit declaration)
+        StorageUnit declaration,
+        bool commitThroughUnitOfWork = false)
     {
         this.connection = connection;
         this.declaration = declaration;
+        this.commitThroughUnitOfWork = commitThroughUnitOfWork;
     }
 
     public void ApplySchema() => connection.Schema.Apply(declaration);
@@ -530,7 +574,8 @@ internal sealed class StorageProviderConcurrencyConnection : IConcurrencyProvide
         new StorageProviderConcurrencySession(
             connection.OpenSession(declaration, StorageAccess.Global),
             declaration,
-            logicalVersions);
+            logicalVersions,
+            commitThroughUnitOfWork ? connection : null);
 
     public void Dispose() => connection.Dispose();
 }
@@ -540,28 +585,36 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
     private readonly IStorageSession session;
     private readonly StorageUnit declaration;
     private readonly ConcurrentDictionary<string, long> logicalVersions;
+    private readonly IStorageProviderConnection? committing;
     private bool disposed;
 
     internal StorageProviderConcurrencySession(
         IStorageSession session,
         StorageUnit declaration,
-        ConcurrentDictionary<string, long> logicalVersions)
+        ConcurrentDictionary<string, long> logicalVersions,
+        IStorageProviderConnection? committing = null)
     {
         this.session = session;
         this.declaration = declaration;
         this.logicalVersions = logicalVersions;
+        this.committing = committing;
     }
 
-    public ConcurrencyWriteOutcome ConditionalUpsert(ConcurrencyWriteRequest request)
+    public ConcurrencyWriteOutcome ConditionalUpsert(ConcurrencyWriteRequest request) =>
+        Write(request, isAsync: false, CancellationToken.None).GetAwaiter().GetResult();
+
+    public ValueTask<ConcurrencyWriteOutcome> ConditionalUpsertAsync(
+        ConcurrencyWriteRequest request,
+        CancellationToken cancellationToken = default) =>
+        Write(request, isAsync: true, cancellationToken);
+
+    private async ValueTask<ConcurrencyWriteOutcome> Write(
+        ConcurrencyWriteRequest request,
+        bool isAsync,
+        CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
-        if (session is not IConcurrencyStorageSession concurrencySession)
-        {
-            throw new NotSupportedException(
-                $"Provider session '{session.GetType().FullName}' does not implement the W2 conditional-upsert adapter.");
-        }
-
         var values = new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["id"] = request.Key,
@@ -571,7 +624,9 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
         var options = declaration.Concurrency.IsOptimistic
             ? new WriteOptions { Precondition = request.Precondition }
             : null;
-        var result = concurrencySession.ConditionalUpsert(values, options);
+        var result = committing is null
+            ? await ConditionalUpsertThroughSession(values, options, isAsync, cancellationToken).ConfigureAwait(false)
+            : await ConditionalUpsertThroughUnitOfWork(values, options, isAsync, cancellationToken).ConfigureAwait(false);
         if (result.Status == WriteOutcomeStatus.ConcurrencyConflict)
             return new ConcurrencyWriteOutcome(ConcurrencyWriteOutcomeStatus.ConcurrencyConflict,
                 result.Version ?? 0);
@@ -592,10 +647,60 @@ internal sealed class StorageProviderConcurrencySession : IConcurrencyProviderSe
             version);
     }
 
-    public ConcurrencyStoredRow? Read(string key)
+    private ValueTask<WriteOutcome> ConditionalUpsertThroughSession(
+        StorageValues values,
+        WriteOptions? options,
+        bool isAsync,
+        CancellationToken cancellationToken)
+    {
+        if (session is not IConcurrencyStorageSession concurrencySession)
+        {
+            throw new NotSupportedException(
+                $"Provider session '{session.GetType().FullName}' does not implement the W2 conditional-upsert adapter.");
+        }
+
+        return isAsync
+            ? concurrencySession.ConditionalUpsertAsync(values, options, cancellationToken)
+            : new(concurrencySession.ConditionalUpsert(values, options));
+    }
+
+    private async ValueTask<WriteOutcome> ConditionalUpsertThroughUnitOfWork(
+        StorageValues values,
+        WriteOptions? options,
+        bool isAsync,
+        CancellationToken cancellationToken)
+    {
+        using var unitOfWork = committing!.BeginUnitOfWork(
+            StorageAccess.Global, BatchWriteOptions.Exact, declaration);
+        var write = RowWrite.ConditionalUpsert(declaration, values, options);
+        unitOfWork.Stage(write);
+        try
+        {
+            var report = isAsync
+                ? await unitOfWork.CommitWithOutcomesAsync(cancellationToken).ConfigureAwait(false)
+                : unitOfWork.CommitWithOutcomes();
+            return report.Outcomes.Single(outcome => ReferenceEquals(outcome.Write, write)).Outcome;
+        }
+        catch (BatchWriteException exception)
+        {
+            // A staged conflict fails the commit; the harness treats it as the write's outcome.
+            return exception.Outcomes.Single(outcome => ReferenceEquals(outcome.Write, write)).Outcome;
+        }
+    }
+
+    public ConcurrencyStoredRow? Read(string key) =>
+        Read(key, isAsync: false, CancellationToken.None).GetAwaiter().GetResult();
+
+    public ValueTask<ConcurrencyStoredRow?> ReadAsync(string key, CancellationToken cancellationToken = default) =>
+        Read(key, isAsync: true, cancellationToken);
+
+    private async ValueTask<ConcurrencyStoredRow?> Read(string key, bool isAsync, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        var entry = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = key }));
+        var storageKey = new StorageKey(new Dictionary<string, object?> { ["id"] = key });
+        var entry = isAsync
+            ? await session.ReadAsync(storageKey, cancellationToken).ConfigureAwait(false)
+            : session.Read(storageKey);
         if (entry is null)
             return null;
         if (!entry.Values.Values.TryGetValue("value", out var value) ||

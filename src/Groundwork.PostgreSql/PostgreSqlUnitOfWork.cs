@@ -61,27 +61,52 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
+    public BatchWriteSummary Commit() =>
+        BatchWriteSummary.FromOutcomes(CompleteCommit(isAsync: false, CancellationToken.None).GetAwaiter().GetResult());
+
+    public async ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
+        BatchWriteSummary.FromOutcomes(await CompleteCommit(isAsync: true, cancellationToken).ConfigureAwait(false));
 
     public BatchWriteReport CommitWithOutcomes()
     {
         ThrowIfTerminal();
         batch.RequireExactOutcomes();
-        return new BatchWriteReport(CompleteCommit());
+        return new BatchWriteReport(CompleteCommit(isAsync: false, CancellationToken.None).GetAwaiter().GetResult());
     }
 
-    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
+    public async ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminal();
+        batch.RequireExactOutcomes();
+        return new BatchWriteReport(await CompleteCommit(isAsync: true, cancellationToken).ConfigureAwait(false));
+    }
+
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> CompleteCommit(bool isAsync, CancellationToken cancellationToken)
     {
         ThrowIfTerminal();
         try
         {
-            batch.FlushAll();
-            transaction.Commit();
+            if (isAsync)
+            {
+                await batch.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                batch.FlushAll();
+                transaction.Commit();
+            }
             return batch.DrainCompleted();
         }
         catch
         {
-            try { transaction.Rollback(); }
+            try
+            {
+                if (isAsync)
+                    await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                else
+                    transaction.Rollback();
+            }
             finally { Complete(); }
             throw;
         }
@@ -90,18 +115,6 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             if (!terminal)
                 Complete();
         }
-    }
-
-    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(CommitWithOutcomes());
-    }
-
-    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(Commit());
     }
 
     public void Rollback()

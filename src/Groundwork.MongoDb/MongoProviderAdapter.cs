@@ -140,14 +140,36 @@ internal class MongoStoreSession(
         return ToStore(inner.Read(new MongoStorageKey(key.Values)));
     }
 
+    public async ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "read");
+        beforeRead?.Invoke(key);
+        return ToStore(await inner.ReadAsync(new MongoStorageKey(key.Values), cancellationToken).ConfigureAwait(false));
+    }
+
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
         return inner.Query(request, options);
     }
 
+    public ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        StorageAccessValidation.EnsureOrdinaryQuery(Access);
+        return inner.QueryAsync(request, options, cancellationToken);
+    }
+
     public CrossScopeQueryResult QueryAcrossScopes(QueryRequest request, QueryRenderOptions? options = null) =>
         inner.QueryAcrossScopes(request, options);
+
+    public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        inner.QueryAcrossScopesAsync(request, options, cancellationToken);
 
     public AggregationResult Aggregate(AggregationQuery query)
     {
@@ -155,43 +177,127 @@ internal class MongoStoreSession(
         return inner.Aggregate(query);
     }
 
+    public ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
+        return inner.AggregateAsync(query, cancellationToken);
+    }
+
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
+    {
+        ValidateInsert(values, options);
+        return ToStore(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
+    }
+
+    public async ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateInsert(values, options);
+        return ToStore(await inner.InsertAsync(
+            new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
+    }
+
+    private void ValidateInsert(StorageValues values, WriteOptions? options)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return ToStore(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
+        ValidateUpdate(values, options);
+        return ToStore(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
+    }
+
+    public async ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateUpdate(values, options);
+        return ToStore(await inner.UpdateAsync(
+            new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
+    }
+
+    private void ValidateUpdate(StorageValues values, WriteOptions? options)
+    {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return ToStore(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
+        ValidateUpsert(values, options);
+        return ToStore(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
+    }
+
+    public async ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateUpsert(values, options);
+        return ToStore(await inner.UpsertAsync(
+            new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
+    }
+
+    private void ValidateUpsert(StorageValues values, WriteOptions? options)
+    {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return ToStore(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
+        ValidateConditionalUpsert(values, options);
+        return ToStore(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
+    }
+
+    public async ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateConditionalUpsert(values, options);
+        return ToStore(await inner.ConditionalUpsertAsync(
+            new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false),
+            values, options);
+    }
+
+    private void ValidateConditionalUpsert(StorageValues values, WriteOptions? options)
+    {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        return ToStore(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
     }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
+        ValidateDelete(options);
+        return ToStore(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
+    }
+
+    public async ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateDelete(options);
+        return ToStore(await inner.DeleteAsync(
+            new MongoStorageKey(key.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
+    }
+
+    private void ValidateDelete(WriteOptions? options)
+    {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
-        return ToStore(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
     }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
@@ -202,17 +308,69 @@ internal class MongoStoreSession(
         return RetentionSessionExtensions.ApplyRetention(this, options);
     }
 
+    public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "retention");
+        return inner is IRetentionStorageSession native
+            ? native.ApplyRetentionAsync(options)
+            : RetentionSessionExtensions.ApplyRetentionAsync(this, options);
+    }
+
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
-        StorageAccessValidation.EnsurePointOperation(Access, "append");
-        var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
+        var native = ValidateAppend(operationId, values);
         return ToStore(inner.Append(operationId, native));
+    }
+
+    public async ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default)
+    {
+        var native = ValidateAppend(operationId, values);
+        return ToStore(await inner.AppendAsync(operationId, native, cancellationToken).ConfigureAwait(false));
+    }
+
+    private MongoStorageValues[] ValidateAppend(OperationId operationId, IReadOnlyList<StorageValues> values)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "append");
+        _ = IdempotencyRules.RequireDeclaration(Unit);
+        IdempotencyRules.ValidateOperation(Unit, operationId, values);
+        return values.Select(value => new MongoStorageValues(value.Values)).ToArray();
     }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
         => ApplyBatch(writes, exactOutcomes: false);
+
+    public async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        CancellationToken cancellationToken = default)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
+        ArgumentNullException.ThrowIfNull(writes);
+        if (inner is IBatchedStorageSession native)
+            return await native.ApplyBatchAsync(writes, exactOutcomes, cancellationToken).ConfigureAwait(false);
+        var outcomes = new List<RowWriteOutcome>(writes.Count);
+        foreach (var write in writes)
+        {
+            outcomes.Add(new RowWriteOutcome(write, await (write.Mode switch
+            {
+                RowWriteMode.Insert => InsertAsync(write.Values!, write.Options, cancellationToken),
+                RowWriteMode.Update => UpdateAsync(write.Values!, write.Options, cancellationToken),
+                RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
+                    ConditionalUpsertAsync(write.Values!, write.Options, cancellationToken),
+                RowWriteMode.Upsert => UpsertAsync(write.Values!, write.Options, cancellationToken),
+                RowWriteMode.ConditionalUpsert => ConditionalUpsertAsync(write.Values!, write.Options, cancellationToken),
+                RowWriteMode.Delete => DeleteAsync(write.Key!, write.Options, cancellationToken),
+                RowWriteMode.CompareAndDelete => this is ICompareAndDeleteStorageSession compareAndDelete
+                    ? compareAndDelete.CompareAndDeleteAsync(write.Key!, write.ExpectedValues, write.Options, cancellationToken)
+                    : throw new NotSupportedException("The provider session does not support compare-and-delete."),
+                _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
+            }).ConfigureAwait(false)));
+        }
+        return outcomes;
+    }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
@@ -278,24 +436,62 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
     internal MongoExactStoreSession(IMongoStorageSession inner, IProviderCommandObserver? commandObserver = null)
         : base(inner, commandObserver: commandObserver) => exactInner = inner;
 
-    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
+    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
+        ToStore(RequireExactAppend(values).AppendWithOutcomes(
+            operationId,
+            values.Select(value => new MongoStorageValues(value.Values)).ToArray()));
+
+    public async ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        ToStore(await RequireExactAppend(values).AppendWithOutcomesAsync(
+            operationId,
+            values.Select(value => new MongoStorageValues(value.Values)).ToArray(),
+            cancellationToken).ConfigureAwait(false));
+
+    private IMongoExactAppendStorageSession RequireExactAppend(IReadOnlyList<StorageValues> values)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "append");
         ArgumentNullException.ThrowIfNull(values);
-        if (exactInner is not IMongoExactAppendStorageSession exact)
-            throw new NotSupportedException(
-                "GW-APPEND-003: this MongoDB deployment does not advertise exact append outcomes; use a transaction-capable deployment and inspect IExactAppendStorageSession before using AppendWithOutcomes.");
-        var native = values.Select(value => new MongoStorageValues(value.Values)).ToArray();
-        var result = exact.AppendWithOutcomes(operationId, native);
-        return new AppendOutcomeReport(
-            (WriteOutcomeStatus)result.Status,
-            result.Outcomes.Select(ToStore).ToArray());
+        return exactInner as IMongoExactAppendStorageSession ?? throw new NotSupportedException(
+            "GW-APPEND-003: this MongoDB deployment does not advertise exact append outcomes; use a transaction-capable deployment and inspect IExactAppendStorageSession before using AppendWithOutcomes.");
     }
+
+    private static AppendOutcomeReport ToStore(MongoAppendOutcomeReport result) =>
+        new((WriteOutcomeStatus)result.Status, result.Outcomes.Select(ToStore).ToArray());
 
     public WriteOutcome CompareAndDelete(
         StorageKey key,
         IReadOnlyDictionary<string, object?> expectedValues,
         WriteOptions? options = null)
+    {
+        var (compareAndDelete, canonicalKey, validated) = PrepareCompareAndDelete(key, expectedValues, options);
+        return ToStore(compareAndDelete.CompareAndDelete(
+            new MongoStorageKey(canonicalKey.Values),
+            validated,
+            new MongoWriteOptions { Precondition = options?.Precondition ?? WritePrecondition.Unconditional }));
+    }
+
+    public async ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        var (compareAndDelete, canonicalKey, validated) = PrepareCompareAndDelete(key, expectedValues, options);
+        return ToStore(await compareAndDelete.CompareAndDeleteAsync(
+            new MongoStorageKey(canonicalKey.Values),
+            validated,
+            new MongoWriteOptions { Precondition = options?.Precondition ?? WritePrecondition.Unconditional },
+            cancellationToken).ConfigureAwait(false));
+    }
+
+    private (IMongoCompareAndDeleteStorageSession Session, StorageKey Key, IReadOnlyDictionary<string, object?> Expected)
+        PrepareCompareAndDelete(
+            StorageKey key,
+            IReadOnlyDictionary<string, object?> expectedValues,
+            WriteOptions? options)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "compare-and-delete");
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
@@ -303,28 +499,35 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
         if (exactInner is not IMongoCompareAndDeleteStorageSession compareAndDelete)
             throw new NotSupportedException(
                 "GW-COMPARE-DELETE-001: this MongoDB deployment does not advertise transactional compare-and-delete.");
-        var result = compareAndDelete.CompareAndDelete(
-            new MongoStorageKey(canonicalKey.Values),
-            validated,
-            new MongoWriteOptions { Precondition = options?.Precondition ?? WritePrecondition.Unconditional });
-        return ToStore(result);
+        return (compareAndDelete, canonicalKey, validated);
     }
 
-    public StorageInspection Inspect()
+    public StorageInspection Inspect() => RequireInspection().Inspect();
+
+    public ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default) =>
+        RequireInspection().InspectAsync(cancellationToken);
+
+    private IStorageInspectionSession RequireInspection()
     {
         StorageAccessValidation.EnsurePointOperation(Access, "inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
-        if (exactInner is not IStorageInspectionSession inspection)
-            throw new NotSupportedException("GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
-        return inspection.Inspect();
+        return exactInner as IStorageInspectionSession ?? throw new NotSupportedException(
+            "GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
     }
 
-    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
+    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null) =>
+        RequireExactRetention().ApplyRetention(operationId, options);
+
+    public ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null) =>
+        RequireExactRetention().ApplyRetentionAsync(operationId, options);
+
+    private IExactRetentionStorageSession RequireExactRetention()
     {
         StorageAccessValidation.EnsurePointOperation(Access, "retention");
-        if (exactInner is not IExactRetentionStorageSession exact)
-            throw new NotSupportedException("GW-RETENTION-003: this provider session does not advertise exact retention operations.");
-        return exact.ApplyRetention(operationId, options);
+        return exactInner as IExactRetentionStorageSession ?? throw new NotSupportedException(
+            "GW-RETENTION-003: this provider session does not advertise exact retention operations.");
     }
 }
 
@@ -373,23 +576,42 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
+    public BatchWriteSummary Commit() =>
+        BatchWriteSummary.FromOutcomes(CompleteCommit(isAsync: false, CancellationToken.None).GetAwaiter().GetResult());
+
+    public async ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
+        BatchWriteSummary.FromOutcomes(await CompleteCommit(isAsync: true, cancellationToken).ConfigureAwait(false));
 
     public BatchWriteReport CommitWithOutcomes()
     {
         ThrowIfTerminal();
         batch.RequireExactOutcomes();
-        return new BatchWriteReport(CompleteCommit());
+        return new BatchWriteReport(CompleteCommit(isAsync: false, CancellationToken.None).GetAwaiter().GetResult());
     }
 
-    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
+    public async ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminal();
+        batch.RequireExactOutcomes();
+        return new BatchWriteReport(await CompleteCommit(isAsync: true, cancellationToken).ConfigureAwait(false));
+    }
+
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> CompleteCommit(bool isAsync, CancellationToken cancellationToken)
     {
         ThrowIfTerminal();
         EnsureNativeActive();
         try
         {
-            batch.FlushAll();
-            inner.Commit();
+            if (isAsync)
+            {
+                await batch.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+                await inner.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                batch.FlushAll();
+                inner.Commit();
+            }
             terminal = true;
             return batch.DrainCompleted();
         }
@@ -399,18 +621,6 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
             finally { terminal = true; }
             throw;
         }
-    }
-
-    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(CommitWithOutcomes());
-    }
-
-    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(Commit());
     }
 
     public void Rollback()

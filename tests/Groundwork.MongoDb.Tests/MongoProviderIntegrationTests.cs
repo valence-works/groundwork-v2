@@ -382,6 +382,20 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public async Task Provider_passes_the_shipped_conformance_suite_on_the_async_surface()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        var url = new MongoUrlBuilder(connectionString) { DatabaseName = "p21conformance_" + Guid.NewGuid().ToString("N") };
+
+        var report = await ConformanceSuite.RunAsync(new MongoProviderFactory(), url.ToMongoUrl().ToString());
+
+        Assert.True(report.Passed, string.Join(Environment.NewLine,
+            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+    }
+
+    [SkippableFact]
     public void Live_compare_and_delete_is_transactional_and_exact()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");

@@ -65,42 +65,34 @@ public static class RelationalQueryResultReader
         DbConnection connection,
         RelationalQueryCommand query,
         Func<string, object?, object?> decode,
-        DbTransaction? transaction)
-    {
-        ArgumentNullException.ThrowIfNull(connection);
-        ArgumentNullException.ThrowIfNull(query);
-        ArgumentNullException.ThrowIfNull(decode);
-        using var command = CreateCommand(connection, query, transaction);
-        using var reader = command.ExecuteReader();
-        var rows = new List<IReadOnlyDictionary<string, object?>>();
-        while (reader.Read())
-            rows.Add(MaterializeRow(reader, decode));
-        return rows;
-    }
+        DbTransaction? transaction) =>
+        Read(connection, query, decode, transaction, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
 
     public static Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadAsync(
         DbConnection connection,
         RelationalQueryCommand query,
         Func<string, object?, object?> decode,
         CancellationToken cancellationToken = default) =>
-        ReadAsync(connection, query, decode, transaction: null, cancellationToken);
+        Read(connection, query, decode, transaction: null,
+            RelationalExecution.Asynchronous(cancellationToken)).AsTask();
 
-    /// <summary>Reads a rendered query on the async ADO.NET surface using the caller-owned transaction, when one exists.</summary>
-    internal static async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadAsync(
+    /// <summary>Reads a rendered query on the surface the caller selected, with its transaction when one exists.</summary>
+    internal static async ValueTask<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Read(
         DbConnection connection,
         RelationalQueryCommand query,
         Func<string, object?, object?> decode,
         DbTransaction? transaction,
-        CancellationToken cancellationToken)
+        RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(decode);
-        cancellationToken.ThrowIfCancellationRequested();
-        await using var command = CreateCommand(connection, query, transaction);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        mode.CancellationToken.ThrowIfCancellationRequested();
+        using var command = CreateCommand(connection, query, transaction);
+        using var reader = await mode.ExecuteReader(command).ConfigureAwait(false);
         var rows = new List<IReadOnlyDictionary<string, object?>>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        while (await mode.Read(reader).ConfigureAwait(false))
             rows.Add(MaterializeRow(reader, decode));
         return rows;
     }

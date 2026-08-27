@@ -269,6 +269,27 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public async Task Full_contract_runs_on_the_async_surface()
+    {
+        var report = await ConformanceSuite.RunAsync(new ExternalFactory(), "memory://contract-async");
+
+        Assert.True(report.Passed, string.Join(Environment.NewLine,
+            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+        Assert.Contains(report.Checks, check => check.Name == "cancellation is refused before provider work");
+    }
+
+    [Fact]
+    public async Task Async_surface_proves_every_check_the_sync_surface_proves()
+    {
+        var synchronous = ConformanceSuite.Run(new ExternalFactory(), "memory://contract-parity-sync");
+        var asynchronous = await ConformanceSuite.RunAsync(new ExternalFactory(), "memory://contract-parity-async");
+
+        Assert.Subset(
+            asynchronous.Checks.Select(check => check.Name).ToHashSet(StringComparer.Ordinal),
+            synchronous.Checks.Select(check => check.Name).ToHashSet(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public void Catalog_is_read_from_provider_state_and_schema_apply_is_idempotent()
     {
         var factory = new InMemoryProviderFactory();

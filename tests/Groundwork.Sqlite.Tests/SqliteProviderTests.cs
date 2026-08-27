@@ -987,13 +987,21 @@ public sealed class SqliteProviderTests
         public StorageUnit Unit => inner.Unit;
         public StorageAccess Access => inner.Access;
         public StoredEntry? Read(StorageKey key) => inner.Read(key);
+        public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) => inner.ReadAsync(key, cancellationToken);
         public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => inner.Query(request, options);
+        public ValueTask<QueryMaterializedResult> QueryAsync(QueryRequest request, QueryRenderOptions? options = null, CancellationToken cancellationToken = default) => inner.QueryAsync(request, options, cancellationToken);
         public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);
+        public ValueTask<AggregationResult> AggregateAsync(AggregationQuery query, CancellationToken cancellationToken = default) => inner.AggregateAsync(query, cancellationToken);
         public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
+        public ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.InsertAsync(values, options, cancellationToken);
         public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => inner.Update(values, options);
+        public ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.UpdateAsync(values, options, cancellationToken);
         public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
+        public ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.UpsertAsync(values, options, cancellationToken);
         public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
+        public ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.DeleteAsync(key, options, cancellationToken);
         public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) => inner.Append(operationId, values);
+        public ValueTask<WriteOutcome> AppendAsync(OperationId operationId, IReadOnlyList<StorageValues> values, CancellationToken cancellationToken = default) => inner.AppendAsync(operationId, values, cancellationToken);
     }
 
     [Fact]
@@ -1068,10 +1076,80 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public async Task Async_write_waits_for_the_provider_gate()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("async-gate"), Name = "async_gate",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        Task<WriteOutcome> pending;
+        lock (((SqliteProviderConnection)connection).Gate)
+        {
+            pending = Task.Run(() =>
+                session.InsertAsync(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).AsTask());
+            Thread.Sleep(250);
+            Assert.False(pending.IsCompleted);
+        }
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, (await pending).Status);
+        Assert.NotNull(await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" })));
+    }
+
+    [Fact]
+    public async Task Async_unit_of_work_commit_stages_flushes_and_reads_back()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("async-uow"), Name = "async_uow",
+            Columns =
+            [
+                new() { Name = "Id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "Value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using (var unitOfWork = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
+        {
+            var staged = unitOfWork.OpenSession(unit);
+            unitOfWork.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+            {
+                ["Id"] = "a", ["Value"] = "staged"
+            })));
+            var flushed = await staged.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
+            Assert.Equal("staged", flushed?.Values.Values["Value"]);
+            var report = await unitOfWork.CommitWithOutcomesAsync();
+            Assert.Equal(1, report.Succeeded);
+        }
+
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var committed = await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
+        Assert.Equal("staged", committed?.Values.Values["Value"]);
+    }
+
+    [Fact]
     public void Provider_passes_provider_neutral_conformance()
     {
         using var store = TemporaryStore.Create();
         var report = ConformanceSuite.Run(new SqliteProviderFactory(), store.ConnectionString);
+        Assert.True(report.Passed, string.Join(Environment.NewLine, report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+    }
+
+    [Fact]
+    public async Task Provider_passes_provider_neutral_conformance_on_the_async_surface()
+    {
+        using var store = TemporaryStore.Create();
+        var report = await ConformanceSuite.RunAsync(new SqliteProviderFactory(), store.ConnectionString);
         Assert.True(report.Passed, string.Join(Environment.NewLine, report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
     }
 

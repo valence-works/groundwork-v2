@@ -298,12 +298,28 @@ public interface IMongoStorageSession
 
     MongoStoredEntry? Read(MongoStorageKey key);
 
+    ValueTask<MongoStoredEntry?> ReadAsync(MongoStorageKey key, CancellationToken cancellationToken = default);
+
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
+
+    ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default);
 
     CrossScopeQueryResult QueryAcrossScopes(QueryRequest request, QueryRenderOptions? options = null);
 
+    ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Executes one named, declared aggregation profile through the native provider.</summary>
     AggregationResult Aggregate(AggregationQuery query);
+
+    ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Inserts a row. A ProviderSequence key must be omitted and is returned through
@@ -311,14 +327,29 @@ public interface IMongoStorageSession
     /// </summary>
     MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null);
 
+    ValueTask<MongoWriteOutcome> InsertAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     /// <summary>A ProviderSequence key is accepted only as the immutable row locator.</summary>
     MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null);
+
+    ValueTask<MongoWriteOutcome> UpdateAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// With ProviderSequence, an omitted key inserts a generated row. A supplied key is
     /// an immutable locator: it updates an existing row or returns NotFound, never inserts it.
     /// </summary>
     MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null);
+
+    ValueTask<MongoWriteOutcome> UpsertAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Executes the provider-native conditional upsert as one MongoDB update command.
@@ -327,9 +358,24 @@ public interface IMongoStorageSession
     /// </summary>
     MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null);
 
+    ValueTask<MongoWriteOutcome> ConditionalUpsertAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null);
 
+    ValueTask<MongoWriteOutcome> DeleteAsync(
+        MongoStorageKey key,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values);
+
+    ValueTask<MongoWriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<MongoStorageValues> values,
+        CancellationToken cancellationToken = default);
 
     MongoWriteOutcome Append(OperationId operationId, params MongoStorageValues[] values) =>
         Append(operationId, (IReadOnlyList<MongoStorageValues>)values);
@@ -341,12 +387,23 @@ internal interface IMongoCompareAndDeleteStorageSession
         MongoStorageKey key,
         IReadOnlyDictionary<string, object?> expectedValues,
         MongoWriteOptions? options = null);
+
+    ValueTask<MongoWriteOutcome> CompareAndDeleteAsync(
+        MongoStorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Internal bridge for the provider-neutral exact append capability.</summary>
 internal interface IMongoExactAppendStorageSession
 {
     MongoAppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<MongoStorageValues> values);
+
+    ValueTask<MongoAppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<MongoStorageValues> values,
+        CancellationToken cancellationToken = default);
 }
 
 internal sealed record MongoAppendOutcomeReport(
@@ -358,6 +415,8 @@ public interface IMongoUnitOfWork : IDisposable
     IMongoStorageSession OpenSession(StorageUnit unit);
 
     void Commit();
+
+    ValueTask CommitAsync(CancellationToken cancellationToken = default);
 
     void Rollback();
 }

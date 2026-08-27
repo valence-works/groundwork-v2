@@ -19,6 +19,11 @@ required by exact append and durable idempotency. A provider may be marked
 production-supported in a later release when the matrix is updated with its
 topology, test evidence, and operational owner.
 
+Every provider implements the whole asynchronous session surface, but only
+PostgreSQL, SQL Server, and MongoDB actually yield the calling thread; SQLite and
+the reference provider complete their asynchronous members synchronously because
+their drivers do. See [async-surface.md](async-surface.md).
+
 All relational providers and the reference provider advertise
 `groundwork.operational.atomic-commit`. MongoDB advertises it only when the
 connected deployment reports transaction support; standalone MongoDB omits the

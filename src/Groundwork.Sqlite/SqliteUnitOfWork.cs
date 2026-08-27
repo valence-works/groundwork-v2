@@ -93,6 +93,11 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         }
     }
 
+    /// <summary>
+    /// Microsoft.Data.Sqlite completes its asynchronous surface synchronously and this provider
+    /// serializes commands on a gate a suspended continuation cannot hold, so an asynchronous
+    /// commit flushes and commits on the calling thread; see docs/sqlite-provider.md.
+    /// </summary>
     public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

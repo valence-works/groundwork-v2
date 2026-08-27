@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Groundwork.Kernel;
 using Groundwork.Store;
+using Groundwork.Substrate.Relational;
 using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
@@ -17,7 +18,7 @@ public sealed class SqlServerProviderFactory : IStorageProviderFactory
 
 public sealed class SqlServerProviderConnection : IStorageProviderConnection
 {
-    private readonly object gate = new();
+    private readonly SemaphoreSlim gate = new(1, 1);
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
     private readonly SqlServerSchemaCoordinator schemaCoordinator;
@@ -46,7 +47,30 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         atomicCommit: true,
         compareAndDelete: true);
 
-    internal object Gate => gate;
+    /// <summary>
+    /// Serializes the writes and connection bookkeeping of every session this connection owns.
+    /// The gate is a semaphore rather than a monitor because the asynchronous write path holds it
+    /// across an await, which a monitor cannot do.
+    /// </summary>
+    internal IDisposable EnterGate()
+    {
+        gate.Wait();
+        return new GateScope(gate);
+    }
+
+    internal ValueTask<IDisposable> EnterGate(RelationalExecution mode) =>
+        mode.IsAsync ? EnterGateAsync(mode.CancellationToken) : new(EnterGate());
+
+    private async ValueTask<IDisposable> EnterGateAsync(CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new GateScope(gate);
+    }
+
+    private sealed class GateScope(SemaphoreSlim gate) : IDisposable
+    {
+        public void Dispose() => gate.Release();
+    }
 
     internal SqlConnection CreateIndependentConnection()
     {
@@ -81,7 +105,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
             connection.Dispose();
             throw;
         }
-        lock (gate)
+        using (EnterGate())
             sessionConnections.Add(connection);
         return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer);
     }
@@ -143,7 +167,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         if (disposed)
             return;
         disposed = true;
-        lock (gate)
+        using (EnterGate())
         {
             foreach (var connection in sessionConnections)
                 connection.Dispose();

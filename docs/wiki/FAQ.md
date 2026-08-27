@@ -124,9 +124,16 @@ incidents — see **[Versioning & Support](Versioning-and-Support)**.
 
 ### Where's the async API?
 
-Async is available where it matters most today: unit-of-work commits (`CommitAsync`,
-`CommitWithOutcomesAsync`) and the LINQ terminals (`ToListAsync`, `CountAsync`, `AnyAsync`). Direct
-session reads and writes are currently synchronous.
+On every operation. `IStorageSession` declares each operation twice — `Read`/`ReadAsync`,
+`Insert`/`InsertAsync`, and so on through query, aggregate, write, and append — and every optional
+capability does the same, alongside `CommitAsync`/`CommitWithOutcomesAsync` and the LINQ terminals.
+Both surfaces are supported: the async one is what a server-side host should use, and the sync one
+stays because removing it would only move the blocking call into your code.
+
+Whether a call actually yields its thread depends on the driver underneath. PostgreSQL, SQL Server,
+and MongoDB do. SQLite does not — Microsoft.Data.Sqlite completes its async surface synchronously —
+and neither does the in-memory reference provider. See
+**[the async surface reference](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/async-surface.md)**.
 
 ### Can I write my own provider or storage family?
 

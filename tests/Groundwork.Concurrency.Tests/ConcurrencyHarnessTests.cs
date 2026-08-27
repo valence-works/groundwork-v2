@@ -85,6 +85,54 @@ public sealed class ConcurrencyHarnessTests
         Assert.True(report.Passed, Describe(report));
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1000)]
+    public void Sqlite_holds_every_named_invariant_on_the_async_surface(int keyCount)
+    {
+        using var store = TemporarySqliteStore.Create();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("sqlite", new SqliteProviderFactory()),
+            store.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 32,
+                KeyCount = keyCount,
+                RepeatCount = 2,
+                Seed = 5245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                IncludePartialUniqueIndex = true,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, Describe(report));
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+        Assert.Contains(report.Scenarios.SelectMany(scenario => scenario.Outcomes),
+            outcome => outcome.Status == ConcurrencyWriteOutcomeStatus.ConcurrencyConflict);
+    }
+
+    [Fact]
+    public void Sqlite_holds_every_named_invariant_when_writes_commit_through_an_async_unit_of_work()
+    {
+        using var store = TemporarySqliteStore.Create();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory(
+                "sqlite", new SqliteProviderFactory(), commitThroughUnitOfWork: true),
+            store.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 8,
+                KeyCount = 1,
+                RepeatCount = 2,
+                Seed = 6245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, Describe(report));
+    }
+
     [Fact]
     public void In_memory_batched_upsert_preserves_atomic_concurrency_and_created_at()
     {
@@ -445,11 +493,19 @@ internal sealed class BrokenConcurrencySession(Dictionary<string, ConcurrencySto
         }
     }
 
+    public ValueTask<ConcurrencyWriteOutcome> ConditionalUpsertAsync(
+        ConcurrencyWriteRequest request,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(ConditionalUpsert(request));
+
     public ConcurrencyStoredRow? Read(string key)
     {
         lock (rows)
             return rows.TryGetValue(key, out var row) ? row : null;
     }
+
+    public ValueTask<ConcurrencyStoredRow?> ReadAsync(string key, CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(Read(key));
 
     public void Dispose()
     {

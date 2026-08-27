@@ -13,14 +13,25 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [Fact]
-    public void Provider_passes_provider_neutral_conformance()
+    public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
     {
         fixture.Reset();
-        using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
-        var report = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+        using (new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            var synchronous = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
+            Assert.True(synchronous.Passed, Describe(synchronous));
+        }
+
+        fixture.Reset();
+        using (new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            var asynchronous = await ConformanceSuite.RunAsync(new SqlServerProviderFactory(), fixture.ConnectionString);
+            Assert.True(asynchronous.Passed, Describe(asynchronous));
+        }
     }
+
+    private static string Describe(ConformanceReport report) => string.Join(Environment.NewLine,
+        report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}"));
 
     [Fact]
     public void Live_compare_and_delete_preserves_revision_cas_and_exact_rollback()

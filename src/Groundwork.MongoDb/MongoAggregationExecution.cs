@@ -18,13 +18,14 @@ internal sealed partial class MongoStorageSession
     private const string SetProbeValueField = "__groundwork_aggregation_set_probe_value";
     private const string SetProbeCountField = "__groundwork_aggregation_set_probe_count";
 
-    private AggregationResult ExecuteNativeAggregation(
+    private async ValueTask<AggregationResult> ExecuteNativeAggregation(
         AggregationProfile profile,
-        AggregationQuery query)
+        AggregationQuery query,
+        MongoExecution mode)
     {
         try
         {
-            return ExecuteNativeAggregationCore(profile, query);
+            return await ExecuteNativeAggregationCore(profile, query, mode).ConfigureAwait(false);
         }
         catch (AggregationBudgetExceededException)
         {
@@ -42,9 +43,10 @@ internal sealed partial class MongoStorageSession
         }
     }
 
-    private AggregationResult ExecuteNativeAggregationCore(
+    private async ValueTask<AggregationResult> ExecuteNativeAggregationCore(
         AggregationProfile profile,
-        AggregationQuery query)
+        AggregationQuery query,
+        MongoExecution mode)
     {
         AggregationExecutor.ValidateQuery(Unit, profile, query);
         var effectiveSource = AggregationGrouping.EffectiveSourcePredicate(Unit, profile, query);
@@ -53,10 +55,10 @@ internal sealed partial class MongoStorageSession
             : new MongoQueryRenderer().RenderAggregationSourcePredicate(effectiveSource, Unit.Name);
         var hasTimeBucket = AggregationGrouping.TimeBucket(profile) is not null;
         if (!hasTimeBucket)
-            VerifyNativeAggregationBudgets(profile, query, sourceFilter);
+            await VerifyNativeAggregationBudgets(profile, query, sourceFilter, mode).ConfigureAwait(false);
         var stages = RenderNativeAggregationPipeline(Unit, profile, query, sourceFilter);
 
-        var documents = RunAggregationPipeline(stages, isProbe: false);
+        var documents = await RunAggregationPipeline(stages, mode, isProbe: false).ConfigureAwait(false);
 
         var rows = new List<AggregationRow>(documents.Count);
         foreach (var document in documents)
@@ -269,17 +271,18 @@ internal sealed partial class MongoStorageSession
         return stages;
     }
 
-    private void VerifyNativeAggregationBudgets(
+    private async ValueTask VerifyNativeAggregationBudgets(
         AggregationProfile profile,
         AggregationQuery query,
-        BsonDocument? sourceFilter)
+        BsonDocument? sourceFilter,
+        MongoExecution mode)
     {
         var inputStages = new List<BsonDocument>();
         if (sourceFilter is not null)
             inputStages.Add(new BsonDocument("$match", sourceFilter));
         inputStages.Add(new BsonDocument("$limit", (long)profile.MaxInputRows + 1L));
         inputStages.Add(new BsonDocument("$count", "count"));
-        var inputEvidence = RunAggregationPipeline(inputStages).SingleOrDefault();
+        var inputEvidence = (await RunAggregationPipeline(inputStages, mode).ConfigureAwait(false)).SingleOrDefault();
         if (inputEvidence?.GetValue("count", 0).ToInt64() > profile.MaxInputRows)
             throw new AggregationBudgetExceededException(
                 "GW-AGG-BOUND-004",
@@ -294,7 +297,7 @@ internal sealed partial class MongoStorageSession
         groupStages.Add(new BsonDocument("$limit", (long)profile.MaxInputRows + 1L));
         groupStages.Add(new BsonDocument("$group", new BsonDocument { ["_id"] = groupIdentity }));
         groupStages.Add(new BsonDocument("$limit", (long)profile.MaxGroups + 1L));
-        var groups = RunAggregationPipeline(groupStages);
+        var groups = await RunAggregationPipeline(groupStages, mode).ConfigureAwait(false);
         if (groups.Count > profile.MaxGroups)
             throw new AggregationBudgetExceededException(
                 "GW-AGG-BOUND-005",
@@ -302,7 +305,8 @@ internal sealed partial class MongoStorageSession
 
         foreach (var set in profile.Aggregates.OfType<Aggregate.SetUnion>())
         {
-            var evidence = RunAggregationPipeline(RenderSetBudgetProbe(profile, set, sourceFilter, query));
+            var evidence = await RunAggregationPipeline(
+                RenderSetBudgetProbe(profile, set, sourceFilter, query), mode).ConfigureAwait(false);
             if (evidence.Count != 0)
                 throw new AggregationBudgetExceededException(
                     "GW-AGG-BOUND-007",
@@ -348,7 +352,10 @@ internal sealed partial class MongoStorageSession
         return stages;
     }
 
-    private List<BsonDocument> RunAggregationPipeline(IEnumerable<BsonDocument> stages, bool isProbe = true)
+    private ValueTask<List<BsonDocument>> RunAggregationPipeline(
+        IEnumerable<BsonDocument> stages,
+        MongoExecution mode,
+        bool isProbe = true)
     {
         var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(stages);
         var options = new AggregateOptions { Collation = new Collation("simple") };
@@ -357,9 +364,9 @@ internal sealed partial class MongoStorageSession
         // trip, observed here so a budget probe and the main pipeline are both counted at issue.
         commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.aggregate", "MongoDB.Aggregate(pipeline)", ProviderCommandKind.Read, IsProbe: isProbe));
-        return (transactionSession is null
+        return mode.ToList(transactionSession is null
             ? collection.Aggregate(pipeline, options)
-            : collection.Aggregate(transactionSession, pipeline, options)).ToList();
+            : collection.Aggregate(transactionSession, pipeline, options));
     }
 
     private static BsonDocument RenderPredicate(

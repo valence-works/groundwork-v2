@@ -9,7 +9,7 @@ namespace Groundwork.Substrate.Relational;
 /// <summary>Reads and enforces the hidden budget evidence emitted by a native reducer command.</summary>
 public static class RelationalAggregationExecutor
 {
-    public static AggregationResult Execute(
+    public static ValueTask<AggregationResult> Execute(
         DbConnection connection,
         DbTransaction? transaction,
         RelationalDialect dialect,
@@ -17,11 +17,12 @@ public static class RelationalAggregationExecutor
         AggregationProfile profile,
         AggregationQuery query,
         Func<string, object?, object?> decode,
+        RelationalExecution mode,
         IProviderCommandObserver? observer = null,
         string? observerOperation = null) =>
-        ExecuteWithHandling(connection, transaction, dialect, unit, profile, query, decode, null, null, observer, observerOperation);
+        ExecuteWithHandling(connection, transaction, dialect, unit, profile, query, decode, null, null, mode, observer, observerOperation);
 
-    internal static AggregationResult ExecuteScoped(
+    internal static ValueTask<AggregationResult> ExecuteScoped(
         DbConnection connection,
         DbTransaction? transaction,
         RelationalDialect dialect,
@@ -31,6 +32,7 @@ public static class RelationalAggregationExecutor
         Func<string, object?, object?> decode,
         string scopeColumn,
         StorageScope scope,
+        RelationalExecution mode,
         IProviderCommandObserver? observer = null,
         string? observerOperation = null)
     {
@@ -45,11 +47,12 @@ public static class RelationalAggregationExecutor
             decode,
             new Predicate.Equal(scopeRef, QueryConstant.Of(scopeRef, scope.Value)),
             scope,
+            mode,
             observer,
             observerOperation);
     }
 
-    private static AggregationResult ExecuteWithHandling(
+    private static async ValueTask<AggregationResult> ExecuteWithHandling(
         DbConnection connection,
         DbTransaction? transaction,
         RelationalDialect dialect,
@@ -59,12 +62,14 @@ public static class RelationalAggregationExecutor
         Func<string, object?, object?> decode,
         Predicate? providerPredicate,
         StorageScope? scope,
+        RelationalExecution mode,
         IProviderCommandObserver? observer = null,
         string? observerOperation = null)
     {
         try
         {
-            return ExecuteCore(connection, transaction, dialect, unit, profile, query, decode, providerPredicate, scope, observer, observerOperation);
+            return await ExecuteCore(connection, transaction, dialect, unit, profile, query, decode, providerPredicate, scope, mode, observer, observerOperation)
+                .ConfigureAwait(false);
         }
         catch (AggregationBudgetExceededException)
         {
@@ -83,7 +88,7 @@ public static class RelationalAggregationExecutor
         }
     }
 
-    private static AggregationResult ExecuteCore(
+    private static async ValueTask<AggregationResult> ExecuteCore(
         DbConnection connection,
         DbTransaction? transaction,
         RelationalDialect dialect,
@@ -93,6 +98,7 @@ public static class RelationalAggregationExecutor
         Func<string, object?, object?> decode,
         Predicate? providerPredicate,
         StorageScope? scope,
+        RelationalExecution mode,
         IProviderCommandObserver? observer = null,
         string? observerOperation = null)
     {
@@ -104,7 +110,10 @@ public static class RelationalAggregationExecutor
         ArgumentNullException.ThrowIfNull(decode);
         var hasTimeBucket = AggregationGrouping.TimeBucket(profile) is not null;
         if (!hasTimeBucket)
-            VerifyBudgets(connection, transaction, dialect, unit, profile, query, providerPredicate, observer, observerOperation);
+        {
+            await VerifyBudgets(connection, transaction, dialect, unit, profile, query, providerPredicate, mode, observer, observerOperation)
+                .ConfigureAwait(false);
+        }
         var command = providerPredicate is null
             ? RelationalAggregationRenderer.Render(dialect, unit, profile, query)
             : RelationalAggregationRenderer.RenderWithProviderPredicate(dialect, unit, profile, query, providerPredicate);
@@ -114,9 +123,9 @@ public static class RelationalAggregationExecutor
         RelationalQueryResultReader.AddParameters(native, command);
         AggregationExecutionDiagnostics.Observe("aggregate");
         observer?.Observe(new ProviderCommandEvent(observerOperation ?? "relational.aggregate", native.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        using var reader = native.ExecuteReader();
+        using var reader = await mode.ExecuteReader(native).ConfigureAwait(false);
         var rows = new List<AggregationRow>();
-        while (reader.Read())
+        while (await mode.Read(reader).ConfigureAwait(false))
         {
             var raw = new Dictionary<string, object?>(StringComparer.Ordinal);
             for (var index = 0; index < reader.FieldCount; index++)
@@ -169,7 +178,7 @@ public static class RelationalAggregationExecutor
             Source = exception.Source
         };
 
-    private static void VerifyBudgets(
+    private static async ValueTask VerifyBudgets(
         DbConnection connection,
         DbTransaction? transaction,
         RelationalDialect dialect,
@@ -177,6 +186,7 @@ public static class RelationalAggregationExecutor
         AggregationProfile profile,
         AggregationQuery query,
         Predicate? providerPredicate,
+        RelationalExecution mode,
         IProviderCommandObserver? observer = null,
         string? observerOperation = null)
     {
@@ -189,9 +199,9 @@ public static class RelationalAggregationExecutor
         RelationalQueryResultReader.AddParameters(native, probe);
         AggregationExecutionDiagnostics.Observe("budget-probe");
         observer?.Observe(new ProviderCommandEvent(observerOperation ?? "relational.aggregate", native.CommandText, ProviderCommandKind.Read, IsProbe: true));
-        using var reader = native.ExecuteReader();
+        using var reader = await mode.ExecuteReader(native).ConfigureAwait(false);
         var groups = 0;
-        while (reader.Read())
+        while (await mode.Read(reader).ConfigureAwait(false))
         {
             groups++;
             if (Convert.ToInt64(reader[RelationalAggregationRenderer.InputCount], CultureInfo.InvariantCulture) > profile.MaxInputRows)

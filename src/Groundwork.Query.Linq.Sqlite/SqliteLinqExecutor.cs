@@ -33,14 +33,8 @@ public sealed class SqliteLinqExecutor : IGwQueryExecutor
         return result.Rows.Count != 0;
     }
 
-    /// <summary>Uses the session's async query capability when advertised; otherwise the query completes synchronously.</summary>
-    private Task<QueryMaterializedResult> QueryAsync(QueryRequest request, CancellationToken cancellationToken)
-    {
-        if (session is IAsyncQueryStorageSession asyncQuery)
-            return asyncQuery.QueryAsync(request, cancellationToken: cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(session.Query(request));
-    }
+    private ValueTask<QueryMaterializedResult> QueryAsync(QueryRequest request, CancellationToken cancellationToken) =>
+        session.QueryAsync(request, cancellationToken: cancellationToken);
 
     private static T Materialize<T>(IReadOnlyDictionary<string, object?> row, GwTableModel<T>? model)
     {

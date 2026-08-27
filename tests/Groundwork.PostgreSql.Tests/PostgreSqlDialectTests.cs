@@ -656,6 +656,58 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
+    public async Task Provider_passes_the_shipped_conformance_suite_on_the_async_surface()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var report = await ConformanceSuite.RunAsync(new PostgreSqlProviderFactory(), database.ConnectionString);
+        Assert.True(report.Passed, string.Join(Environment.NewLine,
+            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+    }
+
+    [SkippableFact]
+    public void Async_writes_hold_every_named_concurrency_invariant_under_contention()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("postgresql", new PostgreSqlProviderFactory()),
+            database.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 16,
+                KeyCount = 1,
+                RepeatCount = 1,
+                Seed = 8245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, report.ToString());
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+    }
+
+    [SkippableFact]
+    public void Async_unit_of_work_commits_hold_every_named_concurrency_invariant_under_contention()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory(
+                "postgresql", new PostgreSqlProviderFactory(), commitThroughUnitOfWork: true),
+            database.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 8,
+                KeyCount = 1,
+                RepeatCount = 1,
+                Seed = 9245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, report.ToString());
+    }
+
+    [SkippableFact]
     public void Live_compare_and_delete_preserves_revision_cas_and_exact_rollback()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();

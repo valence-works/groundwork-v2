@@ -6,11 +6,11 @@ consumers can execute `query.Where(...).ToListAsync(cancellationToken)` without 
 executor. The adapter is deliberately separate from `Groundwork.Sqlite` so the provider itself
 does not reference the LINQ contract family.
 
-The async terminals run on the async ADO.NET surface with real cancellation propagation into the
-native statement, but they still complete synchronously: Microsoft.Data.Sqlite executes its async
-operations synchronously, and the provider serializes every command on the connection's gate, so a
-call waiting for that gate blocks its thread. `Count()` executes the provider's total-count shape
-over a single-row page and `Any()` a limit-1 probe; neither materializes the matching rows, and a
-result without a provider-side total count is refused rather than counted client-side. A session
-that does not advertise the provider's async capability — for example a custom `IStorageSession`
-decorator — executes the ordinary synchronous query path directly.
+The async terminals call `IStorageSession.QueryAsync`, so any session — including a custom consumer
+decorator — reaches the provider's async query path. They run on the async ADO.NET surface with real
+cancellation propagation into the native statement, but they still complete synchronously:
+Microsoft.Data.Sqlite executes its async operations synchronously, and the provider serializes every
+command on the connection's gate, so a call waiting for that gate blocks its thread. `Count()`
+executes the provider's total-count shape over a single-row page and `Any()` a limit-1 probe;
+neither materializes the matching rows, and a result without a provider-side total count is refused
+rather than counted client-side.
