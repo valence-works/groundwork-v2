@@ -29,6 +29,12 @@ public sealed class MongoClientContext : IDisposable
         return Client.StartSession();
     }
 
+    public Task<IClientSessionHandle> StartSessionAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return Client.StartSessionAsync(cancellationToken: cancellationToken);
+    }
+
     public bool SupportsTransactions()
     {
         ThrowIfDisposed();

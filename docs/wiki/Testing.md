@@ -47,6 +47,17 @@ Covers schema apply/no-op/diff, provider catalog and index verification, storage
 audited cross-scope queries, CRUD outcomes, optimistic conflicts, unique violations, and
 unit-of-work commit/rollback.
 
+`ConformanceSuite.RunAsync` proves the same named checks through the asynchronous session surface,
+plus one more — `cancellation is refused before provider work`. Both runs execute the same check
+bodies, so the two surfaces cannot drift:
+
+```csharp
+var report = await ConformanceSuite.RunAsync(new MyProviderFactory(), connectionString);
+```
+
+Each run scopes its own storage unit names, so running both against **one** database is supported
+and neither run depends on the other having been cleaned up first.
+
 ### Custom scenarios
 
 The default scenario uses a shipped probe schema. A storage family can supply its own declaration and
@@ -89,6 +100,19 @@ var report = ConcurrencyHarness.Run(
 
 It exercises both `None` and `Optimistic` concurrency modes and captures a `MachineLoadSnapshot` so a
 failure on a loaded CI runner is distinguishable from a genuine invariant violation.
+
+Set `Surface = ConcurrencySurface.Asynchronous` to submit every writer's reads and writes on the
+asynchronous session surface, and construct the bridge with `commitThroughUnitOfWork: true` to route
+each contended write through `IUnitOfWork.CommitWithOutcomesAsync` instead of writing straight
+through the session:
+
+```csharp
+var report = ConcurrencyHarness.Run(
+    new StorageProviderConcurrencyFactory(
+        "postgresql", new PostgreSqlProviderFactory(), commitThroughUnitOfWork: true),
+    connectionString,
+    new ConcurrencyProbeOptions { Surface = ConcurrencySurface.Asynchronous });
+```
 
 SQLite and in-memory runs need no external services.
 

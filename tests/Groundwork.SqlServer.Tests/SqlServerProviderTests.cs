@@ -13,13 +13,58 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [Fact]
-    public void Provider_passes_provider_neutral_conformance()
+    public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
+    {
+        fixture.Reset();
+        using (new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            // Both surfaces run against the one live database, without a reset between them:
+            // each proves the whole contract on its own storage units.
+            var synchronous = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
+            Assert.True(synchronous.Passed, Describe(synchronous));
+
+            var asynchronous = await ConformanceSuite.RunAsync(new SqlServerProviderFactory(), fixture.ConnectionString);
+            Assert.True(asynchronous.Passed, Describe(asynchronous));
+        }
+    }
+
+    private static string Describe(ConformanceReport report) => string.Join(Environment.NewLine,
+        report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}"));
+
+    [Fact]
+    public async Task Nested_write_is_refused_rather_than_blocking()
     {
         fixture.Reset();
         using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
-        var report = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+        var name = "nested_write_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction. The gate is a non-reentrant semaphore, so
+        // a regression here hangs rather than throwing; the timeout turns that into a failure.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -17,6 +17,12 @@ public interface ICompareAndDeleteStorageSession
         StorageKey key,
         IReadOnlyDictionary<string, object?> expectedValues,
         WriteOptions? options = null);
+
+    ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Public entry point for provider-owned compare-and-delete operations.</summary>
@@ -40,6 +46,27 @@ public static class CompareAndDeleteSessionExtensions
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(session.Unit, key);
         var validated = CompareAndDeleteValidation.Validate(session.Unit, canonicalKey, expectedValues, options);
         return compareAndDelete.CompareAndDelete(canonicalKey, validated, options);
+    }
+
+    public static ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        this IStorageSession session,
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "compare-and-delete");
+        if (session is not ICompareAndDeleteStorageSession compareAndDelete)
+        {
+            throw new NotSupportedException(
+                "GW-COMPARE-DELETE-001: this provider does not advertise atomic compare-and-delete; " +
+                "inspect ICompareAndDeleteStorageSession before using CompareAndDelete.");
+        }
+
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(session.Unit, key);
+        var validated = CompareAndDeleteValidation.Validate(session.Unit, canonicalKey, expectedValues, options);
+        return compareAndDelete.CompareAndDeleteAsync(canonicalKey, validated, options, cancellationToken);
     }
 }
 

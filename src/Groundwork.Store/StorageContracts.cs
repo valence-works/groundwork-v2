@@ -303,6 +303,21 @@ public static class WritePreconditionValidator
         }
     }
 
+    /// <summary>
+    /// Refuses a write that would open a second provider transaction on a session already inside
+    /// one. A provider connection carries one transaction at a time, so a nested write can neither
+    /// join nor isolate itself from the transaction it is nested in.
+    /// </summary>
+    public static void EnsureNoNestedTransaction(object? activeTransaction)
+    {
+        if (activeTransaction is not null)
+        {
+            throw new InvalidOperationException(
+                "GW-WRITE-NESTED-001: this storage session is already inside a provider write " +
+                "transaction; open a unit of work and stage the writes instead of nesting them.");
+        }
+    }
+
     public static void Validate(StorageUnit unit, WriteOperation operation, WriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(unit);
@@ -330,6 +345,58 @@ public static class WritePreconditionValidator
         }
     }
 }
+
+/// <summary>
+/// Runs a cleanup step while a write failure is already in flight. A rollback or a lifecycle close
+/// can itself fail, and the failure the caller has to act on is the original one, so a cleanup
+/// exception is recorded against the original under <see cref="CleanupFailureKey"/> rather than
+/// thrown in its place.
+/// </summary>
+public static class WriteFailureCleanup
+{
+    /// <summary>Key under which a cleanup exception is attached to the original failure's data.</summary>
+    public const string CleanupFailureKey = "Groundwork.CleanupFailure";
+
+    public static void Run(Exception failure, Action cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        try
+        {
+            cleanup();
+        }
+        catch (Exception cleanupFailure)
+        {
+            Record(failure, cleanupFailure);
+        }
+    }
+
+    public static async ValueTask Run(Exception failure, Func<ValueTask> cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        try
+        {
+            await cleanup().ConfigureAwait(false);
+        }
+        catch (Exception cleanupFailure)
+        {
+            Record(failure, cleanupFailure);
+        }
+    }
+
+    private static void Record(Exception failure, Exception cleanupFailure)
+    {
+        try
+        {
+            failure.Data[CleanupFailureKey] = cleanupFailure.ToString();
+        }
+        catch (Exception attachFailure) when (attachFailure is ArgumentException or NotSupportedException)
+        {
+        }
+    }
+}
+
 
 /// <summary>Explicit optimistic-concurrency precondition for a mutation.</summary>
 public sealed record WriteOptions
@@ -598,6 +665,16 @@ public interface ISchemaCoordinator
 /// session opened from a unit of work is valid until that unit reaches a terminal state or is
 /// disposed.
 /// </summary>
+/// <remarks>
+/// Every operation is declared twice: a synchronous member and an asynchronous counterpart that
+/// takes a <see cref="CancellationToken"/>. Both surfaces are supported, and a provider implements
+/// one session that serves both — the asynchronous member is the operation, and the synchronous
+/// member is the same operation executed on the calling thread. Server-side hosts should prefer the
+/// asynchronous surface; the synchronous surface remains because deleting it would not remove the
+/// blocking call, only move it into consumer code where this library can no longer keep it off a
+/// request thread. Whether a given provider actually yields its thread is a property of the driver
+/// underneath it and is stated in that provider's documentation.
+/// </remarks>
 public interface IStorageSession
 {
     StorageUnit Unit { get; }
@@ -606,10 +683,21 @@ public interface IStorageSession
 
     StoredEntry? Read(StorageKey key);
 
+    ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default);
+
     QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null);
+
+    ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>Executes one named, closed aggregation profile with its declared budgets.</summary>
     AggregationResult Aggregate(AggregationQuery query);
+
+    ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Inserts a row. A ProviderSequence key must be omitted and is returned through
@@ -617,8 +705,18 @@ public interface IStorageSession
     /// </summary>
     WriteOutcome Insert(StorageValues values, WriteOptions? options = null);
 
+    ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     /// <summary>A ProviderSequence key is accepted only as the immutable row locator.</summary>
     WriteOutcome Update(StorageValues values, WriteOptions? options = null);
+
+    ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// With ProviderSequence, an omitted key inserts a generated row. A supplied key is
@@ -626,7 +724,17 @@ public interface IStorageSession
     /// </summary>
     WriteOutcome Upsert(StorageValues values, WriteOptions? options = null);
 
+    ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     WriteOutcome Delete(StorageKey key, WriteOptions? options = null);
+
+    ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Appends a batch under one caller-supplied operation identity. The provider commits the
@@ -634,9 +742,21 @@ public interface IStorageSession
     /// </summary>
     WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values);
 
+    ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Convenience overload for a one-row append.</summary>
     WriteOutcome Append(OperationId operationId, StorageValues value) =>
         Append(operationId, new[] { value });
+
+    /// <summary>Convenience overload for a one-row append.</summary>
+    ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        StorageValues value,
+        CancellationToken cancellationToken = default) =>
+        AppendAsync(operationId, new[] { value }, cancellationToken);
 
     /// <summary>Convenience overload for a caller-supplied append batch.</summary>
     WriteOutcome Append(OperationId operationId, params StorageValues[] values) =>
@@ -645,6 +765,13 @@ public interface IStorageSession
     /// <summary>Alias emphasizing that the operation carries a batch payload.</summary>
     WriteOutcome AppendBatch(OperationId operationId, IReadOnlyList<StorageValues> values) =>
         Append(operationId, values);
+
+    /// <summary>Alias emphasizing that the operation carries a batch payload.</summary>
+    ValueTask<WriteOutcome> AppendBatchAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        AppendAsync(operationId, values, cancellationToken);
 }
 
 /// <summary>Durable lifecycle evidence for the current storage unit and access scope.</summary>
@@ -654,6 +781,8 @@ public sealed record StorageInspection(long? LifetimeCommittedSequenceHighWater)
 public interface IStorageInspectionSession
 {
     StorageInspection Inspect();
+
+    ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>Public durable inspection entry point that refuses before provider work when unsupported.</summary>
@@ -674,6 +803,23 @@ public static class StorageInspectionSessionExtensions
         return inspection.Inspect();
     }
 
+    public static ValueTask<StorageInspection> InspectAsync(
+        this IStorageSession session,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "inspect");
+        if (session is not IStorageInspectionSession inspection)
+        {
+            throw new NotSupportedException(
+                "GW-INSPECT-001: this provider session does not advertise durable sequence inspection; " +
+                "inspect IStorageInspectionSession before using Inspect.");
+        }
+
+        EnsureProviderSequence(session.Unit);
+        return inspection.InspectAsync(cancellationToken);
+    }
+
     /// <summary>Refuses inspection declarations that cannot produce a sequence high-water.</summary>
     public static void EnsureProviderSequence(StorageUnit unit)
     {
@@ -691,18 +837,10 @@ public static class StorageInspectionSessionExtensions
 public interface IExactAppendStorageSession
 {
     AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values);
-}
 
-/// <summary>
-/// Internal provider capability for query execution on the async ADO.NET surface. The capability
-/// is best-effort: decorators forward it when their inner session advertises it, and callers fall
-/// back to the synchronous query path when a session does not.
-/// </summary>
-internal interface IAsyncQueryStorageSession
-{
-    Task<QueryMaterializedResult> QueryAsync(
-        QueryRequest request,
-        QueryRenderOptions? options = null,
+    ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
         CancellationToken cancellationToken = default);
 }
 
@@ -712,6 +850,11 @@ public interface IPrivilegedCrossScopeQuerySession
     CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
         QueryRenderOptions? options = null);
+
+    ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Public cross-scope query entry point with explicit capability and access checks.</summary>
@@ -731,6 +874,23 @@ public static class PrivilegedCrossScopeQuerySessionExtensions
             throw new NotSupportedException(
                 "GW-ACCESS-002: this provider session does not advertise privileged cross-scope queries.");
         return privileged.QueryAcrossScopes(request, options);
+    }
+
+    public static ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        this IStorageSession session,
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(request);
+        if (!session.Access.IsPrivilegedAcrossScopes)
+            throw new InvalidOperationException(
+                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
+        if (session is not IPrivilegedCrossScopeQuerySession privileged)
+            throw new NotSupportedException(
+                "GW-ACCESS-002: this provider session does not advertise privileged cross-scope queries.");
+        return privileged.QueryAcrossScopesAsync(request, options, cancellationToken);
     }
 }
 
@@ -753,6 +913,25 @@ public static class ExactAppendSessionExtensions
         }
 
         return exact.AppendWithOutcomes(operationId, values);
+    }
+
+    public static ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        this IStorageSession session,
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(values);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "append");
+        if (session is not IExactAppendStorageSession exact)
+        {
+            throw new NotSupportedException(
+                "GW-APPEND-003: this provider session does not advertise exact append outcomes; " +
+                "inspect IExactAppendStorageSession before using AppendWithOutcomes.");
+        }
+
+        return exact.AppendWithOutcomesAsync(operationId, values, cancellationToken);
     }
 
     public static AppendOutcomeReport AppendWithOutcomes(

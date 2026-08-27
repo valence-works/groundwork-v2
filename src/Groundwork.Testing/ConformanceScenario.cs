@@ -55,6 +55,46 @@ public sealed class ConformanceScenario
     /// <summary>The original shipped #237 probe, retained as the default scenario.</summary>
     public static ConformanceScenario Default { get; } = CreateDefault();
 
+    /// <summary>
+    /// Returns this scenario with <paramref name="suffix"/> appended to both storage unit
+    /// identities and names. Two runs against one database must not share schema objects, so the
+    /// suite scopes each run's units; a caller running the suite more than once for its own reasons
+    /// can scope them the same way.
+    /// </summary>
+    public ConformanceScenario WithUnitNameSuffix(string suffix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(suffix);
+        EnsureRoomForSuffix(Global, suffix);
+        EnsureRoomForSuffix(Scoped, suffix);
+        return new ConformanceScenario(
+            Rename(Global, suffix),
+            Rename(Scoped, suffix),
+            Values,
+            Key,
+            AttachKey,
+            MissingKey,
+            ValueColumn);
+    }
+
+    private static StorageUnit Rename(StorageUnit unit, string suffix) => unit with
+    {
+        Id = new StorageUnitId(unit.Id.Value + suffix),
+        Name = unit.Name + suffix
+    };
+
+    private static void EnsureRoomForSuffix(StorageUnit unit, string suffix)
+    {
+        var budget = PortabilityValidator.MaximumPortableIdentifierLength - suffix.Length;
+        if (unit.Name.Length > budget)
+        {
+            throw new ArgumentException(
+                $"Storage unit '{unit.Name}' leaves no room for the '{suffix}' scope; a conformance " +
+                $"scenario's unit names must stay within {budget} characters so each run can create " +
+                "its own schema objects.",
+                nameof(suffix));
+        }
+    }
+
     private static ConformanceScenario CreateDefault()
     {
         var global = CreateUnit("conformance_global", ScopePolicy.Global, ConcurrencyDeclaration.None);

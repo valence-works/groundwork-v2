@@ -1326,6 +1326,98 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ledger.Remove(key);
     }
 
+    /// <summary>
+    /// The reference provider keeps every unit in process behind a monitor, so it has no I/O to
+    /// yield a thread for. The asynchronous surface observes cancellation, runs the same guarded
+    /// body on the calling thread, and returns an already-completed task.
+    /// </summary>
+    private static ValueTask<T> Completed<T>(CancellationToken cancellationToken, Func<T> operation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(operation());
+    }
+
+    public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Read(key));
+
+    public ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Query(request, options));
+
+    public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => QueryAcrossScopes(request, options));
+
+    public ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Aggregate(query));
+
+    public ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Insert(values, options));
+
+    public ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Update(values, options));
+
+    public ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Upsert(values, options));
+
+    public ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Delete(key, options));
+
+    public ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => ConditionalUpsert(values, options));
+
+    public ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => CompareAndDelete(key, expectedValues, options));
+
+    public ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Append(operationId, values));
+
+    public ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => AppendWithOutcomes(operationId, values));
+
+    public ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, Inspect);
+
+    public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None, () => ApplyRetention(options));
+
+    public ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None,
+            () => ApplyRetention(operationId, options));
+
     internal void Close() => disposed = true;
 
     private WriteOutcome Mutate(
@@ -1504,6 +1596,10 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         return batch.DrainCompleted();
     }
 
+    /// <summary>
+    /// The reference provider commits in process, so an asynchronous commit runs the same body on
+    /// the calling thread and returns an already-completed task.
+    /// </summary>
     public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
