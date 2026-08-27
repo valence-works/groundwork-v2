@@ -18,6 +18,11 @@ dotnet add package Groundwork.Records.Store --prerelease
 
 ## Every Groundwork package
 
+Previews are published to the public
+[Groundwork Feedz source](https://f.feedz.io/valence-works/groundwork/nuget/index.json), not yet to
+nuget.org, so configure that source for `Groundwork.*` before restoring — see
+[Installation](https://github.com/valence-works/groundwork-v2/blob/main/docs/wiki/Installation.md).
+
 Pin one exact version across your whole `Groundwork.*` closure — mixing versions is not supported
 and not tested. Previews are pre-1.0; read the
 [versioning policy](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/versioning.md)

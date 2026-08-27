@@ -63,19 +63,18 @@ public sealed class PublicPackageSet
 
     private string PackOnce()
     {
-        // A release run has already packed the allowlist by the time these assertions matter, so
-        // read those artifacts rather than spending a minute reproducing them.
+        // A release run packs the allowlist from this same tree before these assertions matter, so
+        // read those artifacts rather than spending minutes reproducing them.
         var released = Path.Combine(Root, "artifacts", "packages");
         if (IsComplete(released))
             return released;
 
-        // Otherwise pack into a directory of this suite's own. eng/pack-public-packages.sh clears
-        // its output first, and Groundwork.PublicApi.Acceptance.Tests packs into artifacts/packages,
-        // so sharing that directory would let either suite delete the other's artifacts mid-run.
+        // Otherwise pack into a directory of this suite's own, every time. Reusing what a previous
+        // run left there would assert against artifacts that no longer match the working tree — the
+        // shape of false signal these tests exist to remove. eng/pack-public-packages.sh clears its
+        // output first, and Groundwork.PublicApi.Acceptance.Tests packs into artifacts/packages, so
+        // a shared directory would also let either suite delete the other's artifacts mid-run.
         var own = Path.Combine(Root, "artifacts", "packaging-tests");
-        if (IsComplete(own))
-            return own;
-
         Run("dotnet", "restore Groundwork.slnx --nologo -m:1 -nodeReuse:false");
         Run("/bin/bash", $"eng/pack-public-packages.sh {own}");
         return own;
@@ -97,17 +96,19 @@ public sealed class PublicPackageSet
             UseShellExecute = false
         };
         // Reused MSBuild worker nodes outlive the command that started them and keep the inherited
-        // pipe handles open, so reading to end would block long after the build finished. One
-        // in-process node, not reused, keeps the redirected streams closing when the child exits.
+        // pipe handles open, so the redirected streams would not reach end of file when the build
+        // finished. One in-process node, not reused, keeps them closing with the child.
         startInfo.Environment["MSBUILDDISABLENODEREUSE"] = "1";
-        startInfo.Environment["MSBUILDNODECONNECTIONTIMEOUT"] = "1000";
 
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start {fileName}.");
-        var output = process.StandardOutput.ReadToEnd();
-        var error = process.StandardError.ReadToEnd();
+        // Drain both pipes concurrently: a build that fills one while the reader is blocked on the
+        // other deadlocks them both.
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
         process.WaitForExit();
         if (process.ExitCode != 0)
-            throw new InvalidOperationException($"'{fileName} {arguments}' failed:{Environment.NewLine}{output}{Environment.NewLine}{error}");
+            throw new InvalidOperationException(
+                $"'{fileName} {arguments}' failed:{Environment.NewLine}{output.Result}{Environment.NewLine}{error.Result}");
     }
 }
