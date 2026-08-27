@@ -15,9 +15,10 @@ namespace Groundwork.Differential.Tests;
 /// asserted with the same weight as rows: a provider that returns the right rows but refuses a
 /// different set of queries has not been proven portable.
 /// <para>
-/// Serialized with the other live-provider differentials. Two suites writing and reading the same
-/// SQL Server instance concurrently deadlock each other, which is a fact about the test run rather
-/// than about the providers.
+/// Serialized with the other live-provider differentials, which is what every live-provider suite in
+/// this assembly already does. xUnit runs collections in parallel, and two suites writing and reading
+/// one SQL Server instance can deadlock each other — a fact about how the tests are run rather than
+/// about the providers.
 /// </para>
 /// </summary>
 [Collection(NativeProviderDifferentialCollection.Name)]
