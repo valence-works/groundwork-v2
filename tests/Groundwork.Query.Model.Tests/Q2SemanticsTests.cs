@@ -193,16 +193,22 @@ public sealed class Q2SemanticsTests
     [Fact]
     public void No_comparison_over_a_double_column_is_portable_including_equality()
     {
-        // Equality and membership cannot even be spelled: a Double constant is refused at
-        // construction, so there is no Equal or In node to validate.
+        // A Double equality against a value cannot even be spelled: the constant is refused at
+        // construction, so there is no Equal node to validate.
         Assert.Throws<ArgumentException>(() => QueryConstant.Of(Double, 0.1d));
-        Assert.Throws<ArgumentException>(() => QueryConstant.Of(Double, null));
 
         // 0.1 + 0.2 is the reason. The two sides are not the same binary64 value, so an exact
         // equality that looked portable would answer a question the caller did not ask.
         Assert.NotEqual(0.3d, 0.1d + 0.2d);
 
-        // The shapes that need no typed constant are refused by validation instead.
+        // A *null* constant is legal for any nullable column — that is the general null rule, not
+        // a Double one — so `x == null` over a Double column can be built. Validation is what
+        // refuses it, and it refuses on the column rather than on the constant.
+        var equalNull = PortableQuerySemantics.Validate(
+            new Predicate.Equal(Double, QueryConstant.Of(Double, null)));
+        Assert.Contains(equalNull.Refusals, refusal => refusal.Code == "GW-SEM-TYPE-006");
+        Assert.False(equalNull.IsPortable);
+
         var compare = PortableQuerySemantics.Validate(new Predicate.ColumnCompare(Double, CompareOp.Equal, Double));
         Assert.Contains(compare.Refusals, refusal => refusal.Code == "GW-SEM-TYPE-006");
 
