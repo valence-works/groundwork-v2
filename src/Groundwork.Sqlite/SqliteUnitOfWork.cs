@@ -80,10 +80,13 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
             transaction.Commit();
             return batch.DrainCompleted();
         }
-        catch
+        catch (Exception failure)
         {
-            try { transaction.Rollback(); }
-            finally { Complete(); }
+            WriteFailureCleanup.Run(failure, () =>
+            {
+                try { transaction.Rollback(); }
+                finally { Complete(); }
+            });
             throw;
         }
         finally
@@ -125,9 +128,10 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
     private void Complete()
     {
         terminal = true;
-        foreach (var session in sessions) session.Close();
-        transaction.Dispose();
-        connection.Dispose();
+        WriteFailureCleanup.RunAll(
+            () => { foreach (var session in sessions) session.Close(); },
+            transaction.Dispose,
+            connection.Dispose);
     }
 
     private void ThrowIfTerminal()
