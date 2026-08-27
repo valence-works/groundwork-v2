@@ -60,6 +60,7 @@ public sealed class DocumentsProviderProofTests
             .Project(document => document.Name)
             .Build();
         Assert.True(connection.Schema.Apply(unit.StorageUnit).Applied);
+        _ = connection.OpenSession(unit.StorageUnit, StorageAccess.Global);
 
         var value = new ProviderDocument(Guid.NewGuid(), "Ada");
         var documentObserver = new ProviderCommandObserver();

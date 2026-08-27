@@ -328,7 +328,7 @@ internal sealed class SqlServerDialect : RelationalDialect
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table)
         => RelationalSearchKeyCatalog.Read(
             connection,
@@ -371,16 +371,16 @@ internal sealed class SqlServerDialect : RelationalDialect
             throw new InvalidOperationException($"SQL Server schema history publish affected an unexpected number of rows for '{target}'.");
     }
 
-    public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+    public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT 1 FROM sys.tables WHERE schema_id=SCHEMA_ID(N'dbo') AND name=@name;";
-        AddParameter(command, "@name", table);
-        return command.ExecuteScalar() is not null;
+        command.CommandText = "SELECT OBJECT_ID(@name, N'U');";
+        AddParameter(command, "@name", QuoteIdentifier(table));
+        return command.ExecuteScalar() is not (null or DBNull);
     }
 
-    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction transaction, string table)
+    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -415,7 +415,7 @@ internal sealed class SqlServerDialect : RelationalDialect
         return result;
     }
 
-    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction transaction, string table, string index)
+    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index)
     {
         var physical = PhysicalIndexName(table, index);
         using var command = connection.CreateCommand();
@@ -442,7 +442,7 @@ internal sealed class SqlServerDialect : RelationalDialect
     public override string? BackfillColumnSql(string table, ColumnDefinition column) =>
         column.Default is null ? null : $"UPDATE {QuoteIdentifier(table)} SET {QuoteIdentifier(column.Name)}={MapDefault(column)} WHERE {QuoteIdentifier(column.Name)} IS NULL;";
 
-    public override void ValidateTarget(DbConnection connection, DbTransaction transaction, PhysicalSchemaTarget target) =>
+    public override void ValidateTarget(DbConnection connection, DbTransaction? transaction, PhysicalSchemaTarget target) =>
         SqlServerIndexKeyBudgetValidator.Validate(target.Subject.Definition);
 
     internal static string PhysicalIndexName(string table, string logicalName) =>

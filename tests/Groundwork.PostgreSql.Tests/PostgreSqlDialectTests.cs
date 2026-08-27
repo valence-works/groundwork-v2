@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
@@ -858,4 +859,89 @@ public sealed class PostgreSqlDialectTests
 
     private static string PhysicalIndexName(string table, string index) =>
         $"__groundwork_ix_{table.Length}_{table}_{index.Length}_{index}";
+
+    [SkippableFact]
+    public void Live_dropped_column_on_a_plain_unit_is_fatal_at_session_open()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var unit = AdmissionUnit("pg_admission_drop");
+        using (var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using (var raw = new NpgsqlConnection(database.ConnectionString))
+        {
+            raw.Open();
+            using var command = raw.CreateCommand();
+            command.CommandText = $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";";
+            command.ExecuteNonQuery();
+        }
+
+        using var reopened = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void Live_dropped_index_degrades_instead_of_blocking_session_open()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var unit = AdmissionUnit("pg_admission_index") with
+        {
+            Indexes = [new IndexDefinition { Name = "by_payload", Columns = [new IndexColumn("payload")] }]
+        };
+        using (var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using (var raw = new NpgsqlConnection(database.ConnectionString))
+        {
+            raw.Open();
+            using var command = raw.CreateCommand();
+            command.CommandText = $"DROP INDEX \"{PhysicalIndexName(unit.Name, "by_payload")}\";";
+            command.ExecuteNonQuery();
+        }
+
+        using var reopened = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var session = reopened.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(
+            new Dictionary<string, object?> { ["id"] = "one", ["payload"] = "first" })).Status);
+    }
+
+    [SkippableFact]
+    public void Live_admission_inspects_once_per_unit_per_connection()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var unit = AdmissionUnit("pg_admission_cache");
+        using (var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using var reopened = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var firstObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, firstObserver);
+        var admissionEvent = Assert.Single(firstObserver.Commands);
+        Assert.Equal("postgresql.schema-admission", admissionEvent.Operation);
+        Assert.Equal(ProviderCommandKind.Read, admissionEvent.Kind);
+
+        var secondObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, secondObserver);
+        Assert.Equal(0, secondObserver.RoundTrips);
+    }
+
+    private static StorageUnit AdmissionUnit(string id) => new()
+    {
+        Id = new StorageUnitId(id),
+        Name = id,
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+            new ColumnDefinition { Name = "payload", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
 }

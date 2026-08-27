@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
@@ -16,32 +17,26 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly SqlServerDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+    private readonly RelationalRuntimeAdmission admission;
 
     internal SqlServerSchemaCoordinator(SqlServerProviderConnection owner)
     {
         executor = new RelationalSchemaExecutor(owner.CreateIndependentConnection, dialect);
+        admission = new RelationalRuntimeAdmission(
+            "sqlserver.schema-admission",
+            desired => Target(Prepare(desired)),
+            (target, connection) => connection is null
+                ? executor.InspectDeployedHistory(target)
+                : executor.InspectDeployedHistory(target, connection));
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired)
-    {
-        var physical = Prepare(desired);
-        if (physical.DerivedColumns.Count == 0)
-            return;
-        var target = Target(physical);
-        var inspection = executor.InspectHistory(target);
-        var applied = inspection.History.AppliedState;
-        if (applied is null)
-            return;
-        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
-            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
-        {
-            throw new InvalidOperationException(
-                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
-        }
-    }
+    internal void EnsureRuntimeAdmission(
+        StorageUnit desired,
+        IProviderCommandObserver? observer = null,
+        DbConnection? connection = null) =>
+        admission.EnsureAdmitted(desired, observer, connection);
 
     public SchemaDiff Diff(StorageUnit desired)
     {
@@ -61,10 +56,17 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         var physical = Prepare(desired);
         Remember(desired, physical);
         var target = Target(physical);
-        var result = PhysicalSchemaApplication.Apply(target, executor);
-        return new SchemaApplyResult(
-            new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        try
+        {
+            var result = PhysicalSchemaApplication.Apply(target, executor);
+            return new SchemaApplyResult(
+                new SchemaDiff(MapChanges(result.Plan.Operations)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
+        finally
+        {
+            admission.Invalidate(desired.Id);
+        }
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
@@ -276,7 +278,7 @@ internal sealed class SqlServerProviderCatalog(SqlServerProviderConnection owner
         {
             using var connection = owner.CreateIndependentConnection();
             return unit.Indexes
-                .Select(index => (index, metadata: dialect.ReadIndex(connection, null!, unit.Name, index.Name)))
+                .Select(index => (index, metadata: dialect.ReadIndex(connection, null, unit.Name, index.Name)))
                 .Where(item => item.metadata is not null)
                 .Select(item => new ProviderIndex(
                     item.index.Name,

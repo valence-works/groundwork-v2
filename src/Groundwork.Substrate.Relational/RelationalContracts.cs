@@ -15,6 +15,9 @@ public abstract class RelationalDialect
     public const string SearchKeyDefinitionKind = "search-key-algorithm";
     public const string SearchKeyDefinitionSeparator = "\u001f";
 
+    public const string SchemaHistoryTable = "__groundwork_schema_history";
+    public const string SearchKeyAlgorithmsTable = "__groundwork_search_key_algorithms";
+
     public abstract string ProviderName { get; }
 
     /// <summary>Creates the provider's ordinary query renderer for shared predicate fragments.</summary>
@@ -183,12 +186,12 @@ public abstract class RelationalDialect
 
     public abstract bool TableExists(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table);
 
     public abstract IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table);
 
     /// <summary>
@@ -198,12 +201,12 @@ public abstract class RelationalDialect
     /// </summary>
     public virtual IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table) => new Dictionary<string, string>(StringComparer.Ordinal);
 
     public abstract RelationalIndexMetadata? ReadIndex(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string index);
 
@@ -225,7 +228,7 @@ public abstract class RelationalDialect
 
     public virtual void ValidateTarget(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         PhysicalSchemaTarget target)
     {
     }

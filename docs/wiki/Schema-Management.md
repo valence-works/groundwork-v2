@@ -33,6 +33,12 @@ At startup, providers compare the deployed catalog with the compiled physical ta
 The split is deliberate: a missing column means data cannot be read correctly (fail hard), while a
 missing index means *some queries* are no longer safe (fail those, keep the app up).
 
+Admission runs **once per storage unit per provider connection**: the first session (or unit of
+work) that touches a unit verifies the deployed catalog read-only and caches the verdict for the
+connection's lifetime; a schema apply re-arms verification for that unit. Detection is therefore
+per connection lifetime — out-of-band tampering while a connection stays open is out of scope and
+surfaces on the next new connection.
+
 MongoDB does the same inspect-only split at `OpenSession` via its public `InspectSchema` report.
 
 ## The `groundwork` CLI
@@ -100,6 +106,12 @@ groundwork apply --schema groundwork.schema.json --provider postgresql \
 ```
 
 You cannot authorize destructive work generically. You authorize *these operations, in this plan*.
+
+> **Drops are planned, not current:** no operation kind can produce a drop today, so the
+> `drop-column:`/`drop-index:` identities above show the authorization contract for planned
+> functionality ([#82](https://github.com/valence-works/Groundwork/issues/82)). The authorization
+> machinery itself is live: a **derived-column backfill** is a destructive operation, so `--safe`
+> refuses it until its exact identity is supplied through `--allow-destructive`.
 
 ### Providers and connections
 

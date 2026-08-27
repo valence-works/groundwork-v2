@@ -33,9 +33,11 @@ var unit = StorageUnit.Declare("orders", "orders")
     .Build();
 ```
 
-`Id` is the **logical** identity — it can contain dots and other characters, and it is what schema
-history and planning track across renames. `Name` is the **physical** identifier and is held to
-strict portable rules (ASCII, ≤ 63 bytes, no `__groundwork_` prefix). See
+`Id` is the **logical** identity — it can contain dots and other characters that the physical name
+cannot. It does **not** buy you renames today: schema planning has no rename operation, so a changed
+physical name is treated as drift and refused. Rename tracking via the logical `Id` is planned
+([#82](https://github.com/valence-works/Groundwork/issues/82)). `Name` is the **physical**
+identifier and is held to strict portable rules (ASCII, ≤ 63 bytes, no `__groundwork_` prefix). See
 **[Declaring Storage](Declaring-Storage)**.
 
 A storage unit has **no provider knowledge whatsoever**. The same object is handed to SQLite and to

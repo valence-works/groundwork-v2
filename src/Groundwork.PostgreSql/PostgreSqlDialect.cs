@@ -315,7 +315,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table)
         => RelationalSearchKeyCatalog.Read(
             connection,
@@ -366,7 +366,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
             throw new InvalidOperationException($"PostgreSQL schema history publish affected an unexpected number of rows for '{target}'.");
     }
 
-    public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+    public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = Command(connection, transaction, "SELECT to_regclass(@table) IS NOT NULL;");
         Add(command, "table", table);
@@ -375,7 +375,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table)
     {
         using var command = Command(connection, transaction, """
@@ -415,7 +415,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     public override RelationalIndexMetadata? ReadIndex(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string index)
     {
@@ -430,7 +430,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     private RelationalIndexMetadata? ReadIndexByName(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string index)
     {
