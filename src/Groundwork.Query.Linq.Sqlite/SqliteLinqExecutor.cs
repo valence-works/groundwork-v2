@@ -1,75 +1,43 @@
-using Groundwork.Query.Linq;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Model;
 using Groundwork.Store;
 
 namespace Groundwork.Query.Linq.Sqlite;
 
-/// <summary>Configured async adapter for a closed LINQ database over an existing SQLite session.</summary>
+/// <summary>
+/// Configured async adapter for a closed LINQ database over an existing SQLite session.
+/// <para>
+/// SQLite's execution path is not SQLite-specific: it is <see cref="GwLinqExecutor"/>, the one
+/// adapter every provider uses. This type remains as the named SQLite entry point and adds nothing
+/// of its own.
+/// </para>
+/// </summary>
 public sealed class SqliteLinqExecutor : IGwQueryExecutor
 {
-    private readonly IStorageSession session;
+    private readonly GwLinqExecutor executor;
 
-    public SqliteLinqExecutor(IStorageSession session) =>
-        this.session = session ?? throw new ArgumentNullException(nameof(session));
-
-    public async Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
+    public SqliteLinqExecutor(IStorageSession session)
+        : this(session, connection: null)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        var result = await QueryAsync(request, cancellationToken).ConfigureAwait(false);
-        return result.Rows.Select(row => Materialize<T>(row, model)).ToArray();
     }
 
-    public async Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        var result = await QueryAsync(QueryRequestExecution.ForProviderCount(request), cancellationToken).ConfigureAwait(false);
-        return QueryRequestExecution.RequireTotalCount(request, result.TotalCount);
-    }
+    /// <summary>
+    /// Admits queries against the declared indexes the connection's catalog proves are deployed, and
+    /// under the budgets it advertises, so a declared-but-undeployed index cannot rescue a query
+    /// during a rolling deploy and the fence uses SQLite's real parameter ceiling.
+    /// </summary>
+    public SqliteLinqExecutor(IStorageSession session, IStorageProviderConnection? connection) =>
+        executor = new GwLinqExecutor(session, connection);
 
-    public async Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        var result = await QueryAsync(QueryRequestExecution.ForExistenceProbe(request), cancellationToken).ConfigureAwait(false);
-        return result.Rows.Count != 0;
-    }
+    public Task<IReadOnlyList<T>> ToListAsync<T>(
+        QueryRequest request,
+        GwTableModel<T>? model = null,
+        CancellationToken cancellationToken = default) =>
+        executor.ToListAsync(request, model, cancellationToken);
 
-    /// <summary>Uses the session's async query capability when advertised; otherwise the query completes synchronously.</summary>
-    private Task<QueryMaterializedResult> QueryAsync(QueryRequest request, CancellationToken cancellationToken)
-    {
-        if (session is IAsyncQueryStorageSession asyncQuery)
-            return asyncQuery.QueryAsync(request, cancellationToken: cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(session.Query(request));
-    }
+    public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) =>
+        executor.CountAsync(request, cancellationToken);
 
-    private static T Materialize<T>(IReadOnlyDictionary<string, object?> row, GwTableModel<T>? model)
-    {
-        if (typeof(T) == typeof(IReadOnlyDictionary<string, object?>)) return (T)(object)row;
-        var value = Activator.CreateInstance<T>();
-        var mappings = model?.Columns.Select(column => (Member: column.Key, Column: column.Value.Name))
-            ?? typeof(T).GetMembers(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
-                .Where(member => member is System.Reflection.PropertyInfo or System.Reflection.FieldInfo)
-                .Select(member => (Member: member.Name, Column: member.Name));
-        foreach (var column in mappings)
-        {
-            if (!row.TryGetValue(column.Column, out var raw)) continue;
-            var member = typeof(T).GetMember(column.Member, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance).FirstOrDefault(item => item is System.Reflection.PropertyInfo or System.Reflection.FieldInfo);
-            switch (member)
-            {
-                case System.Reflection.PropertyInfo property when property.CanWrite:
-                    property.SetValue(value, raw is null ? null : ConvertValue(raw, property.PropertyType));
-                    break;
-                case System.Reflection.FieldInfo field when !field.IsInitOnly:
-                    field.SetValue(value, raw is null ? null : ConvertValue(raw, field.FieldType));
-                    break;
-            }
-        }
-        return value;
-    }
-
-    private static object? ConvertValue(object value, Type target)
-    {
-        var core = Nullable.GetUnderlyingType(target) ?? target;
-        return core.IsInstanceOfType(value) ? value : Convert.ChangeType(value, core, System.Globalization.CultureInfo.InvariantCulture);
-    }
+    public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) =>
+        executor.AnyAsync(request, cancellationToken);
 }

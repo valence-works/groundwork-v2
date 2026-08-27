@@ -15,6 +15,7 @@ public sealed class PackagingContractTests
         "src/Groundwork.MongoDb/Groundwork.MongoDb.csproj",
         "src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj",
         "src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj",
+        "src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj",
         "src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj",
         "src/Groundwork.Query.Model/Groundwork.Query.Model.csproj",
         "src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj",

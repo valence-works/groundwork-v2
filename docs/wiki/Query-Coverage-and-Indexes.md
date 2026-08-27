@@ -98,6 +98,62 @@ Behavior that matters operationally:
 - Cache eviction emits the `groundwork.runtime.coverage.cache.eviction` metric. Watch it: sustained
   eviction means your shape space is larger than `MaximumCachedShapes` (default 1024).
 
+## The LINQ executor
+
+`GwLinqExecutor` (package `Groundwork.Query.Linq.Execution`) is the one adapter behind the LINQ
+terminals, for **every** provider. There is deliberately no per-provider executor: admission, scan
+acceptance, paging, materialization, and the async terminals are provider-neutral, and a second copy
+per provider would be a second place for coverage to drift.
+
+```csharp
+var executor = new GwLinqExecutor(session, connection);
+var rows = await db.Table<Customer>().Query
+    .Where(c => c.Email == "ada@example.test")
+    .ToListAsync(executor);
+```
+
+Every terminal admits the request through `RuntimeCoverageGate` **before** the provider is asked to
+render anything. The request that is admitted is the one you wrote — not the narrowed count or
+existence probe derived from it — so a runtime refusal carries the same code and the same named fix
+the analyzer reported at build time.
+
+- **Pass the connection.** It supplies both things admission needs beyond the query itself: the
+  catalog, so declared indexes are intersected with the deployed ones, and the budgets. Without it
+  the gate admits against the declaration alone — an index a rolling deploy has not created yet can
+  still satisfy it — and the fence falls back to portable defaults.
+- Each provider supplies only its native budgets, advertised by the **connection** as a
+  `QueryAdmissionProfile`, so the pre-execution value fence uses the provider's real limit instead of
+  a portable guess — SQLite 999, SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter
+  budget of its own (its bound is the 16 MB command document) and keeps the portable default rather
+  than inventing one. A budget is a deployment property — SQLite's ceiling is a compile-time option
+  of the library you loaded — which is why it is advertised rather than assumed, and why it lives on
+  the connection where a session decorator cannot drop it.
+
+### A declared key is not a coverage candidate
+
+**Filtering on a key column is refused unless you also declare an index over it.**
+
+```csharp
+table.Query.Where(c => c.Id == id).ToListAsync(executor);   // GW-COVER-006
+```
+
+This is not specific to the runtime. Coverage candidates are built from `Indexes` and never from
+`Key` — in the analyzer, in the CLI, and now at runtime — so all three agree, and they agree on the
+wrong answer: every provider does physically index a declared key (a relational `PRIMARY KEY`, or
+Mongo's `_id`), so the deployed catalog *can* serve that read.
+
+Until that is fixed, your options are:
+
+- **Read the row by key instead.** `session.Read(key)` is a point read. It is not a query, does not
+  go through coverage, and is the right call for "fetch this row".
+- **Declare an index over the key column** if you genuinely need the query surface for it — and be
+  aware of what you are buying. The refusal's suggested `[GwIndex(...)]` names the key column, and
+  following it creates a *second* physical index duplicating the primary key: extra storage and
+  write amplification on every insert, on every provider. Prefer the point read.
+
+Tracked in [#203](https://github.com/valence-works/groundwork-v2/issues/203). Fixing it changes what
+the analyzer reports, which regenerates the conformance corpus, so it is its own piece of work.
+
 ## Accepted scans
 
 Some reads genuinely should scan — a small admin export, a one-off migration. Say so explicitly:
@@ -165,9 +221,8 @@ At startup, providers compare the deployed catalog against the compiled physical
 
 MongoDB performs the same inspect-only split at `OpenSession` via its public `InspectSchema` report.
 
-> **Known provider gap:** MongoDB currently has no query executor wired to the runtime coverage gate.
-> Mongo query endpoints must call the shared `RuntimeCoverageGate` before execution to obtain
-> dependent-shape refusal. Extra native indexes are never used to satisfy a declared index.
+All four providers execute LINQ terminals through the same gate — see **[The LINQ executor](#the-linq-executor)**.
+Extra native indexes are never used to satisfy a declared index, on any provider.
 
 ## Designing indexes that cover
 

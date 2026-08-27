@@ -15,8 +15,17 @@ public sealed class SqlServerProviderFactory : IStorageProviderFactory
         new SqlServerProviderConnection(connectionString);
 }
 
-public sealed class SqlServerProviderConnection : IStorageProviderConnection
+public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
+    /// <summary>
+    /// The budget SqlServerQueryRenderer enforces, so the pre-execution fence and the renderer cannot
+    /// disagree about it.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission { get; } = new()
+    {
+        MaximumParameters = SqlServerQueryRenderer.ParameterBudget
+    };
+
     private readonly object gate = new();
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];

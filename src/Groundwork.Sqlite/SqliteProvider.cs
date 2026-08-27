@@ -15,8 +15,17 @@ public sealed class SqliteProviderFactory : IStorageProviderFactory
         new SqliteProviderConnection(connectionString);
 }
 
-public sealed class SqliteProviderConnection : IStorageProviderConnection
+public sealed class SqliteProviderConnection : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
+    /// <summary>
+    /// SQLite's parameter ceiling is a compile-time option of the library this process loaded, so it is
+    /// advertised here rather than assumed by callers.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission { get; } = new()
+    {
+        MaximumParameters = SqliteQueryRenderer.ParameterBudget
+    };
+
     private readonly object gate = new();
     private readonly SqliteConnection connection;
     private readonly FileStream? schemaLock;
