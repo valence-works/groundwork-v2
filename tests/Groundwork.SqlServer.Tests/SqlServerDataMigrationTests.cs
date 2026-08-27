@@ -3,6 +3,7 @@ using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.SqlServer;
 using Groundwork.Substrate.Relational;
+using Groundwork.LiveDatabases;
 using Microsoft.Data.SqlClient;
 using Xunit;
 
@@ -21,9 +22,7 @@ public sealed class SqlServerDataMigrationTests
     [SkippableFact]
     public void A_budgeted_migration_chunks_resumes_and_replays()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString),
-            "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server integration tests.");
+        var connectionString = LiveSqlServer.Required();
         var unit = Unit();
         var target = Target(unit);
         var executor = new RelationalSchemaExecutor(() => new SqlConnection(connectionString), new SqlServerDialect());
@@ -31,7 +30,7 @@ public sealed class SqlServerDataMigrationTests
         {
             Assert.Equal(PhysicalSchemaApplicationOutcome.Applied,
                 PhysicalSchemaApplication.Apply(target, executor, Now).Outcome);
-            Seed(connectionString!, unit, 5);
+            Seed(connectionString, unit, 5);
 
             var first = PhysicalSchemaApplication.Apply(
                 target, executor, Now, null, Catalog(unit),
@@ -41,14 +40,14 @@ public sealed class SqlServerDataMigrationTests
             Assert.Equal("2:i2;", Assert.Single(first.DataMigrations).ResumeCursor);
             // Row 3 is deliberately null-sourced, so the chunk that covers it renders a CASE arm
             // with a null literal beside parameterized arms.
-            Assert.Equal(new string?[] { "a", "b", null, null, null }, Labels(connectionString!, unit));
+            Assert.Equal(new string?[] { "a", "b", null, null, null }, Labels(connectionString, unit));
 
             var second = PhysicalSchemaApplication.Apply(
                 target, executor, Now, null, Catalog(unit), new DataMigrationBudget { MaxRowsPerBatch = 2 });
 
             Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, second.Outcome);
             Assert.Equal(DataMigrationStatus.Completed, Assert.Single(second.DataMigrations).Status);
-            Assert.Equal(new string?[] { "a", "b", null, "d", "e" }, Labels(connectionString!, unit));
+            Assert.Equal(new string?[] { "a", "b", null, "d", "e" }, Labels(connectionString, unit));
             var completed = executor.ReadLedgerEntry(target.Identity, MigrationId)!;
             Assert.Equal(DataMigrationRunState.Completed, completed.State);
             Assert.Equal(5, completed.RowsScanned);
@@ -58,16 +57,14 @@ public sealed class SqlServerDataMigrationTests
         }
         finally
         {
-            Drop(connectionString!, unit.Name);
+            Drop(connectionString, unit.Name);
         }
     }
 
     [SkippableFact]
     public void The_provider_advertises_every_capability_the_facility_requires()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString),
-            "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server integration tests.");
+        var connectionString = LiveSqlServer.Required();
         var executor = new RelationalSchemaExecutor(() => new SqlConnection(connectionString), new SqlServerDialect());
 
         Assert.Equal(

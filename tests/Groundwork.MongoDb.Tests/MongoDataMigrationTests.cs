@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.Kernel.Schema;
 using Groundwork.Store;
 using Groundwork.Substrate.Mongo;
@@ -122,6 +123,9 @@ public sealed class MongoDataMigrationTests
     [SkippableFact]
     public void A_standalone_deployment_refuses_rather_than_writing_rows_it_cannot_commit_with_progress()
     {
+        // A different deployment from the one LiveMongo claims: this proof needs a server that
+        // cannot start a transaction, so it names its own server and claims a database of its own
+        // on it rather than going through the shared per-process claim.
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_STANDALONE_CONNECTION");
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_STANDALONE_CONNECTION to prove the standalone refusal.");
@@ -150,14 +154,12 @@ public sealed class MongoDataMigrationTests
 
     // ------------------------------------------------------------------ fixtures
 
-    private static string ConnectionOrSkip()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString),
-            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
-        var url = new MongoUrlBuilder(connectionString!) { DatabaseName = "gwmigration_" + Guid.NewGuid().ToString("N") };
-        return url.ToMongoUrl().ToString();
-    }
+    /// <summary>
+    /// The database this test process owns. Every storage unit here is named with a fresh GUID, so
+    /// the per-process claim is what keeps the two target-framework runs apart rather than anything
+    /// these tests remember to do.
+    /// </summary>
+    private static string ConnectionOrSkip() => LiveMongo.Required();
 
     private static MongoClientContext OpenContextOrSkip() => new(ConnectionOrSkip());
 
