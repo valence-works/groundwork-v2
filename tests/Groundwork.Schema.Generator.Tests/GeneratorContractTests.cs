@@ -142,6 +142,79 @@ public sealed class GeneratorContractTests
     }
 
     [Fact]
+    public void The_documented_attribute_example_compiles_and_builds_its_unit()
+    {
+        const string source = """
+            #nullable enable
+            using Groundwork.Schema;
+
+            [GwTable("orders", Scope = SchemaScope.Scoped, ConcurrencyToken = "version")]
+            [GwRetention(1000, "seq", Trigger = SchemaRetentionTrigger.OnAppend, PartitionBy = "status")]
+            [GwAppendIdempotency("00:10:00")]
+            [GwRetentionIdempotency("1.00:00:00")]
+            [GwAggregate("summary", "group status, count n")]
+            public sealed class Order
+            {
+                [GwKey, GwColumn(Length = 64)] public string Id { get; init; } = "";
+                [GwColumn(Length = 16, Default = "pending")] public string Status { get; init; } = "";
+                [GwColumn(Required = true)] public long Seq { get; init; }
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(TimeSpan.FromDays(1), Definition(result, "OrderStorageUnit").RetentionIdempotency!.Window);
+    }
+
+    [Fact]
+    public void A_column_only_group_by_expression_generates_compilable_source()
+    {
+        const string json = """
+            {"tables":[{"name":"orders","columns":[{"name":"id","type":"String","nullable":false,"length":64},{"name":"status","type":"String","nullable":false,"length":16}],"key":["id"],"indexes":[],"aggregations":[{"name":"summary","groupByColumns":[],"groupBy":[{"alias":"status","bucket":"None","sourceColumn":null,"widthTicks":0}],"aggregates":[{"kind":"Count","alias":"n","column":null,"orderBy":null,"descending":false,"maxValues":0}]}]}]}
+            """;
+
+        var result = Run("public static class Empty { }", new InMemoryAdditionalText("schema/groundwork.json", json));
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var profile = Assert.Single(Definition(result, "ordersStorageUnit").AggregationProfiles);
+        Assert.Equal("status", Assert.Single(profile.GroupByExpressions).Alias);
+    }
+
+    [Theory]
+    [InlineData("[GwAggregate(\"summary\", \"group status, day d created_at, count n\")]")]
+    [InlineData("[GwAggregate(\"summary\", \"group status, count n\")] [GwAggregate(\"summary\", \"group id, count n\")]")]
+    public void Aggregation_specs_the_kernel_refuses_are_build_diagnostics(string attributes)
+    {
+        var result = Run($$"""
+            #nullable enable
+            using System;
+            using Groundwork.Schema;
+
+            [GwTable("orders")]
+            {{attributes}}
+            public sealed class Order
+            {
+                [GwKey, GwColumn(Length = 64)] public string Id { get; init; } = "";
+                [GwColumn(Length = 16)] public string Status { get; init; } = "";
+                [GwColumn] public DateTimeOffset CreatedAt { get; init; }
+            }
+            """);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Id == "GW_SCHEMA_TABLE_003");
+    }
+
+    private static Groundwork.Kernel.StorageUnit Definition(GeneratorRunResult result, string typeName)
+    {
+        using var emitted = new MemoryStream();
+        Assert.True(result.OutputCompilation.Emit(emitted).Success);
+        return (Groundwork.Kernel.StorageUnit)System.Reflection.Assembly.Load(emitted.ToArray())
+            .GetType(typeName)!.GetProperty("Definition")!.GetValue(null)!;
+    }
+
+    [Fact]
     public void Invalid_index_spec_reports_at_the_spec_argument()
     {
         const string source = """

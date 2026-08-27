@@ -127,7 +127,18 @@ public static class GroundworkSchemaCli
                     "GW-CLI-006",
                     $"No provider plug-in is registered for '{providerName}'.");
             var schema = GroundworkSchemaCanonical.Read(schemaJson);
-            var targets = SchemaCompilation.CompileTargets(schema, provider.Targets);
+            IReadOnlyList<PhysicalSchemaTarget> targets;
+            try
+            {
+                targets = SchemaCompilation.CompileTargets(schema, provider.Targets);
+            }
+            catch (InvalidOperationException exception)
+            {
+                // A provider raises its physicalization refusals as InvalidOperationException;
+                // they name a code and path, so they belong with the validation failures.
+                await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
+                return SchemaToolExitCodes.ValidationFailed;
+            }
             var targetReports = new List<SchemaToolTargetReport>();
 
             if (command == "apply")

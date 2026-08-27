@@ -165,8 +165,11 @@ public static class PhysicalSchemaDiffPlanner
 
             if (desiredBySlot.TryGetValue(current.SlotIdentity, out var replacement))
             {
-                if (IsIndexWidening(current, replacement) || IsSearchKeyRetarget(current, replacement))
+                if (IsIndexWidening(current, replacement) || IsSearchKeyRetarget(current, replacement) ||
+                    IsProviderDefinitionReplacement(current, replacement))
+                {
                     continue;
+                }
                 if (!reportedSubjects.Add($"{current.SubjectId?.Value}:{current.SubjectIdentity}"))
                     continue;
                 refusals.Add(new SchemaRefusal(
@@ -187,10 +190,29 @@ public static class PhysicalSchemaDiffPlanner
         return refusals.ToImmutableArray();
     }
 
+    /// <summary>
+    /// A provider-owned definition is derived from the declaration rather than declared, so a
+    /// changed payload in an existing slot re-applies under authorization instead of refusing.
+    /// Additive-only continues to protect declared columns, indexes, and primary storage.
+    /// </summary>
+    private static bool IsProviderDefinitionReplacement(
+        PhysicalSchemaAppliedOperation applied,
+        PhysicalSchemaOperation desired) =>
+        applied.Kind == PhysicalSchemaOperationKind.ApplyProviderDefinition &&
+        desired is ApplyProviderPhysicalSchemaDefinitionOperation;
+
     private static PhysicalSchemaOperation Realize(
         PhysicalSchemaOperation operation,
         IReadOnlyDictionary<string, PhysicalSchemaAppliedOperation> appliedBySlot)
     {
+        if (appliedBySlot.TryGetValue(operation.SlotIdentity, out var appliedDefinition) &&
+            IsProviderDefinitionReplacement(appliedDefinition, operation) &&
+            !string.Equals(appliedDefinition.Identity, operation.Identity, StringComparison.Ordinal))
+        {
+            operation.RequiresAuthorization = true;
+            return operation;
+        }
+
         if (operation is not CreatePhysicalIndexOperation create ||
             !appliedBySlot.TryGetValue(create.SlotIdentity, out var applied) ||
             !create.Index.Columns.Any(indexColumn =>

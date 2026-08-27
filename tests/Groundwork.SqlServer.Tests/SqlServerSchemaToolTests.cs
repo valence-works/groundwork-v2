@@ -38,10 +38,17 @@ public sealed class SqlServerSchemaToolTests : IDisposable
             var evolved = harness.Temp("evolved.json", SchemaToolCliHarness.EvolvedSchema(table));
             var evolvedPlan = await harness.RunAsync(["plan", "--schema", evolved], connection!);
             Assert.True(SchemaToolExitCodes.PendingChanges == evolvedPlan.ExitCode, evolvedPlan.Reason);
-            var fingerprint = evolvedPlan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
+            // Widening the table rewrites its provider-owned batch type, which re-applies only
+            // under explicit authorization.
+            Assert.Contains(
+                evolvedPlan.Report.RootElement.GetProperty("authorization")
+                    .GetProperty("destructiveOperationsRequired").EnumerateArray(),
+                identity => identity.GetString()!.StartsWith("apply-provider-definition:", StringComparison.Ordinal));
 
-            var authorized = await harness.RunAsync(
-                ["apply", "--schema", evolved, "--expected-plan", fingerprint], connection!);
+            var refused = await harness.RunAsync(["apply", "--schema", evolved, "--safe"], connection!);
+            Assert.True(SchemaToolExitCodes.AuthorizationRequired == refused.ExitCode, refused.Reason);
+
+            var authorized = await harness.ApplyAuthorizedAsync(evolved, connection!);
             Assert.True(SchemaToolExitCodes.Success == authorized.ExitCode, authorized.Reason);
             Assert.Equal("applied", authorized.Report.RootElement.GetProperty("outcome").GetString());
 

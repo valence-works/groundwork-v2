@@ -41,8 +41,8 @@ public sealed class SchemaToolCliHarness : IDisposable
     /// <summary>
     /// One unit expressed as a canonical schema document. <see cref="ParityDeclaration"/> expresses
     /// the same unit through the fluent kernel builder, so a test can prove that a tool-applied
-    /// target and the runtime's expected target are the same value. The document deliberately
-    /// authors its indexes out of canonical order, which the schema model normalizes.
+    /// target and the runtime's expected target are the same value. Both deliberately name their
+    /// indexes in an order the other does not use, which subject identity treats as one set.
     /// </summary>
     public static string ParitySchema(string table = "parity_orders") =>
         $$$"""
@@ -55,8 +55,8 @@ public sealed class SchemaToolCliHarness : IDisposable
             .String("customer", 64, column => column.Required().Collation(PortableCollation.OrdinalIgnoreCase))
             .String("status", 16, column => column.Required().Default("pending"))
             .Key("id")
-            .Index("a_parity_status", "status")
             .Index("z_parity_customer", "customer")
+            .Index("a_parity_status", "status")
             .Scoped()
             .OptimisticConcurrency()
             .Build();

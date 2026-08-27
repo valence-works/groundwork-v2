@@ -41,6 +41,39 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task A_provider_physicalization_refusal_keeps_its_code_as_a_validation_error()
+    {
+        var schema = Temp("refused-schema.json", ValidSchema);
+
+        Assert.Equal(
+            SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"],
+                _ => new FakeSession(refusal: "GW-PORT-011 at indexes.by_id.physicalName: the composed name is too long.")));
+        Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("GW-PORT-011", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("indexes.by_id.physicalName", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_offset_less_timestamp_default_reads_as_utc_on_any_machine()
+    {
+        var schema = ValidSchema.Replace(
+            "\"generation\":\"Supplied\"",
+            "\"generation\":\"Supplied\",\"default\":{\"value\":\"2024-01-01T00:00:00\"}")
+            .Replace("\"type\":\"String\"", "\"type\":\"DateTimeOffset\"");
+
+        var value = Assert.IsType<DateTimeOffset>(Assert.Single(
+            Assert.Single(GroundworkSchemaCanonical.Read(schema).Tables).Columns).Default!.Value);
+
+        Assert.Equal(TimeSpan.Zero, value.Offset);
+        Assert.Equal(new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero), value);
+        Assert.Contains(
+            @"2024-01-01T00:00:00.0000000\u002B00:00",
+            GroundworkSchemaCanonical.Emit(GroundworkSchemaCanonical.Read(schema)),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_default_whose_literal_contradicts_the_column_type_is_a_format_refusal()
     {
         var mistyped = ValidSchema.Replace(
@@ -332,20 +365,21 @@ public sealed class SchemaToolContractTests
         return GroundworkSchemaCli.RunAsync(arguments, output, error, resolver ?? (_ => null));
     }
 
-    private sealed class FakeSession(string provider = "fake") : ISchemaToolProviderSession
+    private sealed class FakeSession(string provider = "fake", string? refusal = null) : ISchemaToolProviderSession
     {
         public FakeExecutor ExecutorImpl { get; } = new();
         public ProviderIdentity Provider { get; } = new(provider, "1");
-        public IPhysicalSchemaTargetCompiler Targets => new FakeTargets(Provider);
+        public IPhysicalSchemaTargetCompiler Targets => new FakeTargets(Provider, refusal);
         public IPhysicalSchemaExecutor Executor => ExecutorImpl;
         public IPhysicalSchemaHistoryInspector Inspector => ExecutorImpl;
         public void Dispose() { }
     }
 
-    private sealed class FakeTargets(ProviderIdentity provider) : IPhysicalSchemaTargetCompiler
+    private sealed class FakeTargets(ProviderIdentity provider, string? refusal = null) : IPhysicalSchemaTargetCompiler
     {
-        public PhysicalSchemaTarget Compile(StorageUnit declaration) =>
-            new(new SchemaSubject(SearchKeyProjection.Expand(declaration)), provider);
+        public PhysicalSchemaTarget Compile(StorageUnit declaration) => refusal is null
+            ? new(new SchemaSubject(SearchKeyProjection.Expand(declaration)), provider)
+            : throw new InvalidOperationException(refusal);
     }
 
     public sealed class DiscoveredFactory : ISchemaToolProviderSessionFactory

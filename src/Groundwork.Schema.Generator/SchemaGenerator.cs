@@ -267,10 +267,21 @@ public sealed class SchemaGenerator : ISourceGenerator
         }
 
         var aggregations = new List<SchemaAggregation>();
+        var aggregationNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var aggregateAttribute in symbol.GetAttributes().Where(attribute => IsAttribute(attribute, "GwAggregateAttribute")))
         {
-            if (TryParseAggregation(context, aggregateAttribute, tableName, out var aggregation))
-                aggregations.Add(aggregation);
+            if (!TryParseAggregation(context, aggregateAttribute, tableName, out var aggregation))
+                continue;
+            if (!aggregationNames.Add(aggregation.Name))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    InvalidTablePolicy,
+                    aggregateAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None,
+                    tableName,
+                    $"aggregation '{aggregation.Name}' is declared more than once."));
+                continue;
+            }
+            aggregations.Add(aggregation);
         }
 
         return new SchemaTable(
@@ -362,10 +373,18 @@ public sealed class SchemaGenerator : ISourceGenerator
             }
         }
 
+        string? invalid = null;
         if (aggregates.Count == 0)
+            invalid = $"aggregation '{name}' declares no aggregate.";
+        else if (groupByColumns.Count != 0 && groupBy.Count != 0)
+            invalid = $"aggregation '{name}' mixes plain 'group' terms with bucket grouping; use one or the other.";
+        else if (groupByColumns.Count == 0 && groupBy.Count == 0)
+            invalid = $"aggregation '{name}' declares no grouping term.";
+        else if (groupBy.Count(group => group.Bucket != SchemaTimeBucket.None) > 1)
+            invalid = $"aggregation '{name}' declares more than one time bucket.";
+        if (invalid is not null)
         {
-            context.ReportDiagnostic(Diagnostic.Create(
-                InvalidTablePolicy, location, tableName, $"aggregation '{name}' declares no aggregate."));
+            context.ReportDiagnostic(Diagnostic.Create(InvalidTablePolicy, location, tableName, invalid));
             aggregation = null!;
             return false;
         }
@@ -612,7 +631,7 @@ public sealed class SchemaGenerator : ISourceGenerator
                 {
                     SchemaTimeBucket.FixedUtc => $".FixedUtcBucket({Literal(group.Alias)}, {Literal(group.SourceColumn!)}, {Ticks(group.Width)})",
                     SchemaTimeBucket.LocalCalendarDay => $".LocalCalendarDayBucket({Literal(group.Alias)}, {Literal(group.SourceColumn!)})",
-                    _ => $".GroupBy(global::Groundwork.Kernel.AggregationGroup.Column({Literal(group.Alias)}))"
+                    _ => $".GroupBy(new global::Groundwork.Kernel.AggregationGroup.Column({Literal(group.Alias)}))"
                 });
             }
             foreach (var aggregate in aggregation.Aggregates)

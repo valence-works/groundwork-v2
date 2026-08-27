@@ -237,7 +237,7 @@ public static class GroundworkSchemaCanonical
             SchemaValueType.Int64 => long.Parse(text, CultureInfo.InvariantCulture),
             SchemaValueType.Decimal => decimal.Parse(text, NumberStyles.Number, CultureInfo.InvariantCulture),
             SchemaValueType.Boolean => bool.Parse(text),
-            SchemaValueType.DateTimeOffset => DateTimeOffset.Parse(text, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            SchemaValueType.DateTimeOffset => DateTimeOffset.Parse(text, CultureInfo.InvariantCulture, TimestampStyles),
             SchemaValueType.Guid => Guid.Parse(text),
             SchemaValueType.Binary => Convert.FromBase64String(text),
             SchemaValueType.Json => ReadJson(JsonDocument.Parse(text).RootElement),
@@ -263,7 +263,7 @@ public static class GroundworkSchemaCanonical
                 ? literal.GetBoolean()
                 : throw Mistyped(literal, type),
             SchemaValueType.DateTimeOffset => Text(literal, type) is { } timestamp &&
-                DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+                DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, TimestampStyles, out var parsed)
                     ? parsed
                     : throw Mistyped(literal, type),
             SchemaValueType.Guid => Guid.TryParse(Text(literal, type), out var guid) ? guid : throw Mistyped(literal, type),
@@ -376,6 +376,13 @@ public static class GroundworkSchemaCanonical
             _ => SchemaAggregationGroup.LocalCalendarDayBucket(alias, RequiredString(element, "sourceColumn"))
         };
     }
+
+    /// <summary>
+    /// Reads a declared instant as UTC. A literal without an explicit offset would otherwise be
+    /// read in the reading machine's time zone, making the document and its fingerprint depend on
+    /// where it was compiled.
+    /// </summary>
+    private const DateTimeStyles TimestampStyles = DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
 
     private static string String(string value) => JsonSerializer.Serialize(value);
 

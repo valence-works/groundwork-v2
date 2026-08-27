@@ -208,16 +208,19 @@ compiles to the same physical target the fluent builder does:
 
 ```csharp
 [GwTable("orders", Scope = SchemaScope.Scoped, ConcurrencyToken = "version")]
-[GwRetention(1000, "seq", Trigger = SchemaRetentionTrigger.OnAppend, PartitionBy = "tenantId")]
+[GwRetention(1000, "seq", Trigger = SchemaRetentionTrigger.OnAppend, PartitionBy = "status")]
 [GwAppendIdempotency("00:10:00")]
-[GwRetentionIdempotency("24:00:00")]
+[GwRetentionIdempotency("1.00:00:00")]
 [GwAggregate("summary", "group status, count n")]
 public sealed class Order
 {
     [GwKey, GwColumn(Length = 64)] public string Id { get; init; } = "";
     [GwColumn(Length = 16, Default = "pending")] public string Status { get; init; } = "";
+    [GwColumn(Required = true)] public long Seq { get; init; }
 }
 ```
+
+Idempotency windows are `TimeSpan` text, so a day is `1.00:00:00` — `24:00:00` parses as 24 days.
 
 ## Next
 
