@@ -137,8 +137,12 @@ Outcome mode is chosen when the unit begins. Use `BatchWriteOptions.Exact`.
 
 ### `QueryCoverageException` (`GW-COVER-006`)
 
-No declared index covers the query. The exception carries `SuggestedIndex` and a ready-to-paste
-`SuggestedDeclaration`. Either declare and deploy the index, or accept the scan explicitly:
+No candidate covers the query. The candidates are the unit's declared key and its declared indexes,
+so a filter on the key — or on the leading columns of a composite key — does not raise this. The
+exception usually carries `SuggestedIndex` and a ready-to-paste `SuggestedDeclaration`; where the
+predicate pins every key column with a single-value equality both are empty, because at most one row
+can match and the message names `session.Read(key)` instead. Either declare and deploy the suggested
+index, or accept the scan explicitly:
 
 ```csharp
 query.AcceptScan("GW-SCAN-0007", "reason", "owner", "2026-12-31")
