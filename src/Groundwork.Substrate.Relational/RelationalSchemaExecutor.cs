@@ -10,7 +10,8 @@ namespace Groundwork.Substrate.Relational;
 /// Shared relational schema executor. Providers own only the public <see cref="RelationalDialect"/>
 /// contract; lifecycle, fencing, operation dispatch, and connection cleanup remain common.
 /// </summary>
-public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector, IDataMigrationExecutor
+public sealed class RelationalSchemaExecutor
+    : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector, IPhysicalSchemaCatalogInspector, IDataMigrationExecutor
 {
     private readonly Func<DbConnection> createConnection;
     private readonly RelationalDialect dialect;
@@ -143,7 +144,8 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         using var transaction = dialect.BeginTransaction(connection);
         try
         {
-            var inspection = InspectTarget(connection, transaction, appliedTarget, history);
+            var inspection = InspectTarget(
+                connection, transaction, appliedTarget, history, target.Subject.ForeignColumns);
             transaction.Commit();
             return inspection;
         }
@@ -196,7 +198,24 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                     $"Relational search-key algorithm catalog '{RelationalDialect.SearchKeyAlgorithmsTable}' is missing for '{appliedTarget.Subject.Name}'.",
                     "table")]);
         }
-        return InspectTarget(connection, null, appliedTarget, history);
+        return InspectTarget(connection, null, appliedTarget, history, target.Subject.ForeignColumns);
+    }
+
+    /// <summary>
+    /// Compares the deployed catalog to an exact compiled target under the caller's application
+    /// lock, consulting no history. This is the proof <c>groundwork adopt</c> rests on, so it runs
+    /// on the lock's own connection: a catalog verified on a second connection could change before
+    /// the applied state claiming it is published.
+    /// </summary>
+    public PhysicalSchemaInspectionResult InspectDeployedCatalog(
+        PhysicalSchemaTarget target,
+        IPhysicalSchemaApplicationLock applicationLock)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        var lease = RequireLock(target.Identity, applicationLock);
+        lease.Verify();
+        return InspectTarget(
+            lease.Connection, null, target, PhysicalSchemaHistoryState.Empty, target.Subject.ForeignColumns);
     }
 
     public bool TryMapUniqueViolation(DbException exception, out string indexName)
@@ -583,7 +602,8 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         DbTransaction transaction,
         PhysicalSchemaTarget target)
     {
-        var inspection = InspectTarget(connection, transaction, target, PhysicalSchemaHistoryState.Empty);
+        var inspection = InspectTarget(
+            connection, transaction, target, PhysicalSchemaHistoryState.Empty, target.Subject.ForeignColumns);
         if (inspection.HasColumnDrift || inspection.HasIndexDrift)
         {
             var refusal = inspection.HasColumnDrift ? inspection.ColumnDrift[0] : inspection.IndexDrift[0];
@@ -595,7 +615,8 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         DbConnection connection,
         DbTransaction? transaction,
         PhysicalSchemaTarget target,
-        PhysicalSchemaHistoryState history)
+        PhysicalSchemaHistoryState history,
+        ForeignColumnPolicy foreignColumns)
     {
         var table = target.Subject.Name;
         if (target.Subject.Evolution.RetiresPrimaryStorage)
@@ -663,6 +684,29 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             }
         }
 
+        // Columns the declaration does not describe. The provider reads the facts; the kernel owns
+        // the decision, so a foreign column means the same thing at startup, at apply-time
+        // validation, and at adoption.
+        // A retained superseded column is described by the declaration — it names the column in
+        // Evolution.Supersessions and deliberately keeps it in the catalog through the
+        // dual-presence window — so it is not foreign. It is absent from Columns by construction:
+        // SchemaSubject refuses a declaration that both supersedes a column and still declares it.
+        var declared = target.Subject.Columns
+            .Select(column => column.Name)
+            .Concat(target.Subject.Evolution.Supersessions.Select(supersession => supersession.Name))
+            .ToHashSet(StringComparer.Ordinal);
+        var verdict = ForeignColumnAdmission.Classify(
+            table,
+            foreignColumns,
+            columns.Values
+                .Where(column => column is not null && !declared.Contains(column.Name))
+                .Select(column => new ForeignPhysicalColumn(
+                    column.Name,
+                    column.IsNullable,
+                    column.DefaultValue is not null,
+                    column.Generation != ColumnGeneration.Supplied || column.IsComputed)));
+        columnDrift.AddRange(verdict.Drift);
+
         if (target.Subject.DerivedColumns.Length != 0)
         {
             var algorithms = dialect.ReadDerivedSearchKeyAlgorithms(connection, transaction, table)
@@ -723,7 +767,10 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             history,
             IsAppliedSchemaValid: columnDrift.Count == 0,
             columnDrift.ToImmutableArray(),
-            indexDrift.ToImmutableArray());
+            indexDrift.ToImmutableArray())
+        {
+            ToleratedDrift = verdict.Tolerated
+        };
 
         if (inspection.IsAppliedSchemaValid)
         {

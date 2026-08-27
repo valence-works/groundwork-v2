@@ -227,6 +227,19 @@ public sealed record SchemaAggregation
     public IReadOnlyList<SchemaAggregate> Aggregates { get; }
 }
 
+/// <summary>The declaration-level tolerance for deployed columns a table does not declare.</summary>
+public enum SchemaForeignColumns
+{
+    /// <summary>Any undeclared deployed column is drift.</summary>
+    Refuse,
+
+    /// <summary>
+    /// An undeclared deployed column the database supplies a value for is a warning rather than
+    /// drift. One it does not — not nullable, not defaulted, not generated — stays drift.
+    /// </summary>
+    TolerateDatabaseSupplied
+}
+
 public sealed record SchemaTable
 {
     public SchemaTable(
@@ -241,7 +254,8 @@ public sealed record SchemaTable
         SchemaIdempotency? appendIdempotency = null,
         SchemaIdempotency? retentionIdempotency = null,
         IEnumerable<SchemaAggregation>? aggregations = null,
-        string? id = null)
+        string? id = null,
+        SchemaForeignColumns foreignColumns = SchemaForeignColumns.Refuse)
     {
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
         Id = string.IsNullOrWhiteSpace(id) ? null : id;
@@ -255,6 +269,7 @@ public sealed record SchemaTable
         AppendIdempotency = appendIdempotency;
         RetentionIdempotency = retentionIdempotency;
         Aggregations = Ordered(aggregations ?? Array.Empty<SchemaAggregation>(), nameof(aggregations), aggregation => aggregation.Name);
+        ForeignColumns = foreignColumns;
     }
 
     public string Name { get; }
@@ -281,6 +296,13 @@ public sealed record SchemaTable
     public SchemaIdempotency? RetentionIdempotency { get; }
     /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>
     public IReadOnlyList<SchemaAggregation> Aggregations { get; }
+
+    /// <summary>
+    /// How a deployed column this table does not declare is treated. Declared here so the
+    /// deployment tool and the host reach the same verdict from one document rather than from a
+    /// switch each of them sets independently.
+    /// </summary>
+    public SchemaForeignColumns ForeignColumns { get; }
 
     private static IReadOnlyList<T> Snapshot<T>(IEnumerable<T> values, string parameterName) =>
         new ReadOnlyCollection<T>((values ?? throw new ArgumentNullException(parameterName)).ToArray());

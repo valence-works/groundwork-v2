@@ -57,6 +57,9 @@ public static class SchemaCompilation
             }).ToArray(),
             AggregationProfiles = table.Aggregations.Select(Compile).ToArray(),
             Scope = table.Scope == SchemaScope.Scoped ? ScopePolicy.Scoped : ScopePolicy.Global,
+            ForeignColumns = table.ForeignColumns == SchemaForeignColumns.TolerateDatabaseSupplied
+                ? ForeignColumnPolicy.TolerateDatabaseSupplied
+                : ForeignColumnPolicy.Refuse,
             Concurrency = table.Concurrency is null
                 ? ConcurrencyDeclaration.None
                 : ConcurrencyDeclaration.Optimistic(table.Concurrency.TokenColumn),

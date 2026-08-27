@@ -92,6 +92,10 @@ public static class GroundworkSchemaCanonical
             builder.Append(']');
             if (table.Id is { } tableId && !string.Equals(tableId, table.Name, StringComparison.Ordinal))
                 builder.Append(",\"id\":").Append(String(tableId));
+            // Emitted only once it diverges from the default, so every schema document written
+            // before this member existed keeps the exact fingerprint it was emitted under.
+            if (table.ForeignColumns != SchemaForeignColumns.Refuse)
+                builder.Append(",\"foreignColumns\":").Append(String(table.ForeignColumns.ToString()));
             builder.Append('}');
         }
 
@@ -161,7 +165,8 @@ public static class GroundworkSchemaCanonical
                 ReadIdempotency(tableElement, "appendIdempotency"),
                 ReadIdempotency(tableElement, "retentionIdempotency"),
                 ReadAggregations(tableElement),
-                OptionalString(tableElement, "id")));
+                OptionalString(tableElement, "id"),
+                EnumValueOrDefault(tableElement, "foreignColumns", SchemaForeignColumns.Refuse)));
         }
 
         return new SchemaDocument(tables);

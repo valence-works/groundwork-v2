@@ -97,7 +97,7 @@ public static class GroundworkSchemaCli
             if (arguments.Count >= 2 && arguments[0] == "schema" && arguments[1] == "emit")
                 return await EmitAsync(arguments, output, json, cancellationToken);
 
-            if (arguments.Count == 0 || arguments[0] is not ("plan" or "validate" or "status" or "apply"))
+            if (arguments.Count == 0 || arguments[0] is not ("plan" or "validate" or "status" or "apply" or "adopt"))
                 throw new SchemaToolInvocationException("GW-CLI-001", "Command options are invalid. Run '--help'.");
             var command = arguments[0];
             ValidateInvocation(arguments, command, 1);
@@ -151,14 +151,15 @@ public static class GroundworkSchemaCli
             }
             var targetReports = new List<SchemaToolTargetReport>();
 
-            if (command == "apply")
+            if (command is "apply" or "adopt")
             {
                 var safe = arguments.Contains("--safe", StringComparer.Ordinal);
                 var expectedPlans = Values(arguments, "--expected-plan").ToHashSet(StringComparer.Ordinal);
                 if (!safe && expectedPlans.Count == 0)
                     throw new SchemaToolInvocationException(
                         "GW-CLI-001",
-                        "Apply requires --safe or an exact --expected-plan authorization mode.");
+                        $"{command[0..1].ToUpperInvariant()}{command[1..]} requires --safe or an exact " +
+                        "--expected-plan authorization mode.");
                 var destructive = Values(arguments, "--allow-destructive")
                     .Concat(Values(arguments, "--authorize-destructive")).ToHashSet(StringComparer.Ordinal);
                 var semantic = Values(arguments, "--allow-semantic")
@@ -222,6 +223,43 @@ public static class GroundworkSchemaCli
                         provider.Provider.Name, provider.Provider.Version, targetReports, [])
                     { Phase = PhaseName(phase) });
                     return SchemaToolExitCodes.AuthorizationRequired;
+                }
+
+                if (command == "adopt")
+                {
+                    if (provider.Executor is not IPhysicalSchemaCatalogInspector)
+                    {
+                        // Named rather than generic: a provider that cannot compare a deployed
+                        // catalog to a target cannot prove anything, and adoption is the proof.
+                        await WriteErrorAsync(
+                            output, error, json, "GW-CLI-013",
+                            $"Provider '{provider.Provider.Name}' cannot compare a deployed catalog to a " +
+                            "compiled target, so it cannot adopt one.");
+                        return SchemaToolExitCodes.ValidationFailed;
+                    }
+                    foreach (var target in targets)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        targetReports.Add(FromAdoption(target, PhysicalSchemaAdoption.Adopt(
+                            target,
+                            provider.Executor,
+                            planAuthorization: plan => Authorize(target, plan))));
+                    }
+                    var adoptionBlocked = targetReports.Any(item => item.Outcome == "blocked");
+                    var adoptionUnauthorized = targetReports.Any(item => item.Outcome == "authorization-required");
+                    // A run where every target was already recorded reports ready, not adopted:
+                    // "adopted" has to mean history was written, or a deploy log cannot tell the
+                    // two apart.
+                    var adoptedAny = targetReports.Any(item => item.Outcome == "adopted");
+                    await WriteAsync(output, json, new SchemaToolReport(
+                        command,
+                        adoptionUnauthorized ? "authorization-required"
+                            : adoptionBlocked ? "blocked"
+                            : adoptedAny ? "adopted" : "ready",
+                        null, provider.Provider.Name, provider.Provider.Version, targetReports, []));
+                    if (adoptionUnauthorized)
+                        return SchemaToolExitCodes.AuthorizationRequired;
+                    return adoptionBlocked ? SchemaToolExitCodes.ValidationFailed : SchemaToolExitCodes.Success;
                 }
 
                 foreach (var target in targets)
@@ -369,7 +407,9 @@ public static class GroundworkSchemaCli
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
         false)
     {
-        Supersessions = Describe(readiness)
+        Supersessions = Describe(readiness),
+        Warnings = (inspection.ToleratedDrift.IsDefault ? [] : inspection.ToleratedDrift)
+            .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray()
     };
 
     private static SchemaToolTargetReport FromApplication(
@@ -394,6 +434,40 @@ public static class GroundworkSchemaCli
         result.Plan.Refusals.Concat(result.AuthorizationRefusals)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
         result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete);
+
+    /// <summary>
+    /// One adoption's report. An adopted target reports the operations the plan would have executed
+    /// as applied, because that is exactly what its published history now records; a refusal reports
+    /// the drift by name so an operator sees which column or index differs.
+    /// </summary>
+    private static SchemaToolTargetReport FromAdoption(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaAdoptionResult result) => new(
+        target.Subject.Id.Value,
+        target.Fingerprint,
+        result.Outcome switch
+        {
+            PhysicalSchemaAdoptionOutcome.Adopted => "adopted",
+            PhysicalSchemaAdoptionOutcome.AlreadyAdopted => "ready",
+            PhysicalSchemaAdoptionOutcome.AuthorizationRequired => "authorization-required",
+            _ => "blocked"
+        },
+        PlanFingerprint(target, result.Plan),
+        result.AppliedState?.TargetFingerprint,
+        result.Outcome == PhysicalSchemaAdoptionOutcome.Adopted
+            ? []
+            : result.Plan.Operations
+                .Select(operation => SchemaToolOperationReport.FromPending(
+                    operation, PhysicalSchemaPlanProtection.Inspect(result.Plan.Operations)))
+                .ToArray(),
+        result.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
+        result.Refusals.Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
+        result.Outcome == PhysicalSchemaAdoptionOutcome.Adopted)
+    {
+        Warnings = result.ToleratedDrift
+            .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path))
+            .ToArray()
+    };
 
     /// <summary>
     /// Reports pending versus applied data migrations for one target from provider-owned state. The
@@ -533,7 +607,8 @@ public static class GroundworkSchemaCli
                 semanticRequired = semantic
             },
             diagnosticRecords = (object?)null,
-            diagnostics = value.Diagnostics.Concat(value.Targets.SelectMany(item => item.Diagnostics)).Select(Error),
+            diagnostics = value.Diagnostics.Concat(value.Targets.SelectMany(item => item.Diagnostics)).Select(Error)
+                .Concat(value.Targets.SelectMany(item => item.Warnings).Select(Warning)),
             targetMutated = value.Targets.Any(item => item.Mutated)
         };
     }
@@ -544,6 +619,14 @@ public static class GroundworkSchemaCli
         error.Code,
         error.Message,
         target = error.Path
+    };
+
+    private static object Warning(SchemaVerificationError warning) => new
+    {
+        severity = "warning",
+        warning.Code,
+        warning.Message,
+        target = warning.Path
     };
 
     private static string Human(object report) => report switch
@@ -570,8 +653,10 @@ public static class GroundworkSchemaCli
                     (migration.State == SchemaToolDataMigrationReport.PendingState
                         ? $" ({migration.RowsScanned} rows scanned, resume at {migration.ResumeCursor})"
                         : string.Empty)))
-            .Concat(value.Diagnostics.Select(diagnostic =>
-                $"error {diagnostic.Code}: {diagnostic.Message} ({diagnostic.Path})"))),
+            .Concat(value.Diagnostics.Concat(value.Targets.SelectMany(target => target.Diagnostics))
+                .Select(diagnostic => $"error {diagnostic.Code}: {diagnostic.Message} ({diagnostic.Path})"))
+            .Concat(value.Targets.SelectMany(target => target.Warnings)
+                .Select(warning => $"warning {warning.Code}: {warning.Message} ({warning.Path})"))),
         _ => "Groundwork schema emit: written"
     };
 
@@ -602,13 +687,13 @@ public static class GroundworkSchemaCli
         var flags = command switch
         {
             "validate" => new HashSet<string>(["--offline"], StringComparer.Ordinal),
-            "apply" => new HashSet<string>(["--safe"], StringComparer.Ordinal),
+            "apply" or "adopt" => new HashSet<string>(["--safe"], StringComparer.Ordinal),
             _ => new HashSet<string>(StringComparer.Ordinal)
         };
         var values = command switch
         {
             "schema emit" => new HashSet<string>(["--input", "--file", "--output"], StringComparer.Ordinal),
-            "apply" => new HashSet<string>([
+            "apply" or "adopt" => new HashSet<string>([
                 "--schema", "--provider", "--connection", "--database", "--provider-assembly",
                 "--coverage", "--output", "--phase", "--expected-plan", "--allow-destructive", "--allow-semantic",
                 "--authorize-destructive", "--authorize-semantic"
@@ -688,7 +773,7 @@ public static class GroundworkSchemaCli
     }
 
     private const string HelpText = """
-        Usage: groundwork <plan|validate|status|apply> --schema <file> --provider <name> [--connection <value>]
+        Usage: groundwork <plan|validate|status|apply|adopt> --schema <file> --provider <name> [--connection <value>]
                [--database <name>] [--provider-assembly <file>] [--coverage <file>] [--output json|human]
                [--phase expand|contract]
                groundwork schema emit --input <file> --file <file> [--output json|human]
@@ -700,6 +785,11 @@ public static class GroundworkSchemaCli
         Apply requires --safe, or exact --expected-plan authorization. Destructive operation identities additionally
         require --allow-destructive <identity>; semantic migrations require --allow-semantic <identity>.
         Runtime admission remains inspect-only unless AutoApplyOnStartup is explicitly enabled by the host.
+
+        Adopt records an existing catalog Groundwork has never applied, under the same authorization as apply. It
+        executes no DDL: it proves the deployed catalog is exactly the compiled target and publishes the applied
+        state that applying it would have produced. Any difference is refused by name. It never infers a schema,
+        and it refuses a target that already has applied history.
         """;
 
     private sealed class SchemaToolInvocationException(string code, string message) : Exception(message)
@@ -747,6 +837,9 @@ public sealed record SchemaToolTargetReport(
 
     /// <summary>Contract readiness per superseded column; empty unless the contract phase was planned.</summary>
     public IReadOnlyList<SchemaToolSupersessionReport> Supersessions { get; init; } = [];
+
+    /// <summary>Drift a declaration's opt-in foreign-column policy downgraded to a warning.</summary>
+    public IReadOnlyList<SchemaVerificationError> Warnings { get; init; } = [];
 }
 
 /// <summary>One semantic migration's recorded data-migration state on one target.</summary>

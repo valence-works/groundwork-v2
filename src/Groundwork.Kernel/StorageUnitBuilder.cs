@@ -118,6 +118,18 @@ public sealed class StorageDeclarationBuilder
         return this;
     }
 
+    /// <summary>
+    /// Coexists with a catalog another tool extends: a deployed column this declaration does not
+    /// describe stops being fatal at admission and is reported as a warning instead — but only when
+    /// the database supplies a value for it, so a column Groundwork could never write around stays
+    /// a refusal. Nothing else about drift changes.
+    /// </summary>
+    public StorageDeclarationBuilder TolerateForeignColumns()
+    {
+        state.SetForeignColumns(ForeignColumnPolicy.TolerateDatabaseSupplied);
+        return this;
+    }
+
     public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns)
     {
         state.AddIndex(name, columns.Select(column => new IndexColumn(column)), unique: true);
@@ -374,6 +386,7 @@ internal sealed class StorageDeclarationState
     private KeyDefinition? key;
     private ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.None;
     private ScopePolicy scope = ScopePolicy.Global;
+    private ForeignColumnPolicy foreignColumns = ForeignColumnPolicy.Refuse;
     private RetentionDeclaration? retention;
     private AppendIdempotencyDeclaration? appendIdempotency;
     private RetentionIdempotencyDeclaration? retentionIdempotency;
@@ -453,6 +466,8 @@ internal sealed class StorageDeclarationState
 
     public void SetScope(ScopePolicy value) => scope = value;
 
+    public void SetForeignColumns(ForeignColumnPolicy value) => foreignColumns = value;
+
     public void SetRetention(RetentionDeclaration declaration) => retention = declaration ?? throw new ArgumentNullException(nameof(declaration));
 
     public void SetAppendIdempotency(AppendIdempotencyDeclaration declaration) =>
@@ -472,6 +487,7 @@ internal sealed class StorageDeclarationState
             Indexes = Array.AsReadOnly(indexes.ToArray()),
             AggregationProfiles = Array.AsReadOnly(aggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()),
             Scope = scope,
+            ForeignColumns = foreignColumns,
             Concurrency = concurrency,
             AppendIdempotency = appendIdempotency,
             RetentionIdempotency = retentionIdempotency,

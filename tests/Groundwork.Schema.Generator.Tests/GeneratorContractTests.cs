@@ -416,6 +416,65 @@ public sealed class GeneratorContractTests
         Assert.Equal(json, GroundworkSchemaCanonical.Serialize(GroundworkSchemaCanonical.Parse(json)));
     }
 
+    /// <summary>
+    /// The foreign-column policy travels in the schema document, so the deployment tool and the
+    /// host reach the same verdict about an undeclared deployed column from one declaration. It is
+    /// emitted only once it diverges from the default, for the same reason logical ids are.
+    /// </summary>
+    [Fact]
+    public void The_foreign_column_policy_round_trips_and_stays_absent_at_its_default()
+    {
+        const string prefix =
+            "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\"," +
+            "\"nullable\":false,\"length\":64,\"precision\":null,\"scale\":null,\"folding\":\"None\"," +
+            "\"generation\":\"Supplied\",\"default\":null}],\"key\":[\"id\"],\"indexes\":[],\"scope\":\"Global\"," +
+            "\"concurrency\":null,\"timestamps\":\"None\",\"retention\":null,\"appendIdempotency\":null," +
+            "\"retentionIdempotency\":null,\"aggregations\":[]";
+        const string strict = prefix + "}]}";
+        const string tolerant = prefix + ",\"foreignColumns\":\"TolerateDatabaseSupplied\"}]}";
+
+        Assert.Equal(strict, GroundworkSchemaCanonical.Serialize(GroundworkSchemaCanonical.Parse(strict)));
+        Assert.Equal(tolerant, GroundworkSchemaCanonical.Serialize(GroundworkSchemaCanonical.Parse(tolerant)));
+        Assert.Equal(
+            SchemaForeignColumns.TolerateDatabaseSupplied,
+            GroundworkSchemaCanonical.Parse(tolerant).Tables[0].ForeignColumns);
+        Assert.Equal(
+            Groundwork.Kernel.ForeignColumnPolicy.TolerateDatabaseSupplied,
+            SchemaTool.SchemaCompilation.Compile(GroundworkSchemaCanonical.Parse(tolerant).Tables[0]).ForeignColumns);
+
+        // Tolerance is not part of the physical target, so it does not move the fingerprint the
+        // deployed catalog is admitted against.
+        Assert.Equal(
+            new Groundwork.Kernel.Schema.SchemaSubject(
+                SchemaTool.SchemaCompilation.Compile(GroundworkSchemaCanonical.Parse(strict).Tables[0])).Fingerprint,
+            new Groundwork.Kernel.Schema.SchemaSubject(
+                SchemaTool.SchemaCompilation.Compile(GroundworkSchemaCanonical.Parse(tolerant).Tables[0])).Fingerprint);
+    }
+
+    /// <summary>
+    /// The attribute surface reaches the same declaration the document does, so a source-generated
+    /// schema can opt in without hand-writing JSON.
+    /// </summary>
+    [Fact]
+    public void The_foreign_column_policy_survives_the_generator()
+    {
+        const string source = """
+            using Groundwork.Schema;
+            [GwTable("tickets", ForeignColumns = SchemaForeignColumns.TolerateDatabaseSupplied)]
+            public partial class Ticket { [GwKey][GwColumn(Length = 64)] public string Id { get; set; } = ""; }
+            """;
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var canonical = (string)result.OutputCompilation.Assembly.GetAttributes()
+            .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName)
+            .ConstructorArguments[0].Value!;
+        Assert.Contains("\"foreignColumns\":\"TolerateDatabaseSupplied\"", canonical, StringComparison.Ordinal);
+        Assert.Contains(
+            result.Generated,
+            generated => generated.Contains(".TolerateForeignColumns()", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Additional_file_round_trip_emits_the_same_canonical_fingerprint()
     {

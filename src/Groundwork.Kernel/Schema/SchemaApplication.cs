@@ -53,9 +53,18 @@ public sealed record PhysicalSchemaInspectionResult(
     ImmutableArray<SchemaRefusal> ColumnDrift = default,
     ImmutableArray<SchemaRefusal> IndexDrift = default)
 {
+    /// <summary>
+    /// Drift a declaration's opt-in <see cref="ForeignColumnPolicy"/> downgraded from a refusal to a
+    /// warning. It is kept apart from <see cref="ColumnDrift"/> rather than dropped, so tolerating a
+    /// foreign column still names it everywhere drift is reported.
+    /// </summary>
+    public ImmutableArray<SchemaRefusal> ToleratedDrift { get; init; } = [];
+
     public bool HasColumnDrift => !ColumnDrift.IsDefaultOrEmpty;
 
     public bool HasIndexDrift => !IndexDrift.IsDefaultOrEmpty;
+
+    public bool HasToleratedDrift => !ToleratedDrift.IsDefaultOrEmpty;
 }
 
 public enum PhysicalSchemaApplicationOutcome
@@ -379,6 +388,14 @@ public sealed record GroundworkRuntimeSchemaAdmissionResult(
 
     public ImmutableArray<PhysicalSchemaOperation> PendingOperations => IsReady ? [] : Plan.Operations;
 
+    /// <summary>
+    /// Foreign-column drift the declaration's opt-in policy downgraded to a warning. Reported
+    /// alongside <see cref="Refusals"/> and never merged into it: these do not block startup, and
+    /// a caller that treated them as refusals would undo the opt-in.
+    /// </summary>
+    public ImmutableArray<SchemaRefusal> Warnings =>
+        Inspection.ToleratedDrift.IsDefault ? [] : Inspection.ToleratedDrift;
+
     public ImmutableArray<SchemaRefusal> Refusals =>
         (Inspection.ColumnDrift.IsDefault ? [] : Inspection.ColumnDrift)
             .Concat(Inspection.IndexDrift.IsDefault ? [] : Inspection.IndexDrift)
@@ -447,6 +464,12 @@ public static class GroundworkRuntimeSchemaAdmission
                 nameof(executor));
 
         var inspection = inspector.InspectHistory(target);
+        foreach (var tolerated in inspection.HasToleratedDrift ? inspection.ToleratedDrift : [])
+        {
+            log(new GroundworkRuntimeSchemaAdmissionLogEntry(
+                GroundworkRuntimeSchemaAdmissionLogLevel.Warning,
+                $"{tolerated.Code}: {tolerated.Message}"));
+        }
         var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UtcNow);
         if (!options.AutoApplyOnStartup || !inspection.IsAppliedSchemaValid || !plan.IsApplicable || plan.Operations.Length == 0)
             return new GroundworkRuntimeSchemaAdmissionResult(inspection, plan);

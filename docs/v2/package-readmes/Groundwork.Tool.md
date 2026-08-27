@@ -1,12 +1,19 @@
 # Groundwork.Tool
 
-The `groundwork` CLI: `plan`, `validate`, `status`, `apply`, and `schema emit`. Deployment-time
-schema planning and application, separate from your application's startup path on purpose.
+The `groundwork` CLI: `plan`, `validate`, `status`, `apply`, `adopt`, and `schema emit`.
+Deployment-time schema planning and application, separate from your application's startup path on
+purpose.
 
 `plan` reports exactly what would change and a plan fingerprint. `apply` refuses unless you
 authorize that exact fingerprint, and refuses again if the plan is no longer current — so a schema
 change cannot be applied on the strength of a plan somebody read yesterday. Destructive and
 semantic operations each need their own explicit authorization.
+
+`adopt` covers the database that already holds exactly what the declaration describes while
+Groundwork has no history of applying it. It executes no DDL: it proves the deployed catalog matches
+the compiled target exactly and publishes the applied state that applying it would have published.
+Any difference is a refusal that names the column or index that differs — adoption verifies, it
+never infers.
 
 `apply` writes the applied-state history that runtime startup admission compares against, which is
 why the tool multi-targets `net8.0` and `net10.0`: a deployment host running .NET 8 can apply schema

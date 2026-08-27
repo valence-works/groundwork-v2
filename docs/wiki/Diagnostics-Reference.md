@@ -129,7 +129,16 @@ Published codes appear in messages; Roslyn ids use underscores.
 | --- | --- | --- |
 | `GW-RUNTIME-001` | Column drift — missing/changed column, collation, or search-key algorithm | **Startup-fatal** |
 | `GW-RUNTIME-002` | Index drift — missing/changed declared index | Dependent query shapes refuse |
+| `GW-RUNTIME-003` | A deployed column the declaration does not describe, downgraded from `GW-RUNTIME-001` by the unit's opt-in foreign-column policy | Warning |
 | `GW-RUNTIME-010`…`013` | Additional runtime admission refusals | |
+
+A deployed column the declaration does not describe is `GW-RUNTIME-001` by default. Declaring
+`ForeignColumns = ForeignColumnPolicy.TolerateDatabaseSupplied` (fluent: `.TolerateForeignColumns()`;
+schema document: `"foreignColumns": "TolerateDatabaseSupplied"`) downgrades it to `GW-RUNTIME-003`
+**only** where the database supplies a value for the column on its own — nullable, defaulted, or
+generated. A foreign column a write that omits it would fail on stays `GW-RUNTIME-001`, because no
+policy makes it writable. Nothing else about drift changes: a declared column that differs, a
+missing column, and index drift are unaffected.
 
 ---
 
@@ -261,6 +270,7 @@ Grouped by concern:
 | `GW-CLI-007` | Schema changes require explicit `--safe` authorization |
 | `GW-CLI-008` | A destructive operation was not named through `--allow-destructive` |
 | `GW-CLI-012` | A semantic migration was not named through `--allow-semantic` |
+| `GW-CLI-013` | `adopt` was invoked against a provider that cannot compare a deployed catalog to a compiled target, so it cannot prove a match |
 | `GW-SCHEMA-TOOL-001` | Schema tool refusal |
 
 ### `GW-SCHEMA-*` — schema planning and evolution
@@ -281,6 +291,9 @@ would make it work, while an unauthorized one is waiting on an operator naming i
 | `GW-SCHEMA-008` | A planned **semantic** migration is not authorized, e.g. `rename-column:orders.buyer` | Needs authorization |
 | `GW-SCHEMA-009` | The provider cannot honor a declared logical-id rename. MongoDB keeps no applied schema ledger, so it cannot tell a renamed field from a new one ([#86](https://github.com/valence-works/groundwork-v2/issues/86)) | Invalid |
 | `GW-SCHEMA-010` | `connection.Schema.Apply` was asked to destroy data re-applying cannot restore — drop a column or its storage, or narrow a column past the values in it. Apply it from the `groundwork` CLI, which authorizes the exact operation against the exact plan | Needs authorization |
+| `GW-SCHEMA-011` | `groundwork adopt` found applied history already recorded for this target. Adoption records a catalog Groundwork has never applied; apply the pending plan instead | Invalid |
+| `GW-SCHEMA-012` | `groundwork adopt` was asked to adopt a subject declared retired, which describes no catalog to verify | Invalid |
+| `GW-SCHEMA-013` | The provider reported the deployed catalog invalid without naming what differs, so adoption refused rather than record an unproved claim | Invalid |
 
 `GW-SCHEMA-007` and `-008` replace the earlier use of `GW-RUNTIME-002` for startup auto-apply
 refusals. `GW-RUNTIME-002` now means only what its own row says: **index drift**.
