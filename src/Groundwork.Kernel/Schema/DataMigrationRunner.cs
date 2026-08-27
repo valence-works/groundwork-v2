@@ -259,6 +259,22 @@ internal readonly struct DataMigrationExecution
 
     internal CancellationToken CancellationToken { get; }
 
+    /// <summary>
+    /// Every recorded entry for one target, or an empty list when the provider records none at all.
+    /// A provider with no data-migration execution is not an error here: it simply has no evidence,
+    /// which the expand–contract gate then reports as an incomplete backfill.
+    /// </summary>
+    internal ValueTask<IReadOnlyList<DataMigrationLedgerEntry>> ReadLedgerEntries(
+        IDataMigrationExecutor? executor,
+        PhysicalSchemaTargetIdentity target)
+    {
+        if (executor is null)
+            return new ValueTask<IReadOnlyList<DataMigrationLedgerEntry>>([]);
+        return IsAsync
+            ? executor.ReadLedgerEntriesAsync(target, CancellationToken)
+            : new ValueTask<IReadOnlyList<DataMigrationLedgerEntry>>(executor.ReadLedgerEntries(target));
+    }
+
     internal ValueTask<DataMigrationLedgerEntry?> ReadLedgerEntry(
         IDataMigrationExecutor executor,
         PhysicalSchemaTargetIdentity target,

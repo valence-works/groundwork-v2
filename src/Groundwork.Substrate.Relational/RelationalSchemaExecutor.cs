@@ -285,6 +285,11 @@ public sealed class RelationalSchemaExecutor
             case DropColumnOperation drop:
                 dialect.DropColumn(connection, transaction, drop.Subject.Name, drop.Column);
                 break;
+            // A supersession marker is a durable ledger fact, not physical work: the expand plan
+            // records that a column is deliberately still there, and the contract plan records that
+            // the removal above happened.
+            case ColumnSupersessionOperation:
+                break;
             case DropPhysicalIndexOperation dropIndex:
                 Execute(connection, transaction, RelationalSql.DropIndex(dialect, dropIndex.Subject.Name, dropIndex.Index.Name));
                 break;

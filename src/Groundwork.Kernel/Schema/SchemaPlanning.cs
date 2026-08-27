@@ -7,11 +7,18 @@ public sealed record SchemaRefusal(string Code, string Message, string Path);
 
 public static class PhysicalSchemaDiffPlanner
 {
+    /// <summary>
+    /// Plans one target. <paramref name="phase"/> selects which half of an expand–contract
+    /// evolution the plan describes; it changes nothing for a declaration that supersedes no
+    /// column, where both phases derive the same operations.
+    /// </summary>
     public static PhysicalSchemaDiffPlan Plan(
         PhysicalSchemaTarget target,
         PhysicalSchemaHistoryState history,
         DateTimeOffset plannedAt,
-        LegacyPhysicalSchemaHistoryPolicy legacyHistoryPolicy = LegacyPhysicalSchemaHistoryPolicy.RejectEntriesWithoutAppliedSnapshot)
+        LegacyPhysicalSchemaHistoryPolicy legacyHistoryPolicy = LegacyPhysicalSchemaHistoryPolicy.RejectEntriesWithoutAppliedSnapshot,
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand,
+        ContractReadinessAssessment? readiness = null)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(history);
@@ -26,7 +33,8 @@ public static class PhysicalSchemaDiffPlanner
                 [new SchemaRefusal(
                     "GW-SCHEMA-001",
                     "Legacy schema history has no typed applied snapshot; remove it rather than infer an adopted schema.",
-                    "schemaHistory")]);
+                    "schemaHistory")],
+                phase: phase);
         }
 
         var applied = history.AppliedState;
@@ -40,21 +48,31 @@ public static class PhysicalSchemaDiffPlanner
                 [new SchemaRefusal(
                     "GW-SCHEMA-002",
                     $"Applied state '{applied.TargetIdentity}' does not match target '{target.Identity}'.",
-                    "schemaHistory.identity")]);
+                    "schemaHistory.identity")],
+                phase: phase);
         }
 
         return target.Subject.Evolution.RetiresPrimaryStorage
-            ? PlanRetirement(target, applied, plannedAt)
-            : PlanEvolution(target, applied, plannedAt);
+            ? PlanRetirement(target, applied, plannedAt, phase)
+            : PlanEvolution(target, applied, plannedAt, phase, readiness);
     }
 
     private static PhysicalSchemaDiffPlan PlanEvolution(
         PhysicalSchemaTarget target,
         PhysicalSchemaAppliedState? applied,
-        DateTimeOffset plannedAt)
+        DateTimeOffset plannedAt,
+        SchemaEvolutionPhase phase,
+        ContractReadinessAssessment? readiness)
     {
-        var desired = DeriveSemanticOperations(target);
-        var evolution = SchemaEvolutionAnalysis.Analyze(target, applied, desired);
+        var supersessions = ColumnSupersessionPlan.Resolve(target, applied);
+        if (phase == SchemaEvolutionPhase.Contract &&
+            supersessions.ValidateReadiness(target, applied, readiness) is { Length: > 0 } gate)
+        {
+            return PhysicalSchemaDiffPlan.Invalid(target, plannedAt, gate, phase: phase);
+        }
+
+        var desired = DeriveSemanticOperations(target, supersessions, phase);
+        var evolution = SchemaEvolutionAnalysis.Analyze(target, applied, desired, supersessions);
         var refusals = evolution.Refusals
             .Concat(ValidateNewRequiredColumns(desired, evolution))
             .ToImmutableArray();
@@ -64,7 +82,8 @@ public static class PhysicalSchemaDiffPlanner
                 target,
                 plannedAt,
                 refusals,
-                CreateSnapshot(target, desired));
+                CreateSnapshot(target, desired),
+                phase: phase);
         }
 
         var appliedIdentities = applied?.Snapshot.SemanticOperations
@@ -87,11 +106,11 @@ public static class PhysicalSchemaDiffPlanner
             .ToList();
 
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
-            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint);
+            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint, phase);
 
         pending.Add(new ValidatePhysicalSchemaOperation(target));
         pending.Add(new PublishAppliedStateOperation(target));
-        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint);
+        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint, phase);
     }
 
     /// <summary>
@@ -101,7 +120,8 @@ public static class PhysicalSchemaDiffPlanner
     private static PhysicalSchemaDiffPlan PlanRetirement(
         PhysicalSchemaTarget target,
         PhysicalSchemaAppliedState? applied,
-        DateTimeOffset plannedAt)
+        DateTimeOffset plannedAt,
+        SchemaEvolutionPhase phase)
     {
         var snapshot = new PhysicalSchemaAppliedSnapshot(target.Subject, [], target.ProviderDefinitions);
         var pending = new List<PhysicalSchemaOperation>();
@@ -113,14 +133,17 @@ public static class PhysicalSchemaDiffPlanner
                 applied.Snapshot.ProviderDefinitions));
         }
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
-            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint);
+            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint, phase);
 
         pending.Add(new ValidatePhysicalSchemaOperation(target));
         pending.Add(new PublishAppliedStateOperation(target));
-        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint);
+        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint, phase);
     }
 
-    private static ImmutableArray<PhysicalSchemaOperation> DeriveSemanticOperations(PhysicalSchemaTarget target)
+    private static ImmutableArray<PhysicalSchemaOperation> DeriveSemanticOperations(
+        PhysicalSchemaTarget target,
+        ColumnSupersessionPlan supersessions,
+        SchemaEvolutionPhase phase)
     {
         var operations = new List<PhysicalSchemaOperation>
         {
@@ -149,6 +172,7 @@ public static class PhysicalSchemaDiffPlanner
             .Select(index => (PhysicalSchemaOperation)new CreatePhysicalIndexOperation(target.Subject, index)));
         operations.AddRange(target.ProviderDefinitions.Select(definition =>
             (PhysicalSchemaOperation)new ApplyProviderPhysicalSchemaDefinitionOperation(definition)));
+        operations.AddRange(supersessions.Operations(target.Subject, phase));
 
         return operations
             .GroupBy(operation => operation.Identity, StringComparer.Ordinal)
@@ -318,10 +342,13 @@ public static class PhysicalSchemaDiffPlanner
         PhysicalSchemaOperationKind.BackfillColumn => 5,
         PhysicalSchemaOperationKind.FinalizeColumn => 6,
         PhysicalSchemaOperationKind.DropColumn => 7,
-        PhysicalSchemaOperationKind.CreatePhysicalIndex => 8,
-        PhysicalSchemaOperationKind.RebuildPhysicalIndex => 9,
-        PhysicalSchemaOperationKind.ApplyProviderDefinition => 10,
-        PhysicalSchemaOperationKind.DropPrimaryStorage => 11,
+        // The marker records what the physical work above just did, so it lands after the removal
+        // in the contract phase and after the replacement column is real in the expand phase.
+        PhysicalSchemaOperationKind.ColumnSupersession => 8,
+        PhysicalSchemaOperationKind.CreatePhysicalIndex => 9,
+        PhysicalSchemaOperationKind.RebuildPhysicalIndex => 10,
+        PhysicalSchemaOperationKind.ApplyProviderDefinition => 11,
+        PhysicalSchemaOperationKind.DropPrimaryStorage => 12,
         PhysicalSchemaOperationKind.ValidatePhysicalSchema => 100,
         PhysicalSchemaOperationKind.PublishAppliedState => 101,
         _ => 100
@@ -336,7 +363,8 @@ public sealed class PhysicalSchemaDiffPlan
         PhysicalSchemaAppliedSnapshot snapshot,
         IEnumerable<PhysicalSchemaOperation> operations,
         IEnumerable<SchemaRefusal> refusals,
-        string? expectedAppliedTargetFingerprint)
+        string? expectedAppliedTargetFingerprint,
+        SchemaEvolutionPhase phase)
     {
         Target = target;
         PlannedAt = plannedAt;
@@ -344,9 +372,13 @@ public sealed class PhysicalSchemaDiffPlan
         Operations = operations.ToImmutableArray();
         Refusals = refusals.ToImmutableArray();
         ExpectedAppliedTargetFingerprint = expectedAppliedTargetFingerprint;
+        Phase = phase;
     }
 
     public PhysicalSchemaTarget Target { get; }
+
+    /// <summary>Which half of an expand–contract evolution this plan describes.</summary>
+    public SchemaEvolutionPhase Phase { get; }
 
     public DateTimeOffset PlannedAt { get; }
 
@@ -421,22 +453,25 @@ public sealed class PhysicalSchemaDiffPlan
         DateTimeOffset plannedAt,
         PhysicalSchemaAppliedSnapshot snapshot,
         IEnumerable<PhysicalSchemaOperation> operations,
-        string? expectedAppliedTargetFingerprint) =>
-        new(target, plannedAt, snapshot, operations, [], expectedAppliedTargetFingerprint);
+        string? expectedAppliedTargetFingerprint,
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand) =>
+        new(target, plannedAt, snapshot, operations, [], expectedAppliedTargetFingerprint, phase);
 
     internal static PhysicalSchemaDiffPlan Invalid(
         PhysicalSchemaTarget target,
         DateTimeOffset plannedAt,
         IEnumerable<SchemaRefusal> refusals,
         PhysicalSchemaAppliedSnapshot? snapshot = null,
-        string? expectedAppliedTargetFingerprint = null) =>
+        string? expectedAppliedTargetFingerprint = null,
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand) =>
         new(
             target,
             plannedAt,
             snapshot ?? new PhysicalSchemaAppliedSnapshot(target.Subject, [], target.ProviderDefinitions),
             [],
             refusals,
-            expectedAppliedTargetFingerprint);
+            expectedAppliedTargetFingerprint,
+            phase);
 }
 
 /// <summary>One planned operation that startup auto-apply must not execute without authorization.</summary>

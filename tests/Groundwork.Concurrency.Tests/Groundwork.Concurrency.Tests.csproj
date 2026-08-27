@@ -25,4 +25,8 @@
     <ProjectReference Include="../../src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="../Groundwork.LiveDatabases/LiveSqlServer.cs" Link="LiveSqlServer.cs" />
+  </ItemGroup>
+
 </Project>

@@ -179,6 +179,38 @@ groundwork apply --schema groundwork.schema.json --provider postgresql \
 The applied ledger then shrinks to nothing for that unit, which is the durable evidence that the
 storage is gone. Delete the declaration afterwards.
 
+### Expand and contract: removing a column without a downtime window
+
+A rename or a widening planned as one operation changes the column an application version is already
+using. When both versions run at once, plan it as **expand–contract** instead: declare the departing
+column as *superseded*, and the same declaration yields an additive expand plan and a later
+destructive contract plan.
+
+```csharp
+new SchemaEvolutionMetadata(
+    semanticMigrationId: "2026-08-widen-total",
+    supersessions:
+    [
+        new ColumnSupersession(
+            new ColumnDefinition { Name = "total", Type = PortableType.Decimal, Precision = 10, Scale = 2 },
+            replacementColumn: "total_amount")
+    ],
+    dualPresenceWindow: TimeSpan.FromHours(24))
+```
+
+```bash
+groundwork apply --schema groundwork.schema.json --provider postgresql --phase expand   …
+#  … the previous version drains; the backfill runs to completion; the window elapses …
+groundwork apply --schema groundwork.schema.json --provider postgresql --phase contract …
+```
+
+The superseded column is deliberately no longer declared, so nothing in the new declaration can read
+it, write it, alter it, or rename it — the expand plan is invisible to the application version that
+still owns it. The contract plan refuses with a `GW-EXPAND-*` code until the applied ledger records
+the column as retained, the data migration is recorded complete, and the declared window has elapsed
+since the later of those two. See **[expand–contract workflows](../v2/expand-contract.md)** for the
+full dual-presence semantics and both worked examples.
+
 ### Provider coverage
 
 | Provider | Drop / rename / alter |

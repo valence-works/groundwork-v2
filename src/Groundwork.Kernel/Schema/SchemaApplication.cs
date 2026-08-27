@@ -101,6 +101,12 @@ public sealed record PhysicalSchemaApplicationResult(
 
     /// <summary>Evidence for every data migration attached to this target's semantic migration.</summary>
     public ImmutableArray<DataMigrationRunResult> DataMigrations { get; init; } = [];
+
+    /// <summary>
+    /// The contract readiness established for this application, or null when it planned the expand
+    /// phase. It is what a refused contract reports, and what an accepted one was admitted by.
+    /// </summary>
+    public ContractReadinessAssessment? ContractReadiness { get; init; }
 }
 
 /// <summary>Coordinates an exact plan with CAS-recorded provider history.</summary>
@@ -135,7 +141,9 @@ public static class PhysicalSchemaApplication
         Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? planAuthorization = null,
         DataMigrationCatalog? dataMigrations = null,
         DataMigrationBudget? dataMigrationBudget = null,
-        IProgress<DataMigrationProgress>? dataMigrationProgress = null) =>
+        IProgress<DataMigrationProgress>? dataMigrationProgress = null,
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand,
+        IDataMigrationExecutor? dataMigrationExecutor = null) =>
         ApplyCore(
             target,
             executor,
@@ -144,6 +152,8 @@ public static class PhysicalSchemaApplication
             dataMigrations,
             dataMigrationBudget,
             dataMigrationProgress,
+            phase,
+            dataMigrationExecutor,
             DataMigrationExecution.Synchronous).GetAwaiter().GetResult();
 
     /// <summary>
@@ -159,6 +169,8 @@ public static class PhysicalSchemaApplication
         DataMigrationCatalog? dataMigrations = null,
         DataMigrationBudget? dataMigrationBudget = null,
         IProgress<DataMigrationProgress>? dataMigrationProgress = null,
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand,
+        IDataMigrationExecutor? dataMigrationExecutor = null,
         CancellationToken cancellationToken = default) =>
         ApplyCore(
             target,
@@ -168,6 +180,8 @@ public static class PhysicalSchemaApplication
             dataMigrations,
             dataMigrationBudget,
             dataMigrationProgress,
+            phase,
+            dataMigrationExecutor,
             DataMigrationExecution.Asynchronous(cancellationToken));
 
     private static async ValueTask<PhysicalSchemaApplicationResult> ApplyCore(
@@ -178,6 +192,8 @@ public static class PhysicalSchemaApplication
         DataMigrationCatalog? dataMigrations,
         DataMigrationBudget? dataMigrationBudget,
         IProgress<DataMigrationProgress>? dataMigrationProgress,
+        SchemaEvolutionPhase phase,
+        IDataMigrationExecutor? dataMigrationExecutor,
         DataMigrationExecution mode)
     {
         ArgumentNullException.ThrowIfNull(target);
@@ -190,16 +206,36 @@ public static class PhysicalSchemaApplication
                 $"Executor returned lock '{applicationLock.Target}' for requested target '{target.Identity}'.");
 
         var history = executor.ReadHistory(target.Identity, applicationLock);
-        var plan = PhysicalSchemaDiffPlanner.Plan(target, history, plannedAt);
+        // One lookup decides where the data-migration ledger comes from, and both the contract gate
+        // and the migration phase below use it. A provider whose schema executor and migration
+        // executor are two objects passes the second one in; most pass one object that is both.
+        var migrationExecutor = dataMigrationExecutor ?? executor as IDataMigrationExecutor;
+        // A contract plan establishes its readiness here, inside the same lock and from the same
+        // history it is planned against, so nothing can change between the gate and the removal.
+        var readiness = phase == SchemaEvolutionPhase.Contract
+            ? ExpandContractWorkflow.AssessContractReadiness(
+                target,
+                history,
+                migrationExecutor is null
+                    ? null
+                    : await mode.ReadLedgerEntries(migrationExecutor, target.Identity).ConfigureAwait(false),
+                now ?? plannedAt)
+            : null;
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, history, plannedAt, phase: phase, readiness: readiness);
+        var supersessions = ColumnSupersessionPlan.Resolve(target, history.AppliedState);
         if (!plan.IsApplicable)
-            return new(PhysicalSchemaApplicationOutcome.Rejected, plan, history.AppliedState);
+            return new(PhysicalSchemaApplicationOutcome.Rejected, plan, history.AppliedState)
+            {
+                ContractReadiness = readiness
+            };
 
         var authorization = planAuthorization?.Invoke(plan) ?? PhysicalSchemaPlanAuthorization.Allow;
         if (!authorization.IsAuthorized)
         {
             return new(PhysicalSchemaApplicationOutcome.AuthorizationRequired, plan, history.AppliedState)
             {
-                AuthorizationRefusals = authorization.Refusals
+                AuthorizationRefusals = authorization.Refusals,
+                ContractReadiness = readiness
             };
         }
 
@@ -211,7 +247,7 @@ public static class PhysicalSchemaApplication
             // A target whose schema is already applied can still owe a data migration that an
             // earlier pass left running, so the resume runs here too rather than only after DDL.
             var resumed = await RunDataMigrations(
-                target, executor, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
+                target, migrationExecutor, supersessions, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
                 .ConfigureAwait(false);
             return new(
                 resumed.Any(result => !result.IsComplete)
@@ -220,7 +256,8 @@ public static class PhysicalSchemaApplication
                 plan,
                 history.AppliedState)
             {
-                DataMigrations = resumed
+                DataMigrations = resumed,
+                ContractReadiness = readiness
             };
         }
 
@@ -240,7 +277,7 @@ public static class PhysicalSchemaApplication
         // unfinished data migration is reported by the outcome and by that ledger, not by pretending
         // the schema was never applied.
         var migrations = await RunDataMigrations(
-            target, executor, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
+            target, migrationExecutor, supersessions, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
             .ConfigureAwait(false);
         return new(
             migrations.Any(result => !result.IsComplete)
@@ -249,7 +286,8 @@ public static class PhysicalSchemaApplication
             plan,
             applied)
         {
-            DataMigrations = migrations
+            DataMigrations = migrations,
+            ContractReadiness = readiness
         };
     }
 
@@ -260,7 +298,8 @@ public static class PhysicalSchemaApplication
     /// </summary>
     private static async ValueTask<ImmutableArray<DataMigrationRunResult>> RunDataMigrations(
         PhysicalSchemaTarget target,
-        IPhysicalSchemaExecutor executor,
+        IDataMigrationExecutor? migrationExecutor,
+        ColumnSupersessionPlan supersessions,
         DataMigrationCatalog? catalog,
         DataMigrationBudget? budget,
         IProgress<DataMigrationProgress>? progress,
@@ -273,7 +312,7 @@ public static class PhysicalSchemaApplication
             return [];
         }
 
-        if (executor is not IDataMigrationExecutor migrationExecutor)
+        if (migrationExecutor is null)
         {
             throw new DataMigrationRefusedException(
                 DataMigrationCodes.NotSupported,
@@ -281,14 +320,28 @@ public static class PhysicalSchemaApplication
                 $"'{target.Provider.Name}' offers no data-migration execution.");
         }
 
+        // The backfill of an expand–contract evolution reads the superseded column, which the
+        // declaration deliberately no longer declares. It is not an undeclared column to the
+        // migration — the supersession declares it, in full — so it is carried into the unit the
+        // migration runs against and typed exactly like every other column.
+        var unit = MigrationUnit(target, supersessions);
         var result = await (mode.IsAsync
             ? DataMigrationRunner.RunAsync(
-                migrationExecutor, target.Identity, target.Subject.Definition, migration,
+                migrationExecutor, target.Identity, unit, migration,
                 budget, now, progress, mode.CancellationToken)
             : new ValueTask<DataMigrationRunResult>(DataMigrationRunner.Run(
-                migrationExecutor, target.Identity, target.Subject.Definition, migration,
+                migrationExecutor, target.Identity, unit, migration,
                 budget, now, progress))).ConfigureAwait(false);
         return [result];
+    }
+
+    private static StorageUnit MigrationUnit(
+        PhysicalSchemaTarget target,
+        ColumnSupersessionPlan supersessions)
+    {
+        var unit = target.Subject.Definition;
+        var retained = supersessions.RetainedColumns;
+        return retained.IsEmpty ? unit : unit with { Columns = [.. unit.Columns, .. retained] };
     }
 
     private static void EnsureAcknowledges(

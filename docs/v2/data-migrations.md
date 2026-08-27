@@ -148,6 +148,12 @@ tool cannot see host transforms, so it names the gap rather than guessing either
 ledger provisions nothing — a missing ledger reports as no recorded migration, so status stays safe
 on a read-only store.
 
+## Expand–contract
+
+A completed data migration is also the gate on the contract half of an expand–contract evolution:
+the superseded column cannot be dropped until this ledger records its backfill complete. See
+[expand–contract workflows](expand-contract.md).
+
 ## Refusal codes
 
 | Code | Meaning |
