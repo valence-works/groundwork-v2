@@ -346,6 +346,58 @@ public static class WritePreconditionValidator
     }
 }
 
+/// <summary>
+/// Runs a cleanup step while a write failure is already in flight. A rollback or a lifecycle close
+/// can itself fail, and the failure the caller has to act on is the original one, so a cleanup
+/// exception is recorded against the original under <see cref="CleanupFailureKey"/> rather than
+/// thrown in its place.
+/// </summary>
+public static class WriteFailureCleanup
+{
+    /// <summary>Key under which a cleanup exception is attached to the original failure's data.</summary>
+    public const string CleanupFailureKey = "Groundwork.CleanupFailure";
+
+    public static void Run(Exception failure, Action cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        try
+        {
+            cleanup();
+        }
+        catch (Exception cleanupFailure)
+        {
+            Record(failure, cleanupFailure);
+        }
+    }
+
+    public static async ValueTask Run(Exception failure, Func<ValueTask> cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        try
+        {
+            await cleanup().ConfigureAwait(false);
+        }
+        catch (Exception cleanupFailure)
+        {
+            Record(failure, cleanupFailure);
+        }
+    }
+
+    private static void Record(Exception failure, Exception cleanupFailure)
+    {
+        try
+        {
+            failure.Data[CleanupFailureKey] = cleanupFailure.ToString();
+        }
+        catch (Exception attachFailure) when (attachFailure is ArgumentException or NotSupportedException)
+        {
+        }
+    }
+}
+
+
 /// <summary>Explicit optimistic-concurrency precondition for a mutation.</summary>
 public sealed record WriteOptions
 {

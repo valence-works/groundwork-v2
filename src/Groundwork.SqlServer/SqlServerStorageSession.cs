@@ -1869,9 +1869,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 await mode.Commit(writeTransaction).ConfigureAwait(false);
                 return result;
             }
-            catch
+            catch (Exception failure)
             {
-                await mode.Rollback(writeTransaction).ConfigureAwait(false);
+                await WriteFailureCleanup.Run(failure, () => mode.Rollback(writeTransaction)).ConfigureAwait(false);
                 throw;
             }
             finally

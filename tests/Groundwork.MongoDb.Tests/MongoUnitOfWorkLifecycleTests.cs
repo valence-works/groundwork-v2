@@ -33,15 +33,36 @@ public sealed class MongoUnitOfWorkLifecycleTests
         unitOfWork.Dispose();
     }
 
+    [Fact]
+    public async Task Failing_rollback_records_itself_against_the_commit_failure_it_must_not_replace()
+    {
+        var inner = new FailingUnitOfWork(endsOnCommitFailure: false);
+        var unitOfWork = new MongoStoreUnitOfWork(inner, BatchWriteOptions.Exact, exactAvailable: false);
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await unitOfWork.CommitWithOutcomesAsync());
+
+        Assert.Same(inner.Failure, failure);
+        Assert.True(inner.RolledBack);
+        Assert.Contains(
+            inner.RollbackFailure.Message,
+            Assert.IsType<string>(failure.Data[WriteFailureCleanup.CleanupFailureKey]),
+            StringComparison.Ordinal);
+        unitOfWork.Dispose();
+    }
+
     /// <summary>
     /// Stands in for the native unit of work after a non-retryable commit failure: the commit
-    /// throws and the unit has already ended, exactly as <c>MongoUnitOfWork</c> now reports itself.
+    /// throws, the unit reports whether it has already ended, and its rollback fails too.
     /// </summary>
-    private sealed class FailingUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
+    private sealed class FailingUnitOfWork(bool endsOnCommitFailure = true)
+        : IMongoUnitOfWork, IMongoUnitOfWorkState
     {
         private bool terminal;
 
         internal InvalidOperationException Failure { get; } = new("the commit failed");
+
+        internal InvalidOperationException RollbackFailure { get; } = new("the rollback failed too");
 
         internal bool RolledBack { get; private set; }
 
@@ -57,13 +78,13 @@ public sealed class MongoUnitOfWorkLifecycleTests
 
         public void Commit()
         {
-            terminal = true;
+            terminal = endsOnCommitFailure;
             throw Failure;
         }
 
         public ValueTask CommitAsync(CancellationToken cancellationToken = default)
         {
-            terminal = true;
+            terminal = endsOnCommitFailure;
             throw Failure;
         }
 
@@ -72,6 +93,7 @@ public sealed class MongoUnitOfWorkLifecycleTests
             RolledBack = true;
             EnsureActive();
             terminal = true;
+            throw RollbackFailure;
         }
 
         public void Dispose()

@@ -1677,9 +1677,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 writeTransaction.Commit();
                 return result;
             }
-            catch
+            catch (Exception failure)
             {
-                writeTransaction.Rollback();
+                WriteFailureCleanup.Run(failure, writeTransaction.Rollback);
                 throw;
             }
             finally

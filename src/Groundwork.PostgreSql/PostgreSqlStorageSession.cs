@@ -1581,9 +1581,9 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             await mode.Commit(write).ConfigureAwait(false);
             return result;
         }
-        catch
+        catch (Exception failure)
         {
-            await mode.Rollback(write).ConfigureAwait(false);
+            await WriteFailureCleanup.Run(failure, () => mode.Rollback(write)).ConfigureAwait(false);
             throw;
         }
         finally

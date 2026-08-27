@@ -615,16 +615,19 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
             terminal = true;
             return batch.DrainCompleted();
         }
-        catch
+        catch (Exception failure)
         {
-            try
+            WriteFailureCleanup.Run(failure, () =>
             {
-                // A native unit that already ended on its own failed commit must not be rolled
-                // back again: the rollback would throw and hide the failure the caller needs.
-                if (inner is not IMongoUnitOfWorkState state || state.IsActive)
-                    inner.Rollback();
-            }
-            finally { terminal = true; }
+                try
+                {
+                    // A native unit that already ended on its own failed commit must not be rolled
+                    // back again: the rollback would throw and hide the failure the caller needs.
+                    if (inner is not IMongoUnitOfWorkState state || state.IsActive)
+                        inner.Rollback();
+                }
+                finally { terminal = true; }
+            });
             throw;
         }
     }

@@ -3332,13 +3332,15 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         {
             await MongoStorageSession.CommitTransactionWithRetry(session, mode).ConfigureAwait(false);
         }
-        finally
+        catch (Exception failure)
         {
             // A failed commit still ends this unit and still disposes the native session. It must
             // become terminal in the same step, or a caller's Dispose rolls back through a disposed
             // session and replaces the commit failure with a lifecycle error.
-            Complete();
+            WriteFailureCleanup.Run(failure, Complete);
+            throw;
         }
+        Complete();
     }
 
     public void Rollback()

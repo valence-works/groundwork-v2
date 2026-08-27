@@ -98,16 +98,19 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             }
             return batch.DrainCompleted();
         }
-        catch
+        catch (Exception failure)
         {
-            try
+            await WriteFailureCleanup.Run(failure, async () =>
             {
-                if (isAsync)
-                    await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
-                else
-                    transaction.Rollback();
-            }
-            finally { Complete(); }
+                try
+                {
+                    if (isAsync)
+                        await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                    else
+                        transaction.Rollback();
+                }
+                finally { Complete(); }
+            }).ConfigureAwait(false);
             throw;
         }
         finally
