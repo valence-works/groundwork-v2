@@ -107,6 +107,12 @@ groundwork apply --schema groundwork.schema.json --provider postgresql \
 
 You cannot authorize destructive work generically. You authorize *these operations, in this plan*.
 
+> **Drops are planned, not current:** no operation kind can produce a drop today, so the
+> `drop-column:`/`drop-index:` identities above show the authorization contract for planned
+> functionality ([#82](https://github.com/valence-works/Groundwork/issues/82)). The authorization
+> machinery itself is live: a **derived-column backfill** is a destructive operation, so `--safe`
+> refuses it until its exact identity is supplied through `--allow-destructive`.
+
 ### Providers and connections
 
 Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories

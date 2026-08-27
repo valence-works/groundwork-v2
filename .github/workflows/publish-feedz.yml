@@ -51,7 +51,8 @@ jobs:
           elif [[ -n "$INPUT_VERSION" ]]; then
             version="$INPUT_VERSION"
           else
-            version="0.1.0-preview.${GITHUB_RUN_NUMBER}"
+            prefix=$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' Directory.Build.props)
+            version="${prefix}-preview.${GITHUB_RUN_NUMBER}"
           fi
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?$ ]] || {
             echo "Invalid package version: $version" >&2

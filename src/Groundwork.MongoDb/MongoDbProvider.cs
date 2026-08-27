@@ -1069,6 +1069,17 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 rows[0] = first;
             }
         }
+        if (command.IncludesTotalCount && facetTotalCount is null && rows.Length == 0)
+        {
+            rows =
+            [
+                new Dictionary<string, object?>
+                {
+                    ["__groundwork_total_count"] = 0L,
+                    ["__groundwork_count_only"] = 1L
+                }
+            ];
+        }
         AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(
             executionSource,

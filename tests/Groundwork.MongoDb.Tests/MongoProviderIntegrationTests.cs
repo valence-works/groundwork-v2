@@ -1478,6 +1478,26 @@ public sealed class MongoProviderIntegrationTests
     private static StorageValues OptimisticUpsertStoreValues(string id, string payload) =>
         new(new Dictionary<string, object?> { ["id"] = id, ["payload"] = payload });
 
+    [SkippableFact]
+    public void Provider_side_count_over_an_empty_collection_reports_zero()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo.empty.count"),
+            Name = "mongo_empty_count",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+
+        var counted = session.Query(QueryRequestExecution.ForProviderCount(new QueryRequest(
+            new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None)));
+
+        Assert.Equal(0L, counted.TotalCount);
+    }
+
     private static IMongoProviderConnection OpenConnection()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
