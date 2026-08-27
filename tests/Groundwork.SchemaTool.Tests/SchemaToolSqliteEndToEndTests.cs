@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Sqlite;
@@ -143,6 +144,28 @@ public sealed class SchemaToolSqliteEndToEndTests : IDisposable
         using var store = new SqliteProviderFactory().Create(connection);
         var failure = Assert.Throws<GroundworkSchemaBoundaryException>(() => store.Schema.Diff(unit));
         Assert.Contains("Discard that catalog", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_multi_target_schema_applies_under_every_target_plan_fingerprint()
+    {
+        var schema = harness.Temp("multi.json", SchemaToolCliHarness.MultiTargetSchema);
+        var database = Path.Combine(harness.Root, "multi.db");
+        var connection = $"Data Source={database}";
+        File.Create(database).Dispose();
+
+        var plan = await harness.RunAsync(["plan", "--schema", schema], connection);
+        Assert.True(SchemaToolExitCodes.PendingChanges == plan.ExitCode, plan.Reason);
+        Assert.Equal(2, plan.Report.RootElement.GetProperty("targets").GetArrayLength());
+        Assert.Equal(JsonValueKind.Null, plan.Report.RootElement.GetProperty("planFingerprint").ValueKind);
+
+        var apply = await harness.ApplyAuthorizedAsync(schema, connection);
+        Assert.True(SchemaToolExitCodes.Success == apply.ExitCode, apply.Reason);
+        Assert.Equal("applied", apply.Report.RootElement.GetProperty("outcome").GetString());
+
+        var status = await harness.RunAsync(["status", "--schema", schema], connection);
+        Assert.True(SchemaToolExitCodes.Success == status.ExitCode, status.Reason);
+        Assert.Equal("ready", status.Report.RootElement.GetProperty("outcome").GetString());
     }
 
     private static void Execute(string connectionString, string sql)

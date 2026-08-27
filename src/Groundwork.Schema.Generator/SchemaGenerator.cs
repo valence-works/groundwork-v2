@@ -142,6 +142,8 @@ public sealed class SchemaGenerator : ISourceGenerator
         AttributeData tableAttribute)
     {
         var tableName = StringArgument(tableAttribute, 0) ?? symbol.Name;
+        if (IsEmpty(context, tableAttribute, symbol.Name, "the table name", tableName))
+            return null;
         var columns = new List<SchemaColumn>();
         var keys = new List<string>();
         var columnSymbols = new Dictionary<string, ISymbol>(StringComparer.Ordinal);
@@ -185,6 +187,8 @@ public sealed class SchemaGenerator : ISourceGenerator
                     }
 
                     var name = StringNamedArgument(columnAttribute, "Name") ?? ToSnakeCase(memberSymbol.Name);
+                    if (IsEmpty(context, columnAttribute, tableName, $"the name of column '{memberSymbol.Name}'", name))
+                        continue;
                     var nullable = IsNullable(memberType) && !BooleanNamedArgument(columnAttribute, "Required");
                     SchemaDefault? columnDefault = null;
                     if (StringNamedArgument(columnAttribute, "Default") is { } defaultText)
@@ -247,6 +251,8 @@ public sealed class SchemaGenerator : ISourceGenerator
         foreach (var indexAttribute in symbol.GetAttributes().Where(attribute => IsAttribute(attribute, "GwIndexAttribute")))
         {
             var indexName = StringArgument(indexAttribute, 0) ?? "<unnamed>";
+            if (IsEmpty(context, indexAttribute, tableName, "an index name", indexName))
+                continue;
             if (!indexNames.Add(indexName))
             {
                 context.ReportDiagnostic(Diagnostic.Create(
@@ -276,7 +282,7 @@ public sealed class SchemaGenerator : ISourceGenerator
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     InvalidTablePolicy,
-                    aggregateAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None,
+                    AttributeLocation(aggregateAttribute, context),
                     tableName,
                     $"aggregation '{aggregation.Name}' is declared more than once."));
                 continue;
@@ -284,27 +290,37 @@ public sealed class SchemaGenerator : ISourceGenerator
             aggregations.Add(aggregation);
         }
 
+        var token = StringNamedArgument(tableAttribute, "ConcurrencyToken");
+        if (token is not null && IsEmpty(context, tableAttribute, tableName, "the concurrency token", token))
+            return null;
+
         return new SchemaTable(
             tableName,
             columns,
             keys,
             indexes,
             EnumNamedArgument(tableAttribute, "Scope", SchemaScope.Global),
-            StringNamedArgument(tableAttribute, "ConcurrencyToken") is { } token ? new SchemaConcurrency(token) : null,
+            token is null ? null : new SchemaConcurrency(token),
             EnumNamedArgument(tableAttribute, "Timestamps", SchemaTimestamps.None),
-            ReadRetention(symbol),
+            ReadRetention(context, symbol, tableName),
             ReadIdempotency(context, symbol, tableName, "GwAppendIdempotencyAttribute"),
             ReadIdempotency(context, symbol, tableName, "GwRetentionIdempotencyAttribute"),
             aggregations);
     }
 
-    private static SchemaRetention? ReadRetention(INamedTypeSymbol symbol)
+    private static SchemaRetention? ReadRetention(
+        GeneratorExecutionContext context,
+        INamedTypeSymbol symbol,
+        string tableName)
     {
         if (FindAttribute(symbol, "GwRetentionAttribute") is not { } attribute)
             return null;
+        var orderBy = StringArgument(attribute, 1);
+        if (IsEmpty(context, attribute, tableName, "the retention order column", orderBy))
+            return null;
         return new SchemaRetention(
             attribute.ConstructorArguments.Length > 0 && attribute.ConstructorArguments[0].Value is int keepNewest ? keepNewest : 0,
-            StringArgument(attribute, 1) ?? "<unnamed>",
+            orderBy!,
             EnumNamedArgument(attribute, "Trigger", SchemaRetentionTrigger.Explicit),
             (StringNamedArgument(attribute, "PartitionBy") ?? string.Empty)
                 .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
@@ -324,13 +340,13 @@ public sealed class SchemaGenerator : ISourceGenerator
         if (!TimeSpan.TryParse(window, CultureInfo.InvariantCulture, out var parsed))
         {
             context.ReportDiagnostic(Diagnostic.Create(
-                InvalidTablePolicy,
-                attribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None,
-                tableName,
-                $"'{window}' is not a time span."));
+                InvalidTablePolicy, AttributeLocation(attribute, context), tableName, $"'{window}' is not a time span."));
             return null;
         }
-        return new SchemaIdempotency(parsed, StringNamedArgument(attribute, "LedgerName"));
+        var ledger = StringNamedArgument(attribute, "LedgerName");
+        if (ledger is not null && IsEmpty(context, attribute, tableName, "the idempotency ledger name", ledger))
+            return null;
+        return new SchemaIdempotency(parsed, ledger);
     }
 
     private static bool TryParseAggregation(
@@ -340,10 +356,15 @@ public sealed class SchemaGenerator : ISourceGenerator
         out SchemaAggregation aggregation)
     {
         var name = StringArgument(attribute, 0) ?? "<unnamed>";
+        if (IsEmpty(context, attribute, tableName, "an aggregation name", name))
+        {
+            aggregation = null!;
+            return false;
+        }
         var groupByColumns = new List<string>();
         var groupBy = new List<SchemaAggregationGroup>();
         var aggregates = new List<SchemaAggregate>();
-        var location = attribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None;
+        var location = AttributeLocation(attribute, context);
         foreach (var term in (StringArgument(attribute, 1) ?? string.Empty).Split(','))
         {
             var tokens = term.Trim().Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -390,6 +411,27 @@ public sealed class SchemaGenerator : ISourceGenerator
         }
 
         aggregation = new SchemaAggregation(name, aggregates, groupByColumns, groupBy);
+        return true;
+    }
+
+    private static Location AttributeLocation(AttributeData attribute, GeneratorExecutionContext context) =>
+        attribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None;
+
+    /// <summary>
+    /// Refuses an empty attribute value as a build diagnostic. The schema model requires these to be
+    /// non-empty, so without this the generator would fault instead of naming what is missing.
+    /// </summary>
+    private static bool IsEmpty(
+        GeneratorExecutionContext context,
+        AttributeData attribute,
+        string tableName,
+        string what,
+        string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+            return false;
+        context.ReportDiagnostic(Diagnostic.Create(
+            InvalidTablePolicy, AttributeLocation(attribute, context), tableName, $"{what} cannot be empty."));
         return true;
     }
 

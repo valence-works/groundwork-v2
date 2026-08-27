@@ -200,6 +200,50 @@ public sealed class GeneratorContractTests
     }
 
     [Theory]
+    [InlineData("""[GwTable("")]""")]
+    [InlineData("""[GwTable("orders", ConcurrencyToken = "")]""")]
+    [InlineData("""[GwTable("orders")] [GwRetention(50, "")]""")]
+    [InlineData("""[GwTable("orders")] [GwAppendIdempotency("00:10:00", LedgerName = "")]""")]
+    [InlineData("""[GwTable("orders")] [GwAggregate("", "group status, count n")]""")]
+    [InlineData("""[GwTable("orders")] [GwIndex("", "status ASC")]""")]
+    public void An_empty_lifecycle_value_is_a_build_diagnostic_not_a_generator_fault(string attributes)
+    {
+        var result = Run($$"""
+            #nullable enable
+            using Groundwork.Schema;
+
+            {{attributes}}
+            public sealed class Order
+            {
+                [GwKey, GwColumn(Length = 64)] public string Id { get; init; } = "";
+                [GwColumn(Length = 16)] public string Status { get; init; } = "";
+            }
+            """);
+
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Id is "GW_SCHEMA_TABLE_003" or "GW_SCHEMA_INDEX_001");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Id == "CS8785");
+    }
+
+    [Fact]
+    public void An_empty_column_name_is_a_build_diagnostic_not_a_generator_fault()
+    {
+        var result = Run("""
+            #nullable enable
+            using Groundwork.Schema;
+
+            [GwTable("orders")]
+            public sealed class Order
+            {
+                [GwKey, GwColumn(Name = "", Length = 64)] public string Id { get; init; } = "";
+            }
+            """);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Id == "GW_SCHEMA_TABLE_003");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Id == "CS8785");
+    }
+
+    [Theory]
     [InlineData("[GwAggregate(\"summary\", \"group status, day d created_at, count n\")]")]
     [InlineData("[GwAggregate(\"summary\", \"group status, count n\")] [GwAggregate(\"summary\", \"group id, count n\")]")]
     public void Aggregation_specs_the_kernel_refuses_are_build_diagnostics(string attributes)

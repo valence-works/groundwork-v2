@@ -38,6 +38,12 @@ public sealed class SchemaToolCliHarness : IDisposable
         {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}
         """;
 
+    /// <summary>Two tables in one document, for which the tool reports no single plan fingerprint.</summary>
+    public const string MultiTargetSchema =
+        """
+        {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]},{"name":"orders","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}
+        """;
+
     public static string EvolvedSchema(string table = "tickets") =>
         $$"""
         {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"priority","type":"Int32","nullable":true,"length":null,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[{"name":"by_priority","columns":[{"name":"priority","descending":false}],"includeNulls":true,"unique":false}]}]}
@@ -78,22 +84,30 @@ public sealed class SchemaToolCliHarness : IDisposable
         InvokeAsync(["schema", "emit", "--input", input, "--file", file, "--output", "json"]);
 
     /// <summary>
-    /// Plans, then applies under exact-plan authorization, naming every destructive and semantic
-    /// identity the plan reported. Apply stays refused unless the plan is still the current one.
-    /// A plan that failed is returned as-is, so a caller asserting on the apply sees the plan's own
-    /// reason rather than an authorization refusal caused by a missing plan fingerprint.
+    /// Plans, then applies under exact-plan authorization, naming every target's plan fingerprint
+    /// and every destructive and semantic identity the plan reported. Apply stays refused unless
+    /// the plan is still the current one. A plan that failed, or that named no target fingerprint
+    /// to authorize, is returned as-is so a caller sees the plan's own reason.
     /// </summary>
     public async Task<SchemaToolCliRun> ApplyAuthorizedAsync(string schemaFile, string connection)
     {
         var plan = await RunAsync(["plan", "--schema", schemaFile], connection);
         if (plan.ExitCode is not (SuccessExitCode or PendingChangesExitCode))
             return plan;
+        // The report's top-level planFingerprint is null for a multi-target schema, so authorize
+        // each target by its own fingerprint rather than the summary.
+        var fingerprints = plan.Report.RootElement.GetProperty("targets").EnumerateArray()
+            .Select(target => target.TryGetProperty("planFingerprint", out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null)
+            .ToArray();
+        if (fingerprints.Length == 0 || Array.Exists(fingerprints, fingerprint => fingerprint is null))
+            return plan;
+
         var authorization = plan.Report.RootElement.GetProperty("authorization");
-        var arguments = new List<string>
-        {
-            "apply", "--schema", schemaFile,
-            "--expected-plan", plan.Report.RootElement.GetProperty("planFingerprint").GetString()!
-        };
+        var arguments = new List<string> { "apply", "--schema", schemaFile };
+        foreach (var fingerprint in fingerprints)
+            arguments.AddRange(["--expected-plan", fingerprint!]);
         foreach (var identity in authorization.GetProperty("destructiveOperationsRequired").EnumerateArray())
             arguments.AddRange(["--allow-destructive", identity.GetString()!]);
         foreach (var identity in authorization.GetProperty("semanticRequired").EnumerateArray())

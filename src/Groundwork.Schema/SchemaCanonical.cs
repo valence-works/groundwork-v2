@@ -313,21 +313,31 @@ public static class GroundworkSchemaCanonical
         _ => throw new FormatException($"Unsupported JSON default token '{value.ValueKind}'.")
     };
 
-    /// <summary>Reads an optional member: absent and null both mean undeclared, anything else must be an object.</summary>
-    private static bool TryReadObject(JsonElement parent, string name, out JsonElement value)
+    /// <summary>
+    /// Reads an optional member under one rule: absent and null both mean undeclared, and a value
+    /// of any other kind is refused by name rather than quietly reverting to a default.
+    /// </summary>
+    private static bool TryRead(JsonElement parent, string name, JsonValueKind kind, out JsonElement value)
     {
         if (!parent.TryGetProperty(name, out value) || value.ValueKind == JsonValueKind.Null)
             return false;
-        if (value.ValueKind != JsonValueKind.Object)
-            throw new FormatException($"Schema JSON property '{name}' must be an object or null.");
+        if (value.ValueKind != kind)
+            throw new FormatException($"Schema JSON property '{name}' must be {Description(kind)} or null.");
         return true;
     }
 
+    private static string Description(JsonValueKind kind) => kind switch
+    {
+        JsonValueKind.Object => "an object",
+        JsonValueKind.Array => "an array",
+        _ => "a string"
+    };
+
     private static SchemaConcurrency? ReadConcurrency(JsonElement table) =>
-        TryReadObject(table, "concurrency", out var value) ? new SchemaConcurrency(RequiredString(value, "token")) : null;
+        TryRead(table, "concurrency", JsonValueKind.Object, out var value) ? new SchemaConcurrency(RequiredString(value, "token")) : null;
 
     private static SchemaRetention? ReadRetention(JsonElement table) =>
-        TryReadObject(table, "retention", out var value)
+        TryRead(table, "retention", JsonValueKind.Object, out var value)
             ? new SchemaRetention(
                 RequiredInt(value, "keepNewest"),
                 RequiredString(value, "orderBy"),
@@ -337,20 +347,16 @@ public static class GroundworkSchemaCanonical
             : null;
 
     private static SchemaIdempotency? ReadIdempotency(JsonElement table, string name) =>
-        TryReadObject(table, name, out var value)
+        TryRead(table, name, JsonValueKind.Object, out var value)
             ? new SchemaIdempotency(
                 TimeSpan.FromTicks(RequiredLong(value, "windowTicks")),
-                value.TryGetProperty("ledger", out var ledger) && ledger.ValueKind == JsonValueKind.String
-                    ? ledger.GetString()
-                    : null)
+                OptionalString(value, "ledger"))
             : null;
 
     private static IReadOnlyList<SchemaAggregation> ReadAggregations(JsonElement table)
     {
-        if (!table.TryGetProperty("aggregations", out var value) || value.ValueKind == JsonValueKind.Null)
+        if (!TryRead(table, "aggregations", JsonValueKind.Array, out var value))
             return Array.Empty<SchemaAggregation>();
-        if (value.ValueKind != JsonValueKind.Array)
-            throw new FormatException("Schema JSON property 'aggregations' must be an array or null.");
         return value.EnumerateArray().Select(element => new SchemaAggregation(
             RequiredString(element, "name"),
             RequiredArray(element, "aggregates").Select(aggregate => SchemaAggregate.Create(
@@ -403,9 +409,7 @@ public static class GroundworkSchemaCanonical
             : throw new FormatException($"Schema JSON property '{name}' must be a string.");
 
     private static string? OptionalString(JsonElement parent, string name) =>
-        parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
+        TryRead(parent, name, JsonValueKind.String, out var value) ? value.GetString() : null;
 
     private static bool RequiredBoolean(JsonElement parent, string name) =>
         parent.TryGetProperty(name, out var value) && (value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False)

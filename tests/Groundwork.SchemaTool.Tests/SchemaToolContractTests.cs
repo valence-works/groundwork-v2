@@ -85,6 +85,31 @@ public sealed class SchemaToolContractTests
     }
 
     [Theory]
+    [InlineData("column")]
+    [InlineData("orderBy")]
+    public void A_mistyped_aggregate_member_is_refused_rather_than_read_as_absent(string member)
+    {
+        var aggregation = $$"""
+            "aggregations":[{"name":"summary","groupByColumns":["id"],"groupBy":[],"aggregates":[{"kind":"Count","alias":"n","column":null,"orderBy":null,"descending":false,"maxValues":0}]}]
+            """.Replace($"\"{member}\":null", $"\"{member}\":7", StringComparison.Ordinal);
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", "\"indexes\":[]," + aggregation)));
+        Assert.Contains(member, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_mistyped_ledger_name_is_refused_rather_than_reverting_to_the_default()
+    {
+        var mistyped = ValidSchema.Replace(
+            "\"indexes\":[]",
+            "\"indexes\":[],\"appendIdempotency\":{\"windowTicks\":600000000,\"ledger\":7}");
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Read(mistyped));
+        Assert.Contains("ledger", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("concurrency")]
     [InlineData("retention")]
     [InlineData("appendIdempotency")]
