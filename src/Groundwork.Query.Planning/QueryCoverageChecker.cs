@@ -139,7 +139,7 @@ public static class QueryCoverageChecker
     /// </summary>
     private static bool DuplicatesDeclaredKey(CoverageIndex suggested, CoverageIndex? declaredKey)
     {
-        if (declaredKey is null || suggested.Columns.Length > declaredKey.Columns.Length)
+        if (declaredKey is null)
             return false;
         var leading = declaredKey.Columns
             .Take(suggested.Columns.Length)

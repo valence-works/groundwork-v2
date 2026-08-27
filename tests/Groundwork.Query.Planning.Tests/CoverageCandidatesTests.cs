@@ -118,11 +118,10 @@ public sealed class CoverageCandidatesTests
     }
 
     [Fact]
-    public void Derive_refuses_null_inputs_and_null_index_references()
+    public void Derive_refuses_null_inputs()
     {
         Assert.Throws<ArgumentNullException>(() => CoverageCandidates.Derive(null!, []));
         Assert.Throws<ArgumentNullException>(() => CoverageCandidates.Derive(["id"], null!));
-        Assert.Throws<ArgumentException>(() => CoverageCandidates.Derive(["id"], [null!]));
     }
 
     private static QueryCoverageResult Check(

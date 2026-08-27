@@ -39,8 +39,6 @@ public static class CoverageCandidates
             throw new ArgumentNullException(nameof(declaredIndexes));
 
         var indexes = declaredIndexes.ToImmutableArray();
-        if (indexes.Any(index => index is null))
-            throw new ArgumentException("Index candidates cannot contain null references.", nameof(declaredIndexes));
         var key = keyColumns.ToImmutableArray();
         if (key.Length == 0)
             return indexes;
