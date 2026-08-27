@@ -21,8 +21,8 @@ while IFS='|' read -r package_id project_path; do
   expected_ids+=("$package_id")
 done < "$allowlist"
 
-[[ "${#expected_ids[@]}" -eq 22 ]] || {
-  echo "Expected 22 public packages, found ${#expected_ids[@]} in $allowlist" >&2
+[[ "${#expected_ids[@]}" -eq 23 ]] || {
+  echo "Expected 23 public packages, found ${#expected_ids[@]} in $allowlist" >&2
   exit 1
 }
 

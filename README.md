@@ -57,6 +57,19 @@ Then install the exact preview required by the application:
 dotnet add package Groundwork.Sqlite --version 0.2.0-preview.1
 ```
 
+## Sample application
+
+`samples/Groundwork.Samples.Api` is a runnable ASP.NET Core minimal API covering
+declaration, schema deployment, typed CRUD, a covered query with paging, a unit
+of work, optimistic concurrency, and tenant scopes — switchable across all four
+providers from configuration.
+
+```shell
+dotnet run --project samples/Groundwork.Samples.Api
+```
+
+See its [README](samples/Groundwork.Samples.Api/README.md).
+
 ## Build
 
 ```shell

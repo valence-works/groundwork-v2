@@ -107,8 +107,11 @@ advertise those capabilities and refuses before doing I/O.
 
 ### Why is SQLite rejecting a second connection?
 
-The store holds one `${database}.schema.lock` file handle for its lifetime. Use **one
+The store holds one `${database}.schema.lock` file handle for its lifetime, so the second opener —
+another process or this one — is refused with `GW-SQLITE-LIFETIME-001`. Use **one
 `IStorageProviderConnection` per database file, for the life of the process** — not one per request.
+Under a host, `AddGroundwork().AddConnection(...)` does that for you; see
+**[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)**.
 
 ### Can I run migrations between preview versions?
 

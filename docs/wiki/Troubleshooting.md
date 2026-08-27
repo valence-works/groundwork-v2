@@ -236,11 +236,16 @@ Not an error — **pending changes**. Treat exit `2` as "work to do" in CI.
 
 ## Providers
 
-### SQLite: "a second process or connection is rejected"
+### SQLite: `GW-SQLITE-LIFETIME-001`, a second connection is rejected
 
 The store holds one `${database}.schema.lock` file handle for its lifetime. **Use one
 `IStorageProviderConnection` per database file, for the life of the process.** Do not create one per
-request.
+request. It does not matter whether the second opener is another process or the same one.
+
+Under a host, register the connection with `AddGroundwork().AddConnection(...)`, which registers it
+as a process singleton — see **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)**.
+In tests, give each test its own database file or use `Data Source=:memory:`. Do not run
+`groundwork apply` against a database an application already has open.
 
 ### SQLite: version error on open
 

@@ -1317,7 +1317,8 @@ public sealed class SqliteProviderTests
         using var store = TemporaryStore.Create();
         using var first = new SqliteProviderFactory().Create(store.ConnectionString);
         var error = Assert.Throws<InvalidOperationException>(() => new SqliteProviderFactory().Create(store.ConnectionString));
-        Assert.Contains("already in use", error.Message, StringComparison.Ordinal);
+        Assert.Contains("GW-SQLITE-LIFETIME-001", error.Message, StringComparison.Ordinal);
+        Assert.Contains("one IStorageProviderConnection per database file", error.Message, StringComparison.Ordinal);
         first.Dispose();
         using var second = new SqliteProviderFactory().Create(store.ConnectionString);
     }
