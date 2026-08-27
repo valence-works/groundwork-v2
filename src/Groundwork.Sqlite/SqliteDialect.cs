@@ -106,6 +106,16 @@ internal sealed class SqliteDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         ((SqliteConnection)connection).BeginTransaction(IsolationLevel.Serializable, deferred: false);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.Serializable;
+
+    /// <summary>
+    /// SQLite's asynchronous surface completes synchronously anyway, and only the synchronous
+    /// overload can ask for an immediate rather than a deferred transaction, so both surfaces open
+    /// the unit the same way.
+    /// </summary>
+    public override ValueTask<DbTransaction> BeginTransaction(DbConnection connection, RelationalExecution mode) =>
+        new(BeginTransaction(connection));
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;

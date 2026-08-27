@@ -156,6 +156,8 @@ internal sealed class SqlServerDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         ((SqlConnection)connection).BeginTransaction(IsolationLevel.Serializable);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.Serializable;
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;

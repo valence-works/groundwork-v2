@@ -38,7 +38,9 @@ await PhysicalSchemaApplication.ApplyAsync(target, executor, dataMigrations: cat
 
 The migration runs after the plan's operations are acknowledged and after applied state is
 published, because replaying `CREATE TABLE`/`ADD COLUMN` is not idempotent while the data-migration
-ledger is. When it does not finish, the application outcome is `DataMigrationIncomplete` and the
+ledger is. It runs inside the same application lock and on the same relational connection and
+fence, so a schema change cannot interleave with a migration of the same target — and a long
+migration therefore holds that lock for its duration. Bound a pass with a budget when that matters. When it does not finish, the application outcome is `DataMigrationIncomplete` and the
 schema tool exits with `PendingChanges` — the schema is applied, the target is not migrated, and
 neither fact is hidden behind the other.
 

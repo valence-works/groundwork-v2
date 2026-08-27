@@ -485,7 +485,13 @@ public static class GroundworkSchemaCli
                 $"Targets: {value.Targets.Count}",
                 $"Pending operations: {value.Targets.Sum(target => target.PendingOperations.Count)}",
                 $"Applied operations: {value.Targets.Sum(target => target.AppliedOperations.Count)}"
-            }.Concat(value.Diagnostics.Select(diagnostic =>
+            }.Concat(value.Targets.SelectMany(target => target.DataMigrations)
+                .OrderBy(migration => migration.Identity, StringComparer.Ordinal)
+                .Select(migration => $"Data migration {migration.Identity}: {migration.State}" +
+                    (migration.State == SchemaToolDataMigrationReport.PendingState
+                        ? $" ({migration.RowsScanned} rows scanned, resume at {migration.ResumeCursor})"
+                        : string.Empty)))
+            .Concat(value.Diagnostics.Select(diagnostic =>
                 $"error {diagnostic.Code}: {diagnostic.Message} ({diagnostic.Path})"))),
         _ => "Groundwork schema emit: written"
     };

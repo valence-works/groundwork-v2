@@ -1,3 +1,4 @@
+using System.Data;
 using System.Collections.ObjectModel;
 using System.Data.Common;
 using System.Globalization;
@@ -169,6 +170,20 @@ public abstract class RelationalDialect
     {
         ArgumentNullException.ThrowIfNull(connection);
         return connection.BeginTransaction();
+    }
+
+    /// <summary>The isolation one durable Groundwork unit runs at on this dialect.</summary>
+    public virtual IsolationLevel TransactionIsolation => IsolationLevel.Unspecified;
+
+    /// <summary>
+    /// Begins a transaction on the surface the caller selected, at this dialect's isolation. The
+    /// asynchronous data-migration path uses it so a chunk does not open its unit with a blocking
+    /// call, and so it runs at the same isolation as a schema apply rather than the driver default.
+    /// </summary>
+    public virtual ValueTask<DbTransaction> BeginTransaction(DbConnection connection, RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        return mode.BeginTransaction(connection, TransactionIsolation);
     }
 
     public abstract void EnsureInfrastructure(DbConnection connection);

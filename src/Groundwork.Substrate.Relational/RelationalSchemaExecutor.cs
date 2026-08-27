@@ -382,6 +382,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         ArgumentNullException.ThrowIfNull(target);
         ArgumentException.ThrowIfNullOrWhiteSpace(migrationId);
         return WithConnection(
+            target,
             connection => dialect.TableExists(connection, null, RelationalDataMigrationLedger.TableName)
                 ? RelationalDataMigrationLedger.Read(dialect, connection, null, target, migrationId, mode)
                 : new ValueTask<DataMigrationLedgerEntry?>((DataMigrationLedgerEntry?)null),
@@ -395,6 +396,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
     {
         ArgumentNullException.ThrowIfNull(target);
         return WithConnection(
+            target,
             connection => dialect.TableExists(connection, null, RelationalDataMigrationLedger.TableName)
                 ? RelationalDataMigrationLedger.ReadAll(dialect, connection, null, target, null, mode)
                 : new ValueTask<IReadOnlyList<DataMigrationLedgerEntry>>(Array.Empty<DataMigrationLedgerEntry>()),
@@ -405,7 +407,7 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
     private async ValueTask WriteLedgerEntryCore(DataMigrationLedgerEntry entry, RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        await WithConnection<object?>(async connection =>
+        await WithConnection<object?>(entry.Target, async connection =>
         {
             await RelationalDataMigrationLedger.Write(dialect, connection, null, entry, mode).ConfigureAwait(false);
             return null;
@@ -422,10 +424,10 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return WithConnection(async connection =>
+        return WithConnection(request.Entry.Target, async connection =>
         {
             var lease = Volatile.Read(ref activeLease);
-            var transaction = await mode.BeginTransaction(connection, IsolationLevel.Unspecified).ConfigureAwait(false);
+            var transaction = await dialect.BeginTransaction(connection, mode).ConfigureAwait(false);
             try
             {
                 if (lease is not null && ReferenceEquals(lease.Connection, connection))
@@ -481,12 +483,13 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
     /// it opens and closes its own.
     /// </summary>
     private async ValueTask<T> WithConnection<T>(
+        PhysicalSchemaTargetIdentity target,
         Func<DbConnection, ValueTask<T>> body,
         RelationalExecution mode,
         bool ensureInfrastructure = true)
     {
         mode.CancellationToken.ThrowIfCancellationRequested();
-        if (Volatile.Read(ref activeLease) is { } lease)
+        if (Volatile.Read(ref activeLease) is { } lease && lease.Target == target)
             return await body(lease.Connection).ConfigureAwait(false);
         var connection = OpenConnection();
         try

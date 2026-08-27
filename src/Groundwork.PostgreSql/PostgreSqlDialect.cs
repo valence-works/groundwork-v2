@@ -287,6 +287,8 @@ public sealed class PostgreSqlDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         connection.BeginTransaction(IsolationLevel.ReadCommitted);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.ReadCommitted;
+
     public override int ParameterBudget => PostgreSqlQueryRenderer.ParameterBudget;
 
     public override string? DataMigrationLedgerUpsertSql =>
