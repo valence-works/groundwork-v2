@@ -107,6 +107,76 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Applied_state_from_an_earlier_schema_boundary_names_the_discard_remedy()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+        var recorded = PhysicalSchemaAppliedStateSerializer.Serialize(executor.AppliedState!);
+        var stale = recorded.Replace(
+            $"\"targetFingerprint\":\"{executor.AppliedState!.TargetFingerprint}\"",
+            "\"targetFingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\"",
+            StringComparison.Ordinal);
+
+        var failure = Assert.Throws<GroundworkSchemaBoundaryException>(
+            () => PhysicalSchemaAppliedStateSerializer.Deserialize(stale));
+
+        Assert.Equal(CreateTarget(CreateUnit(includePriority: true)).Identity, failure.Target);
+        Assert.StartsWith("GW-SCHEMA-006", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("Discard that catalog", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Changed_provider_definition_replans_as_an_authorized_replacement()
+    {
+        static PhysicalSchemaTarget Target(StorageUnit unit, string definition) => new(
+            new SchemaSubject(unit),
+            Provider,
+            [new ProviderPhysicalSchemaDefinition(Provider.Name, unit.Id, "batch-type", "customer_batch", definition)]);
+
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(
+            Target(CreateUnit(includePriority: false), "[\"id\",\"name\"]"), executor, PlannedAt.AddMinutes(1));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            Target(CreateUnit(includePriority: true), "[\"id\",\"name\",\"priority\"]"),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var replacement = Assert.Single(plan.Operations
+            .OfType<ApplyProviderPhysicalSchemaDefinitionOperation>());
+        Assert.True(replacement.RequiresAuthorization);
+    }
+
+    [Fact]
+    public void Changed_declared_schema_still_refuses_even_beside_a_provider_definition()
+    {
+        static PhysicalSchemaTarget Target(StorageUnit unit) => new(
+            new SchemaSubject(unit),
+            Provider,
+            [new ProviderPhysicalSchemaDefinition(Provider.Name, unit.Id, "batch-type", "customer_batch", "[]")]);
+
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(Target(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+        var retyped = CreateUnit(includePriority: true) with
+        {
+            Indexes = [new IndexDefinition
+            {
+                Name = "by_priority",
+                Columns = [new IndexColumn("priority", SortDirection.Descending)]
+            }]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            Target(retyped),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.False(plan.IsApplicable);
+        Assert.Contains(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-003");
+    }
+
+    [Fact]
     public void Required_column_without_a_backfill_source_is_refused_for_existing_rows()
     {
         var initial = CreateTarget(CreateUnit(includePriority: false));
@@ -380,6 +450,36 @@ public sealed class K5SchemaEvolutionTests
 
         Assert.Single(executor.AppliedState!.Snapshot.Subject.Columns);
         Assert.DoesNotContain(executor.AppliedState.Snapshot.Subject.Columns, column => column.Name == "mutated");
+    }
+
+    [Fact]
+    public void Index_and_aggregation_declaration_order_does_not_change_subject_identity()
+    {
+        static StorageUnit Declare(bool alphabetical)
+        {
+            var builder = StorageUnit.Declare("orders", "orders")
+                .String("id", 64, column => column.Required())
+                .String("status", 16, column => column.Required())
+                .Key("id");
+            builder = alphabetical
+                ? builder
+                    .Index("a_by_status", "status")
+                    .Index("z_by_id", "id")
+                    .Aggregate("a_totals", aggregate => aggregate.GroupBy("status").Count("n"))
+                    .Aggregate("z_latest", aggregate => aggregate.GroupBy("status").Max("newest", "id"))
+                : builder
+                    .Index("z_by_id", "id")
+                    .Index("a_by_status", "status")
+                    .Aggregate("z_latest", aggregate => aggregate.GroupBy("status").Max("newest", "id"))
+                    .Aggregate("a_totals", aggregate => aggregate.GroupBy("status").Count("n"));
+            return builder.Build();
+        }
+
+        var declared = Declare(alphabetical: false);
+        Assert.Equal(["z_by_id", "a_by_status"], declared.Indexes.Select(index => index.Name));
+        Assert.Equal(
+            new SchemaSubject(Declare(alphabetical: true)).Fingerprint,
+            new SchemaSubject(declared).Fingerprint);
     }
 
     [Fact]

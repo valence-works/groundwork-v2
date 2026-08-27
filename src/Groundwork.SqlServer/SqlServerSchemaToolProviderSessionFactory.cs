@@ -21,6 +21,7 @@ public sealed class SqlServerSchemaToolProviderSessionFactory : ISchemaToolProvi
         return new RelationalSchemaToolSession(
             SqlServerSchemaCoordinator.Identity,
             new RelationalSchemaExecutor(() => new SqlConnection(connectionString), new SqlServerDialect()),
+            declaration => SqlServerSchemaCoordinator.Target(SqlServerSchemaCoordinator.Prepare(declaration)),
             () =>
             {
                 using var pooled = new SqlConnection(connectionString);

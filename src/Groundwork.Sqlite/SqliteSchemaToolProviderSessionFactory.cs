@@ -24,6 +24,7 @@ public sealed class SqliteSchemaToolProviderSessionFactory : ISchemaToolProvider
         return new RelationalSchemaToolSession(
             SqliteSchemaCoordinator.Identity,
             executor,
+            declaration => SqliteSchemaCoordinator.Target(SqliteSchemaCoordinator.Physicalize(declaration)),
             release: () =>
             {
                 if (store.IsValueCreated)
