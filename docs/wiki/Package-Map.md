@@ -1,6 +1,6 @@
 # Package Map
 
-Groundwork ships 23 public packages. Most applications reference **two or three**. This page tells
+Groundwork ships 24 public packages. Most applications reference **two or three**. This page tells
 you which, and explains the layering — because the layering is what the whole design rests on.
 
 ## The dependency rule
