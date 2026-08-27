@@ -23,6 +23,7 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
 {
     private readonly IStorageSession session;
     private readonly IStorageProviderConnection? connection;
+    private readonly QueryAdmissionProfile? admission;
     private readonly Lazy<RuntimeCoverageGate> gate;
 
     /// <summary>
@@ -48,9 +49,34 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     /// </para>
     /// </summary>
     public GwLinqExecutor(IStorageSession session, IStorageProviderConnection? connection)
+        : this(session, connection, admission: null)
+    {
+    }
+
+    /// <summary>
+    /// Executes against one open session under budgets the caller already knows, for a
+    /// provider-named adapter that is bound to its provider at compile time and so does not need a
+    /// connection to learn them. Coverage still admits against the declaration alone: without a
+    /// connection there is no catalog, so a declared-but-undeployed index can still satisfy the gate.
+    /// </summary>
+    /// <remarks>
+    /// A factory rather than a constructor. A second two-argument constructor taking a reference
+    /// type would make the existing <c>new GwLinqExecutor(session, null)</c> ambiguous — neither
+    /// <see cref="IStorageProviderConnection"/> nor <see cref="QueryAdmissionProfile"/> is more
+    /// specific for a null literal, so overload resolution has no tie to break and the call stops
+    /// compiling (CS0121). Naming the profile at the call site costs nothing and breaks nobody.
+    /// </remarks>
+    public static GwLinqExecutor WithAdmission(IStorageSession session, QueryAdmissionProfile admission) =>
+        new(session, connection: null, admission ?? throw new ArgumentNullException(nameof(admission)));
+
+    private GwLinqExecutor(
+        IStorageSession session,
+        IStorageProviderConnection? connection,
+        QueryAdmissionProfile? admission)
     {
         this.session = session ?? throw new ArgumentNullException(nameof(session));
         this.connection = connection;
+        this.admission = admission;
         gate = new Lazy<RuntimeCoverageGate>(CreateGate, LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
@@ -111,7 +137,7 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     private RuntimeCoverageGate CreateGate()
     {
         var declared = DeclaredIndexes(session.Unit);
-        var profile = connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
+        var profile = admission ?? connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
         return new RuntimeCoverageGate(
             declared,
             DeployedIndexes(declared),

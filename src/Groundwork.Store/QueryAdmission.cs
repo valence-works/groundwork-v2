@@ -13,6 +13,13 @@ namespace Groundwork.Store;
 /// pre-execution fence in step with the renderer that enforces the same limit, instead of the number
 /// living in two places that can disagree.
 /// </para>
+/// <para>
+/// The fence is only as accurate as what it was given. A caller that supplies neither a connection
+/// nor a profile is admitted under the portable defaults, and a request between those defaults and
+/// the provider's real limit will pass admission and then be refused by the renderer instead —
+/// later, and with a rendering code rather than an admission one. It still refuses; what degrades is
+/// the diagnostic.
+/// </para>
 /// </summary>
 public sealed record QueryAdmissionProfile
 {
@@ -23,10 +30,16 @@ public sealed record QueryAdmissionProfile
     /// </summary>
     public static QueryAdmissionProfile Default { get; } = new();
 
-    /// <summary>The provider's real bound on bound parameters in one command.</summary>
+    /// <summary>
+    /// The provider's real bound on bound parameters in one command, when a provider sets it. The
+    /// initializer is the fence's portable default and is not a claim about any provider.
+    /// </summary>
     public int MaximumParameters { get; init; } = 2_100;
 
-    /// <summary>The provider's real bound on distinct values in one membership predicate.</summary>
+    /// <summary>
+    /// The provider's real bound on distinct values in one membership predicate, when a provider
+    /// sets it. The initializer is the fence's portable default.
+    /// </summary>
     public int MaximumInValues { get; init; } = QueryRenderOptions.Default.InValueLimit;
 }
 
