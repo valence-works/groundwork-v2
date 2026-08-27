@@ -262,6 +262,11 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, "GW-CLI-009", "The operation was cancelled.");
             return SchemaToolExitCodes.Cancelled;
         }
+        catch (GroundworkSchemaBoundaryException exception)
+        {
+            await WriteErrorAsync(output, error, json, GroundworkSchemaBoundaryException.Code, exception.Message);
+            return SchemaToolExitCodes.ValidationFailed;
+        }
         catch (Exception exception) when (exception is JsonException or FormatException or ArgumentException)
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);

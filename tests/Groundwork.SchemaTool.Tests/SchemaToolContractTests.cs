@@ -84,6 +84,22 @@ public sealed class SchemaToolContractTests
         Assert.Contains("default", failure.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("concurrency")]
+    [InlineData("retention")]
+    [InlineData("appendIdempotency")]
+    [InlineData("retentionIdempotency")]
+    public void A_wrong_typed_optional_member_is_refused_by_name(string member)
+    {
+        Assert.Null(Assert.Single(GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", $"\"indexes\":[],\"{member}\":null"))
+            .Tables).Retention);
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", $"\"indexes\":[],\"{member}\":5")));
+        Assert.Contains(member, failure.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void A_null_aggregations_member_is_absent_but_a_wrong_typed_one_is_refused()
     {

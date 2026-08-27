@@ -183,6 +183,22 @@ public sealed class GeneratorContractTests
         Assert.Equal("status", Assert.Single(profile.GroupByExpressions).Alias);
     }
 
+    [Fact]
+    public void A_json_default_generates_source_that_a_nullable_disabled_consumer_compiles_cleanly()
+    {
+        const string json = """
+            {"tables":[{"name":"orders","columns":[{"name":"id","type":"String","nullable":false,"length":64},{"name":"payload","type":"Json","nullable":true,"default":{"value":{"items":[1,"two"],"active":true}}}],"key":["id"],"indexes":[]}]}
+            """;
+
+        var result = Run("public static class Empty { }", new InMemoryAdditionalText("schema/groundwork.json", json));
+
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Id == "CS8669");
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var payload = Assert.IsType<Dictionary<string, object?>>(
+            Definition(result, "ordersStorageUnit").Columns.Single(column => column.Name == "payload").Default!.Value);
+        Assert.True((bool)payload["active"]!);
+    }
+
     [Theory]
     [InlineData("[GwAggregate(\"summary\", \"group status, day d created_at, count n\")]")]
     [InlineData("[GwAggregate(\"summary\", \"group status, count n\")] [GwAggregate(\"summary\", \"group id, count n\")]")]

@@ -1,3 +1,5 @@
+using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Sqlite;
 using Groundwork.Testing;
 using Microsoft.Data.Sqlite;
@@ -108,6 +110,49 @@ public sealed class SchemaToolSqliteEndToEndTests : IDisposable
         Assert.True(SchemaToolExitCodes.InvalidInvocation == unconnected.ExitCode, unconnected.Reason);
         Assert.Contains("GW-CLI-001", unconnected.Output, StringComparison.Ordinal);
         Assert.Contains("--connection or --database", unconnected.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_catalog_from_an_earlier_schema_boundary_is_refused_by_name_not_by_exit_ten()
+    {
+        var schema = harness.Temp("boundary-schema.json", SchemaToolCliHarness.InitialSchema());
+        var database = Path.Combine(harness.Root, "boundary.db");
+        var connection = $"Data Source={database}";
+        Assert.True(SchemaToolExitCodes.Success ==
+            (await harness.RunAsync(["apply", "--schema", schema, "--safe"], connection)).ExitCode);
+
+        // Rewrite the fingerprint the snapshot recorded, which is what an earlier build's
+        // fingerprint boundary leaves behind.
+        Execute(connection,
+            """
+            UPDATE __groundwork_schema_history SET state_json = replace(
+                state_json,
+                '"targetFingerprint":"' || target_fingerprint || '"',
+                '"targetFingerprint":"stale-boundary"');
+            """);
+
+        var status = await harness.RunAsync(["status", "--schema", schema], connection);
+        Assert.True(SchemaToolExitCodes.ValidationFailed == status.ExitCode, status.Reason);
+        Assert.Contains(GroundworkSchemaBoundaryException.Code, status.Output, StringComparison.Ordinal);
+        Assert.Contains("Discard that catalog", status.Output, StringComparison.Ordinal);
+
+        var unit = StorageUnit.Declare("tickets", "tickets")
+            .String("id", 64, column => column.Required())
+            .Key("id")
+            .Build();
+        using var store = new SqliteProviderFactory().Create(connection);
+        var failure = Assert.Throws<GroundworkSchemaBoundaryException>(() => store.Schema.Diff(unit));
+        Assert.Contains("Discard that catalog", failure.Message, StringComparison.Ordinal);
+    }
+
+    private static void Execute(string connectionString, string sql)
+    {
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+        SqliteConnection.ClearPool(connection);
     }
 
     private static int CountTables(string connectionString)

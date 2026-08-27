@@ -28,6 +28,11 @@ public sealed class SchemaToolCliHarness : IDisposable
 
     public string Root { get; }
 
+    // This assembly stays independent of the tool, so the two exit codes that carry a usable
+    // plan — success and pending changes — are named here rather than referenced.
+    private const int SuccessExitCode = 0;
+    private const int PendingChangesExitCode = 2;
+
     public static string InitialSchema(string table = "tickets") =>
         $$"""
         {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}
@@ -75,10 +80,14 @@ public sealed class SchemaToolCliHarness : IDisposable
     /// <summary>
     /// Plans, then applies under exact-plan authorization, naming every destructive and semantic
     /// identity the plan reported. Apply stays refused unless the plan is still the current one.
+    /// A plan that failed is returned as-is, so a caller asserting on the apply sees the plan's own
+    /// reason rather than an authorization refusal caused by a missing plan fingerprint.
     /// </summary>
     public async Task<SchemaToolCliRun> ApplyAuthorizedAsync(string schemaFile, string connection)
     {
         var plan = await RunAsync(["plan", "--schema", schemaFile], connection);
+        if (plan.ExitCode is not (SuccessExitCode or PendingChangesExitCode))
+            return plan;
         var authorization = plan.Report.RootElement.GetProperty("authorization");
         var arguments = new List<string>
         {

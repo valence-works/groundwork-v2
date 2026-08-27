@@ -107,6 +107,25 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Applied_state_from_an_earlier_schema_boundary_names_the_discard_remedy()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+        var recorded = PhysicalSchemaAppliedStateSerializer.Serialize(executor.AppliedState!);
+        var stale = recorded.Replace(
+            $"\"targetFingerprint\":\"{executor.AppliedState!.TargetFingerprint}\"",
+            "\"targetFingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\"",
+            StringComparison.Ordinal);
+
+        var failure = Assert.Throws<GroundworkSchemaBoundaryException>(
+            () => PhysicalSchemaAppliedStateSerializer.Deserialize(stale));
+
+        Assert.Equal(CreateTarget(CreateUnit(includePriority: true)).Identity, failure.Target);
+        Assert.StartsWith("GW-SCHEMA-006", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("Discard that catalog", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Changed_provider_definition_replans_as_an_authorized_replacement()
     {
         static PhysicalSchemaTarget Target(StorageUnit unit, string definition) => new(

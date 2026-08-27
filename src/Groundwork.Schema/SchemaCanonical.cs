@@ -313,35 +313,37 @@ public static class GroundworkSchemaCanonical
         _ => throw new FormatException($"Unsupported JSON default token '{value.ValueKind}'.")
     };
 
-    private static SchemaConcurrency? ReadConcurrency(JsonElement table)
+    /// <summary>Reads an optional member: absent and null both mean undeclared, anything else must be an object.</summary>
+    private static bool TryReadObject(JsonElement parent, string name, out JsonElement value)
     {
-        if (!table.TryGetProperty("concurrency", out var value) || value.ValueKind == JsonValueKind.Null)
-            return null;
-        return new SchemaConcurrency(RequiredString(value, "token"));
+        if (!parent.TryGetProperty(name, out value) || value.ValueKind == JsonValueKind.Null)
+            return false;
+        if (value.ValueKind != JsonValueKind.Object)
+            throw new FormatException($"Schema JSON property '{name}' must be an object or null.");
+        return true;
     }
 
-    private static SchemaRetention? ReadRetention(JsonElement table)
-    {
-        if (!table.TryGetProperty("retention", out var value) || value.ValueKind == JsonValueKind.Null)
-            return null;
-        return new SchemaRetention(
-            RequiredInt(value, "keepNewest"),
-            RequiredString(value, "orderBy"),
-            EnumValueOrDefault(value, "trigger", SchemaRetentionTrigger.Explicit),
-            RequiredArray(value, "partitionBy").Select(element =>
-                element.GetString() ?? throw new FormatException("Retention partition columns must be strings.")));
-    }
+    private static SchemaConcurrency? ReadConcurrency(JsonElement table) =>
+        TryReadObject(table, "concurrency", out var value) ? new SchemaConcurrency(RequiredString(value, "token")) : null;
 
-    private static SchemaIdempotency? ReadIdempotency(JsonElement table, string name)
-    {
-        if (!table.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null)
-            return null;
-        return new SchemaIdempotency(
-            TimeSpan.FromTicks(RequiredLong(value, "windowTicks")),
-            value.TryGetProperty("ledger", out var ledger) && ledger.ValueKind == JsonValueKind.String
-                ? ledger.GetString()
-                : null);
-    }
+    private static SchemaRetention? ReadRetention(JsonElement table) =>
+        TryReadObject(table, "retention", out var value)
+            ? new SchemaRetention(
+                RequiredInt(value, "keepNewest"),
+                RequiredString(value, "orderBy"),
+                EnumValueOrDefault(value, "trigger", SchemaRetentionTrigger.Explicit),
+                RequiredArray(value, "partitionBy").Select(element =>
+                    element.GetString() ?? throw new FormatException("Retention partition columns must be strings.")))
+            : null;
+
+    private static SchemaIdempotency? ReadIdempotency(JsonElement table, string name) =>
+        TryReadObject(table, name, out var value)
+            ? new SchemaIdempotency(
+                TimeSpan.FromTicks(RequiredLong(value, "windowTicks")),
+                value.TryGetProperty("ledger", out var ledger) && ledger.ValueKind == JsonValueKind.String
+                    ? ledger.GetString()
+                    : null)
+            : null;
 
     private static IReadOnlyList<SchemaAggregation> ReadAggregations(JsonElement table)
     {
