@@ -75,7 +75,7 @@ public sealed class EventLogConformanceTests
 
     private static ConformanceScenario CreateConformanceScenario()
     {
-        var suffix = Guid.NewGuid().ToString("N");
+        var suffix = Guid.NewGuid().ToString("N")[..8];
         var template = EventLogDeclaration.LogRecords;
         var indexes = template.Indexes
             .Append(new IndexDefinition

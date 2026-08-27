@@ -49,7 +49,19 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         index => SqlServerDialect.PhysicalIndexName(Unit.Name, index.Name),
         StringComparer.Ordinal);
 
-    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
+        QueryCore(request, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        QueryCore(request, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<QueryMaterializedResult> QueryCore(
+        QueryRequest request,
+        QueryRenderOptions? options,
+        RelationalExecution mode) => Execute(async () =>
     {
         ArgumentNullException.ThrowIfNull(request);
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
@@ -67,13 +79,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
+        var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
-        }, activeTransaction ?? transaction);
-        AssertExplainPlan(command, renderOptions);
+        }, activeTransaction ?? transaction, mode).ConfigureAwait(false);
+        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true);
@@ -81,7 +93,19 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
-        QueryRenderOptions? options = null) => Execute(() =>
+        QueryRenderOptions? options = null) =>
+        QueryAcrossScopesCore(request, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        QueryAcrossScopesCore(request, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<CrossScopeQueryResult> QueryAcrossScopesCore(
+        QueryRequest request,
+        QueryRenderOptions? options,
+        RelationalExecution mode) => Execute(async () =>
     {
         ArgumentNullException.ThrowIfNull(request);
         if (!Access.IsPrivilegedAcrossScopes)
@@ -125,13 +149,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             QueryRequestExecution.ForPage(executionSource, renderOptions));
         var command = new SqlServerQueryRenderer().Render(executionRequest, renderOptions);
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
+        var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
-        });
-        AssertExplainPlan(command, renderOptions);
+        }, transaction: null, mode).ConfigureAwait(false);
+        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
         var materialized = QueryResultMaterializer.Materialize(
             executionSource,
             renderOptions,
@@ -146,7 +170,15 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             SqlServerSchemaCoordinator.ScopeColumn);
     });
 
-    public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
+    public AggregationResult Aggregate(AggregationQuery query) =>
+        AggregateCore(query, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default) =>
+        AggregateCore(query, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) => Execute(async () =>
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
@@ -156,7 +188,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
         };
-        return Unit.Scope == ScopePolicy.Scoped
+        return await (Unit.Scope == ScopePolicy.Scoped
             ? RelationalAggregationExecutor.ExecuteScoped(
                 connection,
                 activeTransaction ?? transaction,
@@ -167,6 +199,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 decode,
                 SqlServerSchemaCoordinator.ScopeColumn,
                 Access.Scope!,
+                mode,
                 commandObserver,
                 "sqlserver.aggregate")
             : RelationalAggregationExecutor.Execute(
@@ -177,26 +210,29 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             profile,
             query,
             decode,
+            mode,
             commandObserver,
-            "sqlserver.aggregate");
+            "sqlserver.aggregate")).ConfigureAwait(false);
     });
 
-    private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
+    private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {
         if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(query.SelectedIndex)) return;
         var logicalIndex = query.SelectedIndex!;
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex);
-        using (var enable = Command("SET STATISTICS XML ON")) enable.ExecuteNonQuery();
+        using (var enable = Command("SET STATISTICS XML ON"))
+            await mode.ExecuteNonQuery(enable).ConfigureAwait(false);
         string rawPlan;
         try
         {
             using var explain = Command(query.CommandText);
             RelationalQueryResultReader.AddParameters(explain, query);
-            using var reader = explain.ExecuteReader();
+            await using var readerScope = await mode.ExecuteReader(explain).ConfigureAwait(false);
+            var reader = readerScope.Reader;
             var plans = new List<string>();
             do
             {
-                while (reader.Read())
+                while (await mode.Read(reader).ConfigureAwait(false))
                 for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
                 {
                     if (!reader.GetName(ordinal).Contains("XML Showplan", StringComparison.OrdinalIgnoreCase) &&
@@ -211,13 +247,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                     };
                     if (!string.IsNullOrWhiteSpace(content)) plans.Add(content);
                 }
-            } while (reader.NextResult());
+            } while ((await mode.NextResult(reader).ConfigureAwait(false)));
             rawPlan = string.Join(Environment.NewLine, plans);
         }
         finally
         {
             using var disable = Command("SET STATISTICS XML OFF");
-            disable.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(disable).ConfigureAwait(false);
         }
         ExplainAssertionMode.AssertChosenIndex(
             "SQL Server", logicalIndex, physicalIndex, query.IndexHintApplied, rawPlan,
@@ -232,10 +268,17 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqlServerSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
             QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
 
-    public StoredEntry? Read(StorageKey key)
+    public StoredEntry? Read(StorageKey key) =>
+        ReadEntry(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
+        ReadEntry(key, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<StoredEntry?> ReadEntry(StorageKey key, RelationalExecution mode)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => PublicEntry(ReadCore(key, observerOperation: "sqlserver.read", isProbe: false)));
+        return Execute(async () => PublicEntry(await ReadCore(
+            key, mode, observerOperation: "sqlserver.read", isProbe: false).ConfigureAwait(false)));
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -257,28 +300,67 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         ? null
         : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
-    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
+    public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
+        InsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        InsertAsync(values, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return Mutate(values, options, Mutation.Insert);
+        return Mutate(values, options, Mutation.Insert, mode);
     }
 
-    public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
+    public WriteOutcome Update(StorageValues values, WriteOptions? options = null) =>
+        UpdateAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(values, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return Mutate(values, options, Mutation.Update);
+        return Mutate(values, options, Mutation.Update, mode);
     }
 
-    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
+    public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
+        UpsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        UpsertAsync(values, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return Mutate(values, options, Mutation.Upsert);
+        return Mutate(values, options, Mutation.Upsert, mode);
     }
 
-    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
+    public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
+        ConditionalUpsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        ConditionalUpsertAsync(values, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options,
+        RelationalExecution mode)
     {
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
@@ -287,40 +369,61 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         WriteOutcome outcome;
         try
         {
-            outcome = Execute(() => ConditionalUpsertCore(values, options));
+            outcome = await Execute(() => ConditionalUpsertCore(values, options, mode)).ConfigureAwait(false);
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false);
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted);
+        await CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted, mode)
+            .ConfigureAwait(false);
         return outcome;
     }
 
-    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes) =>
+        ApplyBatchAsync(writes, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        CancellationToken cancellationToken = default) =>
+        ApplyBatchAsync(writes, RelationalExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        RelationalExecution mode)
     {
         var nativeOnAppend = IsNativeAppendBatch(writes);
         var registration = BeginOnAppend(nativeOnAppend);
         IReadOnlyList<RowWriteOutcome> outcomes;
         try
         {
-            outcomes = ExecuteWrite(() => ApplyBatchCore(writes));
+            outcomes = await ExecuteWrite(() => ApplyBatchCore(writes, mode), mode).ConfigureAwait(false);
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false);
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
             throw;
         }
         var succeeded = nativeOnAppend && OnAppendRetentionCoordinator.ContainsAppend(outcomes);
-        CompleteOnAppend(registration, succeeded);
+        await CompleteOnAppend(registration, succeeded, mode).ConfigureAwait(false);
         return outcomes;
     }
 
-    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
+    public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) =>
+        DeleteAsync(key, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        DeleteAsync(key, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options, RelationalExecution mode)
     {
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
-        return ExecuteWrite(() =>
+        return ExecuteWrite(async () =>
         {
             if (Unit.Concurrency.IsNone)
             {
@@ -328,12 +431,12 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
                 commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
                 AddParameters(noneCommand, noneParameters);
-                return noneCommand.ExecuteNonQuery() == 0
+                return (await mode.ExecuteNonQuery(noneCommand).ConfigureAwait(false)) == 0
                     ? new WriteOutcome(WriteOutcomeStatus.NotFound)
                     : new WriteOutcome(WriteOutcomeStatus.Deleted);
             }
 
-            var existing = ReadCore(key);
+            var existing = await ReadCore(key, mode).ConfigureAwait(false);
             ValidateExpected(options, existing, Mutation.Delete);
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
@@ -346,19 +449,34 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
             commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             AddParameters(command, parameters);
-            if (command.ExecuteNonQuery() == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
+            if (await mode.ExecuteNonQuery(command).ConfigureAwait(false) == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-        });
+        }, mode);
     }
 
     public WriteOutcome CompareAndDelete(
         StorageKey key,
         IReadOnlyDictionary<string, object?> expectedValues,
-        WriteOptions? options = null)
+        WriteOptions? options = null) =>
+        CompareAndDeleteAsync(key, expectedValues, options, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
+
+    public ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        CompareAndDeleteAsync(key, expectedValues, options, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options,
+        RelationalExecution mode)
     {
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
         var expected = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
-        return ExecuteWrite(() =>
+        return ExecuteWrite(async () =>
         {
             var (where, parameters) = KeyPredicate(canonicalKey.Values, exactStringKeys: true);
             foreach (var pair in expected)
@@ -391,18 +509,19 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             commandObserver?.Observe(new ProviderCommandEvent("sqlserver.compare-and-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (VersionColumnDefinition is not null)
             {
-                using (var reader = command.ExecuteReader())
+                await using (var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false))
                 {
-                    if (reader.Read())
+                    var reader = readerScope.Reader;
+                    if (await mode.Read(reader).ConfigureAwait(false))
                         return new WriteOutcome(WriteOutcomeStatus.Deleted, Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture));
                 }
             }
-            else if (command.ExecuteNonQuery() != 0)
+            else if ((await mode.ExecuteNonQuery(command).ConfigureAwait(false)) != 0)
             {
                 return new WriteOutcome(WriteOutcomeStatus.Deleted);
             }
 
-            var existing = ReadCore(canonicalKey, "sqlserver.compare-and-delete-read", exactStringKeys: true);
+            var existing = await ReadCore(canonicalKey, mode, "sqlserver.compare-and-delete-read", exactStringKeys: true).ConfigureAwait(false);
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
@@ -411,7 +530,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             return MatchesExpected(existing, expected)
                 ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
                 : new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
-        });
+        }, mode);
     }
 
     private bool MatchesExpected(StoredEntry existing, IReadOnlyDictionary<string, object?> expected) =>
@@ -423,9 +542,15 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         });
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
-        ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
+        ApplyRetention(options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
 
-    private RetentionResult ApplyRetentionCore(RetentionExecutionOptions options)
+    public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null) =>
+        ApplyRetention(options, RelationalExecution.Asynchronous(options?.CancellationToken ?? CancellationToken.None));
+
+    private ValueTask<RetentionResult> ApplyRetention(RetentionExecutionOptions? options, RelationalExecution mode) =>
+        ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions(), mode), mode);
+
+    private async ValueTask<RetentionResult> ApplyRetentionCore(RetentionExecutionOptions options, RelationalExecution mode)
     {
         if (options.MaxRowsPerBatch <= 0)
             throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
@@ -462,7 +587,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             if (Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn))
                 SqlServerProviderConnection.AddParameter(command, "@__groundwork_scope", Access.Scope!.Value,
                     new ColumnDefinition { Name = SqlServerSchemaCoordinator.ScopeColumn, Type = PortableType.String, MaxLength = 128, IsNullable = false });
-            var affected = command.ExecuteNonQuery();
+            var affected = await mode.ExecuteNonQuery(command).ConfigureAwait(false);
             commandObserver?.Observe(new ProviderCommandEvent("sqlserver.retention-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (affected == 0)
                 break;
@@ -474,21 +599,39 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         return new RetentionResult(deleted, batches);
     }
 
-    public StorageInspection Inspect() => Execute(() =>
+    public StorageInspection Inspect() =>
+        InspectCore(RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default) =>
+        InspectCore(RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<StorageInspection> InspectCore(RelationalExecution mode) => Execute(async () =>
     {
         StorageAccessValidation.EnsurePointOperation(Access, "inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
-        EnsureHighWaterTable();
+        await EnsureHighWaterTable(mode).ConfigureAwait(false);
         using var command = Command($"SELECT {Quote(HighWaterValue)} FROM {Quote(HighWaterTable)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope;");
         AddLedgerParameter(command, "unit", Unit.Id.Value);
         AddLedgerParameter(command, "scope", Access.Scope?.Value ?? string.Empty);
-        var value = command.ExecuteScalar();
+        var value = await mode.ExecuteScalar(command).ConfigureAwait(false);
         return value is null or DBNull
             ? new StorageInspection(null)
             : new StorageInspection(Convert.ToInt64(value, CultureInfo.InvariantCulture));
     });
 
-    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
+    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null) =>
+        ApplyRetention(operationId, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null) =>
+        ApplyRetention(operationId, options,
+            RelationalExecution.Asynchronous(options?.CancellationToken ?? CancellationToken.None));
+
+    private ValueTask<RetentionOperationResult> ApplyRetention(
+        OperationId operationId,
+        RetentionExecutionOptions? options,
+        RelationalExecution mode)
     {
         var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
             $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
@@ -496,16 +639,17 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         options ??= new RetentionExecutionOptions();
         RetentionSessionExtensions.ValidateExecutionOptions(options);
         RetentionOperationCodec.ValidateOperation(operationId);
-        return ExecuteWrite(() => ApplyExactRetentionCore(operationId, declaration, options));
+        return ExecuteWrite(() => ApplyExactRetentionCore(operationId, declaration, options, mode), mode);
     }
 
-    private RetentionOperationResult ApplyExactRetentionCore(
+    private async ValueTask<RetentionOperationResult> ApplyExactRetentionCore(
         OperationId operationId,
         RetentionIdempotencyDeclaration declaration,
-        RetentionExecutionOptions options)
+        RetentionExecutionOptions options,
+        RelationalExecution mode)
     {
-        EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = ProviderNow();
+        await EnsureLedgerTable(declaration.LedgerName, mode).ConfigureAwait(false);
+        var providerNow = await ProviderNow(mode).ConfigureAwait(false);
         var scope = Access.Scope?.Value ?? string.Empty;
         var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
@@ -513,10 +657,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             AddLedgerParameter(reclaim, "reclaim_unit", Unit.Id.Value);
             AddLedgerParameter(reclaim, "cutoff", FormatLedgerTime(cutoff));
-            reclaim.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(reclaim).ConfigureAwait(false);
         }
 
-        var existing = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
+        var existing = await ReadRetentionLedger(declaration.LedgerName, operationId, scope, mode).ConfigureAwait(false);
         if (existing is not null)
         {
             var (committedAt, storedFingerprint, storedResult) = existing.Value;
@@ -531,7 +675,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
             using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
             AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            deleteExpired.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(deleteExpired).ConfigureAwait(false);
         }
 
         using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) SELECT @unit, @scope, @nonce, @committed_at, @fingerprint, @result WHERE NOT EXISTS (SELECT 1 FROM {Quote(declaration.LedgerName)} WITH (UPDLOCK, HOLDLOCK) WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce);"))
@@ -540,9 +684,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             AddLedgerParameter(insertLedger, "committed_at", FormatLedgerTime(providerNow));
             AddLedgerParameter(insertLedger, "fingerprint", fingerprint);
             AddLedgerParameter(insertLedger, "result", string.Empty);
-            if (insertLedger.ExecuteNonQuery() == 0)
+            if ((await mode.ExecuteNonQuery(insertLedger).ConfigureAwait(false)) == 0)
             {
-                var raced = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
+                var raced = await ReadRetentionLedger(declaration.LedgerName, operationId, scope, mode).ConfigureAwait(false);
                 if (raced is null || string.IsNullOrEmpty(raced.Value.storedFingerprint) || string.IsNullOrEmpty(raced.Value.storedResult))
                     throw new InvalidOperationException("GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
                 if (!string.Equals(raced.Value.storedFingerprint, fingerprint, StringComparison.Ordinal))
@@ -551,21 +695,26 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             }
         }
 
-        var retention = ApplyRetentionCore(options);
+        var retention = await ApplyRetentionCore(options, mode).ConfigureAwait(false);
         var result = new RetentionOperationResult(RetentionOperationStatus.Executed, retention.DeletedRows, retention.Batches, retention.Completed);
         using var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
         AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
         AddLedgerParameter(complete, "result", RetentionOperationCodec.SerializeResult(result));
-        complete.ExecuteNonQuery();
+        await mode.ExecuteNonQuery(complete).ConfigureAwait(false);
         return result;
     }
 
-    private (DateTimeOffset committedAt, string? storedFingerprint, string? storedResult)? ReadRetentionLedger(string table, OperationId operationId, string scope)
+    private async ValueTask<(DateTimeOffset committedAt, string? storedFingerprint, string? storedResult)?> ReadRetentionLedger(
+        string table,
+        OperationId operationId,
+        string scope,
+        RelationalExecution mode)
     {
         using var command = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(table)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
         AddLedgerParameters(command, Unit.Id.Value, scope, operationId.Nonce);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
+        if (!(await mode.Read(reader).ConfigureAwait(false)))
             return null;
         return (
             DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
@@ -573,7 +722,19 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture));
     }
 
-    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
+    public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) =>
+        AppendAsync(operationId, values, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        AppendAsync(operationId, values, RelationalExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        RelationalExecution mode)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
@@ -584,20 +745,34 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         AppendExecution execution;
         try
         {
-            execution = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: false));
+            execution = await ExecuteWrite(
+                () => AppendCore(operationId, values, declaration, exactOutcomes: false, mode), mode).ConfigureAwait(false);
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false);
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
             throw;
         }
-        CompleteOnAppend(
+        await CompleteOnAppend(
             registration,
-            onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
+            onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            mode).ConfigureAwait(false);
         return new WriteOutcome(execution.Status);
     }
 
-    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
+    public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
+        AppendWithOutcomesAsync(operationId, values, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        AppendWithOutcomesAsync(operationId, values, RelationalExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        RelationalExecution mode)
     {
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
@@ -608,25 +783,30 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         AppendOutcomeReport outcome;
         try
         {
-            outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: true).ToReport());
+            outcome = await ExecuteWrite(async () => (await AppendCore(
+                operationId, values, declaration, exactOutcomes: true, mode).ConfigureAwait(false)).ToReport(), mode)
+                .ConfigureAwait(false);
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false);
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
+        await CompleteOnAppend(registration,
+            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed, mode)
+            .ConfigureAwait(false);
         return outcome;
     }
 
-    private AppendExecution AppendCore(
+    private async ValueTask<AppendExecution> AppendCore(
         OperationId operationId,
         IReadOnlyList<StorageValues> values,
         AppendIdempotencyDeclaration declaration,
-        bool exactOutcomes)
+        bool exactOutcomes,
+        RelationalExecution mode)
     {
-        EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = ProviderNow();
+        await EnsureLedgerTable(declaration.LedgerName, mode).ConfigureAwait(false);
+        var providerNow = await ProviderNow(mode).ConfigureAwait(false);
         var scope = Access.Scope?.Value ?? string.Empty;
         var fingerprint = ExactAppendCodec.Fingerprint(Unit, values);
         var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
@@ -634,15 +814,16 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             AddLedgerParameter(reclaim, "reclaim_unit", Unit.Id.Value);
             AddLedgerParameter(reclaim, "cutoff", FormatLedgerTime(cutoff));
-            reclaim.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(reclaim).ConfigureAwait(false);
         }
 
         var expiredExisting = false;
         using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
         {
             AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
-            using var reader = existing.ExecuteReader();
-            if (reader.Read())
+            await using var readerScope = await mode.ExecuteReader(existing).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (await mode.Read(reader).ConfigureAwait(false))
             {
                 var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
                 if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
@@ -668,7 +849,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
             AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            deleteExpired.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(deleteExpired).ConfigureAwait(false);
         }
 
         using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) SELECT @unit, @scope, @nonce, @committed_at, @fingerprint, @result WHERE NOT EXISTS (SELECT 1 FROM {Quote(declaration.LedgerName)} WITH (UPDLOCK, HOLDLOCK) WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce);"))
@@ -677,12 +858,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             AddLedgerParameter(insertLedger, "committed_at", FormatLedgerTime(providerNow));
             AddLedgerParameter(insertLedger, "fingerprint", fingerprint);
             AddLedgerParameter(insertLedger, "result", string.Empty);
-            if (insertLedger.ExecuteNonQuery() == 0)
+            if ((await mode.ExecuteNonQuery(insertLedger).ConfigureAwait(false)) == 0)
             {
                 using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
                 AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
-                using var reader = replay.ExecuteReader();
-                if (!reader.Read() || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
+                await using var readerScope = await mode.ExecuteReader(replay).ConfigureAwait(false);
+                var reader = readerScope.Reader;
+                if (!(await mode.Read(reader).ConfigureAwait(false)) || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
                 {
                     if (!exactOutcomes)
                         return new AppendExecution(WriteOutcomeStatus.Replayed, null);
@@ -701,9 +883,18 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var writes = values
             .Select(value => RowWrite.Insert(logicalUnit, value))
             .ToArray();
-        var outcomes = SequenceColumnDefinition is not null
-            ? writes.Select(InsertAppendSequence).ToArray()
-            : ApplyBatchCore(writes);
+        IReadOnlyList<RowWriteOutcome> outcomes;
+        if (SequenceColumnDefinition is not null)
+        {
+            var sequenced = new List<RowWriteOutcome>(writes.Length);
+            foreach (var write in writes)
+                sequenced.Add(await InsertAppendSequence(write, mode).ConfigureAwait(false));
+            outcomes = sequenced;
+        }
+        else
+        {
+            outcomes = await ApplyBatchCore(writes, mode).ConfigureAwait(false);
+        }
         if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
             throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
         var report = new AppendExecution(WriteOutcomeStatus.Inserted, outcomes.Select(outcome => outcome.Outcome).ToArray());
@@ -711,19 +902,19 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
             AddLedgerParameter(complete, "result", ExactAppendCodec.SerializeOutcomes(report.Outcomes!));
-            complete.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(complete).ConfigureAwait(false);
         }
         return report;
     }
 
-    private RowWriteOutcome InsertAppendSequence(RowWrite write)
+    private async ValueTask<RowWriteOutcome> InsertAppendSequence(RowWrite write, RelationalExecution mode)
     {
         var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
         ValidateValues(values.Values, requireAllNonNullable: true);
-        return new RowWriteOutcome(write, InsertCore(values.Values, WriteOutcomeStatus.Inserted));
+        return new RowWriteOutcome(write, await InsertCore(values.Values, mode, WriteOutcomeStatus.Inserted).ConfigureAwait(false));
     }
 
-    private void EnsureLedgerTable(string table)
+    private async ValueTask EnsureLedgerTable(string table, RelationalExecution mode)
     {
         using var command = Command($"BEGIN TRY IF OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}', N'U') IS NULL BEGIN CREATE TABLE {Quote(table)} (" +
             $"{Quote(LedgerUnit)} nvarchar(450) COLLATE {BinaryIdentityCollation} NOT NULL, " +
@@ -735,24 +926,24 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             // The tuple is 1,668 bytes at its declared maxima. A clustered key is capped at
             // 900 bytes, while SQL Server's nonclustered key budget is 1,700 bytes.
             $"PRIMARY KEY NONCLUSTERED ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)})); END; END TRY BEGIN CATCH IF ERROR_NUMBER() <> 2714 THROW; END CATCH;");
-        command.ExecuteNonQuery();
+        await mode.ExecuteNonQuery(command).ConfigureAwait(false);
 
-        EnsureLedgerColumn(table, LedgerFingerprint, "nvarchar(128)");
-        EnsureLedgerColumn(table, LedgerResult, "nvarchar(max)");
-        EnsureBinaryIdentityColumns(table, [LedgerUnit, LedgerScope, LedgerNonce]);
+        await EnsureLedgerColumn(table, LedgerFingerprint, "nvarchar(128)", mode).ConfigureAwait(false);
+        await EnsureLedgerColumn(table, LedgerResult, "nvarchar(max)", mode).ConfigureAwait(false);
+        await EnsureBinaryIdentityColumns(table, [LedgerUnit, LedgerScope, LedgerNonce], mode).ConfigureAwait(false);
 
         using var cleanupIndex = Command($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{IdempotencyRules.CleanupIndexName(table)}' AND object_id = OBJECT_ID(N'{table.Replace("'", "''", StringComparison.Ordinal)}')) " +
             $"CREATE INDEX {Quote(IdempotencyRules.CleanupIndexName(table))} ON {Quote(table)} ({Quote(LedgerUnit)}, {Quote(LedgerCommittedAt)});");
-        cleanupIndex.ExecuteNonQuery();
+        await mode.ExecuteNonQuery(cleanupIndex).ConfigureAwait(false);
     }
 
-    private void EnsureLedgerColumn(string table, string column, string type)
+    private async ValueTask EnsureLedgerColumn(string table, string column, string type, RelationalExecution mode)
     {
         var escapedTable = table.Replace("'", "''", StringComparison.Ordinal);
         using var alter = Command($"IF COL_LENGTH(N'{escapedTable}', N'{column}') IS NULL ALTER TABLE {Quote(table)} ADD {Quote(column)} {type} NULL;");
         try
         {
-            alter.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(alter).ConfigureAwait(false);
         }
         catch (SqlException exception) when (exception.Number == 2705)
         {
@@ -761,25 +952,26 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
     }
 
-    private void EnsureHighWaterTable()
+    private async ValueTask EnsureHighWaterTable(RelationalExecution mode)
     {
         using var command = Command($"BEGIN TRY IF OBJECT_ID(N'{HighWaterTable}', N'U') IS NULL BEGIN CREATE TABLE {Quote(HighWaterTable)} (" +
             $"{Quote(LedgerUnit)} nvarchar(450) COLLATE {BinaryIdentityCollation} NOT NULL, " +
             $"{Quote(LedgerScope)} nvarchar(128) COLLATE {BinaryIdentityCollation} NOT NULL, " +
             $"{Quote(HighWaterValue)} bigint NOT NULL, " +
             $"PRIMARY KEY NONCLUSTERED ({Quote(LedgerUnit)}, {Quote(LedgerScope)})); END; END TRY BEGIN CATCH IF ERROR_NUMBER() <> 2714 THROW; END CATCH;");
-        command.ExecuteNonQuery();
-        EnsureBinaryIdentityColumns(HighWaterTable, [LedgerUnit, LedgerScope]);
+        await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+        await EnsureBinaryIdentityColumns(HighWaterTable, [LedgerUnit, LedgerScope], mode).ConfigureAwait(false);
     }
 
-    private void EnsureBinaryIdentityColumns(string table, IReadOnlyList<string> columns)
+    private async ValueTask EnsureBinaryIdentityColumns(string table, IReadOnlyList<string> columns, RelationalExecution mode)
     {
         var escapedTable = table.Replace("'", "''", StringComparison.Ordinal);
         using var command = Command($"SELECT c.name, c.collation_name FROM sys.columns c " +
             $"WHERE c.object_id = OBJECT_ID(N'{escapedTable}', N'U') AND c.name IN ({string.Join(", ", columns.Select(column => "N'" + column.Replace("'", "''", StringComparison.Ordinal) + "'"))});");
-        using var reader = command.ExecuteReader();
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
         var collations = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        while (reader.Read())
+        while (await mode.Read(reader).ConfigureAwait(false))
             collations[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
 
         if (columns.Any(column => !collations.TryGetValue(column, out var collation) ||
@@ -792,11 +984,11 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
     }
 
-    private void RecordHighWater(object? generatedValue)
+    private async ValueTask RecordHighWater(object? generatedValue, RelationalExecution mode)
     {
         if (SequenceColumnDefinition is null || generatedValue is null)
             return;
-        EnsureHighWaterTable();
+        await EnsureHighWaterTable(mode).ConfigureAwait(false);
         using var command = Command($"MERGE {Quote(HighWaterTable)} WITH (HOLDLOCK) AS target " +
             $"USING (SELECT @unit AS {Quote(LedgerUnit)}, @scope AS {Quote(LedgerScope)}, @value AS {Quote(HighWaterValue)}) AS source " +
             $"ON target.{Quote(LedgerUnit)}=source.{Quote(LedgerUnit)} AND target.{Quote(LedgerScope)}=source.{Quote(LedgerScope)} " +
@@ -805,7 +997,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         AddLedgerParameter(command, "unit", Unit.Id.Value);
         AddLedgerParameter(command, "scope", Access.Scope?.Value ?? string.Empty);
         AddLedgerParameter(command, "value", Convert.ToInt64(generatedValue, CultureInfo.InvariantCulture));
-        command.ExecuteNonQuery();
+        await mode.ExecuteNonQuery(command).ConfigureAwait(false);
     }
 
     private static void AddLedgerParameters(SqlCommand command, string unit, string scope, string nonce)
@@ -821,28 +1013,28 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
     private static string FormatLedgerTime(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
-    private DateTimeOffset ProviderNow()
+    private async ValueTask<DateTimeOffset> ProviderNow(RelationalExecution mode)
     {
         using var command = Command("SELECT SYSUTCDATETIME();");
-        var value = (DateTime)command.ExecuteScalar()!;
+        var value = (DateTime)(await mode.ExecuteScalar(command).ConfigureAwait(false))!;
         return new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc));
     }
 
     internal void Close() => closed = true;
 
-    private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchCore(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(writes);
         if (writes.Count == 0)
             return [];
         if (SequenceColumnDefinition is not null)
-            return ApplyBatchFallback(writes);
+            return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
-            return ApplyBatchFallback(writes);
+            return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         if (HasSecondaryUniqueIndex(writes[0].Unit))
-            return ApplyBatchFallback(writes);
+            return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         if (writes[0].Mode is not (RowWriteMode.Insert or RowWriteMode.Upsert))
-            return ApplyBatchFallback(writes);
+            return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
 
         var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
 
@@ -851,10 +1043,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             ValidateValues(write.Values!.Values, requireAllNonNullable: write.Mode == RowWriteMode.Insert);
             if (!PhysicalBatchColumns(write).Select(column => column.Name).SequenceEqual(columns.Select(column => column.Name), StringComparer.Ordinal))
-                return ApplyBatchFallback(writes);
+                return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         }
 
-        return ApplyMergeBatch(physicalWrites, columns);
+        return await ApplyMergeBatch(physicalWrites, columns, mode).ConfigureAwait(false);
     }
 
     private bool IsNativeAppendBatch(IReadOnlyList<RowWrite> writes) =>
@@ -876,26 +1068,28 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         return columns;
     }
 
-    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatch(
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyMergeBatch(
         IReadOnlyList<RowWrite> writes,
-        IReadOnlyList<ColumnDefinition> columns)
+        IReadOnlyList<ColumnDefinition> columns,
+        RelationalExecution mode)
     {
         try
         {
-            return ApplyMergeBatchTableValued(writes, columns);
+            return await ApplyMergeBatchTableValued(writes, columns, mode).ConfigureAwait(false);
         }
         catch (SqlException exception) when (exception.Message.Contains("table type", StringComparison.OrdinalIgnoreCase) ||
                                               exception.Message.Contains("type name", StringComparison.OrdinalIgnoreCase))
         {
             // Existing installations can be upgraded before the provider definition is
             // materialized. Preserve a VALUES fallback while the durable TVP catches up.
-            return ApplyMergeBatchValues(writes, columns);
+            return await ApplyMergeBatchValues(writes, columns, mode).ConfigureAwait(false);
         }
     }
 
-    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatchTableValued(
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyMergeBatchTableValued(
         IReadOnlyList<RowWrite> writes,
-        IReadOnlyList<ColumnDefinition> columns)
+        IReadOnlyList<ColumnDefinition> columns,
+        RelationalExecution mode)
     {
         using var command = Command(string.Empty);
         var table = new DataTable();
@@ -943,7 +1137,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.batch-merge-tvp", "SQL Server MERGE table-valued parameter", ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            var returned = ReadMergeOutcomes(command, writes[0].Unit);
+            var returned = await ReadMergeOutcomes(command, writes[0].Unit, mode).ConfigureAwait(false);
             return MapMergeOutcomes(writes, returned);
         }
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out var indexName))
@@ -953,13 +1147,19 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
     }
 
-    private IReadOnlyList<RowWriteOutcome> ApplyMergeBatchValues(
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyMergeBatchValues(
         IReadOnlyList<RowWrite> writes,
-        IReadOnlyList<ColumnDefinition> columns)
+        IReadOnlyList<ColumnDefinition> columns,
+        RelationalExecution mode)
     {
         var maxRows = Math.Max(1, 2_000 / columns.Count);
         if (writes.Count > maxRows)
-            return writes.Chunk(maxRows).SelectMany(chunk => ApplyMergeBatchValues(chunk, columns)).ToArray();
+        {
+            var chunked = new List<RowWriteOutcome>(writes.Count);
+            foreach (var chunk in writes.Chunk(maxRows))
+                chunked.AddRange(await ApplyMergeBatchValues(chunk, columns, mode).ConfigureAwait(false));
+            return chunked;
+        }
 
         using var command = Command(string.Empty);
         var rows = new List<string>(writes.Count);
@@ -1005,7 +1205,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.batch-merge", "SQL Server MERGE batch", ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            var returned = ReadMergeOutcomes(command, writes[0].Unit);
+            var returned = await ReadMergeOutcomes(command, writes[0].Unit, mode).ConfigureAwait(false);
             return writes.Select(write =>
             {
                 if (!returned.TryGetValue(write.Identity, out var result))
@@ -1023,13 +1223,15 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
     }
 
-    private Dictionary<string, (string Action, long? Version)> ReadMergeOutcomes(
+    private async ValueTask<Dictionary<string, (string Action, long? Version)>> ReadMergeOutcomes(
         SqlCommand command,
-        StorageUnit logicalUnit)
+        StorageUnit logicalUnit,
+        RelationalExecution mode)
     {
         var returned = new Dictionary<string, (string, long?)>(StringComparer.Ordinal);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
+        while (await mode.Read(reader).ConfigureAwait(false))
         {
             var values = new Dictionary<string, object?>(StringComparer.Ordinal);
             for (var index = 0; index < Unit.Key.Columns.Count; index++)
@@ -1075,18 +1277,26 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 
-    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
-        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchFallback(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
+    {
+        var outcomes = new List<RowWriteOutcome>(writes.Count);
+        foreach (var write in writes)
         {
-            RowWriteMode.Insert => Insert(write.Values!, write.Options),
-            RowWriteMode.Update => Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ConditionalUpsert(write.Values!, write.Options),
-            RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
-            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
-            RowWriteMode.Delete => Delete(write.Key!, write.Options),
-            RowWriteMode.CompareAndDelete => CompareAndDelete(write.Key!, write.ExpectedValues, write.Options),
-            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
-        })).ToArray();
+            outcomes.Add(new RowWriteOutcome(write, write.Mode switch
+            {
+                RowWriteMode.Insert => await InsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                RowWriteMode.Update => await UpdateAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
+                    await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                RowWriteMode.Upsert => await UpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                RowWriteMode.ConditionalUpsert => await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                RowWriteMode.Delete => await DeleteAsync(write.Key!, write.Options, mode).ConfigureAwait(false),
+                RowWriteMode.CompareAndDelete => await CompareAndDeleteAsync(write.Key!, write.ExpectedValues, write.Options, mode).ConfigureAwait(false),
+                _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
+            }));
+        }
+        return outcomes;
+    }
 
     private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
         logicalUnit.Indexes.Any(index => index.IsUnique &&
@@ -1124,7 +1334,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         _ => null
     };
 
-    private WriteOutcome Mutate(StorageValues values, WriteOptions? options, Mutation mutation)
+    private async ValueTask<WriteOutcome> Mutate(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode)
     {
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             mutation is Mutation.Insert or Mutation.Upsert;
@@ -1132,14 +1342,14 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         WriteOutcome outcome;
         try
         {
-            outcome = MutateCore(values, options, mutation);
+            outcome = await MutateCore(values, options, mutation, mode).ConfigureAwait(false);
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false);
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Succeeded);
+        await CompleteOnAppend(registration, onAppend && outcome.Succeeded, mode).ConfigureAwait(false);
         return outcome;
     }
 
@@ -1151,29 +1361,26 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             : null;
     }
 
-    private void CompleteOnAppend(
+    private ValueTask CompleteOnAppend(
         OnAppendRetentionCoordinator.AppendRegistration? registration,
-        bool cleanupRequired)
+        bool cleanupRequired,
+        RelationalExecution mode)
     {
-        void Cleanup()
+        async ValueTask Cleanup()
         {
             owner.ThrowIfDisposed();
-            ApplyRetentionCore(new RetentionExecutionOptions());
+            await ApplyRetentionCore(new RetentionExecutionOptions(), mode).ConfigureAwait(false);
         }
         if (registration is not null)
-        {
-            registration.Complete(cleanupRequired, Cleanup);
-            return;
-        }
+            return registration.Complete(cleanupRequired, Cleanup);
         if (!cleanupRequired)
-            return;
-        if (transaction is null)
-            OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup);
-        else
-            Cleanup();
+            return ValueTask.CompletedTask;
+        return transaction is null
+            ? OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup)
+            : Cleanup();
     }
 
-    private WriteOutcome MutateCore(StorageValues values, WriteOptions? options, Mutation mutation) => ExecuteWrite(() =>
+    private ValueTask<WriteOutcome> MutateCore(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode) => ExecuteWrite(async () =>
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
@@ -1184,7 +1391,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             !values.Values.ContainsKey(SequenceColumnDefinition.Name))
         {
             ValidateExpected(options, null, mutation);
-            return InsertCore(values.Values, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted);
+            return await InsertCore(values.Values, mode, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted)
+                .ConfigureAwait(false);
         }
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
             column => column,
@@ -1194,7 +1402,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             StringComparer.Ordinal));
         // None mode has no token to inspect. Keep direct writes single-statement and let the
         // database report uniqueness/not-found from the write itself.
-        var existing = Unit.Concurrency.IsNone ? null : ReadCore(key);
+        var existing = Unit.Concurrency.IsNone ? null : await ReadCore(key, mode).ConfigureAwait(false);
         if (mutation == Mutation.Insert && existing is not null) return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
         if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic) return new WriteOutcome(WriteOutcomeStatus.NotFound);
         if (mutation == Mutation.Upsert && SequenceColumnDefinition is not null &&
@@ -1204,10 +1412,10 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         if (mutation == Mutation.Upsert)
         {
             if (SequenceColumnDefinition is not null && values.Values.ContainsKey(SequenceColumnDefinition.Name))
-                return UpdateCore(values.Values, existing, options);
-            if (Unit.Concurrency.IsNone) return UpsertNoneCore(values.Values, options);
-            if (existing is null) return InsertCore(values.Values);
-            return UpdateCore(values.Values, existing, options);
+                return await UpdateCore(values.Values, existing, options, mode).ConfigureAwait(false);
+            if (Unit.Concurrency.IsNone) return await UpsertNoneCore(values.Values, options, mode).ConfigureAwait(false);
+            if (existing is null) return await InsertCore(values.Values, mode).ConfigureAwait(false);
+            return await UpdateCore(values.Values, existing, options, mode).ConfigureAwait(false);
         }
 
         var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
@@ -1227,13 +1435,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             {
                 if (SequenceColumnDefinition is null)
                 {
-                    insert.ExecuteNonQuery();
+                    await mode.ExecuteNonQuery(insert).ConfigureAwait(false);
                     return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? null : 1);
                 }
 
-                var generated = insert.ExecuteScalar();
+                var generated = await mode.ExecuteScalar(insert).ConfigureAwait(false);
                 var generatedValue = FromSqlServer(generated!, SequenceColumnDefinition);
-                RecordHighWater(generatedValue);
+                await RecordHighWater(generatedValue, mode).ConfigureAwait(false);
                 return new WriteOutcome(
                     WriteOutcomeStatus.Inserted,
                     VersionColumnDefinition is null ? null : 1,
@@ -1247,11 +1455,12 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
             }
         }
-        return UpdateCore(values.Values, existing, options);
-    });
+        return await UpdateCore(values.Values, existing, options, mode).ConfigureAwait(false);
+    }, mode);
 
-    private WriteOutcome InsertCore(
+    private async ValueTask<WriteOutcome> InsertCore(
         IReadOnlyDictionary<string, object?> values,
+        RelationalExecution mode,
         WriteOutcomeStatus status = WriteOutcomeStatus.Upserted)
     {
         var supplied = UserColumns.Where(column => values.ContainsKey(column.Name)).ToArray();
@@ -1272,13 +1481,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         {
             if (SequenceColumnDefinition is null)
             {
-                command.ExecuteNonQuery();
+                await mode.ExecuteNonQuery(command).ConfigureAwait(false);
                 return new WriteOutcome(status, VersionColumnDefinition is null ? null : 1);
             }
 
-            var generated = command.ExecuteScalar();
+            var generated = await mode.ExecuteScalar(command).ConfigureAwait(false);
             var generatedValue = FromSqlServer(generated!, SequenceColumnDefinition);
-            RecordHighWater(generatedValue);
+            await RecordHighWater(generatedValue, mode).ConfigureAwait(false);
             return new WriteOutcome(
                 status,
                 VersionColumnDefinition is null ? null : 1,
@@ -1290,7 +1499,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
     }
 
-    private WriteOutcome UpsertNoneCore(IReadOnlyDictionary<string, object?> values, WriteOptions? options)
+    private async ValueTask<WriteOutcome> UpsertNoneCore(IReadOnlyDictionary<string, object?> values, WriteOptions? options, RelationalExecution mode)
     {
         var supplied = UserColumns.Where(column => values.ContainsKey(column.Name)).ToArray();
         var columns = supplied.ToList();
@@ -1307,7 +1516,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            command.ExecuteNonQuery();
+            await mode.ExecuteNonQuery(command).ConfigureAwait(false);
             return new WriteOutcome(WriteOutcomeStatus.Upserted);
         }
         catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
@@ -1339,7 +1548,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                $"WHEN NOT MATCHED BY TARGET THEN INSERT ({sourceColumns}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))});";
     }
 
-    private WriteOutcome UpdateCore(IReadOnlyDictionary<string, object?> values, StoredEntry? existing, WriteOptions? options)
+    private async ValueTask<WriteOutcome> UpdateCore(IReadOnlyDictionary<string, object?> values, StoredEntry? existing, WriteOptions? options, RelationalExecution mode)
     {
         var supplied = UserColumns.Where(column => values.ContainsKey(column.Name) && !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal)).ToArray();
         var sets = supplied.Select(column => $"{Quote(column.Name)}=@{column.Name}").ToList();
@@ -1367,7 +1576,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             commandObserver?.Observe(new ProviderCommandEvent("sqlserver.update", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            if (command.ExecuteNonQuery() == 0)
+            if ((await mode.ExecuteNonQuery(command).ConfigureAwait(false)) == 0)
                 return new WriteOutcome(Unit.Concurrency.IsNone
                     ? WriteOutcomeStatus.NotFound
                     : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
@@ -1379,7 +1588,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
     }
 
-    private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
+    private ValueTask<WriteOutcome> ConditionalUpsertCore(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
@@ -1393,13 +1602,14 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
                 ? value
                 : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
             StringComparer.Ordinal));
-        return ExecuteConditionalBatch(values, options, key);
+        return ExecuteConditionalBatch(values, options, key, mode);
     }
 
-    private WriteOutcome ExecuteConditionalBatch(
+    private async ValueTask<WriteOutcome> ExecuteConditionalBatch(
         StorageValues values,
         WriteOptions? options,
-        StorageKey key)
+        StorageKey key,
+        RelationalExecution mode)
     {
         var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
         var updateColumns = supplied.Where(column =>
@@ -1471,8 +1681,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         commandObserver?.Observe(new ProviderCommandEvent("sqlserver.conditional-upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            using var reader = command.ExecuteReader();
-            if (reader.Read())
+            await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (await mode.Read(reader).ConfigureAwait(false))
             {
                 var status = string.Equals(reader.GetString(0), "INSERT", StringComparison.Ordinal)
                     ? WriteOutcomeStatus.Inserted
@@ -1515,14 +1726,15 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             null,
             () =>
             {
-                var existing = ReadCore(key);
+                var existing = ReadCore(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
                 return existing is null
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
                     : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
             });
 
-    private StoredEntry? ReadCore(
+    private async ValueTask<StoredEntry?> ReadCore(
         StorageKey key,
+        RelationalExecution mode,
         string? observerOperation = null,
         bool exactStringKeys = false,
         bool isProbe = true)
@@ -1532,8 +1744,9 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
         commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
+        if (!(await mode.Read(reader).ConfigureAwait(false))) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
         for (var i = 0; i < UserColumns.Count; i++) values[UserColumns[i].Name] = FromSqlServer(reader.GetValue(i), UserColumns[i]);
         var version = VersionColumnDefinition is null ? (long?)null : Convert.ToInt64(reader.GetValue(UserColumns.Count), CultureInfo.InvariantCulture);
@@ -1624,13 +1837,13 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         foreach (var pair in parameters) SqlServerProviderConnection.AddParameter(command, pair.Key, pair.Value.Value, pair.Value.Definition);
     }
 
-    private T Execute<T>(Func<T> operation)
+    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation)
     {
         try
         {
-            if (transaction is not null) return operation();
+            if (transaction is not null) return await operation().ConfigureAwait(false);
             owner.ThrowIfDisposed();
-            return operation();
+            return await operation().ConfigureAwait(false);
         }
         catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
         {
@@ -1638,24 +1851,40 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         }
     }
 
-    private T ExecuteWrite<T>(Func<T> operation)
+    private async ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
-        if (transaction is not null) return Translate(operation);
-        lock (owner.Gate)
+        if (transaction is not null) return await Translate(operation).ConfigureAwait(false);
+        // The connection gate is a non-reentrant semaphore, so a nested write must be refused
+        // before it is asked for; waiting on a permit this call already holds would never return.
+        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
+        using (await owner.EnterGate(mode).ConfigureAwait(false))
         {
             owner.ThrowIfDisposed();
-            using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable);
+            var writeTransaction = (SqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.Serializable).ConfigureAwait(false);
             activeTransaction = writeTransaction;
-            try { var result = Translate(operation); writeTransaction.Commit(); return result; }
-            catch { writeTransaction.Rollback(); throw; }
-            finally { activeTransaction = null; }
+            try
+            {
+                var result = await Translate(operation).ConfigureAwait(false);
+                await mode.Commit(writeTransaction).ConfigureAwait(false);
+                return result;
+            }
+            catch (Exception failure)
+            {
+                await WriteFailureCleanup.Run(failure, () => mode.Rollback(writeTransaction)).ConfigureAwait(false);
+                throw;
+            }
+            finally
+            {
+                activeTransaction = null;
+                await mode.Dispose(writeTransaction).ConfigureAwait(false);
+            }
         }
     }
 
-    private static T Translate<T>(Func<T> operation)
+    private static async ValueTask<T> Translate<T>(Func<ValueTask<T>> operation)
     {
-        try { return operation(); }
+        try { return await operation().ConfigureAwait(false); }
         catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
         { return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version); }
     }

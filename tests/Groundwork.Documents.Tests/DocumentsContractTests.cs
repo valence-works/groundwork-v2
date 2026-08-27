@@ -722,13 +722,21 @@ public sealed class DocumentsContractTests
         public StorageValues? LastValues { get; private set; }
         public WriteOptions? LastOptions { get; private set; }
         public StoredEntry? Read(StorageKey key) => throw new NotSupportedException();
+        public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Groundwork.Query.Model.QueryMaterializedResult Query(Groundwork.Query.Model.QueryRequest request, Groundwork.Query.Model.QueryRenderOptions? options = null) => throw new NotSupportedException();
+        public ValueTask<Groundwork.Query.Model.QueryMaterializedResult> QueryAsync(Groundwork.Query.Model.QueryRequest request, Groundwork.Query.Model.QueryRenderOptions? options = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public AggregationResult Aggregate(Groundwork.Kernel.AggregationQuery query) => throw new NotSupportedException();
+        public ValueTask<AggregationResult> AggregateAsync(Groundwork.Kernel.AggregationQuery query, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => Capture(RowWriteMode.Insert, values, null, options);
+        public ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => ValueTask.FromResult(Insert(values, options));
         public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => Capture(RowWriteMode.Update, values, null, options);
+        public ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => ValueTask.FromResult(Update(values, options));
         public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => Capture(RowWriteMode.Upsert, values, null, options);
+        public ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => ValueTask.FromResult(Upsert(values, options));
         public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => Capture(RowWriteMode.Delete, null, key, options);
+        public ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options = null, CancellationToken cancellationToken = default) => ValueTask.FromResult(Delete(key, options));
         public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) => throw new NotSupportedException();
+        public ValueTask<WriteOutcome> AppendAsync(OperationId operationId, IReadOnlyList<StorageValues> values, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         private WriteOutcome Capture(RowWriteMode mode, StorageValues? values, StorageKey? key, WriteOptions? options)
         {
