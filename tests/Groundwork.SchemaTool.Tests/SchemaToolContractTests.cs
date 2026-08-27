@@ -397,13 +397,32 @@ public sealed class SchemaToolContractTests
     {
         var schema = Temp("coverage-schema.json", ValidSchema);
         var inventory = Temp("coverage.json", """
-            {"queries":[{"name":"tickets-by-id","table":"tickets","equal":["id"]}]}
+            {"queries":[{"name":"tickets-unfiltered","table":"tickets"}]}
             """);
         var engine = new RecordingBuildEngine();
         var task = new GroundworkVerify { SchemaFile = schema, CoverageFile = inventory, BuildEngine = engine };
 
         Assert.False(task.Execute());
         Assert.NotEmpty(engine.Errors);
+    }
+
+    /// <summary>
+    /// The build gate agrees with the analyzer and the runtime gate that the declared key is a
+    /// coverage candidate. The table this uses declares no index at all, so the only thing that can
+    /// cover the read is the key itself.
+    /// </summary>
+    [Fact]
+    public void Msbuild_task_passes_the_build_for_a_declared_key_equality()
+    {
+        var schema = Temp("key-coverage-schema.json", ValidSchema);
+        var inventory = Temp("key-coverage.json", """
+            {"queries":[{"name":"tickets-by-id","table":"tickets","equal":["id"]}]}
+            """);
+        var engine = new RecordingBuildEngine();
+        var task = new GroundworkVerify { SchemaFile = schema, CoverageFile = inventory, BuildEngine = engine };
+
+        Assert.True(task.Execute());
+        Assert.Empty(engine.Errors);
     }
 
     /// <summary>

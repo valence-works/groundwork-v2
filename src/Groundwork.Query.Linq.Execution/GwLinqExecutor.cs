@@ -137,10 +137,16 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     private RuntimeCoverageGate CreateGate()
     {
         var declared = DeclaredIndexes(session.Unit);
+        var key = session.Unit.Key.Columns;
         var profile = admission ?? connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
+        // The key joins both sides of the intersection rather than only the declared side. A
+        // declared index can be absent from the catalog mid-deploy, which is exactly what the
+        // intersection is for; the key cannot, because the coordinator emits it as the PRIMARY KEY
+        // of the CREATE TABLE itself. Reaching here at all means the unit was applied, so the table
+        // and its key exist together or neither does.
         return new RuntimeCoverageGate(
-            declared,
-            DeployedIndexes(declared),
+            CoverageCandidates.Derive(key, declared),
+            CoverageCandidates.Derive(key, DeployedIndexes(declared)),
             options: new RuntimeCoverageGateOptions
             {
                 ValueFence = new RuntimeValueFenceOptions

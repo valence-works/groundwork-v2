@@ -37,11 +37,13 @@ production-supported yet** — conformance is evidence of contract behavior, not
 | Cross-scope query | ✅ | ✅ | ✅ | ✅ (unpinned only) | — |
 | Native index hints | ❌ (no syntax) | ❌ (no syntax) | ✅ | ✅ | — |
 
-> **A declared key is physically indexed on every provider — but is not a coverage candidate.** A
-> query filtering on a key column is refused (`GW-COVER-006`) unless you also declare an index over
-> it. Use the point read (`session.Read(key)`) instead; see
-> [Query Coverage & Indexes](Query-Coverage-and-Indexes#a-declared-key-is-not-a-coverage-candidate)
-> and [#203](https://github.com/valence-works/groundwork-v2/issues/203).
+> **A declared key is a coverage candidate on every provider.** A query filtering on the key — or on
+> the leading columns of a composite key — is admitted without a separate `[GwIndex]`, because every
+> relational coordinator emits the key as the table's `PRIMARY KEY` and the engine backs that with a
+> unique index. MongoDB reaches the same verdict but not yet the same plan: it stores the key in
+> `_id` while the renderer filters on the declared field names, so the read is admitted and then
+> scans. See [Query Coverage & Indexes](Query-Coverage-and-Indexes#what-counts-as-a-covering-index)
+> and [#238](https://github.com/valence-works/groundwork-v2/issues/238).
 
 **Always check at runtime rather than reading this table into your code:**
 
