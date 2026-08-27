@@ -188,7 +188,7 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
-    public async Task Provider_failures_are_stable_and_do_not_echo_secrets()
+    public async Task Raw_provider_failures_are_stable_and_do_not_echo_secrets()
     {
         var schema = Temp("failure-schema.json", ValidSchema);
         const string secret = "provider-secret-do-not-echo";
@@ -200,6 +200,28 @@ public sealed class SchemaToolContractTests
 
         Assert.Contains("GW-CLI-010", output.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Factory_authored_failure_reasons_surface_to_the_operator()
+    {
+        var schema = Temp("reason-schema.json", ValidSchema);
+        const string reason = "the target store is already in use by another process";
+
+        Assert.Equal(SchemaToolExitCodes.ExecutionFailed,
+            await RunAsync([
+                "plan", "--schema", schema, "--provider", "fake", "--output", "json"
+            ], _ => throw new SchemaToolProviderException(reason)));
+
+        Assert.Contains("GW-CLI-010", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains(reason, output.ToString(), StringComparison.Ordinal);
+
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation,
+            await RunAsync([
+                "plan", "--schema", schema, "--provider", "fake", "--output", "json"
+            ], _ => throw new SchemaToolProviderInvocationException("the fake provider requires --connection")));
+        Assert.Contains("GW-CLI-001", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("requires --connection", output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

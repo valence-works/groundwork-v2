@@ -14,6 +14,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     internal const string ScopeColumn = "__groundwork_scope";
     internal const string VersionColumn = "__groundwork_version";
     internal const string BatchTypeKind = "table-valued-parameter";
+    internal static readonly ProviderIdentity Identity = new("SQLServer", "1.0");
     private readonly RelationalSchemaExecutor executor;
     private readonly SqlServerDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
@@ -72,7 +73,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
         new(
             new SchemaSubject(physical),
-            new ProviderIdentity("SQLServer", "1.0"),
+            Identity,
             [
                 new ProviderPhysicalSchemaDefinition(
                     "SQLServer",

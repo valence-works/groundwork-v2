@@ -13,6 +13,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     internal const string ScopeColumn = "__groundwork_scope";
     internal const string VersionColumn = "__groundwork_version";
     internal const string ActionColumn = "__groundwork_action";
+    internal static readonly ProviderIdentity Identity = new("SQLite", "1.0");
     private readonly SqliteProviderConnection owner;
     private readonly RelationalSchemaExecutor executor;
     private readonly SqliteDialect dialect = new();
@@ -80,7 +81,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
         new(
             new SchemaSubject(physical),
-            new ProviderIdentity("SQLite", "1.0"),
+            Identity,
             physical.DerivedColumns.Select(derived => new ProviderPhysicalSchemaDefinition(
                 "SQLite",
                 physical.Id,
