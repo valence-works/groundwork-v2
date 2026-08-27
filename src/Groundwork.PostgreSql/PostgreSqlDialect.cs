@@ -63,6 +63,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
         PortableType.Guid => "uuid",
         PortableType.Binary => "bytea",
         PortableType.Json => "jsonb",
+        PortableType.Double => "double precision",
         _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Type, null)
     };
 
@@ -612,6 +613,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
             .Replace("::bigint", string.Empty, StringComparison.OrdinalIgnoreCase)
             .Replace("::integer", string.Empty, StringComparison.OrdinalIgnoreCase)
             .Replace("::boolean", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("::double precision", string.Empty, StringComparison.OrdinalIgnoreCase)
             .Trim();
 
     private static string Literal(object? value, PortableType type) => value is null ? "NULL" : type switch
@@ -624,6 +626,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
         PortableType.Guid => $"'{value}'::uuid",
         PortableType.Binary => $"decode('{Convert.ToHexString((byte[])value)}', 'hex')",
         PortableType.Json => $"'{Escape(value is string text ? text : JsonSerializer.Serialize(value))}'::jsonb",
+        PortableType.Double => PortableDouble.ToLiteral(Convert.ToDouble(value, CultureInfo.InvariantCulture)),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 

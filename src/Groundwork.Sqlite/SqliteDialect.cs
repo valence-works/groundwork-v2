@@ -44,6 +44,7 @@ internal sealed class SqliteDialect : RelationalDialect
         PortableType.Decimal => "TEXT",
         PortableType.DateTimeOffset or PortableType.Guid or PortableType.Json => "TEXT",
         PortableType.Binary => "BLOB",
+        PortableType.Double => "REAL",
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
 
@@ -469,6 +470,7 @@ internal sealed class SqliteDialect : RelationalDialect
         PortableType.Int32 or PortableType.Int64 => Convert.ToString(value, CultureInfo.InvariantCulture)!,
         PortableType.Decimal => $"'{Convert.ToDecimal(value, CultureInfo.InvariantCulture).ToString("G29", CultureInfo.InvariantCulture)}'",
         PortableType.Binary => $"X'{Convert.ToHexString((byte[])value)}'",
+        PortableType.Double => PortableDouble.ToLiteral(Convert.ToDouble(value, CultureInfo.InvariantCulture)),
         _ => $"'{(value is DateTimeOffset date ? date.ToUniversalTime().ToString("O") : Convert.ToString(value, CultureInfo.InvariantCulture))!.Replace("'", "''", StringComparison.Ordinal)}'"
     };
 

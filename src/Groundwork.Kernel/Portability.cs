@@ -121,6 +121,7 @@ public static class PortabilityValidator
         ValidateDuplicatePhysicalIndexSignatures(indexes, diagnostics);
         ValidateUniqueNullability(indexes, byName, diagnostics);
         ValidateDecimalShape(columns, diagnostics);
+        ValidateStorageOnlyDouble(unit, columns, byName, diagnostics);
         ValidateBoundedIndexKeys(indexes, byName, diagnostics);
         ValidateIndexBudget(indexes, byName, diagnostics);
         ValidateGeneration(unit, columns, diagnostics);
@@ -535,6 +536,75 @@ public static class PortabilityValidator
                 "GW-PORT-002",
                 $"Decimal column '{column.Name}' must declare both Precision and Scale.",
                 $"columns.{column.Name}"));
+        }
+    }
+
+    /// <summary>
+    /// Keeps <see cref="PortableType.Double"/> storage-only. A binary64 column round-trips
+    /// bit-for-bit on every supported store, so it is declarable; it never becomes a comparison
+    /// surface, so every structural position that compares values refuses it. The declared
+    /// default is held to the same storable domain the write path enforces, because a default
+    /// outside it would be rendered into DDL that a provider cannot accept.
+    /// </summary>
+    private static void ValidateStorageOnlyDouble(
+        StorageUnit unit,
+        IReadOnlyList<ColumnDefinition> columns,
+        IReadOnlyDictionary<string, ColumnDefinition> byName,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        void RefuseComparison(string column, string position, string path) =>
+            diagnostics.Add(new(
+                "GW-PORT-012",
+                $"Double column '{column}' cannot be {position}. Binary floating point is " +
+                "storage-only: it has no comparison semantics that hold across the supported " +
+                "stores. Declare Decimal or Int64 for a value you compare, and keep Double for " +
+                "a value you only store.",
+                path));
+
+        bool IsDouble(string? name) =>
+            name is not null && byName.TryGetValue(name, out var column) && column.Type == PortableType.Double;
+
+        var keyColumns = unit.Key?.Columns ?? [];
+        for (var index = 0; index < keyColumns.Count; index++)
+        {
+            if (IsDouble(keyColumns[index]))
+                RefuseComparison(keyColumns[index], "a key column", $"key.columns[{index}]");
+        }
+
+        foreach (var index in (unit.Indexes ?? []).Where(index => index is not null))
+        {
+            var indexColumns = index.Columns ?? [];
+            for (var position = 0; position < indexColumns.Count; position++)
+            {
+                var name = indexColumns[position]?.Column;
+                if (IsDouble(name))
+                    RefuseComparison(name!, $"an index column of '{index.Name}'", $"indexes.{index.Name}.columns[{position}]");
+            }
+        }
+
+        foreach (var profile in (unit.AggregationProfiles ?? []).Where(profile => profile is not null))
+        {
+            foreach (var group in AggregationGrouping.EffectiveGroups(profile)
+                .OfType<AggregationGroup.Column>()
+                .Where(group => IsDouble(group.Alias)))
+            {
+                RefuseComparison(
+                    group.Alias,
+                    $"a group-by column of aggregation profile '{profile.Name}'",
+                    $"aggregationProfiles.{profile.Name}.groupByColumns");
+            }
+        }
+
+        foreach (var column in columns.Where(column =>
+            column is { Type: PortableType.Double, Default: not null }))
+        {
+            if (column.Default!.Value is double value && !PortableDouble.IsStorable(value))
+            {
+                diagnostics.Add(new(
+                    "GW-PORT-013",
+                    PortableDouble.Explain(column.Name, value),
+                    $"columns.{column.Name}.default"));
+            }
         }
     }
 

@@ -64,6 +64,7 @@ internal sealed class SqlServerDialect : RelationalDialect
         PortableType.DateTimeOffset => "datetimeoffset(7)",
         PortableType.Guid => "uniqueidentifier",
         PortableType.Binary => definition.MaxLength is { } binaryLength ? $"varbinary({binaryLength})" : "varbinary(max)",
+        PortableType.Double => "float(53)",
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
 
@@ -620,6 +621,7 @@ internal sealed class SqlServerDialect : RelationalDialect
         PortableType.Binary => $"0x{Convert.ToHexString((byte[])value)}",
         PortableType.DateTimeOffset => $"N'{((DateTimeOffset)value).ToUniversalTime():O}'",
         PortableType.Guid => $"N'{value}'",
+        PortableType.Double => PortableDouble.ToLiteral(Convert.ToDouble(value, CultureInfo.InvariantCulture)),
         _ => $"N'{(value is string text ? text : JsonSerializer.Serialize(value)).Replace("'", "''", StringComparison.Ordinal)}'"
     };
 

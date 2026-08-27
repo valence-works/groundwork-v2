@@ -292,7 +292,13 @@ public enum WriteOperation
 /// <summary>Validates operation/precondition combinations before provider I/O.</summary>
 public static class WritePreconditionValidator
 {
-    public static void ValidateSystemOwnedValues(StorageUnit unit, IReadOnlyDictionary<string, object?> values)
+    /// <summary>
+    /// Applies the declaration-level rules a written values dictionary must satisfy before any
+    /// provider sees it: system-owned columns stay system-owned, and a value must fall inside the
+    /// storable domain of its declared portable type. Every provider funnels its write paths
+    /// through here, so the rules hold identically on all of them.
+    /// </summary>
+    public static void ValidateWrittenValues(StorageUnit unit, IReadOnlyDictionary<string, object?> values)
     {
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(values);
@@ -301,6 +307,13 @@ public static class WritePreconditionValidator
         {
             throw new InvalidOperationException(
                 $"GW-WRITE-CONCURRENCY-003: optimistic token column '{token}' is system-owned and cannot be supplied or mutated by application values.");
+        }
+
+        foreach (var column in unit.Columns.Where(column => column.Type == PortableType.Double))
+        {
+            if (values.TryGetValue(column.Name, out var value) && value is double number &&
+                !PortableDouble.IsStorable(number))
+                throw new ArgumentException(PortableDouble.RefusalMessage(column.Name, number), nameof(values));
         }
     }
 
