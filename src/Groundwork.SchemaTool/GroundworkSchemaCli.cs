@@ -19,25 +19,6 @@ public static class SchemaToolExitCodes
     public const int Cancelled = 130;
 }
 
-public interface ISchemaToolProviderSession : IDisposable
-{
-    ProviderIdentity Provider { get; }
-    IPhysicalSchemaExecutor Executor { get; }
-    IPhysicalSchemaHistoryInspector Inspector { get; }
-}
-
-public sealed record SchemaToolProviderOptions(
-    string Provider,
-    string? Connection,
-    string? Database,
-    CancellationToken CancellationToken);
-
-public interface ISchemaToolProviderSessionFactory
-{
-    string Alias { get; }
-    ISchemaToolProviderSession Open(SchemaToolProviderOptions options);
-}
-
 public static class SchemaToolAuthorization
 {
     public static PhysicalSchemaPlanAuthorization Evaluate(
@@ -260,6 +241,11 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, exception.Code, exception.Message);
             return SchemaToolExitCodes.InvalidInvocation;
         }
+        catch (SchemaToolProviderInvocationException exception)
+        {
+            await WriteErrorAsync(output, error, json, "GW-CLI-001", exception.Message);
+            return SchemaToolExitCodes.InvalidInvocation;
+        }
         catch (OperationCanceledException)
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-009", "The operation was cancelled.");
@@ -269,6 +255,11 @@ public static class GroundworkSchemaCli
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
             return SchemaToolExitCodes.ValidationFailed;
+        }
+        catch (SchemaToolProviderException exception)
+        {
+            await WriteErrorAsync(output, error, json, "GW-CLI-010", $"Schema tool execution failed: {exception.Message}");
+            return SchemaToolExitCodes.ExecutionFailed;
         }
         catch (Exception)
         {
@@ -527,6 +518,7 @@ public static class GroundworkSchemaCli
             provider,
             Value(arguments, "--connection"),
             Value(arguments, "--database"),
+            arguments.Count != 0 && arguments[0] == "apply",
             cancellationToken));
     }
 

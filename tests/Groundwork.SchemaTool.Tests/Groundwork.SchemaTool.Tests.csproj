@@ -17,5 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
     <ProjectReference Include="../../src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
 </Project>

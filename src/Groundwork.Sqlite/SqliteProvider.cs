@@ -37,7 +37,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             opened = CreateOpenConnection(builder.ConnectionString);
             schemaLock = acquiredLock;
             connection = opened;
-            isMemory = builder.Mode == SqliteOpenMode.Memory || builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase);
+            isMemory = SqliteDataSource.IsMemory(builder);
             schemaCoordinator = new SqliteSchemaCoordinator(this);
             Schema = schemaCoordinator;
             Catalog = new SqliteProviderCatalog(this);
@@ -193,15 +193,10 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
 
     private static FileStream? AcquireSchemaLock(SqliteConnectionStringBuilder builder)
     {
-        if (builder.Mode == SqliteOpenMode.Memory ||
-            string.IsNullOrWhiteSpace(builder.DataSource) ||
-            builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase))
+        if (SqliteDataSource.IsMemory(builder))
             return null;
 
-        var dataSource = builder.DataSource;
-        if (dataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
-            dataSource = dataSource[5..].Split('?', 2)[0];
-        var fullPath = Path.GetFullPath(dataSource);
+        var fullPath = SqliteDataSource.FullPath(builder.DataSource);
         var directory = Path.GetDirectoryName(fullPath);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
