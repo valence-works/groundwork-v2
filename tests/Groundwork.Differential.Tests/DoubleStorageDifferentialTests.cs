@@ -162,6 +162,52 @@ public sealed class DoubleStorageDifferentialTests
             defaults);
     }
 
+    /// <summary>
+    /// A batched write does not go through the single-row parameter path. SQL Server builds a
+    /// table-valued parameter whose DataTable columns are typed from the declaration, so a Double
+    /// column only survives a batch if that mapping names it. Batched here on all four providers
+    /// for the same reason the single-row case is.
+    /// </summary>
+    [SkippableFact]
+    public void Every_provider_carries_a_double_through_a_batched_write()
+    {
+        using var matrix = DoubleMatrix.OpenAll();
+        var readBack = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var provider in matrix.Providers)
+        {
+            var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(provider.Session);
+            var outcomes = batched.ApplyBatch(
+            [
+                RowWrite.Insert(matrix.Unit, Row(10L, 0.1d)),
+                RowWrite.Insert(matrix.Unit, Row(11L, double.Epsilon)),
+                RowWrite.Insert(matrix.Unit, Row(12L, double.MaxValue))
+            ]);
+            Assert.Equal(3, outcomes.Count);
+
+            readBack[provider.Name] = string.Join(",", new[] { 10L, 11L, 12L }.Select(id =>
+            {
+                var stored = provider.Session.Read(Key(id));
+                Assert.NotNull(stored);
+                return Hex(BitConverter.DoubleToInt64Bits(
+                    Assert.IsType<double>(stored!.Values.Values["reading"])));
+            }));
+        }
+
+        Assert.Equal(
+            matrix.Providers.ToDictionary(
+                provider => provider.Name,
+                _ => "0x3fb999999999999a,0x0000000000000001,0x7fefffffffffffff",
+                StringComparer.Ordinal),
+            readBack);
+    }
+
+    private static StorageValues Row(long id, double reading) => new(new Dictionary<string, object?>
+    {
+        ["id"] = id,
+        ["reading"] = reading,
+        ["calibration"] = 0.1d
+    });
+
     private static StorageKey Key(long id) =>
         new(new Dictionary<string, object?> { ["id"] = id });
 

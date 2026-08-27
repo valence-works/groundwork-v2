@@ -63,6 +63,10 @@ SQLite and MongoDB, so all four are refused at the write with `GW-VALUE-DOUBLE-0
 stored and quietly changed. There is deliberately **no `Single`**: SQLite `REAL` and BSON `double`
 are both binary64, so a 32-bit column would be a widened one on half the providers.
 
+A *declared default* is narrower still, because it reaches the store through DDL rather than as a
+parameter: SQL Server's float literal parser flushes a subnormal to zero, so a subnormal default is
+refused with `GW-PORT-013` even though the same value is perfectly writable as a value.
+
 ```csharp
 .Double("reading")                              // stored, never compared
 .Double("calibration", c => c.Required().Default(0.1))

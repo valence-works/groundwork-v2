@@ -624,7 +624,6 @@ internal sealed class SqlServerDialect : RelationalDialect
         PortableType.Binary => $"0x{Convert.ToHexString((byte[])value)}",
         PortableType.DateTimeOffset => $"N'{((DateTimeOffset)value).ToUniversalTime():O}'",
         PortableType.Guid => $"N'{value}'",
-        PortableType.Double => PortableDouble.ToLiteral(Convert.ToDouble(value, CultureInfo.InvariantCulture)),
         _ => $"N'{(value is string text ? text : JsonSerializer.Serialize(value)).Replace("'", "''", StringComparison.Ordinal)}'"
     };
 

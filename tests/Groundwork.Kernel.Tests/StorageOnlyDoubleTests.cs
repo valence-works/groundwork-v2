@@ -116,11 +116,11 @@ public sealed class StorageOnlyDoubleTests
     }
 
     [Theory]
-    [InlineData(double.NaN)]
-    [InlineData(double.PositiveInfinity)]
-    [InlineData(double.NegativeInfinity)]
-    [InlineData(-0d)]
-    public void A_declared_default_outside_the_storable_domain_is_refused(double value)
+    [InlineData(double.NaN, "NaN", "Write a finite value")]
+    [InlineData(double.PositiveInfinity, "positive infinity", "Write a finite value")]
+    [InlineData(double.NegativeInfinity, "negative infinity", "Write a finite value")]
+    [InlineData(-0d, "negative zero", "Write positive zero")]
+    public void A_declared_default_outside_the_storable_domain_is_refused(double value, string named, string remedy)
     {
         var unit = Unit(
             [
@@ -133,7 +133,53 @@ public sealed class StorageOnlyDoubleTests
             PortabilityValidator.Validate(unit).Refusals,
             finding => finding.Code == "GW-PORT-013");
         Assert.Equal("columns.reading.default", refusal.Path);
-        Assert.Contains("Use a finite value, or declare Decimal or Int64.", refusal.Message, StringComparison.Ordinal);
+        // The remedy has to fit the value: negative zero is finite, so "write a finite value"
+        // would be advice the caller had already followed.
+        Assert.Contains(named, refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(remedy + ", or declare Decimal or Int64.", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A subnormal is a perfectly good written value on all four stores, and a bad declared
+    /// default on one of them: a declared default reaches the store through DDL, and SQL Server's
+    /// float literal parser flushes a subnormal to zero. The two domains are therefore not the
+    /// same, and the message has to say which one the caller hit.
+    /// </summary>
+    [Theory]
+    [InlineData(5E-324d)]
+    [InlineData(1e-320d)]
+    public void A_subnormal_declared_default_is_refused_though_the_value_itself_is_storable(double value)
+    {
+        Assert.True(PortableDouble.IsStorable(value));
+        Assert.False(PortableDouble.IsStorableAsDefault(value));
+
+        var unit = Unit(
+            [
+                Column("id", PortableType.Guid, nullable: false),
+                Column("reading", PortableType.Double) with { Default = new PortableDefault(value) }
+            ],
+            key: ["id"]);
+
+        var refusal = Assert.Single(
+            PortabilityValidator.Validate(unit).Refusals,
+            finding => finding.Code == "GW-PORT-013");
+        Assert.Contains("subnormal", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("write the subnormal as a value instead", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_smallest_normal_value_is_both_storable_and_defaultable()
+    {
+        // The measured boundary on SQL Server: the smallest normal survives a DDL default and
+        // the largest subnormal does not.
+        const double SmallestNormal = 2.2250738585072014e-308d;
+        var largestSubnormal = BitConverter.Int64BitsToDouble(
+            BitConverter.DoubleToInt64Bits(SmallestNormal) - 1);
+
+        Assert.True(PortableDouble.IsStorableAsDefault(SmallestNormal));
+        Assert.True(PortableDouble.IsStorable(largestSubnormal));
+        Assert.False(PortableDouble.IsStorableAsDefault(largestSubnormal));
+        Assert.True(PortableDouble.IsStorableAsDefault(0d));
     }
 
     [Fact]

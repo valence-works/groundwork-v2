@@ -543,8 +543,8 @@ public static class PortabilityValidator
     /// Keeps <see cref="PortableType.Double"/> storage-only. A binary64 column round-trips
     /// bit-for-bit on every supported store, so it is declarable; it never becomes a comparison
     /// surface, so every structural position that compares values refuses it. The declared
-    /// default is held to the same storable domain the write path enforces, because a default
-    /// outside it would be rendered into DDL that a provider cannot accept.
+    /// default is held to a narrower domain still: a value only reaches the store through DDL,
+    /// where SQL Server's float literal parser flushes a subnormal to zero.
     /// </summary>
     private static void ValidateStorageOnlyDouble(
         StorageUnit unit,
@@ -598,11 +598,11 @@ public static class PortabilityValidator
         foreach (var column in columns.Where(column =>
             column is { Type: PortableType.Double, Default: not null }))
         {
-            if (column.Default!.Value is double value && !PortableDouble.IsStorable(value))
+            if (column.Default!.Value is double value && !PortableDouble.IsStorableAsDefault(value))
             {
                 diagnostics.Add(new(
                     "GW-PORT-013",
-                    PortableDouble.Explain(column.Name, value),
+                    PortableDouble.ExplainDefault(column.Name, value),
                     $"columns.{column.Name}.default"));
             }
         }

@@ -43,7 +43,7 @@ Raised by `PortabilityValidator`, builders, and providers **before schema I/O**.
 | `GW-PORT-010` | Invalid physical identifier | ASCII letters/digits/underscores, starts with letter/underscore, ≤ 63 bytes, no `__groundwork_` prefix |
 | `GW-PORT-011` | Duplicate physical index name | Use unique names |
 | `GW-PORT-012` | A `Double` column used as a key, index, or aggregation group-by column | Declare `Decimal` or `Int64` for a value you compare; keep `Double` for one you only store |
-| `GW-PORT-013` | A `Double` column declares a default outside the storable domain | Use a finite default other than negative zero |
+| `GW-PORT-013` | A `Double` column declares a default outside the **defaultable** domain — non-finite, negative zero, or subnormal | Use a finite, normal default other than negative zero; a subnormal can still be written as a value |
 
 ---
 

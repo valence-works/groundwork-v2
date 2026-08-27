@@ -39,24 +39,44 @@ public static class PortableDouble
     public static bool IsStorable(double value) =>
         double.IsFinite(value) && !(value == 0d && double.IsNegative(value));
 
-    /// <summary>The refusal text for a value outside the storable domain, carrying the code.</summary>
-    public static string RefusalMessage(string column, double value) =>
+    /// <summary>
+    /// Whether every supported store returns <paramref name="value"/> bit-for-bit when it is
+    /// written into DDL as a declared default rather than sent as a parameter. This is strictly
+    /// narrower than <see cref="IsStorable"/>: SQL Server's T-SQL float literal parser flushes a
+    /// subnormal to zero — measured, the smallest normal survives and the largest subnormal does
+    /// not — while the same value sent as a parameter round-trips exactly. A subnormal is
+    /// therefore writable but not defaultable.
+    /// </summary>
+    public static bool IsStorableAsDefault(double value) =>
+        IsStorable(value) && (value == 0d || double.IsNormal(value));
+
+    /// <summary>
+    /// The refusal text for a value outside the storable domain, carrying the code. Only
+    /// meaningful for a value <see cref="IsStorable"/> rejects, so it stays internal to the
+    /// assemblies that do the rejecting.
+    /// </summary>
+    internal static string RefusalMessage(string column, double value) =>
         $"{RefusalCode}: {Explain(column, value)}";
 
-    /// <summary>The refusal text without a code, for callers that carry the code separately.</summary>
-    public static string Explain(string column, double value) =>
-        $"Double column '{column}' cannot hold {Describe(value)}. NaN and the infinities are " +
-        "refused outright by SQL Server and SQLite, and negative zero comes back as positive " +
-        "zero from SQLite and MongoDB, so the value a reader gets would depend on the provider. " +
-        "Use a finite value, or declare Decimal or Int64.";
+    /// <summary>The refusal text for a declared default outside the defaultable domain.</summary>
+    internal static string ExplainDefault(string column, double value) =>
+        IsStorable(value)
+            ? $"Double column '{column}' cannot default to the subnormal value " +
+              $"{ToLiteral(value)}: SQL Server's float literal parser flushes a subnormal to zero, " +
+              "so the deployed default would be zero there and the declared value everywhere else. " +
+              "Declare a normal default, and write the subnormal as a value instead."
+            : Explain(column, value);
 
-    private static string Describe(double value) => value switch
-    {
-        _ when double.IsNaN(value) => "NaN",
-        double.PositiveInfinity => "positive infinity",
-        double.NegativeInfinity => "negative infinity",
-        _ => "negative zero"
-    };
+    /// <summary>The refusal text without a code, for callers that carry the code separately.</summary>
+    internal static string Explain(string column, double value) =>
+        double.IsFinite(value)
+            ? $"Double column '{column}' cannot hold negative zero: SQLite and MongoDB both return " +
+              "positive zero for a stored negative zero, so the value a reader gets would depend " +
+              "on the provider. Write positive zero, or declare Decimal or Int64."
+            : $"Double column '{column}' cannot hold {(double.IsNaN(value) ? "NaN" : value > 0 ? "positive infinity" : "negative infinity")}: " +
+              "SQL Server refuses NaN and both infinities outright, and SQLite refuses NaN, so " +
+              "the same write would succeed on one provider and fail on another. Write a finite " +
+              "value, or declare Decimal or Int64.";
 
     /// <summary>
     /// The shortest representation that parses back to the same binary64 value, so a DDL

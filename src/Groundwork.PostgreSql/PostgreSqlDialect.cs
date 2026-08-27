@@ -613,7 +613,6 @@ public sealed class PostgreSqlDialect : RelationalDialect
             .Replace("::bigint", string.Empty, StringComparison.OrdinalIgnoreCase)
             .Replace("::integer", string.Empty, StringComparison.OrdinalIgnoreCase)
             .Replace("::boolean", string.Empty, StringComparison.OrdinalIgnoreCase)
-            .Replace("::double precision", string.Empty, StringComparison.OrdinalIgnoreCase)
             .Trim();
 
     private static string Literal(object? value, PortableType type) => value is null ? "NULL" : type switch
