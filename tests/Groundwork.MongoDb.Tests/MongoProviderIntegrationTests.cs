@@ -29,6 +29,33 @@ public sealed class MongoProviderIntegrationTests
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
+    /// <summary>
+    /// MongoDB has no applied schema ledger, so it cannot distinguish a renamed field from a new
+    /// one. It refuses the declaration by name rather than quietly reading nulls out of documents
+    /// that still carry the old field; the executor that makes this work is #86.
+    /// </summary>
+    [SkippableFact]
+    public void Schema_admission_refuses_a_column_whose_logical_id_has_diverged()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-rename-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_rename_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        var failure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+
+        Assert.Contains("GW-SCHEMA-009", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("buyer", failure.Message, StringComparison.Ordinal);
+    }
+
     [SkippableFact]
     public void Schema_admission_refuses_invalid_aggregation_before_persistence()
     {

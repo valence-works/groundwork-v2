@@ -34,12 +34,12 @@ public static class SchemaToolAuthorization
         var refusals = new List<SchemaRefusal>();
         if (!safeAuthorized && plan.Operations.Length != 0)
             refusals.Add(new("GW-CLI-007", "Schema changes require explicit --safe authorization.", "authorization.safe"));
-        refusals.AddRange(protection.DestructiveOperationIdentities
-            .Where(identity => !authorized.Contains(identity))
-            .Select(identity => new SchemaRefusal(
+        refusals.AddRange(protection.DestructiveOperations
+            .Where(operation => !operation.IsAuthorizedBy(authorized))
+            .Select(operation => new SchemaRefusal(
                 "GW-CLI-008",
-                $"Destructive operation '{identity}' requires explicit authorization.",
-                $"authorization.destructive.{identity}")));
+                $"Destructive operation '{operation.Address ?? operation.Identity}' requires explicit authorization.",
+                $"authorization.destructive.{operation.Identity}")));
         refusals.AddRange(protection.SemanticMigrationIdentities
             .Where(identity => !semantic.Contains(identity))
             .Select(identity => new SchemaRefusal(
@@ -338,7 +338,7 @@ public static class GroundworkSchemaCli
                 : plan.Operations.Length == 0 ? "ready" : "pending",
         PlanFingerprint(target, plan),
         inspection.History.AppliedState?.TargetFingerprint,
-        plan.Operations.Select(SchemaToolOperationReport.FromPending).ToArray(),
+        plan.Operations.Select(operation => SchemaToolOperationReport.FromPending(operation, PhysicalSchemaPlanProtection.Inspect(plan.Operations))).ToArray(),
         inspection.History.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
         plan.Refusals.Concat(authorizationRefusals ?? [])
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
@@ -361,7 +361,7 @@ public static class GroundworkSchemaCli
         result.AppliedState?.TargetFingerprint,
         result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete
             ? []
-            : result.Plan.Operations.Select(SchemaToolOperationReport.FromPending).ToArray(),
+            : result.Plan.Operations.Select(operation => SchemaToolOperationReport.FromPending(operation, PhysicalSchemaPlanProtection.Inspect(result.Plan.Operations))).ToArray(),
         result.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
         result.Plan.Refusals.Concat(result.AuthorizationRefusals)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
@@ -431,8 +431,10 @@ public static class GroundworkSchemaCli
             return report;
         var pending = value.Targets.SelectMany(target => target.PendingOperations).ToArray();
         var applied = value.Targets.SelectMany(target => target.AppliedOperations).ToArray();
+        // Report the spelling that actually authorizes each operation: the readable address where
+        // the plan leaves it unambiguous, and the exact identity otherwise.
         var destructive = pending.Where(operation => operation.IsDestructive)
-            .Select(operation => operation.Identity).Distinct(StringComparer.Ordinal).Order().ToArray();
+            .Select(operation => operation.Authorization).Distinct(StringComparer.Ordinal).Order().ToArray();
         var semantic = pending.Select(operation => operation.SemanticMigrationIdentity)
             .Where(identity => identity is not null).Cast<string>()
             .Distinct(StringComparer.Ordinal).Order().ToArray();
@@ -682,16 +684,24 @@ public sealed record SchemaToolOperationReport(
     string? StorageUnit,
     string SubjectIdentity,
     bool IsDestructive,
-    string? SemanticMigrationIdentity)
+    string? SemanticMigrationIdentity,
+    string? AuthorizationAddress = null)
 {
-    internal static SchemaToolOperationReport FromPending(PhysicalSchemaOperation operation) => new(
+    /// <summary>The exact spelling that authorizes this operation, readable where the plan allows.</summary>
+    internal string Authorization => AuthorizationAddress ?? Identity;
+
+    internal static SchemaToolOperationReport FromPending(
+        PhysicalSchemaOperation operation,
+        PhysicalSchemaPlanProtection protection) => new(
         operation.Identity,
         operation.Fingerprint,
         operation.Kind.ToString(),
         operation.SubjectId?.Value,
         operation.SubjectIdentity,
         operation.RequiresAuthorization,
-        operation.SemanticMigrationId);
+        operation.SemanticMigrationId,
+        protection.DestructiveOperations
+            .FirstOrDefault(protected_ => protected_.Identity == operation.Identity)?.Address);
 
     internal static SchemaToolOperationReport FromApplied(PhysicalSchemaAppliedOperation operation) => new(
         operation.Identity,

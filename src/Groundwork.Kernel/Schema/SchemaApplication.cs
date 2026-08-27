@@ -97,6 +97,28 @@ public sealed record PhysicalSchemaApplicationResult(
 /// <summary>Coordinates an exact plan with CAS-recorded provider history.</summary>
 public static class PhysicalSchemaApplication
 {
+    /// <summary>
+    /// Applies everything the plan contains except work that destroys data re-applying cannot
+    /// restore, which is refused by name. This is what an unauthenticated convenience apply — a
+    /// provider's <c>Schema.Apply</c> — performs, so that path cannot quietly drop a column.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The plan contains irrecoverable work. The message carries <c>GW-SCHEMA-010</c> and names
+    /// every operation, so a caller learns what to authorize rather than seeing a silent no-op.
+    /// </exception>
+    public static PhysicalSchemaApplicationResult ApplyRecoverableWork(
+        PhysicalSchemaTarget target,
+        IPhysicalSchemaExecutor executor,
+        DateTimeOffset? now = null)
+    {
+        var result = Apply(target, executor, now, PhysicalSchemaPlanProtection.RefuseIrrecoverableWork);
+        if (result.Outcome != PhysicalSchemaApplicationOutcome.AuthorizationRequired)
+            return result;
+        throw new InvalidOperationException(string.Join(
+            Environment.NewLine,
+            result.AuthorizationRefusals.Select(refusal => $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
+    }
+
     public static PhysicalSchemaApplicationResult Apply(
         PhysicalSchemaTarget target,
         IPhysicalSchemaExecutor executor,
@@ -387,13 +409,17 @@ public static class GroundworkRuntimeSchemaAdmission
                 return authorization?.Invoke(currentPlan) ?? PhysicalSchemaPlanAuthorization.Allow;
             }
 
-            var refusals = protection.DestructiveOperationIdentities
-                .Select(identity => new SchemaRefusal(
-                    "GW-RUNTIME-002",
-                    $"Startup auto-apply requires explicit authorization for destructive operation '{identity}'.",
+            // These name work that is planned and valid but unauthorized, which is a different
+            // verdict from schema drift; GW-RUNTIME-002 means an index no longer matches its
+            // declaration and would misreport this as a broken catalog.
+            var refusals = protection.DestructiveOperations
+                .Select(operation => new SchemaRefusal(
+                    "GW-SCHEMA-007",
+                    $"Startup auto-apply requires explicit authorization for destructive operation " +
+                    $"'{operation.Address ?? operation.Identity}'.",
                     "runtime-schema-admission"))
                 .Concat(protection.SemanticMigrationIdentities.Select(identity => new SchemaRefusal(
-                    "GW-RUNTIME-002",
+                    "GW-SCHEMA-008",
                     $"Startup auto-apply requires explicit authorization for semantic migration '{identity}'.",
                     "runtime-schema-admission")))
                 .ToArray();

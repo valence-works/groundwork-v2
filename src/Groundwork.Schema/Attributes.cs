@@ -76,6 +76,14 @@ public sealed class GwTableAttribute : Attribute
     public GwTableAttribute(string name) => Name = AttributeValidation.Require(name, nameof(name));
 
     public string Name { get; }
+
+    /// <summary>
+    /// The stable logical identity of this table. Spell it only when renaming the physical
+    /// <see cref="Name"/>, keeping the original name as the id, so the change deploys as a rename
+    /// instead of dropping the old storage and creating new empty storage.
+    /// </summary>
+    public string? Id { get; set; }
+
     public SchemaScope Scope { get; set; } = SchemaScope.Global;
     /// <summary>Names the system-owned optimistic concurrency token, opting the table into it.</summary>
     public string? ConcurrencyToken { get; set; }
@@ -145,6 +153,14 @@ public sealed class GwAggregateAttribute : Attribute
 public sealed class GwColumnAttribute : Attribute
 {
     public string? Name { get; set; }
+
+    /// <summary>
+    /// The stable logical identity of this column. Spell it only when renaming the physical
+    /// <see cref="Name"/>, keeping the original name as the id, so the change deploys as a rename
+    /// instead of dropping the old column and adding a new empty one.
+    /// </summary>
+    public string? Id { get; set; }
+
     public int Length { get; set; } = -1;
     public int Precision { get; set; } = -1;
     public int Scale { get; set; } = -1;

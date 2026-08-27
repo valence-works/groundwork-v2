@@ -13,7 +13,13 @@ public enum PhysicalSchemaOperationKind
     RebuildPhysicalIndex,
     ApplyProviderDefinition,
     ValidatePhysicalSchema,
-    PublishAppliedState
+    PublishAppliedState,
+    RenamePrimaryStorage,
+    RenameColumn,
+    AlterColumn,
+    DropColumn,
+    DropIndex,
+    DropPrimaryStorage
 }
 
 /// <summary>One immutable semantic schema operation with deterministic identity and fingerprint.</summary>
@@ -58,6 +64,42 @@ public abstract class PhysicalSchemaOperation
 
     /// <summary>Optional semantic migration marker that startup auto-apply never infers.</summary>
     public string? SemanticMigrationId { get; internal set; }
+
+    /// <summary>
+    /// The readable per-operation address an operator types to authorize exactly this operation —
+    /// <c>drop-column:orders.legacy_total</c>. It names one operation in one plan, never a class of
+    /// operations, so it is an alternative spelling of <see cref="Identity"/> rather than a wider
+    /// grant; the plan fingerprint is still required alongside it.
+    /// </summary>
+    public string AuthorizationAddress =>
+        string.Equals(SubjectId?.Value, SubjectIdentity, StringComparison.Ordinal)
+            ? $"{ToKebabCase(Kind.ToString())}:{SubjectIdentity}"
+            : $"{ToKebabCase(Kind.ToString())}:{SubjectId?.Value ?? "subject"}.{SubjectIdentity}";
+
+    /// <summary>
+    /// Whether this operation records no slot of its own in the applied ledger. A rename, alter, or
+    /// drop is evidenced by what the ledger then holds — the new name, the new column shape, or the
+    /// absence of the removed slot — so recording the operation itself as well would leave residue
+    /// that the next plan would have to explain away.
+    /// </summary>
+    internal bool IsTransient => Kind is
+        PhysicalSchemaOperationKind.RenamePrimaryStorage or
+        PhysicalSchemaOperationKind.RenameColumn or
+        PhysicalSchemaOperationKind.AlterColumn or
+        PhysicalSchemaOperationKind.DropColumn or
+        PhysicalSchemaOperationKind.DropIndex or
+        PhysicalSchemaOperationKind.DropPrimaryStorage;
+
+    /// <summary>Whether the operation is bookkeeping the applied snapshot never carries.</summary>
+    internal static bool IsLedgerExcluded(PhysicalSchemaOperationKind kind) => kind is
+        PhysicalSchemaOperationKind.ValidatePhysicalSchema or
+        PhysicalSchemaOperationKind.PublishAppliedState or
+        PhysicalSchemaOperationKind.RenamePrimaryStorage or
+        PhysicalSchemaOperationKind.RenameColumn or
+        PhysicalSchemaOperationKind.AlterColumn or
+        PhysicalSchemaOperationKind.DropColumn or
+        PhysicalSchemaOperationKind.DropIndex or
+        PhysicalSchemaOperationKind.DropPrimaryStorage;
 
     internal static string CreateSlotIdentity(
         PhysicalSchemaOperationKind kind,
@@ -132,7 +174,8 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
             ? PortableCollation.Ordinal.ToString()
             : column.Collation?.ToString(),
         column.Generation.ToString(),
-        column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
+        column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type),
+        .. SchemaSubject.LogicalIdentity(column)
     ]);
 
     internal static ColumnDefinition Snapshot(ColumnDefinition column) => new()
@@ -146,7 +189,8 @@ public sealed class AddColumnOperation : PhysicalSchemaOperation
         Collation = column.Collation,
         LogicalCollation = column.LogicalCollation,
         Default = column.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(column.Default.Value, column.Type)),
-        Generation = column.Generation
+        Generation = column.Generation,
+        Id = column.Id
     };
 
 }
@@ -261,24 +305,6 @@ internal sealed record CanonicalIndexPayload(
         index.SchemaVersion,
         index.Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray());
 
-    public IndexDefinition ToDefinition() => new()
-    {
-        Name = Name,
-        IsUnique = IsUnique,
-        MissingValues = MissingValues,
-        SchemaVersion = SchemaVersion,
-        Columns = Columns.Select(column => new IndexColumn(column.Column, column.Direction)).ToImmutableArray()
-    };
-
-    public static bool TryParseOperation(string canonicalOperation, out CanonicalIndexPayload payload)
-    {
-        payload = null!;
-        return SchemaFingerprint.TryParseCanonical(canonicalOperation, out var operationParts) &&
-            operationParts.Length == 5 &&
-            operationParts[4] is { } canonicalIndex &&
-            TryParse(canonicalIndex, out payload);
-    }
-
     public static bool TryParse(string canonical, out CanonicalIndexPayload payload)
     {
         payload = null!;
@@ -340,6 +366,223 @@ public sealed class RebuildPhysicalIndexOperation : PhysicalSchemaOperation
     public IndexDefinition Index { get; }
 
     public string SupersededFingerprint { get; }
+}
+
+/// <summary>Renames the subject's primary storage, carrying its rows with it.</summary>
+public sealed class RenamePrimaryStorageOperation : PhysicalSchemaOperation
+{
+    internal RenamePrimaryStorageOperation(
+        SchemaSubject subject,
+        string fromName,
+        IEnumerable<IndexDefinition> carriedIndexes,
+        IEnumerable<ProviderPhysicalSchemaDefinition> supersededProviderDefinitions)
+        : base(
+            PhysicalSchemaOperationKind.RenamePrimaryStorage,
+            subject.Id,
+            subject.Name,
+            null,
+            [
+                fromName,
+                .. carriedIndexes.Select(CreatePhysicalIndexOperation.CanonicalIndex),
+                .. supersededProviderDefinitions.Select(definition => definition.Fingerprint)
+            ])
+    {
+        Subject = subject;
+        FromName = fromName;
+        ToName = subject.Name;
+        CarriedIndexes = [.. carriedIndexes.Select(CreatePhysicalIndexOperation.Snapshot)];
+        SupersededProviderDefinitions = [.. supersededProviderDefinitions];
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId ?? AuthorizationAddress;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    public string FromName { get; }
+
+    public string ToName { get; }
+
+    /// <summary>
+    /// The indexes the applied ledger holds at rename time. Every relational provider Groundwork
+    /// ships derives its physical index name from the storage name, so those indexes have to move
+    /// with the storage or the catalog stops being addressable by its declaration.
+    /// </summary>
+    public ImmutableArray<IndexDefinition> CarriedIndexes { get; }
+
+    /// <summary>
+    /// The provider-owned definitions the applied ledger holds at rename time. These name themselves
+    /// after the storage in exactly the way indexes do, so the renamed storage records new ones and
+    /// these are removed. Leaving them would accumulate one dead provider object per rename.
+    /// </summary>
+    public ImmutableArray<ProviderPhysicalSchemaDefinition> SupersededProviderDefinitions { get; }
+}
+
+/// <summary>Renames one column in place, carrying its values with it.</summary>
+public sealed class RenameColumnOperation : PhysicalSchemaOperation
+{
+    internal RenameColumnOperation(SchemaSubject subject, string fromName, ColumnDefinition column)
+        : base(
+            PhysicalSchemaOperationKind.RenameColumn,
+            subject.Id,
+            column.Name,
+            null,
+            fromName,
+            AddColumnOperation.CanonicalColumn(column))
+    {
+        Subject = subject;
+        FromName = fromName;
+        Column = AddColumnOperation.Snapshot(column);
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId ?? AuthorizationAddress;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    public string FromName { get; }
+
+    public string ToName => Column.Name;
+
+    public ColumnDefinition Column { get; }
+}
+
+/// <summary>How an in-place column redefinition changes what the column can still hold.</summary>
+public enum ColumnAlterationKind
+{
+    /// <summary>The new definition accepts every value the old one did.</summary>
+    Widening,
+
+    /// <summary>The new definition rejects values the old one accepted.</summary>
+    Narrowing
+}
+
+/// <summary>Redefines an existing column in place.</summary>
+public sealed class AlterColumnOperation : PhysicalSchemaOperation
+{
+    internal AlterColumnOperation(
+        SchemaSubject subject,
+        ColumnDefinition from,
+        ColumnDefinition to,
+        ColumnAlterationKind alteration)
+        : base(
+            PhysicalSchemaOperationKind.AlterColumn,
+            subject.Id,
+            to.Name,
+            null,
+            AddColumnOperation.CanonicalColumn(from),
+            AddColumnOperation.CanonicalColumn(to),
+            alteration.ToString())
+    {
+        Subject = subject;
+        From = AddColumnOperation.Snapshot(from);
+        Column = AddColumnOperation.Snapshot(to);
+        Alteration = alteration;
+        // Widening keeps every stored value representable, so it is a semantic migration; the
+        // narrowing direction can refuse or truncate rows and is therefore destructive.
+        if (alteration == ColumnAlterationKind.Narrowing)
+            RequiresAuthorization = true;
+        else
+            SemanticMigrationId = subject.Evolution.SemanticMigrationId ?? AuthorizationAddress;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    /// <summary>The column definition currently recorded in the applied ledger.</summary>
+    public ColumnDefinition From { get; }
+
+    /// <summary>The declared column definition being applied.</summary>
+    public ColumnDefinition Column { get; }
+
+    public ColumnAlterationKind Alteration { get; }
+}
+
+/// <summary>Removes one column and every value stored in it.</summary>
+public sealed class DropColumnOperation : PhysicalSchemaOperation
+{
+    internal DropColumnOperation(SchemaSubject subject, ColumnDefinition column)
+        : base(
+            PhysicalSchemaOperationKind.DropColumn,
+            subject.Id,
+            column.Name,
+            null,
+            AddColumnOperation.CanonicalColumn(column))
+    {
+        Subject = subject;
+        Column = AddColumnOperation.Snapshot(column);
+        RequiresAuthorization = true;
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    /// <summary>The column definition being removed, as the applied ledger recorded it.</summary>
+    public ColumnDefinition Column { get; }
+}
+
+/// <summary>Removes one declared index.</summary>
+public sealed class DropPhysicalIndexOperation : PhysicalSchemaOperation
+{
+    internal DropPhysicalIndexOperation(SchemaSubject subject, IndexDefinition index, bool rebuild = false)
+        : base(
+            PhysicalSchemaOperationKind.DropIndex,
+            subject.Id,
+            index.Name,
+            null,
+            CreatePhysicalIndexOperation.CanonicalIndex(index),
+            rebuild ? "rebuild" : null)
+    {
+        Subject = subject;
+        Index = CreatePhysicalIndexOperation.Snapshot(index);
+        IsRebuild = rebuild;
+        // An index taken out of the way of a column alteration is put back by the same plan, and the
+        // applied ledger ends holding it. Naming that a removal would ask an operator to authorize
+        // destroying something the plan does not destroy, and would teach them to reach for a
+        // blanket grant to widen a column. The alteration it belongs to carries the authorization.
+        if (!rebuild)
+            RequiresAuthorization = true;
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    /// <summary>The index being removed, as the applied ledger recorded it.</summary>
+    public IndexDefinition Index { get; }
+
+    /// <summary>
+    /// Whether this drop is the first half of a rebuild the same plan completes, rather than a
+    /// removal. A rebuild is authorized by the alteration that required it.
+    /// </summary>
+    public bool IsRebuild { get; }
+}
+
+/// <summary>Removes the subject's primary storage and every row in it.</summary>
+public sealed class DropPrimaryStorageOperation : PhysicalSchemaOperation
+{
+    internal DropPrimaryStorageOperation(
+        SchemaSubject subject,
+        string name,
+        IEnumerable<ProviderPhysicalSchemaDefinition> supersededProviderDefinitions)
+        : base(
+            PhysicalSchemaOperationKind.DropPrimaryStorage,
+            subject.Id,
+            name,
+            null,
+            [.. supersededProviderDefinitions.Select(definition => definition.Fingerprint)])
+    {
+        Subject = subject;
+        Name = name;
+        SupersededProviderDefinitions = [.. supersededProviderDefinitions];
+        RequiresAuthorization = true;
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    /// <summary>The physical name being removed, as the applied ledger recorded it.</summary>
+    public string Name { get; }
+
+    /// <summary>
+    /// The provider-owned definitions that belonged to the removed storage. Retiring a unit and
+    /// leaving its provider objects behind is the same residue a rename would leave.
+    /// </summary>
+    public ImmutableArray<ProviderPhysicalSchemaDefinition> SupersededProviderDefinitions { get; }
 }
 
 public sealed class ApplyProviderPhysicalSchemaDefinitionOperation : PhysicalSchemaOperation

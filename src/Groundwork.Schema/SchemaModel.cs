@@ -19,7 +19,8 @@ public sealed record SchemaColumn
         int? scale = null,
         TextFolding folding = TextFolding.None,
         SchemaGeneration generation = SchemaGeneration.Supplied,
-        SchemaDefault? defaultValue = null)
+        SchemaDefault? defaultValue = null,
+        string? id = null)
     {
         Name = Require(name, nameof(name));
         Type = type;
@@ -30,6 +31,7 @@ public sealed record SchemaColumn
         Folding = folding;
         Generation = generation;
         Default = defaultValue;
+        Id = string.IsNullOrWhiteSpace(id) ? null : id;
     }
 
     public string Name { get; }
@@ -41,6 +43,16 @@ public sealed record SchemaColumn
     public TextFolding Folding { get; }
     public SchemaGeneration Generation { get; }
     public SchemaDefault? Default { get; }
+
+    /// <summary>
+    /// The stable logical identity of this column, spelled only once the physical name changes.
+    /// Schema planning keys its slots on it, so keeping the original id across a renamed
+    /// <see cref="Name"/> is what makes the change deploy as a rename instead of a drop and an add.
+    /// </summary>
+    public string? Id { get; }
+
+    /// <summary>The logical id this column is planned under; <see cref="Name"/> when none is declared.</summary>
+    public string LogicalId => Id ?? Name;
 
     private static string Require(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value) ? throw new ArgumentException("A non-empty value is required.", parameterName) : value;
@@ -228,9 +240,11 @@ public sealed record SchemaTable
         SchemaRetention? retention = null,
         SchemaIdempotency? appendIdempotency = null,
         SchemaIdempotency? retentionIdempotency = null,
-        IEnumerable<SchemaAggregation>? aggregations = null)
+        IEnumerable<SchemaAggregation>? aggregations = null,
+        string? id = null)
     {
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
+        Id = string.IsNullOrWhiteSpace(id) ? null : id;
         Columns = Snapshot(columns, nameof(columns));
         Key = Snapshot(key, nameof(key));
         Indexes = Ordered(indexes ?? Array.Empty<SchemaIndex>(), nameof(indexes), index => index.Name);
@@ -244,6 +258,17 @@ public sealed record SchemaTable
     }
 
     public string Name { get; }
+
+    /// <summary>
+    /// The stable logical identity of this table, spelled only once the physical name changes. It
+    /// is what a deployed catalog's history is keyed on, so keeping the original id across a
+    /// renamed <see cref="Name"/> is what makes the change deploy as a rename.
+    /// </summary>
+    public string? Id { get; }
+
+    /// <summary>The logical id this table is planned under; <see cref="Name"/> when none is declared.</summary>
+    public string LogicalId => Id ?? Name;
+
     public IReadOnlyList<SchemaColumn> Columns { get; }
     public IReadOnlyList<string> Key { get; }
     /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>

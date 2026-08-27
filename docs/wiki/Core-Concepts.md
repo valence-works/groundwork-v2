@@ -34,11 +34,22 @@ var unit = StorageUnit.Declare("orders", "orders")
 ```
 
 `Id` is the **logical** identity — it can contain dots and other characters that the physical name
-cannot. It does **not** buy you renames today: schema planning has no rename operation, so a changed
-physical name is treated as drift and refused. Rename tracking via the logical `Id` is planned
-([#82](https://github.com/valence-works/Groundwork/issues/82)). `Name` is the **physical**
-identifier and is held to strict portable rules (ASCII, ≤ 63 bytes, no `__groundwork_` prefix). See
-**[Declaring Storage](Declaring-Storage)**.
+cannot. `Name` is the **physical** identifier and is held to strict portable rules (ASCII, ≤ 63
+bytes, no `__groundwork_` prefix). See **[Declaring Storage](Declaring-Storage)**.
+
+The logical id is what **carries identity across a rename**. Schema planning keys its slots on it,
+so changing `Name` while keeping `Id` plans as a rename that brings the rows with it, rather than as
+a drop and a create. Columns have the same pair: `ColumnDefinition.Id` defaults to the column's
+`Name` and only has to be spelled once the physical name changes.
+
+```csharp
+// Was "customer"; keeps its rows because it keeps its logical id.
+new() { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
+```
+
+Renames are **authorized** work, not automatic: the deployment tool needs the plan fingerprint plus
+`--allow-semantic rename-column:orders.buyer`. MongoDB cannot honor them yet and says so
+(`GW-SCHEMA-009`). See **[Schema Management](Schema-Management)**.
 
 A storage unit has **no provider knowledge whatsoever**. The same object is handed to SQLite and to
 MongoDB.
@@ -209,9 +220,14 @@ A `#pragma warning disable` does **not** work: it silences the analyzer but leav
 ## Schema is deployment-time work
 
 Runtime admission is **inspect-only** by default. `connection.Schema.Apply(unit)` exists and is used
-freely in tests and local development, but production physical schema changes belong to the
-`groundwork` CLI, which requires explicit authorization (`--safe`, or an exact plan fingerprint plus
-per-operation ids for destructive/semantic work).
+freely in tests and local development. It takes no authorization callback, so it performs only what
+re-applying the same declaration could put back — creates, adds, renames, widenings, index rebuilds —
+and **refuses to destroy what it could not restore** (`GW-SCHEMA-010`): dropping a column or its
+storage, or narrowing a column past the values in it. Production physical schema changes belong to
+the `groundwork` CLI, which requires explicit authorization (`--safe`, or an exact plan fingerprint
+plus per-operation ids for destructive/semantic work). Startup admission is the gate that protects a
+running application: it refuses unauthorized destructive (`GW-SCHEMA-007`) and semantic
+(`GW-SCHEMA-008`) work.
 
 At startup, providers compare the deployed catalog against the compiled target:
 - **Column drift** (missing/changed columns, collation, search-key algorithm) is **startup-fatal** (`GW-RUNTIME-001`).

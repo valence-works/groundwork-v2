@@ -907,6 +907,20 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             throw new ArgumentException("MongoDB indexes cannot contain null definitions.", nameof(unit));
         if (unit.Indexes.Any(index => index.Columns is null || index.Columns.Any(column => column is null)))
             throw new ArgumentException("MongoDB index columns cannot be null.", nameof(unit));
+        // MongoDB keeps no applied schema ledger, so it cannot tell a renamed field from a new one
+        // and would silently read nulls out of documents that still carry the old field. Rename
+        // continuity arrives with the MongoDB schema executor
+        // (https://github.com/valence-works/groundwork-v2/issues/86); until then the declaration is
+        // refused rather than honoured approximately.
+        if (unit.Columns.FirstOrDefault(column =>
+                !string.Equals(column.LogicalId, column.Name, StringComparison.Ordinal)) is { } renamed)
+        {
+            throw new InvalidOperationException(
+                $"GW-SCHEMA-009 at schema.columns.{renamed.Name}.id: MongoDB cannot yet carry a column's logical id " +
+                $"across a rename, so declaring '{renamed.Name}' under logical id '{renamed.LogicalId}' would read " +
+                "documents that still store the old field as null. Deploy the rename on a provider that records " +
+                "applied schema state, or keep the physical name.");
+        }
         var names = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         if (names.Count != unit.Columns.Count)
             throw new ArgumentException("MongoDB storage columns must have unique names.", nameof(unit));
