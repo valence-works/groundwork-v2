@@ -7,8 +7,11 @@ namespace Groundwork.PostgreSql;
 /// <summary>PostgreSQL's one native renderer for the normalized v2 query contract.</summary>
 public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
 {
+    /// <summary>PostgreSQL's real bound on bound parameters in one statement.</summary>
+    public const int ParameterBudget = 65_535;
+
     public PostgreSqlQueryRenderer()
-        : base(new PostgreSqlDialect(), parameterBudget: 65_535, supportsIndexHints: false)
+        : base(new PostgreSqlDialect(), ParameterBudget, supportsIndexHints: false)
     {
     }
 

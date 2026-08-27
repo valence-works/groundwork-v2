@@ -8,6 +8,8 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <ProjectReference Include="../../src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
     <ProjectReference Include="../Groundwork.Query.Linq.Fragments/Groundwork.Query.Linq.Fragments.csproj" />
   </ItemGroup>
 </Project>

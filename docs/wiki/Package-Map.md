@@ -1,6 +1,6 @@
 # Package Map
 
-Groundwork ships 23 public packages. Most applications reference **two or three**. This page tells
+Groundwork ships 24 public packages. Most applications reference **two or three**. This page tells
 you which, and explains the layering — because the layering is what the whole design rests on.
 
 ## The dependency rule
@@ -82,6 +82,7 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 | `Groundwork.Store` | `IStorageProviderConnection`, `IStorageSession`, `IUnitOfWork`, `StorageAccess`, `WriteOutcome`, `RowWrite`, `BatchWriteOptions`, retention/idempotency execution |
 | `Groundwork.Query.Model` | `QueryRequest`, `Predicate`, `ColumnRef`, `Paging`, `Projection`, `PortableQuerySemantics` |
 | `Groundwork.Query.Linq` | The **closed** LINQ front-end (`IGwQueryable<T>`) — deliberately *not* `IQueryable` |
+| `Groundwork.Query.Linq.Execution` | `GwLinqExecutor` — the one execution adapter behind the LINQ terminals, for every provider. Admits each request through `RuntimeCoverageGate` before the provider renders it. |
 | `Groundwork.Query.Planning` | `QueryCoverageChecker`, `RuntimeCoverageGate`, `QueryCoverageException` |
 | `Groundwork.Records` | `RecordTable<T>` mapping and the `IRecordStore` seam, with no provider dependency |
 
@@ -103,7 +104,7 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 | `Groundwork.Substrate.Relational` | Shared relational execution: connection ownership, schema dispatch, app locks, fencing. Implement `RelationalDialect` to add a SQL provider. |
 | `Groundwork.Substrate.Mongo` | The equivalent seam for document stores |
 | `Groundwork.Diagnostics` | Opt-in native explain-plan assertions (`GW_EXPLAIN_ASSERT`). Deliberately kept out of the Store contract — it is a test/diagnostic concern. |
-| `Groundwork.Query.Linq.Sqlite` | SQLite execution adapter for the LINQ front-end, kept separate so `Groundwork.Sqlite` does not depend on the LINQ family |
+| `Groundwork.Query.Linq.Sqlite` | The named SQLite entry point to `GwLinqExecutor`, kept separate so `Groundwork.Sqlite` does not depend on the LINQ family. It adds no behavior of its own. |
 
 ## Quick recipes
 

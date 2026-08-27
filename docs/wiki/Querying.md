@@ -33,6 +33,28 @@ Supported: `Where`, `WhereIf`, `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenBy
 QueryRequest request = query.ToQueryRequest();
 ```
 
+### Executing a query
+
+The async terminals run through `GwLinqExecutor` (package `Groundwork.Query.Linq.Execution`) — one
+adapter for **all four providers**, because everything an executor does is provider-neutral:
+
+```csharp
+var executor = new GwLinqExecutor(session, connection);
+
+var rows  = await table.Query.Where(c => c.Email == email).ToListAsync(executor);
+var count = await table.Query.Where(c => c.Email == email).CountAsync(executor);
+var any   = await table.Query.Where(c => c.Email == email).AnyAsync(executor);
+```
+
+Every terminal is admitted through the shared runtime coverage gate before the provider renders
+anything, so an uncovered query is refused with the same `GW-COVER-*` code the analyzer gave you at
+build time, on whichever provider you happen to be running. See
+**[Query Coverage & Indexes](Query-Coverage-and-Indexes)** — including
+[why a key filter is refused](Query-Coverage-and-Indexes#a-declared-key-is-not-a-coverage-candidate)
+and why `session.Read(key)` is the right call for fetching a row by its key.
+
+`SqliteLinqExecutor` remains as the named SQLite entry point and adds no behavior of its own.
+
 Closed terms are read from constants and closure fields **without compiling an expression per query
 call**. Unsupported expression nodes are rejected rather than evaluated on the client.
 
@@ -195,7 +217,9 @@ except for match-none. This preserves the v1 sparse-index safety rule.
 
 Parameter budgets are enforced against the provider's real limit — **SQLite 999, SQL Server 2,100,
 PostgreSQL 65,535** — including cursor and page parameters. Exceeding it is a refusal, not a
-truncation.
+truncation. Each provider connection advertises that limit as a `QueryAdmissionProfile`, so the
+pre-execution fence and the renderer use the same number rather than two guesses at it. MongoDB has
+no bound-parameter budget and keeps the portable default.
 
 An empty `In` normalizes to match-none; a pinned declaration is still carried on the native command.
 
