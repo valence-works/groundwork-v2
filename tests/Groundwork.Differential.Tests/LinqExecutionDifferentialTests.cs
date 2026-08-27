@@ -14,7 +14,13 @@ namespace Groundwork.Differential.Tests;
 /// refusals — rather than of the query model the four providers happen to share. Refusals are
 /// asserted with the same weight as rows: a provider that returns the right rows but refuses a
 /// different set of queries has not been proven portable.
+/// <para>
+/// Serialized with the other live-provider differentials. Two suites writing and reading the same
+/// SQL Server instance concurrently deadlock each other, which is a fact about the test run rather
+/// than about the providers.
+/// </para>
 /// </summary>
+[Collection(NativeProviderDifferentialCollection.Name)]
 public sealed class LinqExecutionDifferentialTests
 {
     [SkippableFact]

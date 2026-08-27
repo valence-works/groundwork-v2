@@ -120,13 +120,35 @@ the analyzer reported at build time.
 - Pass `connection.Catalog` to intersect your declared indexes with the deployed ones. Without it,
   the gate admits against the declaration alone, and an index that a rolling deploy has not created
   yet can still satisfy it.
-- **Declaring an index is what makes a query covered; declaring a key is not.** The key is not a
-  coverage index, in the analyzer, in the CLI, or at runtime. All three agree because all three call
-  the same checker.
 - Each provider supplies only its native budgets, through `QueryAdmissionProfile`, so the
   pre-execution value fence uses the provider's real limit instead of a portable guess — SQLite 999,
   SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter budget of its own (its bound is
   the 16 MB command document) and keeps the portable default rather than inventing one.
+
+### A declared key is not a coverage candidate
+
+**Filtering on a key column is refused unless you also declare an index over it.**
+
+```csharp
+table.Query.Where(c => c.Id == id).ToListAsync(executor);   // GW-COVER-006
+```
+
+This is not specific to the runtime. Coverage candidates are built from `Indexes` and never from
+`Key` — in the analyzer, in the CLI, and now at runtime — so all three agree, and they agree on the
+wrong answer: every provider does physically index a declared key (a relational `PRIMARY KEY`, or
+Mongo's `_id`), so the deployed catalog *can* serve that read.
+
+Until that is fixed, your options are:
+
+- **Read the row by key instead.** `session.Read(key)` is a point read. It is not a query, does not
+  go through coverage, and is the right call for "fetch this row".
+- **Declare an index over the key column** if you genuinely need the query surface for it — and be
+  aware of what you are buying. The refusal's suggested `[GwIndex(...)]` names the key column, and
+  following it creates a *second* physical index duplicating the primary key: extra storage and
+  write amplification on every insert, on every provider. Prefer the point read.
+
+Tracked in [#203](https://github.com/valence-works/groundwork-v2/issues/203). Fixing it changes what
+the analyzer reports, which regenerates the conformance corpus, so it is its own piece of work.
 
 ## Accepted scans
 
