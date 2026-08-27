@@ -37,6 +37,7 @@ internal static class SqliteDataSource
             }
             if (path.Length >= 3 && path[0] == '/' && char.IsAsciiLetter(path[1]) && path[2] == ':')
                 path = path[1..];
+            path = Uri.UnescapeDataString(path);
         }
         return Path.GetFullPath(path);
     }
