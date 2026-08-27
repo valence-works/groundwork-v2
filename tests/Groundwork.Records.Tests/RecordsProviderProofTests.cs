@@ -11,6 +11,7 @@ using MongoDB.Bson;
 using MongoDB.Driver;
 using Npgsql;
 using Xunit;
+using Groundwork.LiveDatabases;
 
 namespace Groundwork.Records.Tests;
 
@@ -104,8 +105,7 @@ public sealed class RecordsProviderProofTests
     [SkippableFact]
     public void SQLServer_executes_typed_records()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server records proof.");
+        var connectionString = LiveSqlServer.Required();
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         var table = RecordTestFixture.CustomerTable("records_sqlserver_" + Guid.NewGuid().ToString("N"));
         AssertTypedCrud(connection, table, "sqlserver@example.test");
@@ -117,8 +117,7 @@ public sealed class RecordsProviderProofTests
     [SkippableFact]
     public void MongoDB_executes_typed_records()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB records proof.");
+        var connectionString = LiveMongo.Required();
         using var connection = new MongoProviderFactory().Create(connectionString!);
         using var nativeConnection = Assert.IsType<MongoDbProviderConnection>(
             new MongoDbProviderFactory().Create(connectionString!));

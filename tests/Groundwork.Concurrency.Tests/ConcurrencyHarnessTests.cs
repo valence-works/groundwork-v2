@@ -7,6 +7,7 @@ using Groundwork.Testing;
 using Groundwork.Store;
 using MongoDB.Driver;
 using Npgsql;
+using Groundwork.LiveDatabases;
 using Xunit;
 
 namespace Groundwork.Concurrency.Tests;
@@ -158,10 +159,8 @@ public sealed class ConcurrencyHarnessTests
     [SkippableFact]
     public void SqlServer_batched_upsert_preserves_atomic_concurrency_and_created_at()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString),
-            "Set GROUNDWORK_SQLSERVER_CONNECTION to run the live SQL Server batched W3 proof.");
-        AssertBatchedProvider(new SqlServerProviderFactory(), connectionString!, "sqlserver");
+        var connectionString = LiveSqlServer.Required();
+        AssertBatchedProvider(new SqlServerProviderFactory(), connectionString, "sqlserver");
     }
 
     [SkippableFact]

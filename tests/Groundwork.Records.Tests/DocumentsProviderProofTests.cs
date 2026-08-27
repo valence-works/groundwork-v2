@@ -5,6 +5,7 @@ using Groundwork.SqlServer;
 using Groundwork.Store;
 using Groundwork.Sqlite;
 using Xunit;
+using Groundwork.LiveDatabases;
 
 namespace Groundwork.Records.Tests;
 
@@ -38,8 +39,7 @@ public sealed class DocumentsProviderProofTests
     [SkippableFact]
     public void SQLServer_document_write_matches_an_equivalent_ordinary_row_write()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server Documents proof.");
+        var connectionString = LiveSqlServer.Required();
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertEquivalentWrite(connection, "documents_sqlserver_" + Guid.NewGuid().ToString("N"));
     }
@@ -47,8 +47,7 @@ public sealed class DocumentsProviderProofTests
     [SkippableFact]
     public void MongoDB_document_write_matches_an_equivalent_ordinary_row_write()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB Documents proof.");
+        var connectionString = LiveMongo.Required();
         using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertEquivalentWrite(connection, "documents_mongo_" + Guid.NewGuid().ToString("N"));
     }
