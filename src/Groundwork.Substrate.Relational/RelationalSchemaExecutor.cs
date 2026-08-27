@@ -687,8 +687,13 @@ public sealed class RelationalSchemaExecutor
         // Columns the declaration does not describe. The provider reads the facts; the kernel owns
         // the decision, so a foreign column means the same thing at startup, at apply-time
         // validation, and at adoption.
+        // A retained superseded column is described by the declaration — it names the column in
+        // Evolution.Supersessions and deliberately keeps it in the catalog through the
+        // dual-presence window — so it is not foreign. It is absent from Columns by construction:
+        // SchemaSubject refuses a declaration that both supersedes a column and still declares it.
         var declared = target.Subject.Columns
             .Select(column => column.Name)
+            .Concat(target.Subject.Evolution.Supersessions.Select(supersession => supersession.Name))
             .ToHashSet(StringComparer.Ordinal);
         var verdict = ForeignColumnAdmission.Classify(
             table,
