@@ -20,6 +20,7 @@ public static class SchemaCompilation
         var columns = table.Columns.Select(column => new ColumnDefinition
         {
             Name = column.Name,
+            Id = column.Id,
             Type = Map(column.Type),
             IsNullable = column.IsNullable,
             MaxLength = column.Length,
@@ -39,7 +40,7 @@ public static class SchemaCompilation
         }).ToList();
         return new StorageUnit
         {
-            Id = new StorageUnitId(table.Name),
+            Id = new StorageUnitId(table.LogicalId),
             Name = table.Name,
             Columns = ApplyConcurrencyToken(columns, table.Concurrency?.TokenColumn),
             Key = new KeyDefinition { Columns = table.Key.ToArray() },

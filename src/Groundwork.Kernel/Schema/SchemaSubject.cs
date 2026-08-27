@@ -8,18 +8,31 @@ namespace Groundwork.Kernel.Schema;
 /// </summary>
 public sealed record SchemaEvolutionMetadata
 {
-    public SchemaEvolutionMetadata(bool isDestructive = false, string? semanticMigrationId = null)
+    public SchemaEvolutionMetadata(
+        bool isDestructive = false,
+        string? semanticMigrationId = null,
+        bool retiresPrimaryStorage = false)
     {
         if (semanticMigrationId is not null && string.IsNullOrWhiteSpace(semanticMigrationId))
             throw new ArgumentException("A semantic migration id cannot be empty.", nameof(semanticMigrationId));
 
         IsDestructive = isDestructive;
         SemanticMigrationId = semanticMigrationId;
+        RetiresPrimaryStorage = retiresPrimaryStorage;
     }
 
     public bool IsDestructive { get; }
 
     public string? SemanticMigrationId { get; }
+
+    /// <summary>
+    /// Declares that this subject's primary storage is retired. Planning then produces a single
+    /// authorized <c>DropPrimaryStorage</c> operation instead of creating or evolving the unit,
+    /// and the applied ledger shrinks to that removal. The declaration is kept and marked rather
+    /// than deleted so the removal is a reviewable authorized plan instead of an inference drawn
+    /// from an absent declaration.
+    /// </summary>
+    public bool RetiresPrimaryStorage { get; }
 }
 
 /// <summary>
@@ -60,7 +73,10 @@ public sealed class SchemaSubject
                 .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile)
                     .OrderBy(canonical => canonical, StringComparer.Ordinal),
                 Evolution.IsDestructive ? "destructive" : "safe",
-                Evolution.SemanticMigrationId
+                Evolution.SemanticMigrationId,
+                // Appended only when set, so an already-deployed subject keeps the exact
+                // fingerprint it was recorded under instead of hitting a persisted boundary.
+                .. Evolution.RetiresPrimaryStorage ? (string?[])["retired"] : []
             ]);
     }
 
@@ -166,6 +182,14 @@ public sealed class SchemaSubject
         var columnNames = columns.Select(column => column.Name).ToArray();
         if (columnNames.Any(string.IsNullOrWhiteSpace) || columnNames.Distinct(StringComparer.Ordinal).Count() != columnNames.Length)
             throw new ArgumentException("Schema subject columns must have unique non-empty names.", nameof(unit));
+
+        var logicalIds = columns.Select(column => column.LogicalId).ToArray();
+        if (logicalIds.Any(string.IsNullOrWhiteSpace) ||
+            logicalIds.Distinct(StringComparer.Ordinal).Count() != logicalIds.Length)
+        {
+            throw new ArgumentException(
+                "Schema subject columns must have unique non-empty logical ids.", nameof(unit));
+        }
 
         var columnSet = columnNames.ToHashSet(StringComparer.Ordinal);
         if (unit.Key.Columns is null || unit.Key.Columns.Count == 0 ||
@@ -277,7 +301,8 @@ public sealed class SchemaSubject
         Collation = source.Collation,
         LogicalCollation = source.LogicalCollation,
         Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
-        Generation = source.Generation
+        Generation = source.Generation,
+        Id = source.Id
     };
 
     private static string CanonicalColumn(ColumnDefinition column) =>
@@ -292,8 +317,20 @@ public sealed class SchemaSubject
             column.Collation?.ToString(),
             column.LogicalCollation?.ToString(),
             column.Generation.ToString(),
-            column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
+            column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type),
+            .. LogicalIdentity(column)
         ]);
+
+    /// <summary>
+    /// A column that has never been renamed is planned under its own name, so its logical id
+    /// describes nothing extra. Appending the id only once it diverges from the physical name
+    /// keeps every already-deployed subject fingerprint byte-identical, so adding rename support
+    /// is not itself a persisted schema boundary.
+    /// </summary>
+    internal static string?[] LogicalIdentity(ColumnDefinition column) =>
+        string.Equals(column.LogicalId, column.Name, StringComparison.Ordinal)
+            ? []
+            : [column.LogicalId];
 
     private static string CanonicalDerivedColumn(DerivedColumnDefinition column) =>
         SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString(), column.AlgorithmId]);

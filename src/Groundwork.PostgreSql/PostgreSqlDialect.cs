@@ -108,6 +108,48 @@ public sealed class PostgreSqlDialect : RelationalDialect
     public override string FinalizeColumnSql(string table, string column, ColumnDefinition definition) =>
         $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} SET NOT NULL;";
 
+    /// <summary>
+    /// PostgreSQL spells a redefinition as separate type, nullability, and default clauses, so the
+    /// shared finalize statement — which only asserts NOT NULL — is not enough on its own.
+    /// </summary>
+    public override void AlterColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        var column = QuoteIdentifier(definition.Name);
+        var alter = $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {column}";
+        var type = MapType(definition);
+        Execute(
+            connection,
+            transaction,
+            $"{alter} TYPE {type}{(MapCollation(definition) is { } collation ? $" COLLATE {collation}" : string.Empty)} " +
+            $"USING {column}::{type};");
+        Execute(connection, transaction, $"{alter} {(definition.IsNullable ? "DROP NOT NULL" : "SET NOT NULL")};");
+        Execute(
+            connection,
+            transaction,
+            MapDefault(definition) is { } value ? $"{alter} SET DEFAULT {value};" : $"{alter} DROP DEFAULT;");
+    }
+
+    /// <summary>PostgreSQL renames an index in place rather than rebuilding it.</summary>
+    public override void RenameIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string fromTable,
+        string toTable,
+        IndexDefinition index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        Execute(
+            connection,
+            transaction,
+            $"ALTER INDEX IF EXISTS {QuoteIdentifier(PhysicalIndexName(fromTable, index.Name))} " +
+            $"RENAME TO {QuoteIdentifier(PhysicalIndexName(toTable, index.Name))};");
+    }
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;
@@ -311,6 +353,21 @@ public sealed class PostgreSqlDialect : RelationalDialect
             transaction,
             definition,
             "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=EXCLUDED.\"algorithm_id\";");
+    }
+
+    public override void DropProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported PostgreSQL provider definition '{definition.Kind}'.");
+        RelationalSearchKeyCatalog.Drop(
+            connection,
+            transaction,
+            definition,
+            "DELETE FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table AND \"column_name\"=@column;");
     }
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(

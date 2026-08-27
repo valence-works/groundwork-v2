@@ -45,6 +45,112 @@ public sealed class PostgreSqlSchemaToolTests : IDisposable
         Assert.Equal("ready", settled.Report.RootElement.GetProperty("outcome").GetString());
     }
 
+    /// <summary>
+    /// The documented destructive flow, end to end: plan, pin the plan, and name the one operation
+    /// being authorized by the address the documentation uses.
+    /// </summary>
+    [SkippableFact]
+    public async Task Documented_drop_column_authorization_applies_and_leaves_the_remaining_rows()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var schema = harness.Temp("orders.json", SchemaToolCliHarness.OrdersSchema());
+        Assert.Equal(
+            SchemaToolExitCodes.Success,
+            (await harness.RunAsync(["apply", "--schema", schema, "--safe"], database.ConnectionString)).ExitCode);
+        Execute(database.ConnectionString, "INSERT INTO orders (id, customer, legacy_total) VALUES ('o-1', 'ada', 7);");
+
+        var dropped = harness.Temp("orders-dropped.json", SchemaToolCliHarness.OrdersSchema(includeLegacyTotal: false));
+        var plan = await harness.RunAsync(["plan", "--schema", dropped], database.ConnectionString);
+        Assert.True(SchemaToolExitCodes.PendingChanges == plan.ExitCode, plan.Reason);
+        var authorization = plan.Report.RootElement.GetProperty("authorization");
+        Assert.True(authorization.GetProperty("destructiveRequired").GetBoolean());
+        Assert.Equal(
+            "drop-column:orders.legacy_total",
+            Assert.Single(authorization.GetProperty("destructiveOperationsRequired").EnumerateArray()).GetString());
+        var fingerprint = plan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
+
+        // Pinning the plan without naming the operation is still refused.
+        var unnamed = await harness.RunAsync(
+            ["apply", "--schema", dropped, "--expected-plan", fingerprint], database.ConnectionString);
+        Assert.Equal(SchemaToolExitCodes.AuthorizationRequired, unnamed.ExitCode);
+
+        var applied = await harness.RunAsync(
+            [
+                "apply", "--schema", dropped,
+                "--expected-plan", fingerprint,
+                "--allow-destructive", "drop-column:orders.legacy_total"
+            ],
+            database.ConnectionString);
+        Assert.True(SchemaToolExitCodes.Success == applied.ExitCode, applied.Reason);
+        Assert.Equal("applied", applied.Report.RootElement.GetProperty("outcome").GetString());
+
+        Assert.Equal("ada", Scalar(database.ConnectionString, "SELECT customer FROM orders WHERE id='o-1';"));
+        Assert.Equal(0L, Scalar(
+            database.ConnectionString,
+            "SELECT count(*) FROM information_schema.columns " +
+            "WHERE table_name='orders' AND column_name='legacy_total';"));
+        Assert.Equal(
+            SchemaToolExitCodes.Success,
+            (await harness.RunAsync(["status", "--schema", dropped], database.ConnectionString)).ExitCode);
+    }
+
+    /// <summary>
+    /// A renamed column keeps its logical id, so the deployment renames the column in place and the
+    /// rows that were in it are still there afterwards.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_renamed_column_keeps_its_rows_through_semantic_authorization()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var schema = harness.Temp("orders.json", SchemaToolCliHarness.OrdersSchema(includeLegacyTotal: false));
+        Assert.Equal(
+            SchemaToolExitCodes.Success,
+            (await harness.RunAsync(["apply", "--schema", schema, "--safe"], database.ConnectionString)).ExitCode);
+        Execute(database.ConnectionString, "INSERT INTO orders (id, customer) VALUES ('o-1', 'ada');");
+
+        var renamed = harness.Temp(
+            "orders-renamed.json",
+            SchemaToolCliHarness.OrdersSchema(includeLegacyTotal: false, customerColumn: "buyer"));
+        var plan = await harness.RunAsync(["plan", "--schema", renamed], database.ConnectionString);
+        Assert.True(SchemaToolExitCodes.PendingChanges == plan.ExitCode, plan.Reason);
+        Assert.Contains(
+            plan.Report.RootElement.GetProperty("pendingOperations").EnumerateArray(),
+            operation => operation.GetProperty("kind").GetString() == "RenameColumn");
+        Assert.DoesNotContain(
+            plan.Report.RootElement.GetProperty("pendingOperations").EnumerateArray(),
+            operation => operation.GetProperty("kind").GetString() is "DropColumn" or "AddColumn");
+        var fingerprint = plan.Report.RootElement.GetProperty("planFingerprint").GetString()!;
+
+        var applied = await harness.RunAsync(
+            [
+                "apply", "--schema", renamed,
+                "--expected-plan", fingerprint,
+                "--allow-semantic", "rename-column:orders.buyer"
+            ],
+            database.ConnectionString);
+        Assert.True(SchemaToolExitCodes.Success == applied.ExitCode, applied.Reason);
+        Assert.Equal("ada", Scalar(database.ConnectionString, "SELECT buyer FROM orders WHERE id='o-1';"));
+    }
+
+    private static void Execute(string connectionString, string sql)
+    {
+        using var connection = new NpgsqlConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static object? Scalar(string connectionString, string sql)
+    {
+        using var connection = new NpgsqlConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        var value = command.ExecuteScalar();
+        return value == DBNull.Value ? null : value;
+    }
+
     private static bool HistoryTableExists(string connectionString)
     {
         using var connection = new NpgsqlConnection(connectionString);

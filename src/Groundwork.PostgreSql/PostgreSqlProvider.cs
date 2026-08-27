@@ -221,7 +221,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         using var lease = executor.AcquireApplicationLock(target.Identity);
         var history = executor.ReadHistory(target.Identity, lease);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(MapChanges(plan.Operations));
+        return new SchemaDiff(SchemaChangeMapping.Describe(plan.Operations));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -232,9 +232,9 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         var target = Target(physical);
         try
         {
-            var result = PhysicalSchemaApplication.Apply(target, executor);
+            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
             owner.Remember(desired);
-            return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
+            return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(result.Plan.Operations)),
                 result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
         }
         finally
@@ -312,22 +312,6 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     }
 
     private void Remember(StorageUnit original, StorageUnit physical) => units[original.Id] = physical;
-
-    private static IReadOnlyList<SchemaChange> MapChanges(IEnumerable<PhysicalSchemaOperation> operations) =>
-        operations.Where(operation => operation.Kind is not PhysicalSchemaOperationKind.ValidatePhysicalSchema and
-                                      not PhysicalSchemaOperationKind.PublishAppliedState and
-                                      not PhysicalSchemaOperationKind.BackfillColumn and
-                                      not PhysicalSchemaOperationKind.FinalizeColumn)
-            .Select(operation => new SchemaChange(
-                operation.Kind switch
-                {
-                    PhysicalSchemaOperationKind.CreatePrimaryStorage => SchemaChangeKind.CreateStorageUnit,
-                    PhysicalSchemaOperationKind.AddColumn => operation.SubjectIdentity.StartsWith("__groundwork_", StringComparison.Ordinal)
-                        ? SchemaChangeKind.AddDerivedColumn : SchemaChangeKind.AddColumn,
-                    PhysicalSchemaOperationKind.CreatePhysicalIndex or PhysicalSchemaOperationKind.RebuildPhysicalIndex => SchemaChangeKind.CreateIndex,
-                    _ => SchemaChangeKind.AddDerivedColumn
-                }, operation.SubjectIdentity))
-            .ToArray();
 }
 
 internal sealed class PostgreSqlProviderCatalog

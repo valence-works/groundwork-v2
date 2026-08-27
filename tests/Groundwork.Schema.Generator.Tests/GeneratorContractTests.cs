@@ -357,6 +357,65 @@ public sealed class GeneratorContractTests
         Assert.Equal(firstFingerprint, secondFingerprint);
     }
 
+    /// <summary>
+    /// A declared logical id has to reach both consumers of the canonical artifact, or a renamed
+    /// column would deploy under one identity and be admitted at runtime under another.
+    /// </summary>
+    [Fact]
+    public void A_declared_logical_id_reaches_the_canonical_document_and_the_generated_unit()
+    {
+        const string source = """
+            using Groundwork.Schema;
+
+            [GwTable("purchase_orders", Id = "orders")]
+            public partial class Order
+            {
+                [GwKey, GwColumn(Length = 64)] public string Id { get; set; } = "";
+                [GwColumn(Name = "buyer", Id = "customer", Length = 64)] public string Buyer { get; set; } = "";
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var canonical = (string)result.OutputCompilation.Assembly.GetAttributes()
+            .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName)
+            .ConstructorArguments[0].Value!;
+        var table = Assert.Single(GroundworkSchemaCanonical.Read(canonical).Tables);
+        Assert.Equal("orders", table.LogicalId);
+        Assert.Equal("purchase_orders", table.Name);
+        Assert.Equal("customer", table.Columns.Single(column => column.Name == "buyer").LogicalId);
+
+        using var emitted = new MemoryStream();
+        Assert.True(result.OutputCompilation.Emit(emitted).Success);
+        var generated = (Groundwork.Kernel.StorageUnit)System.Reflection.Assembly.Load(emitted.ToArray())
+            .GetType("OrderStorageUnit")!.GetProperty("Definition")!.GetValue(null)!;
+        Assert.Equal("orders", generated.Id.Value);
+        Assert.Equal("customer", generated.Columns.Single(column => column.Name == "buyer").LogicalId);
+        // The tool-compiled target and the runtime's expected target stay one value.
+        Assert.Equal(
+            new Groundwork.Kernel.Schema.SchemaSubject(SchemaTool.SchemaCompilation.Compile(table)).Fingerprint,
+            new Groundwork.Kernel.Schema.SchemaSubject(generated).Fingerprint);
+    }
+
+    /// <summary>
+    /// Adding logical ids must not restate every already-emitted schema. A declaration that never
+    /// renames anything has to serialize to exactly the bytes it did before, or every deployed
+    /// catalog would hit a persisted schema boundary for a feature it does not use.
+    /// </summary>
+    [Fact]
+    public void An_undeclared_logical_id_leaves_the_canonical_document_byte_identical()
+    {
+        const string json =
+            "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\"," +
+            "\"nullable\":false,\"length\":64,\"precision\":null,\"scale\":null,\"folding\":\"None\"," +
+            "\"generation\":\"Supplied\",\"default\":null}],\"key\":[\"id\"],\"indexes\":[],\"scope\":\"Global\"," +
+            "\"concurrency\":null,\"timestamps\":\"None\",\"retention\":null,\"appendIdempotency\":null," +
+            "\"retentionIdempotency\":null,\"aggregations\":[]}]}";
+
+        Assert.Equal(json, GroundworkSchemaCanonical.Serialize(GroundworkSchemaCanonical.Parse(json)));
+    }
+
     [Fact]
     public void Additional_file_round_trip_emits_the_same_canonical_fingerprint()
     {

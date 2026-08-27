@@ -259,8 +259,31 @@ Grouped by concern:
 | --- | --- |
 | `GW-CLI-001`, `-005`…`-012` | CLI invocation and authorization refusals |
 | `GW-CLI-007` | Schema changes require explicit `--safe` authorization |
-| `GW-SCHEMA-001`…`005` | Schema planning/application refusals |
+| `GW-CLI-008` | A destructive operation was not named through `--allow-destructive` |
+| `GW-CLI-012` | A semantic migration was not named through `--allow-semantic` |
 | `GW-SCHEMA-TOOL-001` | Schema tool refusal |
+
+### `GW-SCHEMA-*` — schema planning and evolution
+
+Planning refusals say the evolution is **invalid**; the authorization codes say it is valid but
+**not yet authorized**. The two are deliberately distinct: an invalid evolution has no approval that
+would make it work, while an unauthorized one is waiting on an operator naming it.
+
+| Code | Meaning | Kind |
+| --- | --- | --- |
+| `GW-SCHEMA-001` | Legacy schema history has no typed applied snapshot | Invalid |
+| `GW-SCHEMA-002` | Applied state belongs to a different target | Invalid |
+| `GW-SCHEMA-003` | A changed definition has no portable evolution — a key column's portable type changed, or a rename collides with a name another applied column still holds | Invalid |
+| `GW-SCHEMA-004` | A removal has no portable operation — a key column cannot be dropped | Invalid |
+| `GW-SCHEMA-005` | A new required column has no portable default or semantic migration for existing rows | Invalid |
+| `GW-SCHEMA-006` | Applied state was recorded under a different persisted schema boundary — discard the catalog | Invalid |
+| `GW-SCHEMA-007` | A planned **destructive** operation is not authorized. The message names the operation's address, e.g. `drop-column:orders.legacy_total` | Needs authorization |
+| `GW-SCHEMA-008` | A planned **semantic** migration is not authorized, e.g. `rename-column:orders.buyer` | Needs authorization |
+| `GW-SCHEMA-009` | The provider cannot honor a declared logical-id rename. MongoDB keeps no applied schema ledger, so it cannot tell a renamed field from a new one ([#86](https://github.com/valence-works/groundwork-v2/issues/86)) | Invalid |
+| `GW-SCHEMA-010` | `connection.Schema.Apply` was asked to destroy data re-applying cannot restore — drop a column or its storage, or narrow a column past the values in it. Apply it from the `groundwork` CLI, which authorizes the exact operation against the exact plan | Needs authorization |
+
+`GW-SCHEMA-007` and `-008` replace the earlier use of `GW-RUNTIME-002` for startup auto-apply
+refusals. `GW-RUNTIME-002` now means only what its own row says: **index drift**.
 
 ---
 
