@@ -35,6 +35,12 @@ supported for 1.0 for three reasons:
 Both surfaces are proven by the same conformance suite, so neither can drift into being the
 second-class one.
 
+`IDataMigrationExecutor` follows the same rule: every member that talks to a store is declared
+twice, and `DataMigrationRunner` keeps one orchestration body that selects the surface at its entry
+point. `PhysicalSchemaApplication.ApplyAsync` is the asynchronous counterpart of `Apply`; its
+data-migration phase runs on the asynchronous executor surface and observes the token, while the
+schema operations themselves run on `IPhysicalSchemaExecutor`, which still declares one surface.
+
 ## What "asynchronous" means per provider
 
 Whether a call actually yields its thread is a property of the driver underneath, not of the

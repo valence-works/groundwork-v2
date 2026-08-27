@@ -63,7 +63,14 @@ public enum PhysicalSchemaApplicationOutcome
     Applied,
     NoChanges,
     Rejected,
-    AuthorizationRequired
+    AuthorizationRequired,
+
+    /// <summary>
+    /// The exact target was applied and published, but a data migration attached to its semantic
+    /// migration identity stopped with rows left. The ledger carries the resume cursor; the target
+    /// is not migrated until a further pass completes it.
+    /// </summary>
+    DataMigrationIncomplete
 }
 
 public sealed record PhysicalSchemaPlanAuthorization(
@@ -82,6 +89,9 @@ public sealed record PhysicalSchemaApplicationResult(
     PhysicalSchemaAppliedState? AppliedState)
 {
     public ImmutableArray<SchemaRefusal> AuthorizationRefusals { get; init; } = [];
+
+    /// <summary>Evidence for every data migration attached to this target's semantic migration.</summary>
+    public ImmutableArray<DataMigrationRunResult> DataMigrations { get; init; } = [];
 }
 
 /// <summary>Coordinates an exact plan with CAS-recorded provider history.</summary>
@@ -113,10 +123,57 @@ public static class PhysicalSchemaApplication
         PhysicalSchemaTarget target,
         IPhysicalSchemaExecutor executor,
         DateTimeOffset? now = null,
-        Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? planAuthorization = null)
+        Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? planAuthorization = null,
+        DataMigrationCatalog? dataMigrations = null,
+        DataMigrationBudget? dataMigrationBudget = null,
+        IProgress<DataMigrationProgress>? dataMigrationProgress = null) =>
+        ApplyCore(
+            target,
+            executor,
+            now,
+            planAuthorization,
+            dataMigrations,
+            dataMigrationBudget,
+            dataMigrationProgress,
+            DataMigrationExecution.Synchronous).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// The asynchronous counterpart. Schema operations run on <see cref="IPhysicalSchemaExecutor"/>,
+    /// which declares one surface; the data-migration phase runs on the provider's asynchronous
+    /// <see cref="IDataMigrationExecutor"/> surface and observes the token.
+    /// </summary>
+    public static ValueTask<PhysicalSchemaApplicationResult> ApplyAsync(
+        PhysicalSchemaTarget target,
+        IPhysicalSchemaExecutor executor,
+        DateTimeOffset? now = null,
+        Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? planAuthorization = null,
+        DataMigrationCatalog? dataMigrations = null,
+        DataMigrationBudget? dataMigrationBudget = null,
+        IProgress<DataMigrationProgress>? dataMigrationProgress = null,
+        CancellationToken cancellationToken = default) =>
+        ApplyCore(
+            target,
+            executor,
+            now,
+            planAuthorization,
+            dataMigrations,
+            dataMigrationBudget,
+            dataMigrationProgress,
+            DataMigrationExecution.Asynchronous(cancellationToken));
+
+    private static async ValueTask<PhysicalSchemaApplicationResult> ApplyCore(
+        PhysicalSchemaTarget target,
+        IPhysicalSchemaExecutor executor,
+        DateTimeOffset? now,
+        Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? planAuthorization,
+        DataMigrationCatalog? dataMigrations,
+        DataMigrationBudget? dataMigrationBudget,
+        IProgress<DataMigrationProgress>? dataMigrationProgress,
+        DataMigrationExecution mode)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(executor);
+        mode.CancellationToken.ThrowIfCancellationRequested();
         var plannedAt = now ?? DateTimeOffset.UtcNow;
         using var applicationLock = executor.AcquireApplicationLock(target.Identity);
         if (applicationLock.Target != target.Identity)
@@ -142,7 +199,20 @@ public static class PhysicalSchemaApplication
             var validation = new ValidatePhysicalSchemaOperation(target);
             var acknowledgement = executor.ApplyOperation(target.Identity, validation, applicationLock);
             EnsureAcknowledges(validation, acknowledgement);
-            return new(PhysicalSchemaApplicationOutcome.NoChanges, plan, history.AppliedState);
+            // A target whose schema is already applied can still owe a data migration that an
+            // earlier pass left running, so the resume runs here too rather than only after DDL.
+            var resumed = await RunDataMigrations(
+                target, executor, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
+                .ConfigureAwait(false);
+            return new(
+                resumed.Any(result => !result.IsComplete)
+                    ? PhysicalSchemaApplicationOutcome.DataMigrationIncomplete
+                    : PhysicalSchemaApplicationOutcome.NoChanges,
+                plan,
+                history.AppliedState)
+            {
+                DataMigrations = resumed
+            };
         }
 
         var operations = plan.Operations
@@ -156,7 +226,60 @@ public static class PhysicalSchemaApplication
 
         var applied = plan.Complete(acknowledgements, now ?? DateTimeOffset.UtcNow);
         executor.PublishAppliedState(applied, plan.ExpectedAppliedTargetFingerprint, applicationLock);
-        return new(PhysicalSchemaApplicationOutcome.Applied, plan, applied);
+        // The DDL is durably applied, so applied state is published before the data phase: replaying
+        // CREATE TABLE or ADD COLUMN is not idempotent, while the data-migration ledger is. An
+        // unfinished data migration is reported by the outcome and by that ledger, not by pretending
+        // the schema was never applied.
+        var migrations = await RunDataMigrations(
+            target, executor, dataMigrations, dataMigrationBudget, dataMigrationProgress, now, mode)
+            .ConfigureAwait(false);
+        return new(
+            migrations.Any(result => !result.IsComplete)
+                ? PhysicalSchemaApplicationOutcome.DataMigrationIncomplete
+                : PhysicalSchemaApplicationOutcome.Applied,
+            plan,
+            applied)
+        {
+            DataMigrations = migrations
+        };
+    }
+
+    /// <summary>
+    /// Runs every transform attached to this target's semantic migration identity. It runs inside the
+    /// same authorized application, so a data migration is executed under exactly the authorization
+    /// that admitted its semantic schema change.
+    /// </summary>
+    private static async ValueTask<ImmutableArray<DataMigrationRunResult>> RunDataMigrations(
+        PhysicalSchemaTarget target,
+        IPhysicalSchemaExecutor executor,
+        DataMigrationCatalog? catalog,
+        DataMigrationBudget? budget,
+        IProgress<DataMigrationProgress>? progress,
+        DateTimeOffset? now,
+        DataMigrationExecution mode)
+    {
+        if (catalog is null ||
+            !catalog.TryGet(target.Subject.Evolution.SemanticMigrationId, target.Subject.Id, out var migration))
+        {
+            return [];
+        }
+
+        if (executor is not IDataMigrationExecutor migrationExecutor)
+        {
+            throw new DataMigrationRefusedException(
+                DataMigrationCodes.NotSupported,
+                $"semantic migration '{migration.Id}' attaches a data transform, but provider " +
+                $"'{target.Provider.Name}' offers no data-migration execution.");
+        }
+
+        var result = await (mode.IsAsync
+            ? DataMigrationRunner.RunAsync(
+                migrationExecutor, target.Identity, target.Subject.Definition, migration,
+                budget, now, progress, mode.CancellationToken)
+            : new ValueTask<DataMigrationRunResult>(DataMigrationRunner.Run(
+                migrationExecutor, target.Identity, target.Subject.Definition, migration,
+                budget, now, progress))).ConfigureAwait(false);
+        return [result];
     }
 
     private static void EnsureAcknowledges(

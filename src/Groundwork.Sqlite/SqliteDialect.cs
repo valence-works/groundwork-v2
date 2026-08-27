@@ -2,6 +2,7 @@ using System.Data.Common;
 using System.Data;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
@@ -105,6 +106,16 @@ internal sealed class SqliteDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         ((SqliteConnection)connection).BeginTransaction(IsolationLevel.Serializable, deferred: false);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.Serializable;
+
+    /// <summary>
+    /// SQLite's asynchronous surface completes synchronously anyway, and only the synchronous
+    /// overload can ask for an immediate rather than a deferred transaction, so both surfaces open
+    /// the unit the same way.
+    /// </summary>
+    public override ValueTask<DbTransaction> BeginTransaction(DbConnection connection, RelationalExecution mode) =>
+        new(BeginTransaction(connection));
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;
@@ -127,6 +138,32 @@ internal sealed class SqliteDialect : RelationalDialect
 
     public override object? ConvertValue(object? value, ColumnDefinition definition) =>
         SqliteProviderConnection.ToSqliteValue(value, definition);
+
+    public override object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is null ? null : ReadPortableValue(value, definition);
+
+    /// <summary>
+    /// Maps one stored SQLite value back to the portable CLR shape its declaration names. The
+    /// storage session and the data-migration scan share this one definition, so a host transform
+    /// sees the declared type rather than SQLite's storage class.
+    /// </summary>
+    public static object? ReadPortableValue(object value, ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (value is DBNull) return null;
+        return definition.Type switch
+        {
+            PortableType.Boolean => Convert.ToInt64(value, CultureInfo.InvariantCulture) != 0,
+            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
+            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
+            PortableType.Decimal => decimal.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture),
+            PortableType.Guid => Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!),
+            PortableType.DateTimeOffset => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            PortableType.Binary => ((byte[])value).ToArray(),
+            PortableType.Json => value is string json ? JsonDocument.Parse(json).RootElement.Clone() : value,
+            _ => value
+        };
+    }
 
     public override void Validate(ColumnDefinition definition)
     {
@@ -156,6 +193,19 @@ internal sealed class SqliteDialect : RelationalDialect
     public override long AcquireFence(DbConnection connection, PhysicalSchemaTargetIdentity target, string owner) => 1;
     public override void AssertFence(DbConnection connection, DbTransaction transaction, PhysicalSchemaTargetIdentity target, string owner, long fence) { }
 
+    public override int ParameterBudget => SqliteQueryRenderer.ParameterBudget;
+
+    public override string? DataMigrationLedgerUpsertSql =>
+        "INSERT INTO \"__groundwork_data_migrations\" (\"subject_id\",\"provider_name\",\"migration_id\",\"unit_name\"," +
+        "\"request_fingerprint\",\"state\",\"cursor\",\"rows_scanned\",\"rows_changed\",\"batches\"," +
+        "\"started_at\",\"updated_at\",\"completed_at\") VALUES (@subject,@provider,@migration,@unit,@fingerprint," +
+        "@state,@cursor,@scanned,@changed,@batches,@started,@updated,@completed) " +
+        "ON CONFLICT (\"subject_id\",\"provider_name\",\"migration_id\") DO UPDATE SET " +
+        "\"unit_name\"=excluded.\"unit_name\",\"request_fingerprint\"=excluded.\"request_fingerprint\"," +
+        "\"state\"=excluded.\"state\",\"cursor\"=excluded.\"cursor\",\"rows_scanned\"=excluded.\"rows_scanned\"," +
+        "\"rows_changed\"=excluded.\"rows_changed\",\"batches\"=excluded.\"batches\"," +
+        "\"updated_at\"=excluded.\"updated_at\",\"completed_at\"=excluded.\"completed_at\";";
+
     public override void EnsureInfrastructure(DbConnection connection)
     {
         using var command = connection.CreateCommand();
@@ -172,6 +222,22 @@ internal sealed class SqliteDialect : RelationalDialect
                 "column_name" TEXT NOT NULL,
                 "algorithm_id" TEXT NOT NULL,
                 PRIMARY KEY ("table_name", "column_name")
+            );
+            CREATE TABLE IF NOT EXISTS "__groundwork_data_migrations" (
+                "subject_id" TEXT NOT NULL,
+                "provider_name" TEXT NOT NULL,
+                "migration_id" TEXT NOT NULL,
+                "unit_name" TEXT NOT NULL,
+                "request_fingerprint" TEXT NOT NULL,
+                "state" TEXT NOT NULL,
+                "cursor" TEXT NULL,
+                "rows_scanned" INTEGER NOT NULL,
+                "rows_changed" INTEGER NOT NULL,
+                "batches" INTEGER NOT NULL,
+                "started_at" TEXT NOT NULL,
+                "updated_at" TEXT NOT NULL,
+                "completed_at" TEXT NULL,
+                PRIMARY KEY ("subject_id", "provider_name", "migration_id")
             );
             """;
         command.ExecuteNonQuery();

@@ -10,10 +10,11 @@ namespace Groundwork.Substrate.Relational;
 /// Shared relational schema executor. Providers own only the public <see cref="RelationalDialect"/>
 /// contract; lifecycle, fencing, operation dispatch, and connection cleanup remain common.
 /// </summary>
-public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector
+public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector, IDataMigrationExecutor
 {
     private readonly Func<DbConnection> createConnection;
     private readonly RelationalDialect dialect;
+    private RelationalApplicationLock? activeLease;
 
     public RelationalSchemaExecutor(
         Func<DbConnection> createConnection,
@@ -40,7 +41,13 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                 var owner = Guid.NewGuid().ToString("N");
                 var fence = dialect.AcquireFence(connection, target, owner);
                 var sessionId = dialect.ReadServerSessionId(connection);
-                return new RelationalApplicationLock(connection, dialect, target, resource, owner, fence, sessionId);
+                // The lease is remembered so a data migration executed under this apply runs on the
+                // same connection and fence, rather than racing the apply from a second connection.
+                var lease = new RelationalApplicationLock(
+                    connection, dialect, target, resource, owner, fence, sessionId,
+                    released => Interlocked.CompareExchange(ref activeLease, null, released));
+                Volatile.Write(ref activeLease, lease);
+                return lease;
             }
             catch
             {
@@ -314,52 +321,220 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
             return;
         }
 
-        var source = operation.Derived!.SourceColumn;
-        var keyColumns = operation.Subject.Key.Columns;
-        var selected = new[] { source }
-            .Concat(keyColumns.Where(column => !string.Equals(column, source, StringComparison.Ordinal)))
-            .ToArray();
-        var select = $"SELECT {string.Join(", ", selected.Select(dialect.QuoteIdentifier))} FROM {dialect.QuoteIdentifier(operation.Subject.Name)};";
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = select;
-        using var reader = command.ExecuteReader();
-        var definitions = operation.Subject.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
-        var hidden = operation.Column.Name;
-        var rows = new List<IReadOnlyDictionary<string, object?>>();
-        while (reader.Read())
+        // The same scan/transform/set-based-write used by the resumable data-migration runner,
+        // driven to exhaustion inside the schema-apply transaction: a derived column must be
+        // populated before the plan finalizes it, so this caller cannot stop on a budget.
+        var unit = operation.Subject.Definition;
+        var transform = new DerivedColumnTransform(unit, [operation.Derived!]);
+        var projection = new DataMigration(
+                operation.SemanticMigrationId ?? "derived-column-backfill",
+                operation.Subject.Id,
+                transform)
+            .ValidateAgainst(unit);
+        var admitted = RelationalRowMigration.AdmittedRows(
+            dialect, unit.Key.Columns.Count, transform.TargetColumns.Length, DerivedBackfillBatchRows);
+        IReadOnlyList<object?>? cursor = null;
+        while (true)
         {
-            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-            for (var index = 0; index < selected.Length; index++)
-                values[selected[index]] = reader.IsDBNull(index) ? null : reader.GetValue(index);
-            rows.Add(values);
+            var chunk = RelationalRowMigration.ExecuteChunk(
+                dialect,
+                connection,
+                transaction,
+                unit,
+                projection,
+                cursor,
+                admitted,
+                Project,
+                RelationalExecution.Synchronous).GetAwaiter().GetResult();
+            if (chunk.Exhausted)
+                return;
+            cursor = unit.Key.Columns.Select(column => chunk.LastRow![column]).ToArray();
         }
-        reader.Close();
 
-        foreach (var values in rows)
+        IReadOnlyDictionary<string, object?>? Project(IReadOnlyDictionary<string, object?> row)
         {
-            var projected = SearchKeyProjection.Populate(operation.Subject.Definition, values);
-            projected.TryGetValue(hidden, out var searchKey);
-
-            using var update = connection.CreateCommand();
-            update.Transaction = transaction;
-            update.CommandText = $"UPDATE {dialect.QuoteIdentifier(operation.Subject.Name)} SET {dialect.QuoteIdentifier(hidden)}=@value WHERE " +
-                string.Join(" AND ", keyColumns.Select((column, index) =>
-                    $"{dialect.QuoteIdentifier(column)}=@key{index}")) + ";";
-            AddParameter(update, "@value", dialect.ConvertValue(searchKey, operation.Column));
-            for (var index = 0; index < keyColumns.Count; index++)
-                AddParameter(update, "@key" + index, dialect.ConvertValue(values[keyColumns[index]], definitions[keyColumns[index]]));
-            update.ExecuteNonQuery();
+            var produced = transform.Transform(new DataMigrationRow(row));
+            return produced.HasValues ? produced.Values : null;
         }
     }
 
-    private static void AddParameter(DbCommand command, string name, object? value)
+    /// <summary>
+    /// Rows per set-based statement for the in-transaction derived-column backfill. The chunk is
+    /// clamped further by the dialect's parameter budget.
+    /// </summary>
+    private const int DerivedBackfillBatchRows = 512;
+
+    public DataMigrationCapabilities Capabilities =>
+        DataMigrationCapabilities.KeysetScan |
+        DataMigrationCapabilities.AtomicChunkProgress |
+        DataMigrationCapabilities.SetBasedBatchUpdate |
+        (dialect.DataMigrationLedgerUpsertSql is null
+            ? DataMigrationCapabilities.None
+            : DataMigrationCapabilities.AppliedLedger);
+
+    public DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId) =>
+        ReadLedgerEntryCore(target, migrationId, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<DataMigrationLedgerEntry?> ReadLedgerEntryAsync(
+        PhysicalSchemaTargetIdentity target,
+        string migrationId,
+        CancellationToken cancellationToken = default) =>
+        ReadLedgerEntryCore(target, migrationId, RelationalExecution.Asynchronous(cancellationToken));
+
+    public IReadOnlyList<DataMigrationLedgerEntry> ReadLedgerEntries(PhysicalSchemaTargetIdentity target) =>
+        ReadLedgerEntriesCore(target, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<IReadOnlyList<DataMigrationLedgerEntry>> ReadLedgerEntriesAsync(
+        PhysicalSchemaTargetIdentity target,
+        CancellationToken cancellationToken = default) =>
+        ReadLedgerEntriesCore(target, RelationalExecution.Asynchronous(cancellationToken));
+
+    public void WriteLedgerEntry(DataMigrationLedgerEntry entry) =>
+        WriteLedgerEntryCore(entry, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask WriteLedgerEntryAsync(DataMigrationLedgerEntry entry, CancellationToken cancellationToken = default) =>
+        WriteLedgerEntryCore(entry, RelationalExecution.Asynchronous(cancellationToken));
+
+    public DataMigrationChunkOutcome ExecuteChunk(DataMigrationChunkRequest request) =>
+        ExecuteChunkCore(request, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<DataMigrationChunkOutcome> ExecuteChunkAsync(
+        DataMigrationChunkRequest request,
+        CancellationToken cancellationToken = default) =>
+        ExecuteChunkCore(request, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<DataMigrationLedgerEntry?> ReadLedgerEntryCore(
+        PhysicalSchemaTargetIdentity target,
+        string migrationId,
+        RelationalExecution mode)
     {
-        var parameter = command.CreateParameter();
-        parameter.ParameterName = name;
-        parameter.Value = value ?? DBNull.Value;
-        command.Parameters.Add(parameter);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentException.ThrowIfNullOrWhiteSpace(migrationId);
+        return WithConnection(
+            target,
+            connection => dialect.TableExists(connection, null, RelationalDataMigrationLedger.TableName)
+                ? RelationalDataMigrationLedger.Read(dialect, connection, null, target, migrationId, mode)
+                : new ValueTask<DataMigrationLedgerEntry?>((DataMigrationLedgerEntry?)null),
+            mode,
+            ensureInfrastructure: false);
     }
+
+    private ValueTask<IReadOnlyList<DataMigrationLedgerEntry>> ReadLedgerEntriesCore(
+        PhysicalSchemaTargetIdentity target,
+        RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        return WithConnection(
+            target,
+            connection => dialect.TableExists(connection, null, RelationalDataMigrationLedger.TableName)
+                ? RelationalDataMigrationLedger.ReadAll(dialect, connection, null, target, null, mode)
+                : new ValueTask<IReadOnlyList<DataMigrationLedgerEntry>>(Array.Empty<DataMigrationLedgerEntry>()),
+            mode,
+            ensureInfrastructure: false);
+    }
+
+    private async ValueTask WriteLedgerEntryCore(DataMigrationLedgerEntry entry, RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        await WithConnection<object?>(entry.Target, async connection =>
+        {
+            await RelationalDataMigrationLedger.Write(dialect, connection, null, entry, mode).ConfigureAwait(false);
+            return null;
+        }, mode).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One chunk: read after the cursor, transform in the host process, write the produced values,
+    /// and record the advanced ledger entry — all inside one transaction, so an interruption either
+    /// leaves the rows unwritten and the cursor where it was, or both moved together.
+    /// </summary>
+    private ValueTask<DataMigrationChunkOutcome> ExecuteChunkCore(
+        DataMigrationChunkRequest request,
+        RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return WithConnection(request.Entry.Target, async connection =>
+        {
+            var lease = Volatile.Read(ref activeLease);
+            var transaction = await dialect.BeginTransaction(connection, mode).ConfigureAwait(false);
+            try
+            {
+                if (lease is not null && ReferenceEquals(lease.Connection, connection))
+                    dialect.AssertFence(connection, transaction, lease.Target, lease.Owner, lease.Fence);
+                var admitted = RelationalRowMigration.AdmittedRows(
+                    dialect,
+                    request.Unit.Key.Columns.Count,
+                    request.Migration.Transform.TargetColumns.Length,
+                    request.MaxRows);
+                var chunk = await RelationalRowMigration.ExecuteChunk(
+                    dialect,
+                    connection,
+                    transaction,
+                    request.Unit,
+                    request.Projection,
+                    request.Cursor?.Values.ToArray(),
+                    admitted,
+                    request.Apply,
+                    mode).ConfigureAwait(false);
+
+                var entry = request.Entry;
+                if (chunk.RowsScanned > 0)
+                {
+                    entry = entry.Advance(
+                        DataMigrationCursor.After(request.Unit, chunk.LastRow!),
+                        chunk.RowsScanned,
+                        chunk.RowsChanged,
+                        DateTimeOffset.UtcNow);
+                    await RelationalDataMigrationLedger.Write(dialect, connection, transaction, entry, mode)
+                        .ConfigureAwait(false);
+                }
+
+                await mode.Commit(transaction).ConfigureAwait(false);
+                return chunk.Exhausted
+                    ? DataMigrationChunkOutcome.Exhausted(entry)
+                    : DataMigrationChunkOutcome.Advanced(entry);
+            }
+            catch
+            {
+                await mode.Rollback(transaction).ConfigureAwait(false);
+                throw;
+            }
+            finally
+            {
+                await mode.Dispose(transaction).ConfigureAwait(false);
+            }
+        }, mode);
+    }
+
+    /// <summary>
+    /// Runs on the connection that holds the current application lock when one is held, so a data
+    /// migration executed under a schema apply shares that apply's connection and fence; otherwise
+    /// it opens and closes its own.
+    /// </summary>
+    private async ValueTask<T> WithConnection<T>(
+        PhysicalSchemaTargetIdentity target,
+        Func<DbConnection, ValueTask<T>> body,
+        RelationalExecution mode,
+        bool ensureInfrastructure = true)
+    {
+        mode.CancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref activeLease) is { } lease && lease.Target == target)
+            return await body(lease.Connection).ConfigureAwait(false);
+        var connection = OpenConnection();
+        try
+        {
+            // Reads provision nothing: status and inspection must stay safe on a read-only store,
+            // so a missing ledger reports as no recorded migration instead of being created.
+            if (ensureInfrastructure)
+                dialect.EnsureInfrastructure(connection);
+            return await body(connection).ConfigureAwait(false);
+        }
+        finally
+        {
+            await RelationalExecution.CloseConnection(connection, mode).ConfigureAwait(false);
+        }
+    }
+
 
     private IReadOnlyList<PhysicalSchemaOperationAcknowledgement> ApplyOperationBatchCore(
         RelationalApplicationLock lease,
@@ -642,6 +817,8 @@ public sealed class RelationalApplicationLock : IPhysicalSchemaApplicationLock
     private readonly string resource;
     private bool disposed;
 
+    private readonly Action<RelationalApplicationLock>? released;
+
     internal RelationalApplicationLock(
         DbConnection connection,
         RelationalDialect dialect,
@@ -649,8 +826,10 @@ public sealed class RelationalApplicationLock : IPhysicalSchemaApplicationLock
         string resource,
         string owner,
         long fence,
-        long serverSessionId)
+        long serverSessionId,
+        Action<RelationalApplicationLock>? released = null)
     {
+        this.released = released;
         Connection = connection;
         this.dialect = dialect;
         Target = target;
@@ -689,7 +868,14 @@ public sealed class RelationalApplicationLock : IPhysicalSchemaApplicationLock
         }
         finally
         {
-            Connection.Dispose();
+            try
+            {
+                Connection.Dispose();
+            }
+            finally
+            {
+                released?.Invoke(this);
+            }
         }
     }
 }

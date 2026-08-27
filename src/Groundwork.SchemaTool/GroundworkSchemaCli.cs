@@ -54,6 +54,9 @@ public static class SchemaToolAuthorization
 
 public static class GroundworkSchemaCli
 {
+    /// <summary>Reported when a target's schema is applied but an attached data migration is not.</summary>
+    public const string DataMigrationPendingOutcome = "data-migration-pending";
+
     public static Task<int> RunAsync(
         IReadOnlyList<string> arguments,
         TextWriter output,
@@ -214,16 +217,26 @@ public static class GroundworkSchemaCli
                         target,
                         provider.Executor,
                         planAuthorization: plan => Authorize(target, plan));
-                    targetReports.Add(FromApplication(target, result));
+                    targetReports.Add(FromApplication(target, result) with
+                    {
+                        DataMigrations = ReadDataMigrations(provider, target)
+                    });
                 }
                 var authorizationRequired = targetReports.Any(target => target.Outcome == "authorization-required");
                 var blocked = targetReports.Any(target => target.Outcome == "blocked");
-                var outcome = authorizationRequired ? "authorization-required" : blocked ? "blocked" : "applied";
+                var dataMigrationPending = targetReports.Any(target => target.Outcome == DataMigrationPendingOutcome);
+                var outcome = authorizationRequired
+                    ? "authorization-required"
+                    : blocked ? "blocked" : dataMigrationPending ? DataMigrationPendingOutcome : "applied";
                 await WriteAsync(output, json, new SchemaToolReport(
                     command, outcome, null, provider.Provider.Name, provider.Provider.Version, targetReports, []));
-                return authorizationRequired
-                    ? SchemaToolExitCodes.AuthorizationRequired
-                    : blocked ? SchemaToolExitCodes.ValidationFailed : SchemaToolExitCodes.Success;
+                if (authorizationRequired)
+                    return SchemaToolExitCodes.AuthorizationRequired;
+                if (blocked)
+                    return SchemaToolExitCodes.ValidationFailed;
+                // The schema is applied but the data is not, so this exits as pending work rather
+                // than as success: a deploy gate that treats 0 as done must not pass here.
+                return dataMigrationPending ? SchemaToolExitCodes.PendingChanges : SchemaToolExitCodes.Success;
             }
 
             var pending = false;
@@ -233,9 +246,13 @@ public static class GroundworkSchemaCli
                 cancellationToken.ThrowIfCancellationRequested();
                 var inspection = provider.Inspector.InspectHistory(target);
                 var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UnixEpoch);
+                var dataMigrations = ReadDataMigrations(provider, target);
                 pending |= plan.Operations.Length != 0;
+                // A target whose schema is applied still has pending work when a data migration was
+                // interrupted, so its resume is reported as pending rather than as ready.
+                pending |= dataMigrations.Any(report => report.State == SchemaToolDataMigrationReport.PendingState);
                 invalid |= !inspection.IsAppliedSchemaValid || !plan.IsApplicable;
-                targetReports.Add(FromPlan(target, plan, inspection));
+                targetReports.Add(FromPlan(target, plan, inspection) with { DataMigrations = dataMigrations });
             }
             var reportOutcome = invalid ? "blocked" : command == "validate" ? "ready" : pending ? "pending" : "ready";
             await WriteAsync(output, json, new SchemaToolReport(
@@ -337,17 +354,48 @@ public static class GroundworkSchemaCli
             PhysicalSchemaApplicationOutcome.Rejected => "blocked",
             PhysicalSchemaApplicationOutcome.AuthorizationRequired => "authorization-required",
             PhysicalSchemaApplicationOutcome.NoChanges => "ready",
+            PhysicalSchemaApplicationOutcome.DataMigrationIncomplete => DataMigrationPendingOutcome,
             _ => "applied"
         },
         PlanFingerprint(target, result.Plan),
         result.AppliedState?.TargetFingerprint,
-        result.Outcome == PhysicalSchemaApplicationOutcome.Applied
+        result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete
             ? []
             : result.Plan.Operations.Select(operation => SchemaToolOperationReport.FromPending(operation, PhysicalSchemaPlanProtection.Inspect(result.Plan.Operations))).ToArray(),
         result.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
         result.Plan.Refusals.Concat(result.AuthorizationRefusals)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
-        result.Outcome == PhysicalSchemaApplicationOutcome.Applied);
+        result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete);
+
+    /// <summary>
+    /// Reports pending versus applied data migrations for one target from provider-owned state. The
+    /// tool cannot see host transforms, so a semantic migration the subject declares but the ledger
+    /// has never recorded is reported as not-recorded rather than guessed either way.
+    /// </summary>
+    private static IReadOnlyList<SchemaToolDataMigrationReport> ReadDataMigrations(
+        ISchemaToolProviderSession provider,
+        PhysicalSchemaTarget target)
+    {
+        if (provider.DataMigrations is not { } executor)
+            return [];
+        var recorded = executor.ReadLedgerEntries(target.Identity)
+            .Select(SchemaToolDataMigrationReport.From)
+            .ToList();
+        var declared = target.Subject.Evolution.SemanticMigrationId;
+        if (!string.IsNullOrWhiteSpace(declared) &&
+            !recorded.Any(report => string.Equals(report.Identity, declared, StringComparison.Ordinal)))
+        {
+            recorded.Add(new SchemaToolDataMigrationReport(
+                declared,
+                SchemaToolDataMigrationReport.NotRecordedState,
+                target.Subject.Name,
+                0, 0, 0, null, null));
+        }
+        return recorded
+            .OrderBy(report => report.State == SchemaToolDataMigrationReport.AppliedState)
+            .ThenBy(report => report.Identity, StringComparer.Ordinal)
+            .ToArray();
+    }
 
     private static string PlanFingerprint(PhysicalSchemaTarget target, PhysicalSchemaDiffPlan plan)
     {
@@ -405,6 +453,8 @@ public static class GroundworkSchemaCli
             appliedTargetFingerprint = value.Targets.Count == 1 ? value.Targets[0].AppliedTargetFingerprint : null,
             targets = value.Targets,
             resolvedNames = Array.Empty<object>(),
+            dataMigrations = value.Targets.SelectMany(item => item.DataMigrations)
+                .OrderBy(item => item.Identity, StringComparer.Ordinal),
             pendingOperations = pending,
             appliedOperations = applied.OrderBy(operation => operation.Identity, StringComparer.Ordinal),
             authorization = new
@@ -437,7 +487,13 @@ public static class GroundworkSchemaCli
                 $"Targets: {value.Targets.Count}",
                 $"Pending operations: {value.Targets.Sum(target => target.PendingOperations.Count)}",
                 $"Applied operations: {value.Targets.Sum(target => target.AppliedOperations.Count)}"
-            }.Concat(value.Diagnostics.Select(diagnostic =>
+            }.Concat(value.Targets.SelectMany(target => target.DataMigrations)
+                .OrderBy(migration => migration.Identity, StringComparer.Ordinal)
+                .Select(migration => $"Data migration {migration.Identity}: {migration.State}" +
+                    (migration.State == SchemaToolDataMigrationReport.PendingState
+                        ? $" ({migration.RowsScanned} rows scanned, resume at {migration.ResumeCursor})"
+                        : string.Empty)))
+            .Concat(value.Diagnostics.Select(diagnostic =>
                 $"error {diagnostic.Code}: {diagnostic.Message} ({diagnostic.Path})"))),
         _ => "Groundwork schema emit: written"
     };
@@ -586,7 +642,40 @@ public sealed record SchemaToolTargetReport(
     IReadOnlyList<SchemaToolOperationReport> PendingOperations,
     IReadOnlyList<SchemaToolOperationReport> AppliedOperations,
     IReadOnlyList<SchemaVerificationError> Diagnostics,
-    bool Mutated);
+    bool Mutated)
+{
+    /// <summary>Recorded data-migration state for this target, pending first.</summary>
+    public IReadOnlyList<SchemaToolDataMigrationReport> DataMigrations { get; init; } = [];
+}
+
+/// <summary>One semantic migration's recorded data-migration state on one target.</summary>
+public sealed record SchemaToolDataMigrationReport(
+    string Identity,
+    string State,
+    string? Unit,
+    long RowsScanned,
+    long RowsChanged,
+    int Batches,
+    string? ResumeCursor,
+    string? CompletedAt)
+{
+    /// <summary>The subject declares this semantic migration but nothing has been recorded for it.</summary>
+    public const string NotRecordedState = "not-recorded";
+
+    public const string PendingState = "pending";
+
+    public const string AppliedState = "applied";
+
+    internal static SchemaToolDataMigrationReport From(DataMigrationLedgerEntry entry) => new(
+        entry.MigrationId,
+        entry.IsComplete ? AppliedState : PendingState,
+        entry.UnitName,
+        entry.RowsScanned,
+        entry.RowsChanged,
+        entry.Batches,
+        entry.Cursor,
+        entry.CompletedAt?.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+}
 
 public sealed record SchemaToolOperationReport(
     string Identity,

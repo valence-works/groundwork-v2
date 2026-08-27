@@ -205,6 +205,30 @@ public sealed class PostgreSqlDialect : RelationalDialect
         _ => value
     };
 
+    public override object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is null ? null : ReadPortableValue(value, definition);
+
+    /// <summary>
+    /// Maps one stored PostgreSQL value back to the portable CLR shape its declaration names. The
+    /// storage session and the data-migration scan share this one definition, so a host transform
+    /// sees the declared type rather than the driver's native representation.
+    /// </summary>
+    public static object? ReadPortableValue(object value, ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (value is DBNull)
+            return null;
+        return definition.Type switch
+        {
+            PortableType.DateTimeOffset => new DateTimeOffset(Convert.ToInt64(value, CultureInfo.InvariantCulture), TimeSpan.Zero),
+            PortableType.Json when value is string json => JsonDocument.Parse(json).RootElement.Clone(),
+            PortableType.Json when value is JsonDocument document => document.RootElement.Clone(),
+            PortableType.Json when value is JsonElement element => element.Clone(),
+            PortableType.Binary when value is byte[] bytes => bytes.ToArray(),
+            _ => value
+        };
+    }
+
     public override void Validate(ColumnDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
@@ -305,6 +329,21 @@ public sealed class PostgreSqlDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         connection.BeginTransaction(IsolationLevel.ReadCommitted);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.ReadCommitted;
+
+    public override int ParameterBudget => PostgreSqlQueryRenderer.ParameterBudget;
+
+    public override string? DataMigrationLedgerUpsertSql =>
+        "INSERT INTO \"__groundwork_data_migrations\" (\"subject_id\",\"provider_name\",\"migration_id\",\"unit_name\"," +
+        "\"request_fingerprint\",\"state\",\"cursor\",\"rows_scanned\",\"rows_changed\",\"batches\"," +
+        "\"started_at\",\"updated_at\",\"completed_at\") VALUES (@subject,@provider,@migration,@unit,@fingerprint," +
+        "@state,@cursor,@scanned,@changed,@batches,@started,@updated,@completed) " +
+        "ON CONFLICT (\"subject_id\",\"provider_name\",\"migration_id\") DO UPDATE SET " +
+        "\"unit_name\"=EXCLUDED.\"unit_name\",\"request_fingerprint\"=EXCLUDED.\"request_fingerprint\"," +
+        "\"state\"=EXCLUDED.\"state\",\"cursor\"=EXCLUDED.\"cursor\",\"rows_scanned\"=EXCLUDED.\"rows_scanned\"," +
+        "\"rows_changed\"=EXCLUDED.\"rows_changed\",\"batches\"=EXCLUDED.\"batches\"," +
+        "\"updated_at\"=EXCLUDED.\"updated_at\",\"completed_at\"=EXCLUDED.\"completed_at\";";
+
     public override void EnsureInfrastructure(DbConnection connection)
     {
         const string infrastructureResource = "groundwork:infrastructure";
@@ -331,6 +370,22 @@ public sealed class PostgreSqlDialect : RelationalDialect
                     "column_name" text NOT NULL,
                     "algorithm_id" text NOT NULL,
                     PRIMARY KEY ("table_name", "column_name")
+                );
+                CREATE TABLE IF NOT EXISTS "__groundwork_data_migrations" (
+                    "subject_id" text NOT NULL,
+                    "provider_name" text NOT NULL,
+                    "migration_id" text NOT NULL,
+                    "unit_name" text NOT NULL,
+                    "request_fingerprint" text NOT NULL,
+                    "state" text NOT NULL,
+                    "cursor" text NULL,
+                    "rows_scanned" bigint NOT NULL,
+                    "rows_changed" bigint NOT NULL,
+                    "batches" integer NOT NULL,
+                    "started_at" text NOT NULL,
+                    "updated_at" text NOT NULL,
+                    "completed_at" text NULL,
+                    PRIMARY KEY ("subject_id", "provider_name", "migration_id")
                 );
                 """);
             command.ExecuteNonQuery();

@@ -97,6 +97,10 @@ public readonly struct RelationalExecution
 
     public ValueTask Dispose(DbTransaction transaction) => Close(transaction, IsAsync);
 
+    /// <summary>Closes a connection on the surface the caller selected.</summary>
+    public static ValueTask CloseConnection(DbConnection connection, RelationalExecution mode) =>
+        Close(connection, mode.IsAsync);
+
     internal static ValueTask Close(IAsyncDisposable resource, bool isAsync)
     {
         if (isAsync)
