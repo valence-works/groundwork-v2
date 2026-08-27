@@ -67,7 +67,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
+        schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
         var connection = OpenConnection();
         OwnConnection(connection);
         return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null, observer);
@@ -102,7 +102,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
             ArgumentNullException.ThrowIfNull(unit);
             PortabilityValidator.EnsurePhysicalIdentifiers(unit);
             PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
         }
 
         var connection = OpenConnection();
@@ -171,33 +171,22 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly PostgreSqlDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+    private readonly RelationalRuntimeAdmission admission;
 
     internal PostgreSqlSchemaCoordinator(PostgreSqlProviderConnection owner)
     {
         this.owner = owner;
         executor = new RelationalSchemaExecutor(owner.OpenConnection, dialect);
+        admission = new RelationalRuntimeAdmission(
+            "postgresql.schema-admission",
+            desired => Target(Physicalize(desired)),
+            executor.InspectDeployedHistory);
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired)
-    {
-        var physical = Physicalize(desired);
-        if (physical.DerivedColumns.Count == 0)
-            return;
-        var target = Target(physical);
-        var inspection = executor.InspectHistory(target);
-        var applied = inspection.History.AppliedState;
-        if (applied is null)
-            return;
-        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
-            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
-        {
-            throw new InvalidOperationException(
-                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
-        }
-    }
+    internal void EnsureRuntimeAdmission(StorageUnit desired, IProviderCommandObserver? observer = null) =>
+        admission.EnsureAdmitted(desired, observer);
 
     public SchemaDiff Diff(StorageUnit desired)
     {
@@ -217,6 +206,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
+        admission.Invalidate(desired.Id);
         var result = PhysicalSchemaApplication.Apply(target, executor);
         owner.Remember(desired);
         return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),

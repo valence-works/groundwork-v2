@@ -17,32 +17,28 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly SqliteDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+    private readonly RelationalRuntimeAdmission admission;
 
     internal SqliteSchemaCoordinator(SqliteProviderConnection owner)
     {
         this.owner = owner;
         executor = new RelationalSchemaExecutor(owner.CreateIndependentConnection, dialect);
+        admission = new RelationalRuntimeAdmission(
+            "sqlite.schema-admission",
+            desired => Target(Physicalize(desired)),
+            InspectDeployed);
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired)
+    internal void EnsureRuntimeAdmission(StorageUnit desired, IProviderCommandObserver? observer = null) =>
+        admission.EnsureAdmitted(desired, observer);
+
+    private PhysicalSchemaInspectionResult InspectDeployed(PhysicalSchemaTarget target)
     {
-        var physical = Physicalize(desired);
-        if (physical.DerivedColumns.Count == 0)
-            return;
-        var target = Target(physical);
-        var inspection = executor.InspectHistory(target);
-        var applied = inspection.History.AppliedState;
-        if (applied is null)
-            return;
-        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
-            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
-        {
-            throw new InvalidOperationException(
-                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
-        }
+        if (owner.UsesSharedSessionConnection)
+            lock (owner.Gate) return executor.InspectDeployedHistory(target, owner.Connection);
+        return executor.InspectDeployedHistory(target);
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -63,6 +59,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
+        admission.Invalidate(desired.Id);
         var result = PhysicalSchemaApplication.Apply(target, executor);
         owner.RefreshSchema();
         return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),

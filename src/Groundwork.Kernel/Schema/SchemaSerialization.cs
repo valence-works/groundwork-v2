@@ -24,7 +24,7 @@ public static class PhysicalSchemaAppliedStateSerializer
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false,
-        Converters = { new PortableDefaultJsonConverter(), new JsonStringEnumConverter() }
+        Converters = { new PortableDefaultJsonConverter(), new ReadOnlySetJsonConverterFactory(), new JsonStringEnumConverter() }
     };
 
     public static string Serialize(PhysicalSchemaAppliedState state)
@@ -91,6 +91,37 @@ public static class PhysicalSchemaAppliedStateSerializer
         public ProviderPhysicalSchemaDefinition[]? ProviderDefinitions { get; set; }
 
         public PhysicalSchemaAppliedOperation[]? AppliedOperations { get; set; }
+    }
+
+    private sealed class ReadOnlySetJsonConverterFactory : JsonConverterFactory
+    {
+        public override bool CanConvert(Type typeToConvert) =>
+            typeToConvert.IsGenericType && typeToConvert.GetGenericTypeDefinition() == typeof(IReadOnlySet<>);
+
+        public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options) =>
+            (JsonConverter)Activator.CreateInstance(
+                typeof(ReadOnlySetJsonConverter<>).MakeGenericType(typeToConvert.GetGenericArguments()[0]))!;
+    }
+
+    private sealed class ReadOnlySetJsonConverter<T> : JsonConverter<IReadOnlySet<T>>
+    {
+        public override IReadOnlySet<T> Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options) =>
+            JsonSerializer.Deserialize<HashSet<T>>(ref reader, options)
+                ?? throw new JsonException("A set cannot be null.");
+
+        public override void Write(
+            Utf8JsonWriter writer,
+            IReadOnlySet<T> value,
+            JsonSerializerOptions options)
+        {
+            writer.WriteStartArray();
+            foreach (var item in value)
+                JsonSerializer.Serialize(writer, item, options);
+            writer.WriteEndArray();
+        }
     }
 
     private sealed class PortableDefaultJsonConverter : JsonConverter<PortableDefault>

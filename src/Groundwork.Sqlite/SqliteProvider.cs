@@ -93,7 +93,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
+        schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         if (!isMemory)
             lock (gate) sessionConnections.Add(sessionConnection);
@@ -129,7 +129,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             ArgumentNullException.ThrowIfNull(unit);
             PortabilityValidator.EnsurePhysicalIdentifiers(unit);
             SqliteSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer);
         }
 
         var transactional = CreateIndependentConnection();

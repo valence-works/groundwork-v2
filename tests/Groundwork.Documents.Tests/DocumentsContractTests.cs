@@ -435,6 +435,7 @@ public sealed class DocumentsContractTests
         using var store = TemporarySqliteStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         connection.Schema.Apply(unit.StorageUnit);
+        _ = connection.OpenSession(unit.StorageUnit, StorageAccess.Global);
         var value = new EnumDocument(Guid.NewGuid(), OrderStatus.Paid);
         var documentObserver = new ProviderCommandObserver();
         var documentWrite = unit.Upsert(value);
