@@ -40,7 +40,7 @@ public sealed class SqliteLinqExecutor : IGwQueryExecutor
         // With a connection, its advertised profile wins — it is the same number, read from the
         // deployment rather than from this constant. Without one, the constant is still SQLite's.
         executor = connection is null
-            ? new GwLinqExecutor(session, SqliteAdmission)
+            ? GwLinqExecutor.WithAdmission(session, SqliteAdmission)
             : new GwLinqExecutor(session, connection);
 
     public Task<IReadOnlyList<T>> ToListAsync<T>(

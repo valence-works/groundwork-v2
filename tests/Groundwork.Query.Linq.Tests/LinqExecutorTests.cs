@@ -1,3 +1,4 @@
+using System.Globalization;
 using Groundwork.Kernel;
 using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Model;
@@ -112,6 +113,43 @@ public sealed class LinqExecutorTests
             .ToListAsync(fixture.Executor);
 
         Assert.Equal("a", Assert.Single(rows).Id);
+    }
+
+    [Fact]
+    public async Task Supplying_a_known_budget_does_not_cost_callers_the_explicit_null_connection()
+    {
+        using var fixture = Fixture.Open();
+
+        // That both calls below compile is half the assertion. Expressing "budgets known at compile
+        // time" as a second two-argument constructor would have made the first one ambiguous with
+        // the connection constructor: a null literal converts to both reference types and neither is
+        // more specific, so a caller who already wrote it would stop compiling with CS0121.
+        var explicitNull = new GwLinqExecutor(fixture.Session, null);
+        var known = GwLinqExecutor.WithAdmission(
+            fixture.Session,
+            new QueryAdmissionProfile { MaximumParameters = 999 });
+
+        // Neither has a connection to advertise a budget. The first falls back to the portable
+        // default and the second uses the one it was handed, so the two refuse at different numbers.
+        var fellBack = Assert.IsType<RuntimeValueFenceException>(
+            await Record.ExceptionAsync(() => explicitNull.ToListAsync(OverBudgetRequest(), Fixture.Model)));
+        var supplied = Assert.IsType<RuntimeValueFenceException>(
+            await Record.ExceptionAsync(() => known.ToListAsync(OverBudgetRequest(), Fixture.Model)));
+
+        Assert.Equal("GW-RUNTIME-011", fellBack.Code);
+        Assert.Equal("GW-RUNTIME-011", supplied.Code);
+        Assert.Contains(
+            QueryAdmissionProfile.Default.MaximumParameters.ToString(CultureInfo.InvariantCulture),
+            fellBack.Message,
+            StringComparison.Ordinal);
+        Assert.Contains("999", supplied.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_supplied_budget_is_required_rather_than_quietly_replaced_by_the_default()
+    {
+        using var fixture = Fixture.Open();
+        Assert.Throws<ArgumentNullException>(() => GwLinqExecutor.WithAdmission(fixture.Session, null!));
     }
 
     [Fact]

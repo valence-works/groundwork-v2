@@ -59,10 +59,15 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     /// connection to learn them. Coverage still admits against the declaration alone: without a
     /// connection there is no catalog, so a declared-but-undeployed index can still satisfy the gate.
     /// </summary>
-    public GwLinqExecutor(IStorageSession session, QueryAdmissionProfile admission)
-        : this(session, connection: null, admission ?? throw new ArgumentNullException(nameof(admission)))
-    {
-    }
+    /// <remarks>
+    /// A factory rather than a constructor. A second two-argument constructor taking a reference
+    /// type would make the existing <c>new GwLinqExecutor(session, null)</c> ambiguous — neither
+    /// <see cref="IStorageProviderConnection"/> nor <see cref="QueryAdmissionProfile"/> is more
+    /// specific for a null literal, so overload resolution has no tie to break and the call stops
+    /// compiling (CS0121). Naming the profile at the call site costs nothing and breaks nobody.
+    /// </remarks>
+    public static GwLinqExecutor WithAdmission(IStorageSession session, QueryAdmissionProfile admission) =>
+        new(session, connection: null, admission ?? throw new ArgumentNullException(nameof(admission)));
 
     private GwLinqExecutor(
         IStorageSession session,
