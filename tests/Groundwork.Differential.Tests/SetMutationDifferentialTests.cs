@@ -7,6 +7,7 @@ using Groundwork.Query.Planning;
 using Groundwork.SqlServer;
 using Groundwork.Substrate.Relational;
 using Groundwork.Sqlite;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Store;
 using Xunit;
 

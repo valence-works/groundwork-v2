@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Store;
 using Groundwork.Testing;
 
