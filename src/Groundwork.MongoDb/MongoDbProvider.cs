@@ -624,7 +624,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         return new MongoSchemaAdmissionReport(applied.Declaration.Id, columnDrift, indexDrift);
     }
 
-    private static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
+    internal static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
     {
         PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
@@ -879,7 +879,44 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             "The native _id field order is part of the route and cannot be reordered.");
     }
 
+    /// <summary>
+    /// The declaration rules this in-process coordinator adds to the shared ones. The rename
+    /// refusal is the only one that is specific to this path: it plans from the fingerprint in
+    /// <c>__groundwork_metadata</c> rather than from the applied schema ledger, so it still cannot
+    /// tell a renamed field from a new one.
+    /// </summary>
     private static void ValidateDeclaration(StorageUnit unit)
+    {
+        MongoDeclarationRules.Validate(unit);
+        // The deployment tool reads the applied schema ledger and plans a RenameColumn against it;
+        // this path has no ledger to read, so declaring a diverged logical id here would read
+        // documents that still store the old field as null. Deploy the rename with
+        // 'groundwork apply', which carries the logical id across the rename.
+        if (unit.Columns.FirstOrDefault(column =>
+                !string.Equals(column.LogicalId, column.Name, StringComparison.Ordinal)) is { } renamed)
+        {
+            throw new InvalidOperationException(
+                $"GW-SCHEMA-009 at schema.columns.{renamed.Name}.id: this in-process MongoDB schema apply does " +
+                $"not read the applied schema ledger, so declaring '{renamed.Name}' under logical id " +
+                $"'{renamed.LogicalId}' would read documents that still store the old field as null. Deploy the " +
+                "rename with 'groundwork apply', which plans it against that ledger, or keep the physical name.");
+        }
+    }
+
+    private static bool HasProviderSequence(StorageUnit unit) =>
+        unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence);
+
+    private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
+}
+
+/// <summary>
+/// The declaration rules every MongoDB schema path enforces, whichever entry point compiled the
+/// declaration: the in-process coordinator and the deployment tool's target compiler both call this
+/// so a declaration MongoDB refuses is refused identically either way.
+/// </summary>
+internal static class MongoDeclarationRules
+{
+    internal static void Validate(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
         ConcurrencyDeclaration.ValidateDeclaration(unit);
@@ -907,20 +944,6 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             throw new ArgumentException("MongoDB indexes cannot contain null definitions.", nameof(unit));
         if (unit.Indexes.Any(index => index.Columns is null || index.Columns.Any(column => column is null)))
             throw new ArgumentException("MongoDB index columns cannot be null.", nameof(unit));
-        // MongoDB keeps no applied schema ledger, so it cannot tell a renamed field from a new one
-        // and would silently read nulls out of documents that still carry the old field. Rename
-        // continuity arrives with the MongoDB schema executor
-        // (https://github.com/valence-works/groundwork-v2/issues/86); until then the declaration is
-        // refused rather than honoured approximately.
-        if (unit.Columns.FirstOrDefault(column =>
-                !string.Equals(column.LogicalId, column.Name, StringComparison.Ordinal)) is { } renamed)
-        {
-            throw new InvalidOperationException(
-                $"GW-SCHEMA-009 at schema.columns.{renamed.Name}.id: MongoDB cannot yet carry a column's logical id " +
-                $"across a rename, so declaring '{renamed.Name}' under logical id '{renamed.LogicalId}' would read " +
-                "documents that still store the old field as null. Deploy the rename on a provider that records " +
-                "applied schema state, or keep the physical name.");
-        }
         var names = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         if (names.Count != unit.Columns.Count)
             throw new ArgumentException("MongoDB storage columns must have unique names.", nameof(unit));
@@ -937,11 +960,6 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             if (column.Precision is not (>= 1 and <= 34) || column.Scale is not (>= 0) || column.Scale > column.Precision)
                 throw new ArgumentException($"MongoDB Decimal128 requires Decimal column '{column.Name}' to declare Precision 1..34 and Scale 0..Precision.", nameof(unit));
     }
-
-    private static bool HasProviderSequence(StorageUnit unit) =>
-        unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence);
-
-    private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
 internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
@@ -3543,8 +3561,13 @@ internal static class SchemaIdentity
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
-        string.Join("|", unit.Indexes.Select(Index)),
-        SchemaFingerprint.Canonicalize(unit.AggregationProfiles.Select(AggregationProfile)));
+        // Indexes and aggregation profiles are sets, not sequences, exactly as SchemaSubject
+        // treats them: naming the same ones in a different order describes the same unit. A
+        // schema document canonicalizes their order and the fluent builder does not, so an
+        // order-sensitive hash here would refuse a declaration the deployment tool just applied.
+        string.Join("|", unit.Indexes.Select(Index).OrderBy(canonical => canonical, StringComparer.Ordinal)),
+        SchemaFingerprint.Canonicalize(unit.AggregationProfiles.Select(AggregationProfile)
+            .OrderBy(canonical => canonical, StringComparer.Ordinal)));
 
     internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
         string.Equals(Column(left), Column(right), StringComparison.Ordinal);

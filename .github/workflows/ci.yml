@@ -337,6 +337,56 @@ jobs:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p1ci?replicaSet=p1rs&directConnection=true
         run: dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-restore --configuration Release
 
+  mongo-schema-tool:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Initialize MongoDB replica set
+        run: |
+          docker run --detach --name groundwork-schema-tool-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet p35rs --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec groundwork-schema-tool-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"p35rs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec groundwork-schema-tool-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+      - run: dotnet restore Groundwork.slnx
+      - name: Run the schema tool against a replica set
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p35ci?replicaSet=p35rs&directConnection=true
+        run: >-
+          dotnet test tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj
+          --no-restore --configuration Release
+          --logger "trx;LogFileName=schema-tool.trx"
+          --results-directory artifacts/schema-tool
+      # A suite whose live-provider proofs skip is green and proves nothing: unconfigured, this
+      # project reports 45 passed, 7 skipped and exit 0. The job asserts the proofs executed rather
+      # than trusting the exit code.
+      - name: Refuse a run whose MongoDB proofs did not execute
+        run: |
+          results="artifacts/schema-tool/schema-tool.trx"
+          outcomes() {
+            grep -o "testName=\"Groundwork.SchemaTool.Tests.$1[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
+              "$results" | grep -c "outcome=\"$2\"" || true
+          }
+          executed=$(outcomes SchemaToolMongoEndToEndTests Passed)
+          notExecuted=$(outcomes SchemaToolMongoEndToEndTests NotExecuted)
+          skipped=$(grep -c 'outcome="NotExecuted"' "$results" || true)
+          echo "SchemaToolMongoEndToEndTests passed: $executed, not executed: $notExecuted"
+          echo "Tests not executed in the whole suite: $skipped"
+          if [ "$executed" -lt 7 ] || [ "$notExecuted" -ne 0 ] || [ "$skipped" -ne 0 ]; then
+            echo "::error::The MongoDB schema-tool proofs did not run against the replica set." >&2
+            exit 1
+          fi
+
   mongo-standalone-exact-append:
     runs-on: ubuntu-latest
     services:

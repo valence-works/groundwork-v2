@@ -59,6 +59,13 @@ groundwork schema emit --input schema.json --file groundwork.schema.json
 
 Add `--output json` for the stable machine-readable report.
 
+The aliases are `sqlite`, `postgresql`, `sqlserver` and `mongodb`, each discovered from its provider
+package. All four speak one plan and report format: operation kinds, operation identities,
+authorization addresses, refusal codes and exit codes mean the same thing whether the target is a
+table or a collection. The MongoDB plug-in requires a replica set or a sharded cluster, because
+publishing the applied schema ledger needs a transaction; a standalone deployment is refused when
+the session opens rather than part-way through an apply.
+
 > The package is `Groundwork.Tool`; its assembly and namespace remain `Groundwork.SchemaTool` for
 > source compatibility.
 
@@ -218,7 +225,7 @@ full dual-presence semantics and both worked examples.
 | SQLite | Native `DROP COLUMN` and `RENAME COLUMN`; an alteration rebuilds the table in the schema transaction, the same mechanism the dialect already uses to finalize a backfilled column |
 | PostgreSQL | Native, including in-place index rename |
 | SQL Server | Native, through `sp_rename`; a column's auto-named default constraint is dropped with it |
-| MongoDB | **Not yet.** MongoDB implements no `IPhysicalSchemaExecutor` and keeps no applied schema ledger, so it cannot tell a renamed field from a new one. A declaration whose logical id has diverged is refused with `GW-SCHEMA-009` rather than silently reading nulls ([#86](https://github.com/valence-works/groundwork-v2/issues/86)) |
+| MongoDB | Native, through `MongoSchemaExecutor`: a rename `$rename`s the stored field, a drop `$unset`s it, and an alteration re-encodes stored values when the BSON representation changes. Work spans the primary collection and every per-scope collection. The in-process `connection.Schema.Apply` keeps no ledger and still refuses a diverged logical id with `GW-SCHEMA-009`; deploy the rename with `groundwork apply` |
 
 > Provider-owned definitions move with their storage for the same reason indexes do: each names
 > itself after the table. SQL Server's batch table type is dropped and recreated under the new name;
@@ -372,6 +379,14 @@ It also refuses, by name, where the question does not apply:
 - `GW-SCHEMA-011` — the target already has applied history. Run `apply`, not `adopt`.
 - `GW-SCHEMA-012` — the subject is declared retired, so it describes no catalog to verify.
 - `GW-SCHEMA-013` — the provider called the catalog invalid without saying what differs.
+
+On MongoDB the deployed catalog is the collection set: the primary collection, every per-scope
+collection, their indexes, and the declared fields in their documents. A field the declaration does
+not mention is deliberately not drift there — MongoDB publishes no column catalog, so there is no
+undefaulted `NOT NULL` column that could refuse a write — but a missing field or a wrong BSON type
+is `GW-RUNTIME-001` exactly as elsewhere. Adoption also republishes the provider catalog entry the
+runtime compares its declaration against, so an adopted collection set opens without a second
+in-process apply.
 
 **Known limitation.** A subject with a folded column has a derived search-key column whose
 algorithm registration lives in Groundwork's own catalog, which a database Groundwork never applied
