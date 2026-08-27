@@ -66,6 +66,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorage
         // the token still interrupts the native statement mid-execution.
         return Task.FromResult(Execute(() =>
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var (executionSource, renderOptions, command) = PrepareQuery(request, options);
             var rows = RelationalQueryResultReader.ReadAsync(
                     connection, command, DecodeQueryValue, activeTransaction ?? transaction, cancellationToken)

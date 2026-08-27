@@ -750,15 +750,19 @@ internal sealed class BatchContext
 }
 
 /// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
-internal class BatchStorageSession : IStorageSession, IAsyncQueryStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     protected readonly IStorageSession inner;
     protected readonly BatchContext context;
 
     internal static BatchStorageSession Create(IStorageSession inner, BatchContext context) =>
-        inner is ICompareAndDeleteStorageSession
-            ? new BatchCompareAndDeleteStorageSession(inner, context)
-            : new BatchStorageSession(inner, context);
+        (inner is ICompareAndDeleteStorageSession, inner is IAsyncQueryStorageSession) switch
+        {
+            (true, true) => new BatchAsyncQueryCompareAndDeleteStorageSession(inner, context),
+            (true, false) => new BatchCompareAndDeleteStorageSession(inner, context),
+            (false, true) => new BatchAsyncQueryStorageSession(inner, context),
+            _ => new BatchStorageSession(inner, context)
+        };
 
     internal BatchStorageSession(IStorageSession inner, BatchContext context)
     {
@@ -786,15 +790,13 @@ internal class BatchStorageSession : IStorageSession, IAsyncQueryStorageSession,
         return inner.Query(request, options);
     }
 
-    public Task<QueryMaterializedResult> QueryAsync(
+    private protected Task<QueryMaterializedResult> QueryAsyncCore(
         QueryRequest request,
-        QueryRenderOptions? options = null,
-        CancellationToken cancellationToken = default)
+        QueryRenderOptions? options,
+        CancellationToken cancellationToken)
     {
         context.FlushAll();
-        return inner is IAsyncQueryStorageSession asyncQuery
-            ? asyncQuery.QueryAsync(request, options, cancellationToken)
-            : throw new NotSupportedException("The provider session does not advertise asynchronous queries.");
+        return ((IAsyncQueryStorageSession)inner).QueryAsync(request, options, cancellationToken);
     }
 
     public AggregationResult Aggregate(AggregationQuery query)
@@ -877,7 +879,35 @@ internal class BatchStorageSession : IStorageSession, IAsyncQueryStorageSession,
     }
 }
 
-internal sealed class BatchCompareAndDeleteStorageSession : BatchStorageSession, ICompareAndDeleteStorageSession
+internal sealed class BatchAsyncQueryStorageSession : BatchStorageSession, IAsyncQueryStorageSession
+{
+    internal BatchAsyncQueryStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+
+    public Task<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        QueryAsyncCore(request, options, cancellationToken);
+}
+
+internal sealed class BatchAsyncQueryCompareAndDeleteStorageSession : BatchCompareAndDeleteStorageSession, IAsyncQueryStorageSession
+{
+    internal BatchAsyncQueryCompareAndDeleteStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+
+    public Task<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        QueryAsyncCore(request, options, cancellationToken);
+}
+
+internal class BatchCompareAndDeleteStorageSession : BatchStorageSession, ICompareAndDeleteStorageSession
 {
     internal BatchCompareAndDeleteStorageSession(IStorageSession inner, BatchContext context)
         : base(inner, context)

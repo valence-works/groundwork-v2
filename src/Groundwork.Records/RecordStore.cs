@@ -235,8 +235,7 @@ public sealed class RecordTableSession<T>
         var request = query.Count().Request;
         table.ValidateRequest(request);
         var result = store.Query(QueryRequestExecution.ForProviderCount(request), table.CreateRenderOptions(null));
-        return result.TotalCount ?? throw new InvalidOperationException(
-            $"Count on '{request.Table.Value}' requires a provider-side total count; the store returned a page without one.");
+        return QueryRequestExecution.RequireTotalCount(request, result.TotalCount);
     }
 
     public bool Any(IGwQueryable<T> query)

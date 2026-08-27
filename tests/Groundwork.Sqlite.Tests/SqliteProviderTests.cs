@@ -941,6 +941,73 @@ public sealed class SqliteProviderTests
         Assert.True(database.Schema.Apply(unit).Applied);
 
         Assert.Throws<ArgumentException>(() => new SqliteLinqExecutor(database.OpenSession(unit, StorageAccess.Global)));
+        using var unitOfWork = database.BeginUnitOfWork(StorageAccess.Global, unit);
+        Assert.Throws<ArgumentException>(() => new SqliteLinqExecutor(unitOfWork.OpenSession(unit)));
+    }
+
+    [Fact]
+    public async Task Async_query_cancelled_while_waiting_for_the_provider_gate_is_refused()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-gate"), Name = "linq_gate",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_gate", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
+            ]));
+
+        using var cancellation = new CancellationTokenSource();
+        Task<long> pending;
+        lock (((SqliteProviderConnection)connection).Gate)
+        {
+            pending = Task.Run(() => table.Query.CountAsync(executor, cancellation.Token));
+            Thread.Sleep(250);
+            cancellation.Cancel();
+        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+    }
+
+    [Fact]
+    public async Task Existence_probe_on_a_continuation_request_answers_the_remaining_window()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-window"), Name = "linq_window",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var id in new[] { "a", "b", "c" })
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = id })).Status);
+
+        var tableId = new TableId("linq_window");
+        var idColumn = new ColumnRef(tableId, "Id", QueryType.String, isNullable: false);
+        var order = System.Collections.Immutable.ImmutableArray.Create(new OrderTerm(idColumn, OrderDirection.Ascending, NullOrder.Last));
+        var firstPage = session.Query(new QueryRequest(tableId, Predicate.AlwaysTrue.Instance, order, Projection.All, Paging.Keyset(2)));
+        Assert.Equal(2, firstPage.Rows.Count);
+        Assert.NotNull(firstPage.NextContinuationToken);
+
+        var executor = new SqliteLinqExecutor(session);
+        var remaining = new QueryRequest(tableId, Predicate.AlwaysTrue.Instance, order, Projection.All,
+            Paging.Continuation(firstPage.NextContinuationToken!, 2));
+        Assert.True(await executor.AnyAsync(remaining));
+
+        var endToken = QueryContinuationToken.Encode(remaining, QueryRenderOptions.Default, [QueryConstant.Of(idColumn, "c")]);
+        var exhausted = new QueryRequest(tableId, Predicate.AlwaysTrue.Instance, order, Projection.All,
+            Paging.Continuation(endToken, 2));
+        Assert.False(await executor.AnyAsync(exhausted));
+        Assert.Equal(3, await executor.CountAsync(exhausted));
     }
 
     private sealed class LinqCountTicket

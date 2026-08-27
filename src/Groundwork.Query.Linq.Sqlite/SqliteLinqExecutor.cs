@@ -27,8 +27,7 @@ public sealed class SqliteLinqExecutor : IGwQueryExecutor
     {
         ArgumentNullException.ThrowIfNull(request);
         var result = await session.QueryAsync(QueryRequestExecution.ForProviderCount(request), cancellationToken: cancellationToken).ConfigureAwait(false);
-        return result.TotalCount ?? throw new InvalidOperationException(
-            $"Query on '{request.Table.Value}' returned no provider-side total count; a materialized page is never counted client-side.");
+        return QueryRequestExecution.RequireTotalCount(request, result.TotalCount);
     }
 
     public async Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default)

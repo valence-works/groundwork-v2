@@ -254,6 +254,35 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
+    public void Count_and_existence_probes_keep_the_continuation_window_and_binding()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice")),
+            ImmutableArray.Create(new OrderTerm(Created, OrderDirection.Ascending, NullOrder.Last)),
+            Projection.All,
+            Paging.Continuation("q1.token", 25),
+            ResultShape.Rows.Instance);
+
+        var probe = QueryRequestExecution.ForExistenceProbe(request);
+        Assert.Equal("q1.token", probe.Paging.ContinuationToken);
+        Assert.Equal(1, probe.Paging.Limit);
+        Assert.False(probe.Result.IncludesTotalCount);
+        Assert.Equal(request.ContinuationFingerprint, probe.ContinuationFingerprint);
+        Assert.Equal(request.CanonicalPredicate, probe.CanonicalPredicate);
+
+        var count = QueryRequestExecution.ForProviderCount(request);
+        Assert.Equal("q1.token", count.Paging.ContinuationToken);
+        Assert.Equal(1, count.Paging.Limit);
+        Assert.True(count.Result.IncludesTotalCount);
+        Assert.Equal(request.ContinuationFingerprint, count.ContinuationFingerprint);
+
+        Assert.Equal(7, QueryRequestExecution.RequireTotalCount(request, 7));
+        var refusal = Assert.Throws<InvalidOperationException>(() => QueryRequestExecution.RequireTotalCount(request, null));
+        Assert.Contains("provider-side total count", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Rows_result_has_no_count_semantics_and_total_is_nullable()
     {
         Assert.False(ResultShape.Rows.Instance.IncludesTotalCount);

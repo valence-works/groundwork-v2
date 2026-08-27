@@ -215,7 +215,7 @@ public static class QueryRequestExecution
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            Paging.OffsetLimit(0, 1), ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan)
+            ProbePaging(request.Paging, keepOffset: false), ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -223,18 +223,32 @@ public static class QueryRequestExecution
         };
     }
 
-    /// <summary>Builds a limit-1 existence probe instead of the caller's full page.</summary>
+    /// <summary>Builds a limit-1 existence probe over the caller's page window instead of its full page.</summary>
     public static QueryRequest ForExistenceProbe(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            Paging.OffsetLimit(request.Paging.Offset ?? 0, 1), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan)
+            ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
             ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
         };
     }
+
+    /// <summary>Returns the provider-side total count or refuses; a page is never counted client-side.</summary>
+    public static long RequireTotalCount(QueryRequest request, long? totalCount)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        return totalCount ?? throw new InvalidOperationException(
+            $"Query on '{request.Table.Value}' returned no provider-side total count; a materialized page is never counted client-side.");
+    }
+
+    /// <summary>Bounds a page to one row while keeping the caller's continuation window.</summary>
+    private static Paging ProbePaging(Paging paging, bool keepOffset) =>
+        paging.ContinuationToken is { } token
+            ? Paging.Continuation(token, 1)
+            : Paging.OffsetLimit(keepOffset ? paging.Offset ?? 0 : 0, 1);
 
     /// <summary>Builds a provider execution request with additional internal projection columns.</summary>
     public static QueryRequest WithProjection(QueryRequest request, Projection projection)
