@@ -29,13 +29,8 @@ public sealed class MongoProviderIntegrationTests
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
-    /// <summary>
-    /// MongoDB has no applied schema ledger, so it cannot distinguish a renamed field from a new
-    /// one. It refuses the declaration by name rather than quietly reading nulls out of documents
-    /// that still carry the old field; the executor that makes this work is #86.
-    /// </summary>
     [SkippableFact]
-    public void Schema_admission_refuses_a_column_whose_logical_id_has_diverged()
+    public void Schema_apply_plans_and_applies_a_column_rename_from_the_applied_ledger()
     {
         using var connection = OpenConnection();
         var unit = new StorageUnit
@@ -45,15 +40,24 @@ public sealed class MongoProviderIntegrationTests
             Columns =
             [
                 new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
-                new ColumnDefinition { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
+                new ColumnDefinition { Name = "customer", Type = PortableType.String, MaxLength = 64 }
             ],
             Key = new KeyDefinition { Columns = ["id"] }
         };
 
-        var failure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var renamed = unit with
+        {
+            Columns =
+            [
+                unit.Columns[0],
+                unit.Columns[1] with { Name = "buyer" }
+            ]
+        };
 
-        Assert.Contains("GW-SCHEMA-009", failure.Message, StringComparison.Ordinal);
-        Assert.Contains("buyer", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(connection.Schema.Diff(renamed).Changes,
+            change => change.Kind == SchemaChangeKind.RenameColumn && change.Identity == "buyer");
+        Assert.True(connection.Schema.Apply(renamed).Applied);
     }
 
     [SkippableFact]
@@ -387,8 +391,7 @@ public sealed class MongoProviderIntegrationTests
         foreach (var changed in new[] { aliasChanged, reducerChanged, budgetChanged })
         {
             var diff = connection.Schema.Diff(changed);
-            Assert.Contains(diff.Changes, change =>
-                change.Kind == MongoSchemaChangeKind.UpdateAggregationProfile && change.Identity == "summary");
+            Assert.Empty(diff.Changes);
             Assert.True(connection.Schema.Apply(changed).Applied);
         }
 

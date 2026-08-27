@@ -219,36 +219,6 @@ public sealed class MongoProviderIndex
     public int SchemaVersion { get; }
 }
 
-public enum MongoSchemaChangeKind
-{
-    CreateStorageUnit,
-    AddColumn,
-    CreateIndex,
-    AddDerivedColumn,
-    RebuildIndex,
-    UpdateAggregationProfile
-}
-
-public sealed record MongoSchemaChange(MongoSchemaChangeKind Kind, string Identity);
-
-public sealed class MongoSchemaDiff
-{
-    public MongoSchemaDiff(IReadOnlyList<MongoSchemaChange> changes)
-    {
-        ArgumentNullException.ThrowIfNull(changes);
-        Changes = Array.AsReadOnly(changes.ToArray());
-    }
-
-    public IReadOnlyList<MongoSchemaChange> Changes { get; }
-
-    public bool IsEmpty => Changes.Count == 0;
-}
-
-public sealed record MongoSchemaApplyResult(MongoSchemaDiff Diff, bool Applied)
-{
-    public bool IsNoOp => Diff.IsEmpty;
-}
-
 /// <summary>
 /// Native MongoDB admission evidence. Column drift prevents a store from opening; index drift
 /// remains observable so a query coverage gate can refuse only shapes that require that index.
@@ -285,9 +255,9 @@ public interface IMongoProviderCatalog
 
 public interface IMongoSchemaCoordinator
 {
-    MongoSchemaDiff Diff(StorageUnit desired);
+    SchemaDiff Diff(StorageUnit desired);
 
-    MongoSchemaApplyResult Apply(StorageUnit desired);
+    SchemaApplyResult Apply(StorageUnit desired);
 }
 
 public interface IMongoStorageSession

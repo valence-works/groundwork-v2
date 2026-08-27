@@ -225,7 +225,7 @@ full dual-presence semantics and both worked examples.
 | SQLite | Native `DROP COLUMN` and `RENAME COLUMN`; an alteration rebuilds the table in the schema transaction, the same mechanism the dialect already uses to finalize a backfilled column |
 | PostgreSQL | Native, including in-place index rename |
 | SQL Server | Native, through `sp_rename`; a column's auto-named default constraint is dropped with it |
-| MongoDB | Native, through `MongoSchemaExecutor`: a rename `$rename`s the stored field, a drop `$unset`s it, and an alteration re-encodes stored values when the BSON representation changes. Work spans the primary collection and every per-scope collection. The in-process `connection.Schema.Apply` keeps no ledger and still refuses a diverged logical id with `GW-SCHEMA-009`; deploy the rename with `groundwork apply` |
+| MongoDB | Native, through `MongoSchemaExecutor`: a rename `$rename`s the stored field, a drop `$unset`s it, and an alteration re-encodes stored values when the BSON representation changes. Work spans the primary collection and every per-scope collection. Both `connection.Schema.Apply` and `groundwork apply` plan from the applied schema ledger |
 
 > Provider-owned definitions move with their storage for the same reason indexes do: each names
 > itself after the table. SQL Server's batch table type is dropped and recreated under the new name;

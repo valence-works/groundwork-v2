@@ -149,9 +149,9 @@ public sealed class SchemaToolMongoEndToEndTests : IDisposable
     }
 
     /// <summary>
-    /// The rename the in-process coordinator refuses with <c>GW-SCHEMA-009</c>. The deployment tool
-    /// plans it against the applied ledger, so the stored field moves and keeps its value instead
-    /// of a new field appearing beside the old one.
+    /// The in-process coordinator and deployment tool both plan the rename against the applied
+    /// ledger, so the stored field moves and keeps its value instead of a new field appearing beside
+    /// the old one.
     /// </summary>
     [SkippableFact]
     public async Task A_column_rename_carries_its_logical_id_and_moves_the_stored_field()
