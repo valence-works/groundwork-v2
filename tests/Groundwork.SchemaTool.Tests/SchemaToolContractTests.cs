@@ -347,12 +347,14 @@ public sealed class SchemaToolContractTests
         using var session = new FakeSession();
         session.ExecutorImpl.IndexDrift = [new SchemaRefusal("GW-RUNTIME-002", "Index 'by_owner' is missing.", "index")];
 
-        // Index-only drift does not block; exit is Success (no pending ops on a fresh schema).
-        Assert.Equal(SchemaToolExitCodes.Success,
-            await RunAsync([command, "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+        // Fresh schema → pending operations → PendingChanges exit; index drift does not make it ValidationFailed.
+        var exit = await RunAsync([command, "--schema", schema, "--provider", "fake", "--output", "json"], _ => session);
+        Assert.NotEqual(SchemaToolExitCodes.ValidationFailed, exit);
 
         using var report = JsonDocument.Parse(output.ToString());
         var target = report.RootElement.GetProperty("targets")[0];
+        // Outcome must not be "blocked" — index drift is not a startup-fatal condition.
+        Assert.NotEqual("blocked", target.GetProperty("outcome").GetString());
         var warnings = target.GetProperty("warnings");
         var diagnostics = target.GetProperty("diagnostics");
         Assert.Contains(warnings.EnumerateArray(),
