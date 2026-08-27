@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.Query.Model;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
@@ -124,7 +125,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void SQLServer_read_and_query_raise_single_read_events()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server provider-command tests.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertReadEvents(connection, "sqlserver");
@@ -133,7 +134,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void MongoDB_read_and_query_raise_single_read_events()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB provider-command tests.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertReadEvents(connection, "mongodb");
@@ -190,7 +191,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void SQLServer_ordinary_writes_each_raise_one_write_event()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server provider-command tests.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertOrdinaryWritesObserved(connection, "sqlserver");
@@ -199,7 +200,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void MongoDB_ordinary_writes_each_raise_one_write_event()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB provider-command tests.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertOrdinaryWritesObserved(connection, "mongodb");
@@ -377,7 +378,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void SQLServer_conditional_upsert_uses_one_batch_and_preserves_created_at()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server provider-command tests.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertOneRoundTripAndCreatedAt(connection, "sqlserver");
@@ -386,7 +387,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void MongoDB_conditional_upsert_uses_one_native_update_and_preserves_created_at()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB provider-command tests.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertOneRoundTripAndCreatedAt(connection, "mongodb");
@@ -508,7 +509,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void SQLServer_none_provider_writes_use_one_native_statement_and_upsert_overwrites()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server provider-command tests.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertNoneProviderWrites(connection, "sqlserver");
@@ -735,7 +736,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void MongoDB_unique_violation_is_not_misclassified_as_a_cas_conflict()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB provider-command tests.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertUniqueViolationWithoutProbe(connection, "mongodb-unique");
@@ -744,7 +745,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void SQLServer_unique_violation_names_the_index_without_a_probe()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server provider-command tests.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertUniqueViolationWithoutProbe(connection, "sqlserver-unique");
@@ -753,7 +754,7 @@ public sealed class ProviderCommandTests
     [SkippableFact]
     public void MongoDB_provider_sequence_conditional_upsert_refuses_before_any_command()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB provider-command tests.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         var unit = new StorageUnit

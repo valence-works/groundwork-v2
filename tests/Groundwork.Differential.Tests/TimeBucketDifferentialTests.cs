@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
@@ -26,11 +27,11 @@ public sealed class TimeBucketDifferentialTests
 
     [SkippableFact]
     public void SQLServer_live_time_bucket_matches_the_portable_oracle() =>
-        AssertProvider("SQL Server", () => new SqlServerProviderFactory().Create(Required("GROUNDWORK_SQLSERVER_CONNECTION")));
+        AssertProvider("SQL Server", () => new SqlServerProviderFactory().Create(LiveSqlServer.Required()));
 
     [SkippableFact]
     public void MongoDB_live_time_bucket_matches_the_portable_oracle() =>
-        AssertProvider("MongoDB", () => new MongoProviderFactory().Create(Required("GROUNDWORK_MONGO_CONNECTION")));
+        AssertProvider("MongoDB", () => new MongoProviderFactory().Create(LiveMongo.Required()));
 
     [Fact]
     public void SQLite_live_fixed_bucket_preserves_a_fractional_invocation_origin() =>
@@ -43,16 +44,16 @@ public sealed class TimeBucketDifferentialTests
 
     [SkippableFact]
     public void SQLServer_live_fixed_bucket_preserves_a_fractional_invocation_origin() =>
-        AssertFixedProvider("SQL Server", () => new SqlServerProviderFactory().Create(Required("GROUNDWORK_SQLSERVER_CONNECTION")));
+        AssertFixedProvider("SQL Server", () => new SqlServerProviderFactory().Create(LiveSqlServer.Required()));
 
     [SkippableFact]
     public void MongoDB_live_fixed_bucket_preserves_a_fractional_invocation_origin() =>
-        AssertFixedProvider("MongoDB", () => new MongoProviderFactory().Create(Required("GROUNDWORK_MONGO_CONNECTION")));
+        AssertFixedProvider("MongoDB", () => new MongoProviderFactory().Create(LiveMongo.Required()));
 
     [SkippableFact]
     public void MongoDB_time_bucket_global_input_budget_covers_distinct_buckets_in_one_operation()
     {
-        using var connection = new MongoProviderFactory().Create(Required("GROUNDWORK_MONGO_CONNECTION"));
+        using var connection = new MongoProviderFactory().Create(LiveMongo.Required());
         var source = FixedUnit();
         var unit = source with
         {

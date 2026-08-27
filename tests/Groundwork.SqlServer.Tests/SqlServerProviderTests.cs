@@ -2,6 +2,7 @@ using Microsoft.Data.SqlClient;
 using Testcontainers.MsSql;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.LiveDatabases;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
 using Groundwork.Store;
@@ -9,7 +10,7 @@ using Xunit;
 
 namespace Groundwork.SqlServer.Tests;
 
-[Collection("SQL Server provider")]
+[Collection(SqlServerLiveDatabase.Name)]
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [Fact]
@@ -505,11 +506,6 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 
 }
 
-[CollectionDefinition("SQL Server provider", DisableParallelization = true)]
-public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>
-{
-}
-
 public sealed class SqlServerFixture : IAsyncLifetime
 {
     private MsSqlContainer? container;
@@ -537,8 +533,10 @@ public sealed class SqlServerFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        ConnectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION") ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(ConnectionString)) return;
+        // A configured server hands out a database this process owns; without one the suite starts
+        // a container that is already its own.
+        ConnectionString = LiveSqlServer.ConnectionString ?? string.Empty;
+        if (ConnectionString.Length != 0) return;
 
         container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04")
             .WithPassword("Groundwork!2026")

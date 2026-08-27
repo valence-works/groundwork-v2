@@ -9,7 +9,6 @@
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <PackageId>Groundwork.Schema.Generator</PackageId>
     <Description>Roslyn source generator for Groundwork canonical schemas and provider-neutral metadata.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
     <NoWarn>$(NoWarn);NU5128;RS1042;RS1036;RS1032;RS2008</NoWarn>
   </PropertyGroup>
 
@@ -19,7 +18,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
     <None Include="$(TargetPath)" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="$(TargetDir)Groundwork.Schema.Generator.pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="$(TargetDir)Groundwork.Schema.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />

@@ -8,6 +8,22 @@ Previews are published to the public Groundwork Feedz source, **not nuget.org**:
 https://f.feedz.io/valence-works/groundwork/nuget/index.json
 ```
 
+Feedz stays the preview channel. A nuget.org release pipeline is in place and validated on every
+run, but it cannot publish on its own: it has no push or pull-request trigger, requires a published
+GitHub release or a manually retyped version, runs behind a protected environment with required
+reviewers, and needs a credential the repository does not hold. Publishing to a public feed is a
+maintainer decision, not something CI arrives at.
+
+## Target frameworks
+
+Runtime packages multi-target `net8.0` and `net10.0`; analyzers, source generators, and the portable
+contract packages stay `netstandard2.0`. The two runtime targets are one implementation compiled
+twice, not two variants — nothing is compiled conditionally per target, and the fingerprints and
+canonical documents that persist across processes are pinned to literals by suites that run on each
+target. `Groundwork.SchemaTool.MSBuild` is `net10.0` only, because an MSBuild task loads into the
+SDK's MSBuild process rather than into the application; see
+[Installation](Installation) for what that does and does not constrain.
+
 ## Version format
 
 - Packages use SemVer-compatible **pre-1.0** versions: `0.1.0-preview.1`, `0.2.0-preview.1`, …
@@ -105,7 +121,8 @@ A release is not published until all of it is green:
 1. Built from a **tagged commit**.
 2. Packs the **explicit public-project allowlist** (23 packages; samples and benchmarks are not
    release artifacts).
-3. Emits **SourceLink** and **symbol packages**.
+3. Emits **Source Link** and **symbol packages**, asserted against the packed artifacts rather
+   than against the project settings meant to produce them.
 4. Passes the **full four-provider CI suite**.
 5. Passes **package layout verification**.
 6. Passes the **clean-room package-only public API consumer** — built outside the repository source

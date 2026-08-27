@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.Query.Model;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
@@ -461,7 +462,7 @@ public sealed class LifecycleCapabilityProofTests
     [SkippableFact]
     public void SQLServer_lifecycle_capabilities_preserve_high_water_and_exact_retention()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server lifecycle proof.");
         using var database = SqlServerDatabaseLease.Create(connectionString!);
         AssertSqlServerLegacyLifecycleRefusal(database.ConnectionString);
@@ -472,7 +473,7 @@ public sealed class LifecycleCapabilityProofTests
     [SkippableFact]
     public void MongoDB_lifecycle_capabilities_preserve_high_water_and_exact_retention()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB lifecycle proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         Skip.If(!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.ExactRetention),
@@ -483,7 +484,7 @@ public sealed class LifecycleCapabilityProofTests
     [SkippableFact]
     public void MongoDB_unit_of_work_inspection_reads_transactional_high_water()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB transactional inspection proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         Skip.If(!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.DurableHighWaterInspection),

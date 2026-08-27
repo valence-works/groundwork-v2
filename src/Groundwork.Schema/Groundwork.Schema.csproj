@@ -7,12 +7,10 @@
     <IsPackable>true</IsPackable>
     <PackageId>Groundwork.Schema</PackageId>
     <Description>Canonical provider-neutral schema declarations and generated metadata for Groundwork.</Description>
-    <PackageReadmeFile>Groundwork.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Text.Json" />
-    <None Include="../../docs/v2/package-readme.md" Pack="true" PackagePath="Groundwork.md" />
   </ItemGroup>
 
 </Project>
