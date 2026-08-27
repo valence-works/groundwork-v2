@@ -234,8 +234,8 @@ public sealed class RecordTableSession<T>
         ArgumentNullException.ThrowIfNull(query);
         var request = query.Count().Request;
         table.ValidateRequest(request);
-        var result = store.Query(request, table.CreateRenderOptions(null));
-        return result.TotalCount ?? result.Rows.Count;
+        var result = store.Query(QueryRequestExecution.ForProviderCount(request), table.CreateRenderOptions(null));
+        return QueryRequestExecution.RequireTotalCount(request, result.TotalCount);
     }
 
     public bool Any(IGwQueryable<T> query)

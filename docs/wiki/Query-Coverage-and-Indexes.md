@@ -29,7 +29,7 @@ attribute, from referenced assemblies via `GroundworkSchemaMetadata`, or from a 
 `AdditionalFile` selected by `gw_schema_file`.
 
 The closed query surface it understands: `Table<T>()`, `Where`, `WhereIf`, ordering, `Skip`/`Take`,
-and the terminals `QueryAsync`, `CountAsync`, `FirstOrDefaultAsync`, `ToListAsync`.
+and the terminals `ToList`, `ToListAsync`, `Count`, `CountAsync`, `Any`, `AnyAsync`.
 
 - `WhereIf` is enumerated as **every 2ⁿ shape for n ≤ 6**.
 - The reassignment form `if (condition) q = q.Where(...)` is enumerated **up to 32 shapes**.

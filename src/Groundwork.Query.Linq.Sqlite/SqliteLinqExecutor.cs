@@ -8,26 +8,38 @@ namespace Groundwork.Query.Linq.Sqlite;
 public sealed class SqliteLinqExecutor : IGwQueryExecutor
 {
     private readonly IStorageSession session;
-    public SqliteLinqExecutor(IStorageSession session) => this.session = session ?? throw new ArgumentNullException(nameof(session));
 
-    public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
+    public SqliteLinqExecutor(IStorageSession session) =>
+        this.session = session ?? throw new ArgumentNullException(nameof(session));
+
+    public async Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        IReadOnlyList<T> rows = session.Query(request).Rows.Select(row => Materialize<T>(row, model)).ToArray();
-        return Task.FromResult(rows);
+        ArgumentNullException.ThrowIfNull(request);
+        var result = await QueryAsync(request, cancellationToken).ConfigureAwait(false);
+        return result.Rows.Select(row => Materialize<T>(row, model)).ToArray();
     }
 
-    public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default)
+    public async Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var result = session.Query(request);
-        return Task.FromResult(result.TotalCount ?? result.Rows.Count);
+        ArgumentNullException.ThrowIfNull(request);
+        var result = await QueryAsync(QueryRequestExecution.ForProviderCount(request), cancellationToken).ConfigureAwait(false);
+        return QueryRequestExecution.RequireTotalCount(request, result.TotalCount);
     }
 
-    public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default)
+    public async Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        var result = await QueryAsync(QueryRequestExecution.ForExistenceProbe(request), cancellationToken).ConfigureAwait(false);
+        return result.Rows.Count != 0;
+    }
+
+    /// <summary>Uses the session's async query capability when advertised; otherwise the query completes synchronously.</summary>
+    private Task<QueryMaterializedResult> QueryAsync(QueryRequest request, CancellationToken cancellationToken)
+    {
+        if (session is IAsyncQueryStorageSession asyncQuery)
+            return asyncQuery.QueryAsync(request, cancellationToken: cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(session.Query(request).Rows.Count != 0);
+        return Task.FromResult(session.Query(request));
     }
 
     private static T Materialize<T>(IReadOnlyDictionary<string, object?> row, GwTableModel<T>? model)

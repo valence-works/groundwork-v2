@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqliteStorageSession : IStorageSession, IAsyncQueryStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -47,6 +47,41 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
     {
+        var (executionSource, renderOptions, command) = PrepareQuery(request, options);
+        var rows = RelationalQueryResultReader.Read(connection, command, DecodeQueryValue, activeTransaction ?? transaction);
+        AssertExplainPlan(command, renderOptions);
+        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+    });
+
+    public Task<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // Microsoft.Data.Sqlite's async ADO.NET surface completes synchronously, so the reader
+        // task drains inside the same provider gate that serializes every session command while
+        // the token still interrupts the native statement mid-execution.
+        return Task.FromResult(Execute(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (executionSource, renderOptions, command) = PrepareQuery(request, options);
+            var rows = RelationalQueryResultReader.ReadAsync(
+                    connection, command, DecodeQueryValue, activeTransaction ?? transaction, cancellationToken)
+                .GetAwaiter().GetResult();
+            AssertExplainPlan(command, renderOptions);
+            return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+                sourceIncludesRequestedOffset: true,
+                sourceIncludesContinuation: true);
+        }));
+    }
+
+    private (QueryRequest ExecutionSource, QueryRenderOptions RenderOptions, RelationalQueryCommand Command) PrepareQuery(
+        QueryRequest request,
+        QueryRenderOptions? options)
+    {
         ArgumentNullException.ThrowIfNull(request);
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
@@ -66,17 +101,15 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
         commandObserver?.Observe(new ProviderCommandEvent("sqlite.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-        }, activeTransaction ?? transaction);
-        AssertExplainPlan(command, renderOptions);
-        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-    });
+        return (executionSource, renderOptions, command);
+    }
+
+    private object? DecodeQueryValue(string name, object? value)
+    {
+        if (name == "__groundwork_total_count") return value;
+        var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+        return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
+    }
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,

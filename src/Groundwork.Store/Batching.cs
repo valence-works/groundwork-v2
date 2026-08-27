@@ -750,7 +750,7 @@ internal sealed class BatchContext
 }
 
 /// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
-internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal class BatchStorageSession : IStorageSession, IAsyncQueryStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     protected readonly IStorageSession inner;
     protected readonly BatchContext context;
@@ -784,6 +784,18 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
         // staged set rather than the exact-key barrier used by Read.
         context.FlushAll();
         return inner.Query(request, options);
+    }
+
+    public Task<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        context.FlushAll();
+        return inner is IAsyncQueryStorageSession asyncQuery
+            ? asyncQuery.QueryAsync(request, options, cancellationToken)
+            : Task.FromResult(inner.Query(request, options));
     }
 
     public AggregationResult Aggregate(AggregationQuery query)

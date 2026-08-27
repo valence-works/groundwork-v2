@@ -6,7 +6,7 @@ referenced assembly attributes through `GroundworkSchemaMetadata`, or a `.json` 
 selected by `gw_schema_file`.
 
 The closed query surface is deliberately small: `Table<T>()`, `Where`, `WhereIf`, ordering,
-`Skip`/`Take`, and the `QueryAsync`, `CountAsync`, `FirstOrDefaultAsync`, and `ToListAsync` terminal
+`Skip`/`Take`, and the `ToList`, `ToListAsync`, `Count`, `CountAsync`, `Any`, and `AnyAsync` terminal
 methods. `WhereIf` is enumerated as every 2^n shape for n <= 6. The reassignment form
 `if (condition) q = q.Where(...)` is enumerated up to 32 shapes; loops, escapes, unknown helpers,
 and larger compositions are reported as unresolved.

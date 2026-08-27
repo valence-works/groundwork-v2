@@ -65,7 +65,7 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         var member = invocation.Expression as MemberAccessExpressionSyntax;
         if (member is null || !IsTerminal(member.Name.Identifier.ValueText))
             return;
-        if (!QueryResolver.IsCandidate(invocation))
+        if (!QueryResolver.IsClosedSurfaceCandidate(invocation, context.SemanticModel, context.CancellationToken))
             return;
 
         var resolution = QueryResolver.Resolve(invocation, context.SemanticModel, schema, context.CancellationToken);
@@ -171,6 +171,5 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
                 "Groundwork.Query.Model.GwAllowAcceptedScansAttribute",
                 StringComparison.Ordinal));
 
-    private static bool IsTerminal(string name) => name is
-        "QueryAsync" or "CountAsync" or "FirstOrDefaultAsync" or "ToListAsync";
+    private static bool IsTerminal(string name) => QueryResolver.TerminalNames.Contains(name);
 }
