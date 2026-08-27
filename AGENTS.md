@@ -2,13 +2,48 @@
 
 ## Delivery
 
-- The v2 program is tracked in GitHub Project 5. Source issues live in
-  `valence-works/Groundwork`, even though implementation pull requests live in
-  this repository.
-- Target issue pull requests at `codex/groundwork-v2` and use an explicit
-  cross-repository closing reference such as
-  `Closes valence-works/Groundwork#232`.
+- Issues and implementation pull requests both live in this repository,
+  `valence-works/groundwork-v2`. Pull requests target `main` and close their
+  issue with a plain reference: `Closes #232`.
 - Preserve the dependency order and acceptance criteria stated by each issue.
+- A behaviour change, a new CLI surface, or a new diagnostic code needs a
+  release note in `docs/v2/releases/<current release>.md`, and a new diagnostic
+  code also needs a row in `docs/wiki/Diagnostics-Reference.md`. The current
+  release is named by `GroundworkCurrentRelease` in `Directory.Build.props`.
+- Closing a **parent** issue is manual. GitHub closes the sub-issues a pull
+  request names and leaves the parent open, so a phase can read as unfinished
+  when every item in it has shipped.
+
+## Claiming an issue
+
+Several agents and people work this board at once, in separate worktrees and
+sometimes in separate sessions. Two of them starting the same issue costs both
+of them, and neither finds out until a pull request already exists. The claim
+is therefore on the issue, where everyone looks, rather than in any one agent's
+head.
+
+- **Name the branch for the issue**: `<prefix>/<issue number>-<slug>`, for
+  example `claude/203-key-coverage`. Without the number in the name there is no
+  way to ask whether an issue is already being worked short of reading every
+  branch, and two people can pick different reasonable names for the same issue
+  and never recognise each other's work.
+- **Before starting**, the issue must have no assignee, no open pull request
+  referencing it, and no remote branch carrying its number. Free work is
+  `is:issue is:open no:assignee`; the branch check is
+  `git ls-remote --heads origin | grep -E "/<issue number>-"`.
+- **To claim it**, assign yourself and leave one comment naming the branch you
+  will push to and the date. The assignee is the signal that it is taken; the
+  comment says who and where, because several agents can share one account and
+  an assignee alone cannot tell them apart.
+- **Push the branch early**, before the work is finished. An unpushed branch is
+  invisible to everyone else, and a claim nobody can verify is a claim nobody
+  can safely inherit.
+- **To release it**, unassign and say why. Leaving a claim behind when you stop
+  is worse than never making one, because the issue then looks worked when it
+  is not.
+- **A claim goes stale** when the branch it names has had no commit for four
+  hours. Anyone may take a stale claim, after saying so on the issue.
+- A merged pull request closes the issue and the claim goes with it.
 
 ## Architecture
 
