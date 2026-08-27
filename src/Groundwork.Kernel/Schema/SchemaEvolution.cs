@@ -128,10 +128,12 @@ internal sealed class SchemaEvolutionAnalysis
     public static SchemaEvolutionAnalysis Analyze(
         PhysicalSchemaTarget target,
         PhysicalSchemaAppliedState? applied,
-        IReadOnlyList<PhysicalSchemaOperation> desired)
+        IReadOnlyList<PhysicalSchemaOperation> desired,
+        ColumnSupersessionPlan? supersessions = null)
     {
         if (applied is null)
             return Empty;
+        supersessions ??= ColumnSupersessionPlan.Empty;
 
         var appliedSubject = applied.Snapshot.Subject;
         var appliedColumnIds = appliedSubject.Columns.ToDictionary(
@@ -162,7 +164,7 @@ internal sealed class SchemaEvolutionAnalysis
         var rebuiltIndexes = new HashSet<string>(StringComparer.Ordinal);
         PlanPrimaryStorageRename(target, applied, appliedSubject, operations);
         PlanColumnEvolution(target, appliedSubject, appliedColumns, desiredColumns, operations, refusals, rebuiltIndexes);
-        PlanRemovals(target, appliedSubject, desiredColumns, operations, refusals);
+        PlanRemovals(target, appliedSubject, desiredColumns, supersessions.WithheldColumns, operations, refusals);
 
         MarkSatisfied(appliedSubject, target.Subject, desired, desiredColumnIds, operations, satisfied);
         ReportUnevolvedApplied(desired, appliedByLogicalSlot, desiredColumnIds, operations, refusals);
@@ -338,12 +340,18 @@ internal sealed class SchemaEvolutionAnalysis
         PhysicalSchemaTarget target,
         SchemaSubject appliedSubject,
         IReadOnlyDictionary<string, ColumnDefinition> desiredColumns,
+        IReadOnlySet<string> withheldColumns,
         List<PhysicalSchemaOperation> operations,
         List<SchemaRefusal> refusals)
     {
         foreach (var column in appliedSubject.Columns.OrderBy(column => column.Name, StringComparer.Ordinal))
         {
             if (desiredColumns.ContainsKey(column.LogicalId))
+                continue;
+            // A superseded column is removed by its own operation in the contract phase, or by
+            // nothing at all in the expand phase. Either way the ordinary removal rule stays out of
+            // it, so there is exactly one place that decides when a superseded column goes.
+            if (withheldColumns.Contains(column.Name))
                 continue;
             if (appliedSubject.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
             {
@@ -391,6 +399,24 @@ internal sealed class SchemaEvolutionAnalysis
             .ToHashSet(StringComparer.Ordinal);
         foreach (var (slot, operation) in appliedByLogicalSlot.OrderBy(entry => entry.Key, StringComparer.Ordinal))
         {
+            if (operation.Kind == PhysicalSchemaOperationKind.ColumnSupersession && !desiredSlots.Contains(slot))
+            {
+                // Withdrawing a supersession from the declaration is how the workflow ends, but only
+                // once the column is actually gone. Dropping the declaration while the column is
+                // still retained would strand it: physically present and named by nothing.
+                if (ColumnSupersessionOperation.TryReadPayload(operation.CanonicalPayload, out _, out var state) &&
+                    state == ColumnSupersessionState.Contracted)
+                {
+                    continue;
+                }
+                refusals.Add(new SchemaRefusal(
+                    ExpandContractCodes.RetainedSupersessionWithdrawn,
+                    $"Column '{operation.SubjectIdentity}' is recorded as retained by an expand plan, and this " +
+                    "declaration no longer supersedes it. Contract it before withdrawing the supersession.",
+                    $"schema.supersessions.{operation.SubjectIdentity}"));
+                continue;
+            }
+
             if (desiredSlots.Contains(slot) ||
                 (renamesStorage && operation.Kind == PhysicalSchemaOperationKind.ApplyProviderDefinition) ||
                 operation.Kind is PhysicalSchemaOperationKind.CreatePrimaryStorage or

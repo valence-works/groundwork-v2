@@ -287,6 +287,22 @@ refusals. `GW-RUNTIME-002` now means only what its own row says: **index drift**
 
 ---
 
+## `GW-EXPAND-*` — expand–contract workflows
+
+The contract half of an expand–contract evolution refuses until its readiness is **established** from
+durable state. See **[expand–contract workflows](../v2/expand-contract.md)**.
+
+| Code | Meaning |
+| --- | --- |
+| `GW-EXPAND-001` | The applied ledger does not record the column as retained beside its replacement — the expand plan has not been applied |
+| `GW-EXPAND-002` | The data migration that populates the replacement column is not recorded complete |
+| `GW-EXPAND-003` | The declared dual-presence window has not elapsed |
+| `GW-EXPAND-004` | A contract plan was requested without readiness established from durable state |
+| `GW-EXPAND-005` | Readiness was established for another target or against another applied state |
+| `GW-EXPAND-006` | A declaration withdrew a supersession whose column is still retained |
+
+---
+
 ## `GW-MIGRATION-*` — data migrations
 
 | Code | Meaning |

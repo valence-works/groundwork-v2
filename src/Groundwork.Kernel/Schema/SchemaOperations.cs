@@ -19,7 +19,10 @@ public enum PhysicalSchemaOperationKind
     AlterColumn,
     DropColumn,
     DropIndex,
-    DropPrimaryStorage
+    DropPrimaryStorage,
+
+    /// <summary>Records that a superseded column is retained beside its replacement, or contracted.</summary>
+    ColumnSupersession
 }
 
 /// <summary>One immutable semantic schema operation with deterministic identity and fingerprint.</summary>
@@ -514,6 +517,65 @@ public sealed class DropColumnOperation : PhysicalSchemaOperation
 
     /// <summary>The column definition being removed, as the applied ledger recorded it.</summary>
     public ColumnDefinition Column { get; }
+}
+
+/// <summary>
+/// Records one superseded column's place in the expand–contract workflow. It performs no physical
+/// work: it is the ledger entry that says a column is still there on purpose, and the durable fact
+/// a later contract plan reads to establish that the dual-presence window has been open and for how
+/// long. <see cref="ColumnSupersessionState.Contracted"/> is terminal — once recorded, no plan in
+/// either phase re-adds the column.
+/// </summary>
+public sealed class ColumnSupersessionOperation : PhysicalSchemaOperation
+{
+    internal ColumnSupersessionOperation(
+        SchemaSubject subject,
+        ColumnSupersession supersession,
+        ColumnSupersessionState state)
+        : base(
+            PhysicalSchemaOperationKind.ColumnSupersession,
+            subject.Id,
+            supersession.Name,
+            null,
+            supersession.ReplacementColumn,
+            state.ToString())
+    {
+        Subject = subject;
+        Supersession = supersession;
+        State = state;
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    public ColumnSupersession Supersession { get; }
+
+    public ColumnSupersessionState State { get; }
+
+    /// <summary>
+    /// Reads the replacement column and state back out of a recorded canonical payload. The layout
+    /// is the base operation's: kind, subject id, subject identity, slot, then the two semantic
+    /// parts this operation adds.
+    /// </summary>
+    internal static bool TryReadPayload(
+        string canonicalPayload,
+        out string replacementColumn,
+        out ColumnSupersessionState state)
+    {
+        replacementColumn = string.Empty;
+        state = default;
+        if (!SchemaFingerprint.TryParseCanonical(canonicalPayload, out var parts) ||
+            parts.Length < 6 ||
+            string.IsNullOrWhiteSpace(parts[4]) ||
+            !Enum.TryParse(parts[5], ignoreCase: false, out state) ||
+            !Enum.IsDefined(state))
+        {
+            return false;
+        }
+
+        replacementColumn = parts[4]!;
+        return true;
+    }
 }
 
 /// <summary>Removes one declared index.</summary>
