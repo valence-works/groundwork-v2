@@ -309,28 +309,29 @@ internal class MongoStoreSession(
     }
 
     public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
-        RequireSetMutation("update-where").UpdateWhere(where, assignments);
+        SetMutation.UpdateWhere(where, assignments);
 
     public ValueTask<SetMutationResult> UpdateWhereAsync(
         Predicate where,
         IReadOnlyDictionary<string, object?> assignments,
         CancellationToken cancellationToken = default) =>
-        RequireSetMutation("update-where").UpdateWhereAsync(where, assignments, cancellationToken);
+        SetMutation.UpdateWhereAsync(where, assignments, cancellationToken);
 
-    public SetMutationResult DeleteWhere(Predicate where) =>
-        RequireSetMutation("delete-where").DeleteWhere(where);
+    public SetMutationResult DeleteWhere(Predicate where) => SetMutation.DeleteWhere(where);
 
     public ValueTask<SetMutationResult> DeleteWhereAsync(
         Predicate where,
         CancellationToken cancellationToken = default) =>
-        RequireSetMutation("delete-where").DeleteWhereAsync(where, cancellationToken);
+        SetMutation.DeleteWhereAsync(where, cancellationToken);
 
-    private ISetMutationStorageSession RequireSetMutation(string operation)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, operation);
-        return inner as ISetMutationStorageSession ?? throw new NotSupportedException(
+    /// <summary>
+    /// Set-based mutation has no per-row fallback — building one would be the row-at-a-time loop
+    /// this operation exists to replace — so a native session that does not implement it is refused
+    /// by name rather than approximated. Access is checked by the native session, not restated here.
+    /// </summary>
+    private ISetMutationStorageSession SetMutation =>
+        inner as ISetMutationStorageSession ?? throw new NotSupportedException(
             "GW-SET-001: this MongoDB session does not advertise set-based mutation.");
-    }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {

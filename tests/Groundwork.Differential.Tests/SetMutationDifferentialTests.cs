@@ -221,6 +221,16 @@ public sealed class SetMutationDifferentialTests
         Assert.Equal(new[] { "a1", "a2", "g1", "g2", "o1", "o2", "o3" }, Ids(second, unit));
         Assert.Equal(new string?[] { "scoped", "scoped", "scoped" }, Labels(first, unit, "old"));
         Assert.Equal(new string?[] { "keep", "keep", "keep" }, Labels(second, unit, "old"));
+
+        // A privileged cross-scope session sees every scope at once and so has no scope to write
+        // to. The provider session refuses it, which is what a caller who reaches the capability
+        // interface directly — bypassing the admitted entry point — actually meets.
+        var privileged = (ISetMutationStorageSession)connection.OpenSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("operator", "P4.3 acceptance proof")));
+        var refusal = Assert.Throws<InvalidOperationException>(() => privileged.DeleteWhere(Status(unit, "old")));
+        Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
+        Assert.Equal(new[] { "a1", "a2", "o1", "o2", "o3" }, Ids(first, unit));
     }
 
     /// <summary>

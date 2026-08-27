@@ -36,6 +36,13 @@ public sealed class SetMutationCapabilityTests
         Assert.Contains("GW-SET-001", update.Message, StringComparison.Ordinal);
 
         Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?>(StringComparer.Ordinal) { ["id"] = "a" })));
+
+        // A unit-of-work session is a wrapper that always carries the capability interface, so the
+        // wrapper is where the refusal has to be named for a staged caller.
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        var staged = work.OpenSession(unit);
+        var wrapped = Assert.Throws<NotSupportedException>(() => staged.DeleteWhere(Status(unit, "open")));
+        Assert.Contains("GW-SET-001", wrapped.Message, StringComparison.Ordinal);
     }
 
     private static Predicate Status(StorageUnit unit, string value)

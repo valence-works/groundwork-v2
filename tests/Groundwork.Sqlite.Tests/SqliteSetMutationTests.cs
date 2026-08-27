@@ -174,7 +174,13 @@ public sealed class SqliteSetMutationTests
             new() { Name = "amount", Type = PortableType.Decimal, IsNullable = true, Precision = 18, Scale = 4 }
         ],
         Key = new KeyDefinition { Columns = ["id"] },
-        Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
+        Indexes =
+        [
+            new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] },
+            // Indexed so that the non-portable-predicate proof is refused for being non-portable
+            // rather than for being uncovered.
+            new IndexDefinition { Name = "by_amount", Columns = [new IndexColumn("amount")] }
+        ]
     };
 
     private static StorageUnit FoldedUnit() => new()
