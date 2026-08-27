@@ -32,7 +32,11 @@ public static class QueryCoverageChecker
                 Array.Empty<CoverageRefusal>(),
                 "The normalized predicate is always false and requires no provider read.");
         }
-        var suggested = SuggestIndex(request, constraints);
+        var declaredKey = candidates.FirstOrDefault(index => index.IsDeclaredKey);
+        var composed = SuggestIndex(request, constraints);
+        // A suggestion over the leading columns of the declared key would only duplicate the
+        // primary key, so it is withheld and the point-read path is named instead.
+        var suggested = DuplicatesDeclaredKey(composed, declaredKey) ? null : composed;
 
         var refusals = new List<Refusal>();
         foreach (var order in request.Order)
@@ -113,14 +117,35 @@ public static class QueryCoverageChecker
         QueryRequest request,
         string reason,
         CoverageIndex? nearest,
-        CoverageIndex suggested)
+        CoverageIndex? suggested)
     {
         var nearestText = nearest is null
             ? "Nearest index: <none>."
             : "Nearest index '" + nearest.Name + "' (" + Describe(nearest) + ").";
+        var fix = suggested is null
+            ? "Those columns are the leading columns of the declared key, which is already indexed;" +
+              " declaring an index over them would duplicate the primary key. Read by key instead:" +
+              " session.Read(key), or the typed Records read."
+            : "Add: " + suggested.Declaration;
         return "Query on '" + request.Table.Value + "' is not index-covered. " + reason + " " +
-               nearestText + " Add: " + suggested.Declaration +
+               nearestText + " " + fix +
                " Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").";
+    }
+
+    /// <summary>
+    /// Whether the suggested columns are the leading columns of the declared key. Order within the
+    /// suggestion is not compared: an index over the same set of leading key columns is redundant
+    /// however it is spelled, because the key already covers every predicate that set can bound.
+    /// </summary>
+    private static bool DuplicatesDeclaredKey(CoverageIndex suggested, CoverageIndex? declaredKey)
+    {
+        if (declaredKey is null || suggested.Columns.Length > declaredKey.Columns.Length)
+            return false;
+        var leading = declaredKey.Columns
+            .Take(suggested.Columns.Length)
+            .Select(column => column.Column)
+            .ToArray();
+        return suggested.Columns.All(column => leading.Contains(column.Column, StringComparer.Ordinal));
     }
 
     private static Refusal? CheckIndex(QueryRequest request, ConstraintSet constraints, CoverageIndex index)

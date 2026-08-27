@@ -79,6 +79,14 @@ public sealed record CoverageIndex
     public ImmutableArray<CoverageIndexColumn> Columns { get; }
     public IndexMissingValueBehavior MissingValues { get; }
 
+    /// <summary>
+    /// Whether this candidate is the unit's declared key rather than a declared secondary index.
+    /// It is set by <see cref="CoverageCandidates.Derive"/>, the one place candidates are derived.
+    /// A refusal never advises declaring an index over the leading columns of the key: that index
+    /// already exists as the primary key, so declaring it again only duplicates storage.
+    /// </summary>
+    public bool IsDeclaredKey { get; init; }
+
     public string Declaration =>
         "[GwIndex(\"" + Escape(Name) + "\", " +
         "\"" + Escape(string.Join(", ", Columns.Select(column =>
