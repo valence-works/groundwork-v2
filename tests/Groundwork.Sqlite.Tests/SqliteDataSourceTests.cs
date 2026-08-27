@@ -43,6 +43,16 @@ public sealed class SqliteDataSourceTests
         Assert.Equal(Path.GetFullPath(path), SqliteDataSource.FullPath("file:" + path));
     }
 
+    [Theory]
+    [InlineData("100%done.db")]
+    [InlineData("draft%.db")]
+    [InlineData("run%zz.db")]
+    public void A_file_uri_keeps_a_percent_that_is_not_an_escape(string name)
+    {
+        var path = Path.Combine(Path.GetTempPath(), name);
+        Assert.Equal(Path.GetFullPath(path), SqliteDataSource.FullPath("file:" + path));
+    }
+
     private static StorageUnit Unit() => new()
     {
         Id = new StorageUnitId("uri.probe.unit"),
