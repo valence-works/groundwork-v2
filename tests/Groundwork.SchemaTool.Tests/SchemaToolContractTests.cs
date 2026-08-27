@@ -125,6 +125,26 @@ public sealed class SchemaToolContractTests
         Assert.Contains(member, failure.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("\"type\":\"String\"", "\"type\":\"999\"", "type")]
+    [InlineData("\"folding\":\"None\"", "\"folding\":\"999\"", "folding")]
+    [InlineData(
+        "\"indexes\":[]",
+        "\"indexes\":[],\"aggregations\":[{\"name\":\"summary\",\"groupByColumns\":[],"
+        + "\"groupBy\":[{\"alias\":\"day\",\"bucket\":\"999\",\"sourceColumn\":\"id\",\"widthTicks\":0}],"
+        + "\"aggregates\":[]}]",
+        "bucket")]
+    public void An_enum_outside_its_declared_members_is_refused_by_name(
+        string original, string replacement, string member)
+    {
+        var undefined = ValidSchema.Replace(original, replacement, StringComparison.Ordinal);
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Read(undefined));
+
+        Assert.Contains(member, failure.Message, StringComparison.Ordinal);
+        Assert.Contains("999", failure.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void A_null_aggregations_member_is_absent_but_a_wrong_typed_one_is_refused()
     {

@@ -438,7 +438,10 @@ public static class GroundworkSchemaCanonical
     private static T EnumValue<T>(JsonElement parent, string name) where T : struct, Enum
     {
         var text = RequiredString(parent, name);
-        return Enum.TryParse<T>(text, ignoreCase: false, out var value)
+        // Enum.TryParse also accepts numeric text, which yields an undefined value for a
+        // number outside the declared members. Refuse it by name rather than letting it
+        // fall through to whatever a downstream switch treats as its default.
+        return Enum.TryParse<T>(text, ignoreCase: false, out var value) && Enum.IsDefined(typeof(T), value)
             ? value
             : throw new FormatException($"Schema JSON property '{name}' has unknown value '{text}'.");
     }
