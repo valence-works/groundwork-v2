@@ -120,6 +120,96 @@ public abstract class RelationalDialect
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Redefines an existing column in place. The default reuses <see cref="FinalizeColumn"/>,
+    /// because finalizing a backfilled column and widening or narrowing one are the same physical
+    /// act on every dialect Groundwork ships: replace the column's definition with the declared one.
+    /// </summary>
+    public virtual void AlterColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ColumnDefinition definition) =>
+        FinalizeColumn(connection, transaction, table, definition);
+
+    /// <summary>Removes one column and every value stored in it.</summary>
+    public virtual string DropColumnSql(string table, string column) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(column)};";
+
+    /// <summary>
+    /// Removes one column. Providers that cannot express the removal as a single statement override
+    /// this hook; the default executes <see cref="DropColumnSql"/>.
+    /// </summary>
+    public virtual void DropColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(definition);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = DropColumnSql(table, definition.Name);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>Removes the primary storage and every row in it.</summary>
+    public virtual string DropTableSql(string table) => $"DROP TABLE {QuoteIdentifier(table)};";
+
+    /// <summary>Renames the primary storage, carrying its rows with it.</summary>
+    public virtual string RenameTableSql(string table, string renamed) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} RENAME TO {QuoteIdentifier(renamed)};";
+
+    /// <summary>
+    /// Renames the primary storage. Providers whose physical index names embed the storage name
+    /// override this hook so their catalog stays addressable afterwards.
+    /// </summary>
+    public virtual void RenameTable(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        string renamed)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = RenameTableSql(table, renamed);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Moves one index onto renamed storage. Every dialect Groundwork ships derives its physical
+    /// index name from the storage name, so the index has to move with it. The portable default
+    /// drops and recreates; a dialect with a native index rename overrides this to keep it cheap.
+    /// </summary>
+    public virtual void RenameIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string fromTable,
+        string toTable,
+        IndexDefinition index)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(index);
+        Execute(connection, transaction, DropIndexSql(fromTable, index.Name));
+        Execute(connection, transaction, CreateIndexSql(toTable, index, IndexFilter(index)));
+    }
+
+    /// <summary>Runs one statement on the dialect's schema connection and transaction.</summary>
+    protected static void Execute(DbConnection connection, DbTransaction transaction, string sql)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>Renames one column in place, carrying its values with it.</summary>
+    public virtual string RenameColumnSql(string table, string column, string renamed) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} RENAME COLUMN {QuoteIdentifier(column)} TO {QuoteIdentifier(renamed)};";
+
     public abstract string CreateIndexSql(string table, IndexDefinition index, string? filter);
 
     public abstract string DropIndexSql(string table, string index);

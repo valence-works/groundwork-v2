@@ -264,13 +264,17 @@ public static class GroundworkRuntimeSchemaAdmission
                 return authorization?.Invoke(currentPlan) ?? PhysicalSchemaPlanAuthorization.Allow;
             }
 
-            var refusals = protection.DestructiveOperationIdentities
-                .Select(identity => new SchemaRefusal(
-                    "GW-RUNTIME-002",
-                    $"Startup auto-apply requires explicit authorization for destructive operation '{identity}'.",
+            // These name work that is planned and valid but unauthorized, which is a different
+            // verdict from schema drift; GW-RUNTIME-002 means an index no longer matches its
+            // declaration and would misreport this as a broken catalog.
+            var refusals = protection.DestructiveOperations
+                .Select(operation => new SchemaRefusal(
+                    "GW-SCHEMA-007",
+                    $"Startup auto-apply requires explicit authorization for destructive operation " +
+                    $"'{operation.Address ?? operation.Identity}'.",
                     "runtime-schema-admission"))
                 .Concat(protection.SemanticMigrationIdentities.Select(identity => new SchemaRefusal(
-                    "GW-RUNTIME-002",
+                    "GW-SCHEMA-008",
                     $"Startup auto-apply requires explicit authorization for semantic migration '{identity}'.",
                     "runtime-schema-admission")))
                 .ToArray();

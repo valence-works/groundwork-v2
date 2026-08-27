@@ -149,7 +149,7 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
-    public void Changed_declared_schema_still_refuses_even_beside_a_provider_definition()
+    public void Changed_declared_index_rebuilds_even_beside_a_provider_definition()
     {
         static PhysicalSchemaTarget Target(StorageUnit unit) => new(
             new SchemaSubject(unit),
@@ -172,8 +172,11 @@ public sealed class K5SchemaEvolutionTests
             PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
             PlannedAt.AddMinutes(2));
 
-        Assert.False(plan.IsApplicable);
-        Assert.Contains(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-003");
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var rebuild = Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        Assert.Equal("by_priority", rebuild.Index.Name);
+        Assert.Equal(SortDirection.Descending, Assert.Single(rebuild.Index.Columns).Direction);
+        Assert.Contains(rebuild.Identity, PhysicalSchemaPlanProtection.Inspect(plan.Operations).DestructiveOperationIdentities);
     }
 
     [Fact]
@@ -199,7 +202,7 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
-    public void Changing_an_applied_column_is_refused_as_non_additive()
+    public void Widening_an_applied_column_plans_an_authorized_alter()
     {
         var initial = CreateTarget(CreateUnit(includePriority: false));
         var executor = new FakeExecutor();
@@ -218,9 +221,72 @@ public sealed class K5SchemaEvolutionTests
             PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
             PlannedAt.AddMinutes(2));
 
-        Assert.False(plan.IsApplicable);
-        Assert.Equal("GW-SCHEMA-003", Assert.Single(plan.Refusals).Code);
-        Assert.Empty(plan.Operations);
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var alter = Assert.Single(plan.Operations.OfType<AlterColumnOperation>());
+        Assert.Equal(ColumnAlterationKind.Widening, alter.Alteration);
+        Assert.Equal(100, alter.From.MaxLength);
+        Assert.Equal(200, alter.Column.MaxLength);
+        // A widening keeps every stored value, so it is authorized as a semantic migration rather
+        // than as a destructive one — and the alter is not re-run as an add.
+        Assert.Empty(plan.Operations.OfType<AddColumnOperation>());
+        var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+        Assert.Empty(protection.DestructiveOperations);
+        Assert.Contains("alter-column:customer.name", protection.SemanticMigrationIdentities);
+    }
+
+    [Fact]
+    public void Narrowing_an_applied_column_plans_a_destructive_alter()
+    {
+        var initial = CreateTarget(CreateUnit(includePriority: false));
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(initial, executor, PlannedAt.AddMinutes(1));
+        var narrowed = CreateUnit(includePriority: false) with
+        {
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "name", Type = PortableType.String, IsNullable = false, MaxLength = 40 }
+            ]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(narrowed),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var alter = Assert.Single(plan.Operations.OfType<AlterColumnOperation>());
+        Assert.Equal(ColumnAlterationKind.Narrowing, alter.Alteration);
+        var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+        Assert.Equal("alter-column:customer.name", Assert.Single(protection.DestructiveOperations).Address);
+        Assert.Empty(protection.SemanticMigrationIdentities);
+    }
+
+    [Theory]
+    [InlineData(18, 4, 28, 4, ColumnAlterationKind.Widening)]
+    [InlineData(28, 4, 18, 4, ColumnAlterationKind.Narrowing)]
+    [InlineData(18, 4, 18, 2, ColumnAlterationKind.Narrowing)]
+    [InlineData(18, 4, 20, 6, ColumnAlterationKind.Narrowing)]
+    public void Decimal_precision_widens_only_at_an_unchanged_scale(
+        int appliedPrecision,
+        int appliedScale,
+        int declaredPrecision,
+        int declaredScale,
+        ColumnAlterationKind expected)
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(
+            CreateTarget(CreateDecimalUnit(appliedPrecision, appliedScale)),
+            executor,
+            PlannedAt.AddMinutes(1));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(CreateDecimalUnit(declaredPrecision, declaredScale)),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        Assert.Equal(expected, Assert.Single(plan.Operations.OfType<AlterColumnOperation>()).Alteration);
     }
 
     [Fact]
@@ -243,7 +309,7 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
-    public void Widening_index_without_nullable_keys_revalidates_with_create()
+    public void Widening_index_without_nullable_keys_is_still_a_rebuild()
     {
         var initial = CreateTarget(CreateNonNullableIndexUnit(MissingValueBehavior.Excluded));
         var executor = new FakeExecutor();
@@ -255,9 +321,11 @@ public sealed class K5SchemaEvolutionTests
             PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
             PlannedAt.AddMinutes(2));
 
-        Assert.True(plan.IsApplicable);
-        Assert.Single(plan.Operations.OfType<CreatePhysicalIndexOperation>());
-        Assert.Empty(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
+        // Re-issuing the create would be a silent no-op on every provider, because their create is
+        // idempotent by name and would leave the deployed index on its old partial-index filter.
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        Assert.Empty(plan.Operations.OfType<CreatePhysicalIndexOperation>());
+        Assert.Single(plan.Operations.OfType<RebuildPhysicalIndexOperation>());
     }
 
     [Fact]
@@ -308,7 +376,7 @@ public sealed class K5SchemaEvolutionTests
 
         Assert.False(result.IsReady);
         Assert.Equal(PhysicalSchemaApplicationOutcome.AuthorizationRequired, result.Application!.Outcome);
-        Assert.Contains(result.Refusals, diagnostic => diagnostic.Code == "GW-RUNTIME-002");
+        Assert.Contains(result.Refusals, diagnostic => diagnostic.Code == "GW-SCHEMA-007");
         Assert.Null(executor.AppliedState);
     }
 
@@ -334,7 +402,7 @@ public sealed class K5SchemaEvolutionTests
         Assert.False(result.IsReady);
         Assert.Equal(PhysicalSchemaApplicationOutcome.AuthorizationRequired, result.Application!.Outcome);
         Assert.Contains(result.Plan.Operations, operation => operation is BackfillColumnOperation backfill && backfill.Derived is not null);
-        Assert.Contains(result.Refusals, diagnostic => diagnostic.Code == "GW-RUNTIME-002" &&
+        Assert.Contains(result.Refusals, diagnostic => diagnostic.Code == "GW-SCHEMA-007" &&
             diagnostic.Message.Contains("backfill-column", StringComparison.Ordinal));
         Assert.Null(executor.AppliedState);
     }
@@ -754,6 +822,431 @@ public sealed class K5SchemaEvolutionTests
                 MissingValues = missingValues
             }
         ]
+    };
+
+    /// <summary>
+    /// Rename support must not restate every deployed catalog. A declaration that renames nothing
+    /// records no logical id at all, so its applied state stays exactly the document — and the
+    /// fingerprint — an earlier build wrote.
+    /// </summary>
+    [Fact]
+    public void A_declaration_that_renames_nothing_records_no_logical_id()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+
+        var recorded = PhysicalSchemaAppliedStateSerializer.Serialize(executor.AppliedState!);
+
+        // The unit id serializes as an object; a column id would be a bare string.
+        Assert.DoesNotContain("\"id\":\"", recorded, StringComparison.Ordinal);
+        Assert.Equal(
+            executor.AppliedState!.TargetFingerprint,
+            PhysicalSchemaAppliedStateSerializer.Deserialize(recorded).TargetFingerprint);
+    }
+
+    [Fact]
+    public void A_renamed_column_records_the_logical_id_it_is_planned_under()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: false)), executor, PlannedAt.AddMinutes(1));
+        var renamed = CreateTarget(RenameColumn(CreateUnit(includePriority: false), "name", "full_name"));
+
+        var applied = PhysicalSchemaApplication.Apply(
+            renamed, executor, PlannedAt.AddMinutes(2), _ => PhysicalSchemaPlanAuthorization.Allow);
+        var recorded = PhysicalSchemaAppliedStateSerializer.Serialize(applied.AppliedState!);
+
+        Assert.Contains("\"id\":\"name\"", recorded, StringComparison.Ordinal);
+        Assert.Equal(
+            applied.AppliedState!.TargetFingerprint,
+            PhysicalSchemaAppliedStateSerializer.Deserialize(recorded).TargetFingerprint);
+    }
+
+    [Fact]
+    public void Altering_an_indexed_column_takes_its_index_out_of_the_way_and_puts_it_back()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+        var widened = CreateUnit(includePriority: true) with
+        {
+            Columns = [.. CreateUnit(includePriority: true).Columns.Select(column => column.Name == "priority"
+                ? column with { Type = PortableType.Int64 }
+                : column)]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(widened),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var operations = plan.Operations.ToArray();
+        var dropIndex = Assert.Single(plan.Operations.OfType<DropPhysicalIndexOperation>());
+        var alter = Assert.Single(plan.Operations.OfType<AlterColumnOperation>());
+        var createIndex = Assert.Single(plan.Operations.OfType<CreatePhysicalIndexOperation>());
+        Assert.Equal("by_priority", dropIndex.Index.Name);
+        Assert.Equal("by_priority", createIndex.Index.Name);
+        Assert.True(Array.IndexOf(operations, dropIndex) < Array.IndexOf(operations, alter));
+        Assert.True(Array.IndexOf(operations, alter) < Array.IndexOf(operations, createIndex));
+
+        var applied = PhysicalSchemaApplication.Apply(
+            CreateTarget(widened),
+            executor,
+            PlannedAt.AddMinutes(3),
+            _ => PhysicalSchemaPlanAuthorization.Allow);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
+                CreateTarget(widened),
+                PhysicalSchemaHistoryState.FromApplied(applied.AppliedState!),
+                PlannedAt.AddMinutes(4))
+            .Operations);
+    }
+
+    [Fact]
+    public void Renaming_a_column_plans_a_rename_rather_than_a_drop_and_an_add()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: false)), executor, PlannedAt.AddMinutes(1));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(RenameColumn(CreateUnit(includePriority: false), "name", "full_name")),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var rename = Assert.Single(plan.Operations.OfType<RenameColumnOperation>());
+        Assert.Equal("name", rename.FromName);
+        Assert.Equal("full_name", rename.ToName);
+        Assert.Empty(plan.Operations.OfType<DropColumnOperation>());
+        Assert.Empty(plan.Operations.OfType<AddColumnOperation>());
+        // A rename carries data, so it is authorized as semantic work rather than destructive.
+        var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+        Assert.Empty(protection.DestructiveOperations);
+        Assert.Contains("rename-column:customer.full_name", protection.SemanticMigrationIdentities);
+    }
+
+    /// <summary>
+    /// A rename is only a rename because the declaration claims continuity. Renaming the column
+    /// without keeping its logical id says the old column is gone and a new one has arrived, and the
+    /// plan takes the declaration at its word — under destructive authorization.
+    /// </summary>
+    [Fact]
+    public void Renaming_a_column_without_keeping_its_logical_id_plans_a_drop_and_an_add()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: false)), executor, PlannedAt.AddMinutes(1));
+        var replaced = CreateUnit(includePriority: false) with
+        {
+            Columns = [.. CreateUnit(includePriority: false).Columns.Select(column => column.Name == "name"
+                ? column with { Name = "full_name", IsNullable = true }
+                : column)]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(replaced),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        Assert.Empty(plan.Operations.OfType<RenameColumnOperation>());
+        Assert.Equal("name", Assert.Single(plan.Operations.OfType<DropColumnOperation>()).Column.Name);
+        Assert.Equal("full_name", Assert.Single(plan.Operations.OfType<AddColumnOperation>()).Column.Name);
+        Assert.Contains(
+            "drop-column:customer.name",
+            PhysicalSchemaPlanProtection.Inspect(plan.Operations).DestructiveOperations.Select(item => item.Address));
+    }
+
+    [Fact]
+    public void An_applied_rename_records_the_new_name_and_replans_as_a_no_op()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: false)), executor, PlannedAt.AddMinutes(1));
+        var renamed = CreateTarget(RenameColumn(CreateUnit(includePriority: false), "name", "full_name"));
+
+        var applied = PhysicalSchemaApplication.Apply(renamed, executor, PlannedAt.AddMinutes(2), _ => PhysicalSchemaPlanAuthorization.Allow);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        // The rename itself leaves no residue: the ledger simply names the column its new name.
+        Assert.DoesNotContain(applied.AppliedState!.Snapshot.SemanticOperations,
+            operation => operation.Kind == PhysicalSchemaOperationKind.RenameColumn);
+        Assert.Contains(applied.AppliedState.Snapshot.SemanticOperations,
+            operation => operation.Kind == PhysicalSchemaOperationKind.AddColumn && operation.SubjectIdentity == "full_name");
+        Assert.DoesNotContain(applied.AppliedState.Snapshot.SemanticOperations,
+            operation => operation.SubjectIdentity == "name");
+        Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
+                renamed,
+                PhysicalSchemaHistoryState.FromApplied(applied.AppliedState),
+                PlannedAt.AddMinutes(3))
+            .Operations);
+    }
+
+    [Fact]
+    public void Renaming_primary_storage_plans_a_rename_that_carries_its_applied_indexes()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+
+        var renamed = CreateTarget(CreateUnit(includePriority: true) with { Name = "CustomerAccount" });
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            renamed,
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var rename = Assert.Single(plan.Operations.OfType<RenamePrimaryStorageOperation>());
+        Assert.Equal("Customer", rename.FromName);
+        Assert.Equal("CustomerAccount", rename.ToName);
+        Assert.Equal("by_priority", Assert.Single(rename.CarriedIndexes).Name);
+        Assert.Empty(plan.Operations.OfType<CreatePrimaryStorageOperation>());
+        Assert.Empty(plan.Operations.OfType<DropPrimaryStorageOperation>());
+        // Column work is keyed on the storage unit id, so renaming the storage churns no columns.
+        Assert.Empty(plan.Operations.OfType<AddColumnOperation>());
+        Assert.Empty(plan.Operations.OfType<DropColumnOperation>());
+    }
+
+    [Fact]
+    public void Dropping_a_column_plans_an_authorized_drop_and_shrinks_the_applied_ledger()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+        var before = executor.AppliedState!.Snapshot.SemanticOperations.Length;
+        var withoutPriority = CreateUnit(includePriority: true) with
+        {
+            Columns = [.. CreateUnit(includePriority: true).Columns.Where(column => column.Name != "priority")],
+            Indexes = []
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(withoutPriority),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var drop = Assert.Single(plan.Operations.OfType<DropColumnOperation>());
+        Assert.Equal("priority", drop.Column.Name);
+        var dropIndex = Assert.Single(plan.Operations.OfType<DropPhysicalIndexOperation>());
+        Assert.Equal("by_priority", dropIndex.Index.Name);
+        // The index has to go before the column it keys on.
+        Assert.True(Array.IndexOf(plan.Operations.ToArray(), dropIndex) < Array.IndexOf(plan.Operations.ToArray(), drop));
+
+        var applied = PhysicalSchemaApplication.Apply(
+            CreateTarget(withoutPriority),
+            executor,
+            PlannedAt.AddMinutes(3),
+            _ => PhysicalSchemaPlanAuthorization.Allow);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.True(applied.AppliedState!.Snapshot.SemanticOperations.Length < before);
+        Assert.DoesNotContain(applied.AppliedState.Snapshot.SemanticOperations,
+            operation => operation.SubjectIdentity is "priority" or "by_priority");
+        Assert.DoesNotContain(applied.AppliedState.AppliedOperations,
+            operation => operation.SubjectIdentity is "priority" or "by_priority");
+        Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
+                CreateTarget(withoutPriority),
+                PhysicalSchemaHistoryState.FromApplied(applied.AppliedState),
+                PlannedAt.AddMinutes(4))
+            .Operations);
+    }
+
+    [Fact]
+    public void A_dropped_column_is_authorized_by_its_readable_address()
+    {
+        var executor = new FakeExecutor();
+        var unit = CreateOrdersUnit(includeLegacyTotal: true);
+        PhysicalSchemaApplication.Apply(CreateTarget(unit), executor, PlannedAt.AddMinutes(1));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(CreateOrdersUnit(includeLegacyTotal: false)),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+        var drop = Assert.Single(protection.DestructiveOperations);
+        Assert.Equal("drop-column:orders.legacy_total", drop.Address);
+        Assert.True(drop.IsAuthorizedBy(new HashSet<string>(StringComparer.Ordinal) { "drop-column:orders.legacy_total" }));
+        Assert.True(drop.IsAuthorizedBy(new HashSet<string>(StringComparer.Ordinal) { drop.Identity }));
+        Assert.False(drop.IsAuthorizedBy(new HashSet<string>(StringComparer.Ordinal) { "drop-column:orders.total" }));
+    }
+
+    [Fact]
+    public void An_address_two_operations_answer_to_authorizes_neither()
+    {
+        static PhysicalSchemaTarget Target(StorageUnit unit, string definition) => new(
+            new SchemaSubject(unit),
+            Provider,
+            [
+                new ProviderPhysicalSchemaDefinition(Provider.Name, unit.Id, "batch-type", "customer_batch", definition),
+                new ProviderPhysicalSchemaDefinition(Provider.Name, unit.Id, "stream-type", "customer_batch", definition)
+            ]);
+
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(Target(CreateUnit(includePriority: false), "[\"id\"]"), executor, PlannedAt.AddMinutes(1));
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            Target(CreateUnit(includePriority: false), "[\"id\",\"name\"]"),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+        Assert.Equal(2, protection.DestructiveOperations.Length);
+        Assert.All(protection.DestructiveOperations, operation => Assert.Null(operation.Address));
+        Assert.All(
+            protection.DestructiveOperations,
+            operation => Assert.False(operation.IsAuthorizedBy(
+                new HashSet<string>(StringComparer.Ordinal) { "apply-provider-definition:customer.customer_batch" })));
+    }
+
+    [Fact]
+    public void Retiring_primary_storage_plans_one_authorized_drop_and_empties_the_ledger()
+    {
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(CreateTarget(CreateUnit(includePriority: true)), executor, PlannedAt.AddMinutes(1));
+
+        var retired = new PhysicalSchemaTarget(
+            new SchemaSubject(CreateUnit(includePriority: true), new SchemaEvolutionMetadata(retiresPrimaryStorage: true)),
+            Provider);
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            retired,
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var drop = Assert.Single(plan.Operations.OfType<DropPrimaryStorageOperation>());
+        Assert.Equal("Customer", drop.Name);
+        Assert.Equal("drop-primary-storage:customer.Customer", Assert.Single(
+            PhysicalSchemaPlanProtection.Inspect(plan.Operations).DestructiveOperations).Address);
+
+        var applied = PhysicalSchemaApplication.Apply(retired, executor, PlannedAt.AddMinutes(3), _ => PhysicalSchemaPlanAuthorization.Allow);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, applied.Outcome);
+        Assert.Empty(applied.AppliedState!.Snapshot.SemanticOperations);
+        Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
+                retired,
+                PhysicalSchemaHistoryState.FromApplied(applied.AppliedState),
+                PlannedAt.AddMinutes(4))
+            .Operations);
+    }
+
+    [Fact]
+    public void Dropping_a_key_column_is_refused_as_an_invalid_evolution()
+    {
+        var executor = new FakeExecutor();
+        var unit = CreateOrdersUnit(includeLegacyTotal: true);
+        PhysicalSchemaApplication.Apply(CreateTarget(unit), executor, PlannedAt.AddMinutes(1));
+        var keyless = unit with
+        {
+            Columns = [.. unit.Columns.Where(column => column.Name != "id"), new ColumnDefinition
+            {
+                Name = "surrogate",
+                Type = PortableType.Guid,
+                IsNullable = false
+            }],
+            Key = new KeyDefinition { Columns = ["surrogate"] }
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(keyless),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.False(plan.IsApplicable);
+        Assert.Contains(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-004" && refusal.Message.Contains("'id'", StringComparison.Ordinal));
+        Assert.Empty(plan.Operations);
+    }
+
+    [Fact]
+    public void Changing_a_key_columns_portable_type_is_refused_as_an_invalid_evolution()
+    {
+        var executor = new FakeExecutor();
+        var unit = CreateOrdersUnit(includeLegacyTotal: false);
+        PhysicalSchemaApplication.Apply(CreateTarget(unit), executor, PlannedAt.AddMinutes(1));
+        var retyped = unit with
+        {
+            Columns = [.. unit.Columns.Select(column => column.Name == "id"
+                ? column with { Type = PortableType.String, MaxLength = 64 }
+                : column)]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(retyped),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.False(plan.IsApplicable);
+        Assert.Contains(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-003");
+    }
+
+    [Fact]
+    public void A_rename_onto_a_name_another_applied_column_still_holds_is_refused()
+    {
+        var executor = new FakeExecutor();
+        var unit = CreateOrdersUnit(includeLegacyTotal: true);
+        PhysicalSchemaApplication.Apply(CreateTarget(unit), executor, PlannedAt.AddMinutes(1));
+        // Swap the two physical names. The declaration is valid — both names stay unique — but
+        // neither rename can run first without colliding with the other.
+        var colliding = unit with
+        {
+            Columns = [.. unit.Columns.Select(column => column.Name switch
+            {
+                "legacy_total" => column with { Name = "total", Id = "legacy_total" },
+                "total" => column with { Name = "legacy_total", Id = "total" },
+                _ => column
+            })]
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(colliding),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.False(plan.IsApplicable);
+        Assert.Contains(plan.Refusals, refusal => refusal.Code == "GW-SCHEMA-003" &&
+            refusal.Message.Contains("two applies", StringComparison.Ordinal));
+    }
+
+    private static StorageUnit RenameColumn(StorageUnit unit, string from, string to) => unit with
+    {
+        Columns = [.. unit.Columns.Select(column => column.Name == from
+            ? column with { Name = to, Id = column.LogicalId }
+            : column)],
+        Key = new KeyDefinition
+        {
+            Columns = [.. unit.Key.Columns.Select(column => column == from ? to : column)]
+        },
+        Indexes = [.. unit.Indexes.Select(index => new IndexDefinition
+        {
+            Name = index.Name,
+            Columns = [.. index.Columns.Select(column => column.Column == from ? new IndexColumn(to, column.Direction) : column)],
+            IsUnique = index.IsUnique,
+            MissingValues = index.MissingValues,
+            SchemaVersion = index.SchemaVersion
+        })]
+    };
+
+    private static StorageUnit CreateOrdersUnit(bool includeLegacyTotal) => new()
+    {
+        Id = new StorageUnitId("orders"),
+        Name = "orders",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+            new() { Name = "total", Type = PortableType.Decimal, Precision = 18, Scale = 4 },
+            ..(includeLegacyTotal
+                ? new[] { new ColumnDefinition { Name = "legacy_total", Type = PortableType.Decimal, Precision = 18, Scale = 4 } }
+                : [])
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    private static StorageUnit CreateDecimalUnit(int precision, int scale) => new()
+    {
+        Id = new StorageUnitId("ledger"),
+        Name = "Ledger",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+            new() { Name = "total", Type = PortableType.Decimal, Precision = precision, Scale = scale }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
     };
 
     private sealed class FakeExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector

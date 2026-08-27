@@ -43,48 +43,76 @@ public static class PhysicalSchemaDiffPlanner
                     "schemaHistory.identity")]);
         }
 
+        return target.Subject.Evolution.RetiresPrimaryStorage
+            ? PlanRetirement(target, applied, plannedAt)
+            : PlanEvolution(target, applied, plannedAt);
+    }
+
+    private static PhysicalSchemaDiffPlan PlanEvolution(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaAppliedState? applied,
+        DateTimeOffset plannedAt)
+    {
         var desired = DeriveSemanticOperations(target);
+        var evolution = SchemaEvolutionAnalysis.Analyze(target, applied, desired);
+        var refusals = evolution.Refusals
+            .Concat(ValidateNewRequiredColumns(desired, evolution))
+            .ToImmutableArray();
+        if (refusals.Length != 0)
+        {
+            return PhysicalSchemaDiffPlan.Invalid(
+                target,
+                plannedAt,
+                refusals,
+                CreateSnapshot(target, desired));
+        }
+
         var appliedIdentities = applied?.Snapshot.SemanticOperations
             .Select(operation => operation.Identity)
             .ToHashSet(StringComparer.Ordinal) ?? [];
         var appliedBySlot = applied?.Snapshot.SemanticOperations
             .ToDictionary(operation => operation.SlotIdentity, StringComparer.Ordinal) ?? [];
-        var additiveRefusals = ValidateAdditiveDiff(desired, applied);
-        if (additiveRefusals.Length != 0)
-            return PhysicalSchemaDiffPlan.Invalid(
-                target,
-                plannedAt,
-                additiveRefusals,
-                CreateSnapshot(target, desired),
-                applied?.TargetFingerprint,
-                applied?.AppliedOperations);
-
         var realizedDesired = desired
-            .Select(operation => Realize(operation, appliedBySlot))
+            .Select(operation => Realize(operation, appliedBySlot, evolution))
             .ToImmutableArray();
         var snapshot = CreateSnapshot(target, realizedDesired);
         var pending = realizedDesired
-            .Where(operation => !IsAlreadyApplied(operation, appliedIdentities, appliedBySlot))
+            .Where(operation =>
+                !evolution.SatisfiedIdentities.Contains(operation.Identity) &&
+                (IsRebuiltByEvolution(operation, evolution) ||
+                 !IsAlreadyApplied(operation, appliedIdentities, appliedBySlot)))
+            .Concat(evolution.Operations)
+            .OrderBy(OperationOrder)
+            .ThenBy(operation => operation.SubjectIdentity, StringComparer.Ordinal)
             .ToList();
 
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
-            return PhysicalSchemaDiffPlan.Valid(
-                target,
-                plannedAt,
-                snapshot,
-                [],
-                applied.TargetFingerprint,
-                applied.AppliedOperations);
+            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint);
 
         pending.Add(new ValidatePhysicalSchemaOperation(target));
         pending.Add(new PublishAppliedStateOperation(target));
-        return PhysicalSchemaDiffPlan.Valid(
-            target,
-            plannedAt,
-            snapshot,
-            pending,
-            applied?.TargetFingerprint,
-            applied?.AppliedOperations);
+        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint);
+    }
+
+    /// <summary>
+    /// A retired subject plans exactly one authorized removal and records an empty ledger, so the
+    /// evidence that the storage is gone is the ledger no longer describing any of it.
+    /// </summary>
+    private static PhysicalSchemaDiffPlan PlanRetirement(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaAppliedState? applied,
+        DateTimeOffset plannedAt)
+    {
+        var snapshot = new PhysicalSchemaAppliedSnapshot(target.Subject, [], target.ProviderDefinitions);
+        var pending = new List<PhysicalSchemaOperation>();
+        if (applied?.Snapshot.SemanticOperations.Length > 0)
+            pending.Add(new DropPrimaryStorageOperation(target.Subject, applied.Snapshot.Subject.Name));
+        if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
+            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint);
+
+        pending.Add(new ValidatePhysicalSchemaOperation(target));
+        pending.Add(new PublishAppliedStateOperation(target));
+        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint);
     }
 
     private static ImmutableArray<PhysicalSchemaOperation> DeriveSemanticOperations(PhysicalSchemaTarget target)
@@ -125,26 +153,30 @@ public static class PhysicalSchemaDiffPlanner
             .ToImmutableArray();
     }
 
-    private static ImmutableArray<SchemaRefusal> ValidateAdditiveDiff(
+    /// <summary>
+    /// Adding a required column to storage that already holds rows needs something to put in it.
+    /// This is a genuine invalidity rather than an authorization question: no operator approval can
+    /// invent the missing values.
+    /// </summary>
+    private static IEnumerable<SchemaRefusal> ValidateNewRequiredColumns(
         IReadOnlyList<PhysicalSchemaOperation> desired,
-        PhysicalSchemaAppliedState? applied)
+        SchemaEvolutionAnalysis evolution)
     {
-        if (applied is null)
+        if (evolution.AppliedByLogicalSlot.Count == 0)
             return [];
 
-        var desiredByIdentity = desired.ToDictionary(operation => operation.Identity, StringComparer.Ordinal);
-        var desiredBySlot = desired.ToDictionary(operation => operation.SlotIdentity, StringComparer.Ordinal);
-        var appliedIdentities = applied.Snapshot.SemanticOperations
-            .Select(operation => operation.Identity)
-            .ToHashSet(StringComparer.Ordinal);
-        var appliedSlots = applied.Snapshot.SemanticOperations
-            .Select(operation => operation.SlotIdentity)
-            .ToHashSet(StringComparer.Ordinal);
-        var refusals = new List<SchemaRefusal>();
-        refusals.AddRange(desired
+        var logicalColumnIds = desired
+            .OfType<AddColumnOperation>()
+            .ToDictionary(operation => operation.Column.Name, operation => operation.Column.LogicalId, StringComparer.Ordinal);
+        return desired
             .OfType<AddColumnOperation>()
             .Where(operation =>
-                !appliedSlots.Contains(operation.SlotIdentity) &&
+                !evolution.AppliedByLogicalSlot.ContainsKey(SchemaEvolutionAnalysis.LogicalSlot(
+                    operation.Kind,
+                    operation.SubjectId,
+                    operation.SubjectIdentity,
+                    operation.SlotIdentity,
+                    logicalColumnIds)) &&
                 !operation.Column.IsNullable &&
                 operation.Column.Default is null &&
                 operation.Column.Generation == ColumnGeneration.Supplied &&
@@ -155,45 +187,12 @@ public static class PhysicalSchemaDiffPlanner
             .Select(operation => new SchemaRefusal(
                 "GW-SCHEMA-005",
                 $"Non-nullable column '{operation.Column.Name}' has no portable default or semantic migration for existing rows.",
-                $"schema.columns.{operation.Column.Name}.default")));
-        var reportedSubjects = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var current in applied.Snapshot.SemanticOperations)
-        {
-            if (desiredByIdentity.TryGetValue(current.Identity, out _) ||
-                desired.Any(operation => IsAlreadyApplied(operation, current)))
-                continue;
-
-            if (desiredBySlot.TryGetValue(current.SlotIdentity, out var replacement))
-            {
-                if (IsIndexWidening(current, replacement) || IsSearchKeyRetarget(current, replacement) ||
-                    IsProviderDefinitionReplacement(current, replacement))
-                {
-                    continue;
-                }
-                if (!reportedSubjects.Add($"{current.SubjectId?.Value}:{current.SubjectIdentity}"))
-                    continue;
-                refusals.Add(new SchemaRefusal(
-                    "GW-SCHEMA-003",
-                    $"Applied operation '{current.Identity}' conflicts with changed definition '{replacement.Identity}'. Schema evolution is additive-only; authorize a deliberate replacement separately.",
-                    $"schema.operations.{replacement.SubjectIdentity}"));
-                continue;
-            }
-
-            if (!reportedSubjects.Add($"{current.SubjectId?.Value}:{current.SubjectIdentity}"))
-                continue;
-            refusals.Add(new SchemaRefusal(
-                "GW-SCHEMA-004",
-                $"Applied operation '{current.Identity}' is absent from the desired target. Removing physical schema is not an additive evolution.",
-                $"schema.operations.{current.SubjectIdentity}"));
-        }
-
-        return refusals.ToImmutableArray();
+                $"schema.columns.{operation.Column.Name}.default"));
     }
 
     /// <summary>
     /// A provider-owned definition is derived from the declaration rather than declared, so a
     /// changed payload in an existing slot re-applies under authorization instead of refusing.
-    /// Additive-only continues to protect declared columns, indexes, and primary storage.
     /// </summary>
     private static bool IsProviderDefinitionReplacement(
         PhysicalSchemaAppliedOperation applied,
@@ -203,7 +202,8 @@ public static class PhysicalSchemaDiffPlanner
 
     private static PhysicalSchemaOperation Realize(
         PhysicalSchemaOperation operation,
-        IReadOnlyDictionary<string, PhysicalSchemaAppliedOperation> appliedBySlot)
+        IReadOnlyDictionary<string, PhysicalSchemaAppliedOperation> appliedBySlot,
+        SchemaEvolutionAnalysis evolution)
     {
         if (appliedBySlot.TryGetValue(operation.SlotIdentity, out var appliedDefinition) &&
             IsProviderDefinitionReplacement(appliedDefinition, operation) &&
@@ -213,54 +213,41 @@ public static class PhysicalSchemaDiffPlanner
             return operation;
         }
 
+        // One rule for every index redefinition: an index whose declared shape no longer matches the
+        // applied one is dropped and recreated under authorization, whatever changed about it.
         if (operation is not CreatePhysicalIndexOperation create ||
-            !appliedBySlot.TryGetValue(create.SlotIdentity, out var applied) ||
-            !create.Index.Columns.Any(indexColumn =>
-                create.Subject.Columns.Any(column =>
-                    column.Name == indexColumn.Column && column.IsNullable)) &&
-            !IsSearchKeyRetarget(applied, operation))
+            !evolution.AppliedByLogicalSlot.TryGetValue(
+                SchemaEvolutionAnalysis.LogicalSlot(
+                    operation.Kind,
+                    operation.SubjectId,
+                    operation.SubjectIdentity,
+                    operation.SlotIdentity,
+                    new Dictionary<string, string>(StringComparer.Ordinal)),
+                out var applied) ||
+            IsAlreadyApplied(operation, applied))
         {
             return operation;
         }
 
-        if (IsIndexWidening(applied, operation) || IsSearchKeyRetarget(applied, operation))
-        {
-            return new RebuildPhysicalIndexOperation(
-                create.Subject,
-                create.Index,
-                applied.Fingerprint);
-        }
-
-        if (TryGetAppliedRebuild(applied, operation, out var supersededFingerprint))
-        {
-            return new RebuildPhysicalIndexOperation(
-                create.Subject,
-                create.Index,
-                supersededFingerprint);
-        }
-
-        return operation;
+        return new RebuildPhysicalIndexOperation(
+            create.Subject,
+            create.Index,
+            applied.Kind == PhysicalSchemaOperationKind.RebuildPhysicalIndex &&
+            SchemaFingerprint.TryParseCanonical(applied.CanonicalPayload, out var parts) &&
+            parts.Length >= 6
+                ? parts[5]!
+                : applied.Fingerprint);
     }
 
-    private static bool TryGetAppliedRebuild(
-        PhysicalSchemaAppliedOperation applied,
-        PhysicalSchemaOperation desired,
-        out string supersededFingerprint)
-    {
-        supersededFingerprint = string.Empty;
-        if (applied.Kind != PhysicalSchemaOperationKind.RebuildPhysicalIndex ||
-            desired is not CreatePhysicalIndexOperation ||
-            !SchemaFingerprint.TryParseCanonical(applied.CanonicalPayload, out var appliedParts) ||
-            !SchemaFingerprint.TryParseCanonical(desired.CanonicalPayload, out var desiredParts) ||
-            appliedParts.Length < 6 || desiredParts.Length < 5 ||
-            !string.Equals(appliedParts[4], desiredParts[4], StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        supersededFingerprint = appliedParts[5]!;
-        return true;
-    }
+    /// <summary>
+    /// An index an alteration dropped out of the way is recreated even though the applied ledger
+    /// still describes it: the ledger describes the index that used to be there.
+    /// </summary>
+    private static bool IsRebuiltByEvolution(
+        PhysicalSchemaOperation operation,
+        SchemaEvolutionAnalysis evolution) =>
+        operation.Kind == PhysicalSchemaOperationKind.CreatePhysicalIndex &&
+        evolution.RebuiltIndexNames.Contains(operation.SubjectIdentity);
 
     private static bool IsAlreadyApplied(
         PhysicalSchemaOperation desired,
@@ -296,46 +283,12 @@ public static class PhysicalSchemaDiffPlanner
         return string.Equals(appliedParts[4], desiredParts[4], StringComparison.Ordinal);
     }
 
-    private static bool IsIndexWidening(
-        PhysicalSchemaAppliedOperation applied,
-        PhysicalSchemaOperation desired)
-    {
-        if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
-            desired is not CreatePhysicalIndexOperation create ||
-            !CanonicalIndexPayload.TryParseOperation(applied.CanonicalPayload, out var current) ||
-            current.MissingValues != MissingValueBehavior.Excluded ||
-            create.Index.MissingValues != MissingValueBehavior.Included)
-        {
-            return false;
-        }
-
-        var desiredPayload = CanonicalIndexPayload.From(create.Index);
-        return string.Equals(
-            (current with { MissingValues = MissingValueBehavior.Included }).Canonical,
-            desiredPayload.Canonical,
-            StringComparison.Ordinal);
-    }
-
-    private static bool IsSearchKeyRetarget(
-        PhysicalSchemaAppliedOperation applied,
-        PhysicalSchemaOperation desired)
-    {
-        if (applied.Kind != PhysicalSchemaOperationKind.CreatePhysicalIndex ||
-            desired is not CreatePhysicalIndexOperation create ||
-            !CanonicalIndexPayload.TryParseOperation(applied.CanonicalPayload, out var current))
-        {
-            return false;
-        }
-        return SearchKeyProjection.IsIndexRetarget(current.ToDefinition(), create.Index, create.Subject.DerivedColumns);
-    }
-
     private static PhysicalSchemaAppliedSnapshot CreateSnapshot(
         PhysicalSchemaTarget target,
         IReadOnlyList<PhysicalSchemaOperation> semanticOperations)
     {
         var operations = semanticOperations
-            .Where(operation => operation.Kind is not PhysicalSchemaOperationKind.ValidatePhysicalSchema and
-                                not PhysicalSchemaOperationKind.PublishAppliedState)
+            .Where(operation => !PhysicalSchemaOperation.IsLedgerExcluded(operation.Kind))
             .Select(operation => new PhysicalSchemaAppliedOperation(
                 operation.Identity,
                 operation.Fingerprint,
@@ -351,13 +304,19 @@ public static class PhysicalSchemaDiffPlanner
 
     private static int OperationOrder(PhysicalSchemaOperation operation) => operation.Kind switch
     {
+        PhysicalSchemaOperationKind.RenamePrimaryStorage => 0,
         PhysicalSchemaOperationKind.CreatePrimaryStorage => 0,
-        PhysicalSchemaOperationKind.AddColumn => 1,
-        PhysicalSchemaOperationKind.BackfillColumn => 2,
-        PhysicalSchemaOperationKind.FinalizeColumn => 3,
-        PhysicalSchemaOperationKind.CreatePhysicalIndex => 4,
-        PhysicalSchemaOperationKind.RebuildPhysicalIndex => 5,
-        PhysicalSchemaOperationKind.ApplyProviderDefinition => 6,
+        PhysicalSchemaOperationKind.RenameColumn => 1,
+        PhysicalSchemaOperationKind.DropIndex => 2,
+        PhysicalSchemaOperationKind.AddColumn => 3,
+        PhysicalSchemaOperationKind.AlterColumn => 4,
+        PhysicalSchemaOperationKind.BackfillColumn => 5,
+        PhysicalSchemaOperationKind.FinalizeColumn => 6,
+        PhysicalSchemaOperationKind.DropColumn => 7,
+        PhysicalSchemaOperationKind.CreatePhysicalIndex => 8,
+        PhysicalSchemaOperationKind.RebuildPhysicalIndex => 9,
+        PhysicalSchemaOperationKind.ApplyProviderDefinition => 10,
+        PhysicalSchemaOperationKind.DropPrimaryStorage => 11,
         PhysicalSchemaOperationKind.ValidatePhysicalSchema => 100,
         PhysicalSchemaOperationKind.PublishAppliedState => 101,
         _ => 100
@@ -372,8 +331,7 @@ public sealed class PhysicalSchemaDiffPlan
         PhysicalSchemaAppliedSnapshot snapshot,
         IEnumerable<PhysicalSchemaOperation> operations,
         IEnumerable<SchemaRefusal> refusals,
-        string? expectedAppliedTargetFingerprint,
-        IEnumerable<PhysicalSchemaAppliedOperation>? previousAppliedOperations)
+        string? expectedAppliedTargetFingerprint)
     {
         Target = target;
         PlannedAt = plannedAt;
@@ -381,7 +339,6 @@ public sealed class PhysicalSchemaDiffPlan
         Operations = operations.ToImmutableArray();
         Refusals = refusals.ToImmutableArray();
         ExpectedAppliedTargetFingerprint = expectedAppliedTargetFingerprint;
-        PreviousAppliedOperations = previousAppliedOperations?.ToImmutableArray() ?? [];
     }
 
     public PhysicalSchemaTarget Target { get; }
@@ -393,8 +350,6 @@ public sealed class PhysicalSchemaDiffPlan
     public ImmutableArray<SchemaRefusal> Refusals { get; }
 
     public string? ExpectedAppliedTargetFingerprint { get; }
-
-    private ImmutableArray<PhysicalSchemaAppliedOperation> PreviousAppliedOperations { get; }
 
     public bool IsApplicable => Refusals.Length == 0;
 
@@ -427,28 +382,32 @@ public sealed class PhysicalSchemaDiffPlan
                 throw new PhysicalSchemaFingerprintConflictException(operation.Identity, operation.Fingerprint, matches[0].Fingerprint);
         }
 
-        var currentOperations = Operations
-            .Where(operation => operation.Kind is not PhysicalSchemaOperationKind.ValidatePhysicalSchema and
-                                not PhysicalSchemaOperationKind.PublishAppliedState)
+        // The recorded ledger is exactly the snapshot the plan describes: operations executed this
+        // round carry their acknowledged time and the rest carry the plan's. Nothing an evolution
+        // removed can survive, which is what makes a drop verifiable in the ledger.
+        var acknowledged = supplied.ToDictionary(item => item.Identity, StringComparer.Ordinal);
+        var appliedOperations = Snapshot.SemanticOperations
+            .Select(operation => operation with
+            {
+                AppliedAt = acknowledged.TryGetValue(operation.Identity, out var acknowledgement)
+                    ? acknowledgement.AppliedAt
+                    : appliedAt
+            })
+            .Concat(Operations
+                .Where(operation => operation.Kind is PhysicalSchemaOperationKind.ValidatePhysicalSchema or
+                    PhysicalSchemaOperationKind.PublishAppliedState)
+                .Select(operation => new PhysicalSchemaAppliedOperation(
+                    operation.Identity,
+                    operation.Fingerprint,
+                    operation.Kind,
+                    operation.SubjectId,
+                    operation.SubjectIdentity,
+                    operation.SlotIdentity,
+                    acknowledged.TryGetValue(operation.Identity, out var acknowledgement)
+                        ? acknowledgement.AppliedAt
+                        : appliedAt,
+                    operation.CanonicalPayload)))
             .ToArray();
-        var carriedOperations = PreviousAppliedOperations
-            .Where(operation => operation.Kind is not PhysicalSchemaOperationKind.ValidatePhysicalSchema and
-                                not PhysicalSchemaOperationKind.PublishAppliedState)
-            .Where(previous => currentOperations.All(operation => operation.SlotIdentity != previous.SlotIdentity));
-        var currentAppliedOperations = Operations.Select(operation =>
-        {
-            var acknowledgement = supplied.SingleOrDefault(item => item.Identity == operation.Identity);
-            return new PhysicalSchemaAppliedOperation(
-                operation.Identity,
-                operation.Fingerprint,
-                operation.Kind,
-                operation.SubjectId,
-                operation.SubjectIdentity,
-                operation.SlotIdentity,
-                acknowledgement?.AppliedAt ?? appliedAt,
-                operation.CanonicalPayload);
-        });
-        var appliedOperations = carriedOperations.Concat(currentAppliedOperations).ToArray();
         return new PhysicalSchemaAppliedState(Target, PlannedAt, appliedAt, Snapshot, appliedOperations);
     }
 
@@ -457,40 +416,71 @@ public sealed class PhysicalSchemaDiffPlan
         DateTimeOffset plannedAt,
         PhysicalSchemaAppliedSnapshot snapshot,
         IEnumerable<PhysicalSchemaOperation> operations,
-        string? expectedAppliedTargetFingerprint,
-        IEnumerable<PhysicalSchemaAppliedOperation>? previousAppliedOperations = null) =>
-        new(target, plannedAt, snapshot, operations, [], expectedAppliedTargetFingerprint, previousAppliedOperations);
+        string? expectedAppliedTargetFingerprint) =>
+        new(target, plannedAt, snapshot, operations, [], expectedAppliedTargetFingerprint);
 
     internal static PhysicalSchemaDiffPlan Invalid(
         PhysicalSchemaTarget target,
         DateTimeOffset plannedAt,
         IEnumerable<SchemaRefusal> refusals,
         PhysicalSchemaAppliedSnapshot? snapshot = null,
-        string? expectedAppliedTargetFingerprint = null,
-        IEnumerable<PhysicalSchemaAppliedOperation>? previousAppliedOperations = null) =>
-        new(target, plannedAt, snapshot ?? new PhysicalSchemaAppliedSnapshot(target.Subject, [], target.ProviderDefinitions), [], refusals, expectedAppliedTargetFingerprint, previousAppliedOperations);
+        string? expectedAppliedTargetFingerprint = null) =>
+        new(
+            target,
+            plannedAt,
+            snapshot ?? new PhysicalSchemaAppliedSnapshot(target.Subject, [], target.ProviderDefinitions),
+            [],
+            refusals,
+            expectedAppliedTargetFingerprint);
+}
+
+/// <summary>One planned operation that startup auto-apply must not execute without authorization.</summary>
+public sealed record PhysicalSchemaProtectedOperation(string Identity, string? Address)
+{
+    /// <summary>
+    /// Whether the operator named exactly this operation. Both spellings address one operation in
+    /// one plan; neither authorizes a class of operations, and the plan fingerprint is required
+    /// alongside either.
+    /// </summary>
+    public bool IsAuthorizedBy(IReadOnlySet<string> authorizations)
+    {
+        ArgumentNullException.ThrowIfNull(authorizations);
+        return authorizations.Contains(Identity) || (Address is not null && authorizations.Contains(Address));
+    }
 }
 
 /// <summary>Identifies operations that startup auto-apply must not execute without authorization.</summary>
 public sealed record PhysicalSchemaPlanProtection(
-    ImmutableArray<string> DestructiveOperationIdentities,
+    ImmutableArray<PhysicalSchemaProtectedOperation> DestructiveOperations,
     ImmutableArray<string> SemanticMigrationIdentities)
 {
-    public bool IsSafe => DestructiveOperationIdentities.Length == 0 && SemanticMigrationIdentities.Length == 0;
+    public bool IsSafe => DestructiveOperations.Length == 0 && SemanticMigrationIdentities.Length == 0;
+
+    public ImmutableArray<string> DestructiveOperationIdentities =>
+        [.. DestructiveOperations.Select(operation => operation.Identity)];
 
     public static PhysicalSchemaPlanProtection Inspect(IReadOnlyList<PhysicalSchemaOperation> operations)
     {
         ArgumentNullException.ThrowIfNull(operations);
+        var destructive = operations.Where(operation => operation.RequiresAuthorization).ToArray();
+        // A readable address only stands in for an identity while it names exactly one operation in
+        // this plan. Where two operations would answer to it, the exact identity is the only
+        // spelling that authorizes either.
+        var ambiguous = destructive
+            .GroupBy(operation => operation.AuthorizationAddress, StringComparer.Ordinal)
+            .Where(group => group.Select(operation => operation.Identity).Distinct(StringComparer.Ordinal).Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.Ordinal);
         return new(
-            operations.Where(operation => operation.RequiresAuthorization)
-                .Select(operation => operation.Identity)
-                .Distinct(StringComparer.Ordinal)
-                .OrderBy(identity => identity, StringComparer.Ordinal)
-                .ToImmutableArray(),
-            operations.Where(operation => !string.IsNullOrWhiteSpace(operation.SemanticMigrationId))
+            [.. destructive
+                .Select(operation => new PhysicalSchemaProtectedOperation(
+                    operation.Identity,
+                    ambiguous.Contains(operation.AuthorizationAddress) ? null : operation.AuthorizationAddress))
+                .DistinctBy(operation => operation.Identity, StringComparer.Ordinal)
+                .OrderBy(operation => operation.Identity, StringComparer.Ordinal)],
+            [.. operations.Where(operation => !string.IsNullOrWhiteSpace(operation.SemanticMigrationId))
                 .Select(operation => operation.SemanticMigrationId!)
                 .Distinct(StringComparer.Ordinal)
-                .OrderBy(identity => identity, StringComparer.Ordinal)
-                .ToImmutableArray());
+                .OrderBy(identity => identity, StringComparer.Ordinal)]);
     }
 }

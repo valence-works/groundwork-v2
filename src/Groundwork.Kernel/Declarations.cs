@@ -269,6 +269,20 @@ public sealed record ColumnDefinition
     public PortableCollation? LogicalCollation { get; init; }
     public PortableDefault? Default { get; init; }
     public ColumnGeneration Generation { get; init; } = ColumnGeneration.Supplied;
+
+    /// <summary>
+    /// The stable logical identity of this column. It defaults to <see cref="Name"/> and only has
+    /// to be spelled once the physical name changes: schema planning keys its slots on the logical
+    /// id, so retaining the original id across a renamed <see cref="Name"/> is what makes the
+    /// change plan as a rename instead of a drop followed by an add.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Id { get; init; }
+
+    /// <summary>The logical id this column is planned under; <see cref="Name"/> when none is declared.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string LogicalId => string.IsNullOrWhiteSpace(Id) ? Name : Id;
 }
 
 public sealed record KeyDefinition

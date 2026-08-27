@@ -167,7 +167,51 @@ internal sealed class SqlServerDialect : RelationalDialect
     }
 
     public override string DropIndexSql(string table, string index) =>
-        $"DROP INDEX {QuoteIdentifier(PhysicalIndexName(table, index))} ON {QuoteIdentifier(table)};";
+        $"DROP INDEX IF EXISTS {QuoteIdentifier(PhysicalIndexName(table, index))} ON {QuoteIdentifier(table)};";
+
+    /// <summary>
+    /// SQL Server binds a column default to an auto-named constraint and then refuses to drop the
+    /// column while that constraint exists, so the constraint is looked up and dropped by name in
+    /// the same statement batch.
+    /// </summary>
+    public override string DropColumnSql(string table, string column) =>
+        $"""
+        DECLARE @constraint sysname;
+        SELECT @constraint = dc.name
+        FROM sys.default_constraints AS dc
+        INNER JOIN sys.columns AS c
+            ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+        WHERE dc.parent_object_id = OBJECT_ID(N'{Escape(table)}') AND c.name = N'{Escape(column)}';
+        IF @constraint IS NOT NULL
+            EXEC(N'ALTER TABLE {Escape(QuoteIdentifier(table))} DROP CONSTRAINT ' + QUOTENAME(@constraint));
+        ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(column)};
+        """;
+
+    /// <summary>SQL Server renames objects through sp_rename rather than an ALTER clause.</summary>
+    public override string RenameTableSql(string table, string renamed) =>
+        $"EXEC sp_rename N'{Escape(table)}', N'{Escape(renamed)}';";
+
+    public override string RenameColumnSql(string table, string column, string renamed) =>
+        $"EXEC sp_rename N'{Escape(table)}.{Escape(column)}', N'{Escape(renamed)}', N'COLUMN';";
+
+    /// <summary>SQL Server renames an index in place rather than rebuilding it.</summary>
+    public override void RenameIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string fromTable,
+        string toTable,
+        IndexDefinition index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        // sp_rename addresses the index through its table, which already carries the new name.
+        Execute(
+            connection,
+            transaction,
+            $"EXEC sp_rename N'{Escape(toTable)}.{Escape(PhysicalIndexName(fromTable, index.Name))}', " +
+            $"N'{Escape(PhysicalIndexName(toTable, index.Name))}', N'INDEX';");
+    }
+
+    private static string Escape(string identifier) => identifier.Replace("'", "''", StringComparison.Ordinal);
 
     public override string ConditionalUpsertSql(RelationalWriteShape shape)
     {

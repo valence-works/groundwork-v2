@@ -217,7 +217,8 @@ public sealed class SchemaGenerator : ISourceGenerator
                         IntNamedArgument(columnAttribute, "Scale"),
                         EnumNamedArgument(columnAttribute, "Folding", TextFolding.None),
                         EnumNamedArgument(columnAttribute, "Generation", SchemaGeneration.Supplied),
-                        columnDefault);
+                        columnDefault,
+                        StringNamedArgument(columnAttribute, "Id"));
                     if (columnSymbols.ContainsKey(name))
                     {
                         context.ReportDiagnostic(Diagnostic.Create(
@@ -305,7 +306,8 @@ public sealed class SchemaGenerator : ISourceGenerator
             ReadRetention(context, symbol, tableName),
             ReadIdempotency(context, symbol, tableName, "GwAppendIdempotencyAttribute"),
             ReadIdempotency(context, symbol, tableName, "GwRetentionIdempotencyAttribute"),
-            aggregations);
+            aggregations,
+            StringNamedArgument(tableAttribute, "Id"));
     }
 
     private static SchemaRetention? ReadRetention(
@@ -595,7 +597,7 @@ public sealed class SchemaGenerator : ISourceGenerator
         builder.AppendLine("    private static global::Groundwork.Kernel.StorageUnit Build()");
         builder.AppendLine("    {");
         builder.Append("        var declaration = global::Groundwork.Kernel.StorageUnit.Declare(")
-            .Append(Literal(table.Name)).Append(", ").Append(Literal(table.Name)).AppendLine(")");
+            .Append(Literal(table.LogicalId)).Append(", ").Append(Literal(table.Name)).AppendLine(")");
         foreach (var column in table.Columns)
         {
             builder.Append("            .Column(").Append(Literal(column.Name)).Append(", global::Groundwork.Kernel.PortableType.").Append(column.Type switch
@@ -624,6 +626,8 @@ public sealed class SchemaGenerator : ISourceGenerator
                 columnOptions.Add("ProviderSequence()");
             if (column.Default is { } columnDefault)
                 columnOptions.Add("Default(" + DefaultLiteral(columnDefault.Value, column.Type) + ")");
+            if (column.Id is { } columnId && columnId != column.Name)
+                columnOptions.Add("LogicalId(" + Literal(columnId) + ")");
             if (columnOptions.Count > 0)
                 builder.Append(" column => column.").Append(string.Join(".", columnOptions));
             builder.AppendLine(")");

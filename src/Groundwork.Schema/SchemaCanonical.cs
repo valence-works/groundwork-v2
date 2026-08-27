@@ -38,8 +38,13 @@ public static class GroundworkSchemaCanonical
                     .Append(",\"scale\":").Append(Number(column.Scale))
                     .Append(",\"folding\":").Append(String(column.Folding.ToString()))
                     .Append(",\"generation\":").Append(String(column.Generation.ToString()))
-                    .Append(",\"default\":").Append(Default(column))
-                    .Append('}');
+                    .Append(",\"default\":").Append(Default(column));
+                // A column that has never been renamed is planned under its own name, so its
+                // logical id adds nothing. Emitting it only once it diverges keeps every already
+                // emitted schema fingerprint byte-identical.
+                if (column.Id is { } columnId && !string.Equals(columnId, column.Name, StringComparison.Ordinal))
+                    builder.Append(",\"id\":").Append(String(columnId));
+                builder.Append('}');
             }
 
             builder.Append("],\"key\":[");
@@ -84,7 +89,10 @@ public static class GroundworkSchemaCanonical
                 Append(builder, table.Aggregations[aggregationIndex]);
             }
 
-            builder.Append("]}");
+            builder.Append(']');
+            if (table.Id is { } tableId && !string.Equals(tableId, table.Name, StringComparison.Ordinal))
+                builder.Append(",\"id\":").Append(String(tableId));
+            builder.Append('}');
         }
 
         return builder.Append("]}").ToString();
@@ -122,7 +130,8 @@ public static class GroundworkSchemaCanonical
                     OptionalInt(columnElement, "scale"),
                     EnumValueOrDefault(columnElement, "folding", TextFolding.None),
                     EnumValueOrDefault(columnElement, "generation", SchemaGeneration.Supplied),
-                    ReadDefault(columnElement, type)));
+                    ReadDefault(columnElement, type),
+                    OptionalString(columnElement, "id")));
             }
 
             var indexes = new List<SchemaIndex>();
@@ -151,7 +160,8 @@ public static class GroundworkSchemaCanonical
                 ReadRetention(tableElement),
                 ReadIdempotency(tableElement, "appendIdempotency"),
                 ReadIdempotency(tableElement, "retentionIdempotency"),
-                ReadAggregations(tableElement)));
+                ReadAggregations(tableElement),
+                OptionalString(tableElement, "id")));
         }
 
         return new SchemaDocument(tables);

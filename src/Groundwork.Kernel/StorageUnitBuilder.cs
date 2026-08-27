@@ -189,6 +189,7 @@ public sealed class ColumnBuilder
     private object? defaultValue;
     private bool hasDefault;
     private ColumnGeneration generation = ColumnGeneration.Supplied;
+    private string? logicalId;
 
     public ColumnBuilder Required() { isNullable = false; return this; }
 
@@ -214,6 +215,13 @@ public sealed class ColumnBuilder
 
     public ColumnBuilder ProviderSequence() { generation = ColumnGeneration.ProviderSequence; return this; }
 
+    /// <summary>
+    /// Pins the column's stable logical identity, which defaults to its physical name. Spell it
+    /// only when renaming the column, keeping the original name as the id, so schema planning
+    /// recognises the change as a rename rather than a drop and an add.
+    /// </summary>
+    public ColumnBuilder LogicalId(string value) { logicalId = value; return this; }
+
     internal ColumnBuilder InferNullable(bool value)
     {
         isNullable ??= value;
@@ -230,7 +238,8 @@ public sealed class ColumnBuilder
         Scale = scale,
         Collation = collation,
         Default = hasDefault ? new PortableDefault(DefaultValueSnapshot.Create(defaultValue, type)) : null,
-        Generation = generation
+        Generation = generation,
+        Id = logicalId
     };
 
     private static string RequireName(string value) =>

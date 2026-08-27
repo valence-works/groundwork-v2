@@ -337,14 +337,6 @@ internal sealed class SqliteDialect : RelationalDialect
     internal static string PhysicalIndexName(string table, string logicalName) =>
         $"__groundwork_ix_{table.Length}_{table}_{logicalName.Length}_{logicalName}";
 
-    private static void Execute(DbConnection connection, DbTransaction transaction, string sql)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
-    }
-
     private static string? ReadCreateSql(SqliteConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();

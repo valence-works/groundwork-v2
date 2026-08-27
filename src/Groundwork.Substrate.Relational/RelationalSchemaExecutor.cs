@@ -238,6 +238,29 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
                 Execute(connection, transaction, RelationalSql.DropIndex(dialect, rebuild.Subject.Name, rebuild.Index.Name));
                 Execute(connection, transaction, RelationalSql.CreateIndex(dialect, rebuild.Subject.Name, rebuild.Index));
                 break;
+            case RenamePrimaryStorageOperation rename:
+                dialect.RenameTable(connection, transaction, rename.FromName, rename.ToName);
+                foreach (var carried in rename.CarriedIndexes)
+                    dialect.RenameIndex(connection, transaction, rename.FromName, rename.ToName, carried);
+                break;
+            case RenameColumnOperation renameColumn:
+                Execute(
+                    connection,
+                    transaction,
+                    dialect.RenameColumnSql(renameColumn.Subject.Name, renameColumn.FromName, renameColumn.ToName));
+                break;
+            case AlterColumnOperation alter:
+                dialect.AlterColumn(connection, transaction, alter.Subject.Name, alter.Column);
+                break;
+            case DropColumnOperation drop:
+                dialect.DropColumn(connection, transaction, drop.Subject.Name, drop.Column);
+                break;
+            case DropPhysicalIndexOperation dropIndex:
+                Execute(connection, transaction, RelationalSql.DropIndex(dialect, dropIndex.Subject.Name, dropIndex.Index.Name));
+                break;
+            case DropPrimaryStorageOperation dropStorage:
+                Execute(connection, transaction, dialect.DropTableSql(dropStorage.Name));
+                break;
             case ApplyProviderPhysicalSchemaDefinitionOperation applyProvider:
                 dialect.ApplyProviderDefinition(connection, transaction, applyProvider.Definition);
                 break;
@@ -375,9 +398,9 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         PhysicalSchemaTarget target)
     {
         var inspection = InspectTarget(connection, transaction, target, PhysicalSchemaHistoryState.Empty);
-        if (inspection.ColumnDrift.Any() || inspection.IndexDrift.Any())
+        if (inspection.HasColumnDrift || inspection.HasIndexDrift)
         {
-            var refusal = inspection.ColumnDrift.FirstOrDefault() ?? inspection.IndexDrift.First();
+            var refusal = inspection.HasColumnDrift ? inspection.ColumnDrift[0] : inspection.IndexDrift[0];
             throw new InvalidOperationException(refusal.Message);
         }
     }
@@ -389,6 +412,13 @@ public sealed class RelationalSchemaExecutor : IPhysicalSchemaExecutor, IPhysica
         PhysicalSchemaHistoryState history)
     {
         var table = target.Subject.Name;
+        if (target.Subject.Evolution.RetiresPrimaryStorage)
+        {
+            // A retired subject declares no catalog to compare against: its applied ledger is empty
+            // by construction. Whether the removal still has to run is a planning question, and the
+            // plan answers it with a pending drop.
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+        }
         if (!dialect.TableExists(connection, transaction, table))
         {
             return new PhysicalSchemaInspectionResult(

@@ -38,6 +38,17 @@ public sealed class SchemaToolCliHarness : IDisposable
         {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}
         """;
 
+    /// <summary>
+    /// The orders unit the authorization documentation is written around. Dropping
+    /// <c>legacy_total</c> is the worked example behind
+    /// <c>--allow-destructive drop-column:orders.legacy_total</c>, and renaming <c>customer</c>
+    /// keeps its logical id so the change deploys as a rename rather than as a drop and an add.
+    /// </summary>
+    public static string OrdersSchema(bool includeLegacyTotal = true, string customerColumn = "customer") =>
+        $$"""
+        {"tables":[{"name":"orders","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":null},{"name":"{{customerColumn}}","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":null{{(customerColumn == "customer" ? "" : ",\"id\":\"customer\"")}}}{{(includeLegacyTotal ? ",{\"name\":\"legacy_total\",\"type\":\"Decimal\",\"nullable\":true,\"length\":null,\"precision\":18,\"scale\":4,\"folding\":\"None\",\"generation\":\"Supplied\",\"default\":null}" : "")}}],"key":["id"],"indexes":[]}]}
+        """;
+
     /// <summary>Two tables in one document, for which the tool reports no single plan fingerprint.</summary>
     public const string MultiTargetSchema =
         """
