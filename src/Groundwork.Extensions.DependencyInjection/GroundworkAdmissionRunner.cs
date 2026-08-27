@@ -124,6 +124,11 @@ public sealed class GroundworkAdmissionRunner
     // directions: a Ready verdict where the first session open would refuse with GW-RUNTIME-001, or a
     // Blocked verdict where the runtime would have admitted. Do not extend these methods to cover new
     // cases — close #201 by exposing runtime admission on the Store contract and delete them.
+    //
+    // This has already drifted once, before it shipped: the additive list below included
+    // UpdateAggregationProfile, which providers emit for a *changed* deployed profile as well as a new
+    // one. The kernel's rule is that anything semantic needs explicit authorization. Read that as
+    // evidence for #201 rather than as a list that is now correct.
     // ---------------------------------------------------------------------------------------------
 
     private static bool IsColumnLevel(SchemaChange change) => change.Kind is
@@ -131,10 +136,18 @@ public sealed class GroundworkAdmissionRunner
         SchemaChangeKind.AddColumn or
         SchemaChangeKind.AddDerivedColumn;
 
+    /// <summary>
+    /// Only what genuinely adds without altering anything already deployed.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SchemaChangeKind.UpdateAggregationProfile"/> is deliberately absent. Providers emit
+    /// that kind both for a profile that is new and for one that already exists deployed, so applying
+    /// it can redefine how an aggregation behaves against stored data. That is a semantic migration,
+    /// and the kernel requires explicit authorization for those rather than a startup switch.
+    /// </remarks>
     private static bool IsAdditive(SchemaChange change) => change.Kind is
         SchemaChangeKind.CreateStorageUnit or
         SchemaChangeKind.AddColumn or
         SchemaChangeKind.AddDerivedColumn or
-        SchemaChangeKind.CreateIndex or
-        SchemaChangeKind.UpdateAggregationProfile;
+        SchemaChangeKind.CreateIndex;
 }

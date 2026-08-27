@@ -194,7 +194,11 @@ options.AutoApplyOnStartup = builder.Environment.IsDevelopment() && configuratio
 ```
 
 Off by default. When on, additive plans — create unit, add column, add derived column, create index —
-are applied at startup and logged at warning level; anything else still refuses. It exists so
+are applied at startup and logged at warning level; anything else still refuses. A change to a
+declared **aggregation profile** is deliberately not in that list: providers emit the same change kind
+for a redefined profile as for a new one, so applying it can alter how an aggregation behaves against
+stored data. That is a semantic migration, and it needs the CLI's explicit authorization rather than a
+startup switch. It exists so
 `dotnet run` and integration tests can stand a database up. **Production physical schema belongs to
 the `groundwork` CLI**, which requires explicit authorization for destructive and semantic work.
 

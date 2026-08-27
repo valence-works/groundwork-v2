@@ -1,3 +1,4 @@
+using Groundwork.Kernel;
 using Groundwork.Store;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -121,6 +122,58 @@ public sealed class StartupAdmissionTests
         Assert.Equal(GroundworkAdmissionStatus.Ready, unit.Status);
         Assert.True(provider.GetRequiredService<IStorageProviderConnection>()
             .Schema.Diff(HostingFixture.Orders).IsEmpty);
+
+        // Pins the positive side of the list: these kinds add without altering anything deployed, so
+        // auto-apply may execute them. The negative side is pinned below.
+        Assert.Equal(
+            [SchemaChangeKind.CreateStorageUnit, SchemaChangeKind.AddColumn, SchemaChangeKind.CreateIndex],
+            unit.PendingChanges.Select(change => change.Kind).Distinct());
+    }
+
+    // Providers emit UpdateAggregationProfile for a profile that already exists deployed as well as
+    // for a new one, so applying it can redefine how an aggregation behaves against stored data. The
+    // kernel calls that a semantic migration and requires explicit authorization; a startup switch is
+    // not that. This is the regression guard for a list that already drifted once.
+    [Fact]
+    public async Task A_changed_aggregation_profile_is_never_auto_applied()
+    {
+        fixture.Deploy(HostingFixture.OrdersWithProfile);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(options =>
+        {
+            fixture.Connect(HostingFixture.OrdersWithChangedProfile)(options);
+            options.AutoApplyOnStartup = true;
+        });
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        await HostingFixture.StartAsync(provider);
+
+        var unit = Assert.Single(Assert.Single(
+            provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Connections).Units);
+        Assert.Equal(
+            SchemaChangeKind.UpdateAggregationProfile,
+            Assert.Single(unit.PendingChanges).Kind);
+        Assert.False(unit.Applied);
+
+        // The deployed profile is still the one that was deployed: nothing was applied behind the host.
+        Assert.False(provider.GetRequiredService<IStorageProviderConnection>()
+            .Schema.Diff(HostingFixture.OrdersWithChangedProfile).IsEmpty);
+    }
+
+    [Fact]
+    public async Task A_changed_aggregation_profile_degrades_rather_than_blocking_startup()
+    {
+        fixture.Deploy(HostingFixture.OrdersWithProfile);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(fixture.Connect(HostingFixture.OrdersWithChangedProfile));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        // Reads and writes are unaffected; only the aggregation runs against the deployed profile.
+        await HostingFixture.StartAsync(provider);
+
+        Assert.Equal(GroundworkAdmissionStatus.Degraded,
+            provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Status);
+        Assert.Equal(HealthStatus.Degraded, (await Check(provider)).Status);
     }
 
     [Fact]

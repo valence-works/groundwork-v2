@@ -41,8 +41,9 @@ public sealed class GroundworkConnectionOptions
     /// <summary>
     /// Development-only. Applies the declared schema during startup admission instead of refusing.
     /// Off by default, and only additive plans are applied: a plan that adds a storage unit, column,
-    /// derived column, or index. Production physical schema belongs to the <c>groundwork</c> CLI,
-    /// which requires explicit authorization — see the Schema Management wiki page.
+    /// derived column, or index. A changed aggregation profile is excluded — that redefines behaviour
+    /// against stored data, which is a semantic migration. Production physical schema belongs to the
+    /// <c>groundwork</c> CLI, which requires explicit authorization — see the Schema Management wiki page.
     /// </summary>
     public bool AutoApplyOnStartup { get; set; }
 

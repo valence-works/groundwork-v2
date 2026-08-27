@@ -39,6 +39,23 @@ internal sealed class HostingFixture
         .Key("id")
         .Build();
 
+    /// <summary>A unit carrying one declared aggregation profile.</summary>
+    internal static StorageUnit OrdersWithProfile { get; } = AggregatedOrders(
+        profile => profile.GroupBy("customer").Count("orders"));
+
+    /// <summary>The same unit with the same profile name redefined — a change, not an addition.</summary>
+    internal static StorageUnit OrdersWithChangedProfile { get; } = AggregatedOrders(
+        profile => profile.GroupBy("customer").Count("orders").Sum("spend", "total"));
+
+    private static StorageUnit AggregatedOrders(Action<AggregationBuilder> profile) =>
+        StorageUnit.Declare("orders_aggregated", "orders_aggregated")
+            .String("id", 64, column => column.Required())
+            .String("customer", 64, column => column.Required())
+            .Decimal("total", 18, 4)
+            .Key("id")
+            .Aggregate("per_customer", profile)
+            .Build();
+
     /// <summary>Applies a declaration out of band, standing in for a completed deployment step.</summary>
     internal void Deploy(StorageUnit unit)
     {
