@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.LiveDatabases;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
@@ -76,9 +77,7 @@ public sealed class SchemaEvolutionDdlTests
     [SkippableFact]
     public void Every_sql_server_statement_this_dialect_emits_parses_on_the_server()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString),
-            "Set GROUNDWORK_SQLSERVER_CONNECTION to parse-check SQL Server DDL.");
+        var connectionString = LiveSqlServer.Required();
         var dialect = new SqlServerDialect();
         var column = new ColumnDefinition
         {

@@ -1,6 +1,7 @@
 using System.Data.Common;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using Groundwork.LiveDatabases;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
@@ -54,6 +55,11 @@ public sealed class SchemaEvolutionDifferentialTests
         using var store = provider.Open();
         var initial = Orders(store.Table, store.Table, includeLegacyTotal: true);
         Apply(store, initial);
+        // The folded "code" column expands into a derived search-key column, so every relational
+        // provider records a provider-owned definition whose identity embeds the storage name.
+        // Without one, only SQL Server would exercise DropProviderDefinition through the rename
+        // below, and the PostgreSQL and SQLite implementations of it would never run.
+        Assert.NotEmpty(Inspect(store, initial).History.AppliedState!.Snapshot.ProviderDefinitions);
         store.Execute(
             $"INSERT INTO {store.Quote(store.Table)} ({store.Quote("id")}, {store.Quote("customer")}, " +
             $"{store.Quote("total")}, {store.Quote("legacy_total")}) VALUES ('o-1', 'ada', 10, 7);");
@@ -293,9 +299,11 @@ public sealed class SchemaEvolutionDifferentialTests
     private static EvolutionProvider SqlServerProvider() => new(
         () =>
         {
-            var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-            Skip.If(string.IsNullOrWhiteSpace(connectionString),
-                "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server evolution tests.");
+            // The database this test process owns, from #209. Each target framework runs as its own
+            // process, so a shared database would give schema application two writers taking
+            // key-range locks on the same server catalog. Per-store naming separates identities
+            // within a process; this separates the catalog between them.
+            var connectionString = LiveSqlServer.Required();
             var table = "gw_evo_" + Guid.NewGuid().ToString("N")[..12];
             var session = new SqlServerSchemaToolProviderSessionFactory().Open(
                 new SchemaToolProviderOptions("sqlserver", connectionString, null, AllowCreate: true, CancellationToken.None));
