@@ -120,6 +120,35 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer);
     }
 
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        var sessionConnection = isMemory ? connection : CreateIndependentConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, sessionConnection);
+        }
+        catch
+        {
+            if (!isMemory)
+                sessionConnection.Dispose();
+            throw;
+        }
+        // Shared in-memory mode is the one place ownership cannot transfer: that connection IS the database,
+        // so releasing it would drop every table. Disposal there closes the session only. SQLite serializes
+        // internally, so the concurrency this seam buys elsewhere costs nothing to forgo here.
+        return new SqliteStorageSession(
+            this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer,
+            ownsConnection: !isMemory);
+    }
+
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
         => BeginUnitOfWork(access, BatchWriteOptions.Default, units);
 

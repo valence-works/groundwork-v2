@@ -39,6 +39,9 @@ internal sealed class CountingConnection(IStorageProviderConnection inner) : ISt
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null) =>
         inner.OpenSession(unit, access, observer);
 
+    public IOwnedStorageSession OpenOwnedSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null) =>
+        inner.OpenOwnedSession(unit, access, observer);
+
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] storageUnits) =>
         Track(inner.BeginUnitOfWork(access, storageUnits));
 

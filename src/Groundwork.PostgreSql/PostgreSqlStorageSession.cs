@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -21,14 +21,24 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBound
     private NpgsqlTransaction? activeTransaction;
     private bool closed;
 
+    /// <summary>
+    /// True when this session was opened through <c>OpenOwnedSession</c> and must return its connection on
+    /// disposal. A session from <c>OpenSession</c> is a view over a connection the provider owns, and a
+    /// session from a unit of work is owned by that unit — in both cases disposing here would release
+    /// something belonging to someone else, so it only closes the session.
+    /// </summary>
+    private readonly bool ownsConnection;
+
     internal PostgreSqlStorageSession(
         PostgreSqlProviderConnection owner,
         StorageUnit unit,
         StorageAccess access,
         NpgsqlConnection connection,
         NpgsqlTransaction? transaction,
-        IProviderCommandObserver? observer = null)
+        IProviderCommandObserver? observer = null,
+        bool ownsConnection = false)
     {
+        this.ownsConnection = ownsConnection;
         this.owner = owner;
         Unit = unit;
         Access = access;
@@ -1030,6 +1040,24 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBound
 
     internal void Close() => closed = true;
 
+    public void Dispose()
+    {
+        if (closed)
+            return;
+        closed = true;
+        if (ownsConnection)
+            connection.Dispose();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (closed)
+            return;
+        closed = true;
+        if (ownsConnection)
+            await connection.DisposeAsync().ConfigureAwait(false);
+    }
+
     private ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchCore(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(writes);
@@ -1680,6 +1708,10 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBound
 
     private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation)
     {
+        // Serialized for the whole operation: a cached session is shared by concurrent callers and Npgsql
+        // refuses concurrent commands on one connection. Reads need this as much as writes — a colliding
+        // read is what surfaces on SQL Server as "already an open DataReader".
+        using var lease = await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false);
         try
         {
             ThrowIfClosed();
@@ -1693,6 +1725,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBound
 
     private async ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
     {
+        using var lease = await owner.EnterGate(mode).ConfigureAwait(false);
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         ThrowIfClosed();
         if (transaction is not null)

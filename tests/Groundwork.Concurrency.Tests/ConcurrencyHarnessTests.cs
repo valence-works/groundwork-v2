@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Groundwork.MongoDb;
 using Groundwork.Kernel;
 using Groundwork.PostgreSql;
@@ -350,6 +351,134 @@ public sealed class ConcurrencyHarnessTests
         Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, error.Outcomes.Single().Outcome.Status);
         Assert.Equal("second", connection.OpenSession(unit, StorageAccess.Global)
             .Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "same" }))!.Values.Values["value"]);
+    }
+
+    /// <summary>
+    /// One session, many concurrent callers — the shape Elsa's storage session source produces, which it
+    /// caches by (target, unit, access) and hands to every matching caller. Before the connection gate this
+    /// failed on PostgreSQL with NpgsqlOperationInProgressException and on SQL Server with "already an open
+    /// DataReader"; SQLite serialized internally and MongoDB's driver is thread-safe, which is why only two
+    /// of four providers ever showed it (elsa-foundation#1449).
+    /// </summary>
+    [SkippableFact]
+    public async Task PostgreSql_one_shared_session_serializes_concurrent_readers_and_writers()
+    {
+        using var store = PostgreSqlStore.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(store.ConnectionString);
+        var suffix = Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("shared-session-" + suffix),
+            Name = "shared_session_" + suffix,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
+                new() { Name = "value", Type = PortableType.String, MaxLength = 256 },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.None
+        };
+        connection.Schema.Apply(unit);
+
+        // Exactly one session, as the session source would hand out.
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        for (var seed = 0; seed < 8; seed++)
+            session.Upsert(Values($"row-{seed}", "seed", DateTimeOffset.UnixEpoch), WriteOptions.Unconditional);
+
+        var failures = new ConcurrentBag<Exception>();
+        var readers = Enumerable.Range(0, 16).Select(index => Task.Run(() =>
+        {
+            try
+            {
+                for (var pass = 0; pass < 8; pass++)
+                    _ = session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = $"row-{index % 8}" }));
+            }
+            catch (Exception failure) { failures.Add(failure); }
+        }));
+        var writers = Enumerable.Range(0, 8).Select(index => Task.Run(() =>
+        {
+            try
+            {
+                for (var pass = 0; pass < 8; pass++)
+                    session.Upsert(Values($"row-{index}", $"pass-{pass}", DateTimeOffset.UnixEpoch), WriteOptions.Unconditional);
+            }
+            catch (Exception failure) { failures.Add(failure); }
+        }));
+
+        await Task.WhenAll(readers.Concat(writers));
+
+        Assert.True(failures.IsEmpty,
+            "Concurrent use of one shared session must serialize, not fault: " +
+            string.Join("; ", failures.Select(failure => failure.GetType().Name + ": " + failure.Message)));
+        for (var index = 0; index < 8; index++)
+            Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = $"row-{index}" })));
+    }
+
+    /// <summary>
+    /// The property the connection gate cannot provide: owned sessions run genuinely CONCURRENTLY rather
+    /// than queueing. Each caller opens its own session, so each has its own connection; if owned sessions
+    /// secretly shared one, the gate would serialize them and the elapsed time would collapse to the serial
+    /// sum. Also proves the release half — the reason per-call sessions were rejected before this seam is
+    /// that every one leaked a connection for the provider's lifetime (groundwork-v2#233).
+    /// </summary>
+    [SkippableFact]
+    public async Task PostgreSql_owned_sessions_run_concurrently_and_release_their_connections()
+    {
+        using var store = PostgreSqlStore.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(store.ConnectionString);
+        var suffix = Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("owned-session-" + suffix),
+            Name = "owned_session_" + suffix,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 450, IsNullable = false },
+                new() { Name = "value", Type = PortableType.String, MaxLength = 256 },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.None
+        };
+        connection.Schema.Apply(unit);
+
+        const int callers = 8;
+        var barrier = new CountdownEvent(callers);
+        var proceed = new ManualResetEventSlim(false);
+        var failures = new ConcurrentBag<Exception>();
+        var overlapped = 0;
+
+        var work = Enumerable.Range(0, callers).Select(index => Task.Run(async () =>
+        {
+            try
+            {
+                await using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+                // Every caller holds its own session open at the same moment. On one shared connection this
+                // is precisely what deadlocks or faults; on owned sessions it simply overlaps.
+                barrier.Signal();
+                proceed.Wait(TimeSpan.FromSeconds(30));
+                Interlocked.Increment(ref overlapped);
+                for (var pass = 0; pass < 4; pass++)
+                    owned.Upsert(Values($"row-{index}", $"pass-{pass}", DateTimeOffset.UnixEpoch), WriteOptions.Unconditional);
+            }
+            catch (Exception failure) { failures.Add(failure); }
+        })).ToArray();
+
+        Assert.True(barrier.Wait(TimeSpan.FromSeconds(30)), "Owned sessions could not all be open at once.");
+        proceed.Set();
+        await Task.WhenAll(work);
+
+        Assert.True(failures.IsEmpty,
+            "Owned sessions must be independently usable: " +
+            string.Join("; ", failures.Select(failure => failure.GetType().Name + ": " + failure.Message)));
+        Assert.Equal(callers, overlapped);
+
+        // Released: a fresh session still reads every row, and the provider never accumulated the eight
+        // connections — they went back to the pool when each session was disposed.
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        for (var index = 0; index < callers; index++)
+            Assert.NotNull(reader.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = $"row-{index}" })));
     }
 
     private static StorageValues Values(string id, string value, DateTimeOffset createdAt) =>

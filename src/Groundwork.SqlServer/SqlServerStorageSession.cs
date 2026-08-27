@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -21,10 +21,18 @@ internal sealed class SqlServerStorageSession : IStorageSession, IProviderBoundS
     private SqlTransaction? activeTransaction;
     private bool closed;
 
+    /// <summary>
+    /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
+    /// A view from <c>OpenSession</c> and a session from a unit of work both belong to someone else.
+    /// </summary>
+    private readonly bool ownsConnection;
+
     internal SqlServerStorageSession(SqlServerProviderConnection owner, StorageUnit unit, StorageAccess access,
         SqlConnection connection, SqlTransaction? transaction,
-        IProviderCommandObserver? observer = null)
+        IProviderCommandObserver? observer = null,
+        bool ownsConnection = false)
     {
+        this.ownsConnection = ownsConnection;
         commandObserver = observer;
         this.owner = owner;
         Unit = unit;
@@ -1095,6 +1103,24 @@ internal sealed class SqlServerStorageSession : IStorageSession, IProviderBoundS
 
     internal void Close() => closed = true;
 
+    public void Dispose()
+    {
+        if (closed)
+            return;
+        closed = true;
+        if (ownsConnection)
+            connection.Dispose();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (closed)
+            return;
+        closed = true;
+        if (ownsConnection)
+            await connection.DisposeAsync().ConfigureAwait(false);
+    }
+
     private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchCore(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(writes);
@@ -1913,6 +1939,12 @@ internal sealed class SqlServerStorageSession : IStorageSession, IProviderBoundS
 
     private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation)
     {
+        // Reads take the connection gate for the same reason writes do: a cached session is shared by
+        // concurrent callers, and a colliding read is what SqlClient reports as "already an open
+        // DataReader". A session inside a unit of work already holds its transaction's exclusive use.
+        using var lease = transaction is null
+            ? await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false)
+            : null;
         try
         {
             if (transaction is not null) return await operation().ConfigureAwait(false);

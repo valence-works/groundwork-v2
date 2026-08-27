@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -19,14 +19,22 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
     private SqliteTransaction? activeTransaction;
     private bool closed;
 
+    /// <summary>
+    /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
+    /// A view from <c>OpenSession</c> and a session from a unit of work both belong to someone else.
+    /// </summary>
+    private readonly bool ownsConnection;
+
     internal SqliteStorageSession(
         SqliteProviderConnection owner,
         StorageUnit unit,
         StorageAccess access,
         SqliteConnection connection,
         SqliteTransaction? transaction,
-        IProviderCommandObserver? observer = null)
+        IProviderCommandObserver? observer = null,
+        bool ownsConnection = false)
     {
+        this.ownsConnection = ownsConnection;
         commandObserver = observer;
         this.owner = owner;
         Unit = unit;
@@ -983,6 +991,24 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
     }
 
     internal void Close() => closed = true;
+
+    public void Dispose()
+    {
+        if (closed)
+            return;
+        closed = true;
+        if (ownsConnection)
+            connection.Dispose();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (closed)
+            return;
+        closed = true;
+        if (ownsConnection)
+            await connection.DisposeAsync().ConfigureAwait(false);
+    }
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes)
     {

@@ -74,6 +74,19 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         return new InMemoryStorageSession(database, state, access, liveState: true, providerConnection: this, observer: observer);
     }
 
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        var state = database.GetState(unit, access);
+        return new InMemoryStorageSession(database, state, access, liveState: true, observer: observer);
+    }
+
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
         => BeginUnitOfWork(access, BatchWriteOptions.Default, units);
 
@@ -562,7 +575,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class InMemoryStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -1497,6 +1510,18 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
             () => ApplyRetention(operationId, options));
 
     internal void Close() => disposed = true;
+
+    /// <summary>
+    /// The in-memory provider holds no scarce per-session resource, so releasing one only closes it. The
+    /// capability exists so a consumer can use one lifetime model across every provider.
+    /// </summary>
+    public void Dispose() => disposed = true;
+
+    public ValueTask DisposeAsync()
+    {
+        disposed = true;
+        return ValueTask.CompletedTask;
+    }
 
     private WriteOutcome Mutate(
         StorageValues values,

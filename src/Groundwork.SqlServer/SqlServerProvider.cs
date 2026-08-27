@@ -124,6 +124,31 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer);
     }
 
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+        var connection = CreateIndependentConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+        // Deliberately not added to sessionConnections: the caller releases it on disposal.
+        return new SqlServerStorageSession(
+            this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer, ownsConnection: true);
+    }
+
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
         => BeginUnitOfWork(access, BatchWriteOptions.Default, units);
 

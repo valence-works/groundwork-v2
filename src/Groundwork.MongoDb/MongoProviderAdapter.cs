@@ -71,6 +71,17 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
             : new MongoStoreSession(session, commandObserver: observer, providerConnection: this);
     }
 
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        var session = inner.OpenSession(unit, ToNative(access), observer);
+        return inner.ProviderSequenceFit is ProviderFit.Supported
+            ? new MongoExactStoreSession(session, observer)
+            : new MongoStoreSession(session, commandObserver: observer);
+    }
+
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
         BeginUnitOfWork(access, BatchWriteOptions.Default, units);
 
@@ -138,8 +149,23 @@ internal class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null,
     IProviderCommandObserver? commandObserver = null,
-    IStorageProviderConnection? providerConnection = null) : IStorageSession, IProviderBoundStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+    IStorageProviderConnection? providerConnection = null) : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
+    private bool released;
+
+    /// <summary>
+    /// MongoDB's driver is thread-safe and a session here holds no exclusive connection, so releasing one
+    /// only closes it. The capability exists so a consumer can use one session lifetime model across every
+    /// provider rather than special-casing this one.
+    /// </summary>
+    public void Dispose() => released = true;
+
+    public ValueTask DisposeAsync()
+    {
+        released = true;
+        return ValueTask.CompletedTask;
+    }
+
     public StorageUnit Unit => inner.Unit;
 
     IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection => providerConnection;
