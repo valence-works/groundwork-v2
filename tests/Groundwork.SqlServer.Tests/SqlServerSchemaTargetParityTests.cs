@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.SchemaTool;
 using Groundwork.Store;
 using Groundwork.Testing;
@@ -13,7 +14,7 @@ public sealed class SqlServerSchemaTargetParityTests : IDisposable
     [SkippableFact]
     public async Task Cli_applied_history_carries_the_fingerprint_the_runtime_expects()
     {
-        var connection = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connection = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connection),
             "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server integration tests.");
         var table = "parity_orders_" + Guid.NewGuid().ToString("N");

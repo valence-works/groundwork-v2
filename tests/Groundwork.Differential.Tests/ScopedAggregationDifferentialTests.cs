@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -129,14 +130,14 @@ public sealed class ScopedAggregationDifferentialTests
     public void SQLServer_native_scoped_aggregation_is_isolated_and_bounded()
     {
         AssertProvider("SQL Server", () => new SqlServerProviderFactory().Create(
-            Required("GROUNDWORK_SQLSERVER_CONNECTION")));
+            LiveSqlServer.Required()));
     }
 
     [SkippableFact]
     public void MongoDB_transactional_native_scoped_aggregation_is_isolated_and_bounded()
     {
         AssertProvider("MongoDB", () => new MongoProviderFactory().Create(
-            Required("GROUNDWORK_MONGO_CONNECTION")));
+            LiveMongo.Required()));
     }
 
     private static void AssertProvider(string providerName, Func<IStorageProviderConnection> open)

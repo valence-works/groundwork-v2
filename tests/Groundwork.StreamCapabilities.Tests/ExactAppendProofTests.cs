@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -76,7 +77,7 @@ public sealed class ExactAppendProofTests
     [SkippableFact]
     public void SQLServer_exact_append_returns_ordered_generated_values_and_replays_them()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server exact append proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertExactAppend(connection, "sqlserver");
@@ -86,7 +87,7 @@ public sealed class ExactAppendProofTests
     [SkippableFact]
     public void MongoDB_exact_append_returns_ordered_generated_values_and_replays_them()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB exact append proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         Skip.If(!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.ExactAppendOutcomes),

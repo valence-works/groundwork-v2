@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
@@ -45,7 +46,7 @@ public sealed class ProviderSequenceProofTests
     [SkippableFact]
     public void SQLServer_provider_sequence_allocation_is_monotonic_and_returned_in_exact_outcomes()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server sequence proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertSequence(connection, "sqlserver");
@@ -54,7 +55,7 @@ public sealed class ProviderSequenceProofTests
     [SkippableFact]
     public void MongoDB_provider_sequence_requires_transaction_capability_and_returns_values()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB sequence proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         var unit = SequenceUnit("stream-sequence-mongodb-" + Guid.NewGuid().ToString("N"));

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.SqlServer;
@@ -60,7 +61,7 @@ public sealed class RetentionProofTests
     [SkippableFact]
     public void SQLServer_retention_keeps_newest_rows_per_partition()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server retention proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         AssertRetention(connection, "sqlserver");
@@ -69,7 +70,7 @@ public sealed class RetentionProofTests
     [SkippableFact]
     public async Task SQLServer_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
+        var connectionString = LiveSqlServer.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run the SQL Server OnAppend proof.");
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
 
@@ -111,7 +112,7 @@ public sealed class RetentionProofTests
     [SkippableFact]
     public void MongoDB_retention_uses_bounded_deleteMany_and_keeps_newest_rows_per_partition()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB retention proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertRetention(connection, "mongodb");
@@ -122,7 +123,7 @@ public sealed class RetentionProofTests
     [SkippableFact]
     public async Task MongoDB_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run the MongoDB OnAppend proof.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
 
