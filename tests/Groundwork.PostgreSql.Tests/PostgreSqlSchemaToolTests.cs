@@ -85,10 +85,15 @@ public sealed class PostgreSqlSchemaToolTests : IDisposable
         Assert.Equal("applied", applied.Report.RootElement.GetProperty("outcome").GetString());
 
         Assert.Equal("ada", Scalar(database.ConnectionString, "SELECT customer FROM orders WHERE id='o-1';"));
+        // information_schema spans every schema the role can see, so this has to name the fixture's
+        // own. Without current_schema() the count picks up any other schema's orders.legacy_total —
+        // in practice the other target framework's process running this same test — and the drop
+        // reads as not applied on whichever framework loses the race.
         Assert.Equal(0L, Scalar(
             database.ConnectionString,
             "SELECT count(*) FROM information_schema.columns " +
-            "WHERE table_name='orders' AND column_name='legacy_total';"));
+            "WHERE table_schema=current_schema() " +
+            "AND table_name='orders' AND column_name='legacy_total';"));
         Assert.Equal(
             SchemaToolExitCodes.Success,
             (await harness.RunAsync(["status", "--schema", dropped], database.ConnectionString)).ExitCode);
