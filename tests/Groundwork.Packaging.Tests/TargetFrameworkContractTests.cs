@@ -54,6 +54,9 @@ public sealed class TargetFrameworkContractTests
             + "and verify-clean-room.sh builds and runs it once per shipped framework.",
         ["tests/Groundwork.Samples.EventLog.Tests/Groundwork.Samples.EventLog.Tests.csproj"] =
             "Exercises a sample application, which targets one framework of its own.",
+        ["tests/Groundwork.Samples.Api.Tests/Groundwork.Samples.Api.Tests.csproj"] =
+            "Drives the ASP.NET Core sample through WebApplicationFactory, which binds the test host to "
+            + "the sample's own framework. Running it twice would test ASP.NET Core, not Groundwork.",
         ["tests/Groundwork.Query.Linq.Fragments/Groundwork.Query.Linq.Fragments.csproj"] =
             "A netstandard2.0 compilation fixture, not a test host.",
         ["tests/Groundwork.Documents.External/Groundwork.Documents.External.csproj"] =
