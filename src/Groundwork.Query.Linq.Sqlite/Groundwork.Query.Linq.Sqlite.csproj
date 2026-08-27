@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+    <ProjectReference Include="../Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj" />
     <ProjectReference Include="../Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
     <ProjectReference Include="../Groundwork.Store/Groundwork.Store.csproj" />
   </ItemGroup>

@@ -121,7 +121,7 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
 internal class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null,
-    IProviderCommandObserver? commandObserver = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+    IProviderCommandObserver? commandObserver = null) : IStorageSession, IQueryAdmissionStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     public StorageUnit Unit => inner.Unit;
 
@@ -139,6 +139,13 @@ internal class MongoStoreSession(
         beforeRead?.Invoke(key);
         return ToStore(inner.Read(new MongoStorageKey(key.Values)));
     }
+
+    /// <summary>
+    /// MongoDB has no bound-parameter budget — its real bound is the 16 MB command document — so the
+    /// portable literal and membership defaults are stated deliberately rather than a Mongo-specific
+    /// number being invented for them.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission => QueryAdmissionProfile.Default;
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
