@@ -20,4 +20,7 @@
     <ProjectReference Include="../../src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Groundwork.LiveDatabases/LiveSqlServer.cs" Link="LiveSqlServer.cs" />
+  </ItemGroup>
 </Project>

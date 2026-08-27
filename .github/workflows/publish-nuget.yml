@@ -1,6 +1,6 @@
 # Publishing Groundwork to nuget.org
 #
-# This workflow builds, validates, and — only on an explicit release — publishes the 22-package
+# This workflow builds, validates, and — only on an explicit release — publishes the 24-package
 # public set to nuget.org. The Feedz feed remains the nightly preview channel and is unaffected;
 # see publish-feedz.yml.
 #

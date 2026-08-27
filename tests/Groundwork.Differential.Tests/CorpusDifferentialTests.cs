@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
@@ -95,8 +96,8 @@ public sealed class CorpusDifferentialTests
     public void Prefix_search_keys_match_the_same_edge_corpus_on_all_four_providers()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         using var sqlite = OpenSqlite(PrefixUnit, PrefixRows);
         using var pg = OpenPostgreSql(postgres, PrefixUnit, PrefixRows);
         using var sql = OpenSqlServer(sqlServer, PrefixUnit, PrefixRows);
@@ -147,8 +148,8 @@ public sealed class CorpusDifferentialTests
     {
         Skip.If(!ExplainAssertionMode.Enabled, "Set GW_EXPLAIN_ASSERT=1 to run native plan proof.");
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         var rows = Enumerable.Range(1, 2_000)
             .Select(value => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
             {
@@ -195,8 +196,8 @@ public sealed class CorpusDifferentialTests
     public void Scoped_queries_isolate_rows_counts_and_continuation_tokens_on_all_four_providers()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         var unit = ScopedUnit;
         using var sqlite = new SqliteProviderFactory().Create("Data Source=file:g2q4_scope_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
         using var pg = new PostgreSqlProviderFactory().Create(postgres);
@@ -251,8 +252,8 @@ public sealed class CorpusDifferentialTests
     public void Pinned_40_row_300_shape_corpus_is_bit_identical_through_public_provider_sessions()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         using var sqlite = OpenSqlite();
         using var pg = OpenPostgreSql(postgres);
         using var sql = OpenSqlServer(sqlServer);
@@ -302,8 +303,8 @@ public sealed class CorpusDifferentialTests
     public void Public_nullable_keyset_continuation_is_equivalent_on_all_four_providers()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         using var sqlite = OpenSqlite();
         using var pg = OpenPostgreSql(postgres);
         using var sql = OpenSqlServer(sqlServer);
@@ -340,8 +341,8 @@ public sealed class CorpusDifferentialTests
     public void Public_result_materialization_preserves_count_and_hides_provider_fields()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         using var sqlite = OpenSqlite();
         using var pg = OpenPostgreSql(postgres);
         using var sql = OpenSqlServer(sqlServer);
@@ -443,8 +444,8 @@ public sealed class CorpusDifferentialTests
     public void Empty_in_keeps_a_pinned_partial_index_usable_on_all_four_providers()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         using var sqlite = OpenSqlite(SparseUnit, SparseRows);
         using var pg = OpenPostgreSql(postgres, SparseUnit, SparseRows);
         using var sql = OpenSqlServer(sqlServer, SparseUnit, SparseRows);
@@ -475,8 +476,8 @@ public sealed class CorpusDifferentialTests
     public void Adversarial_scalar_ordering_matches_the_portable_oracle_on_all_four_providers()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         using var sqlite = OpenSqlite(SemanticEdgeUnit, SemanticEdgeRows);
         using var pg = OpenPostgreSql(postgres, SemanticEdgeUnit, SemanticEdgeRows);
         using var sql = OpenSqlServer(sqlServer, SemanticEdgeUnit, SemanticEdgeRows);
@@ -531,8 +532,8 @@ public sealed class CorpusDifferentialTests
     public void Latest_per_key_is_native_and_preserves_full_count_across_pages_on_all_four_providers()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         using var sqlite = OpenSqlite(LatestUnit, LatestRows);
         using var pg = OpenPostgreSql(postgres, LatestUnit, LatestRows);
         using var sql = OpenSqlServer(sqlServer, LatestUnit, LatestRows);

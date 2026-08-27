@@ -1,6 +1,6 @@
 <Project>
 
-  <!-- Release contract for every public package, declared once rather than repeated 22 times.
+  <!-- Release contract for every public package, declared once rather than repeated 24 times.
        Source Link is in-box in the .NET 8+ SDK; Microsoft.SourceLink.GitHub stays referenced so a
        build on an older SDK still embeds the same commit metadata. Groundwork.Packaging.Tests packs
        for real and asserts the resulting nupkg and snupkg carry all of it. -->

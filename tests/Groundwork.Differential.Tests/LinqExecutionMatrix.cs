@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Linq;
@@ -54,8 +55,8 @@ internal sealed class LinqExecutionMatrix : IDisposable
     internal static LinqExecutionMatrix OpenAll()
     {
         var postgres = Required("GROUNDWORK_POSTGRES_CONNECTION");
-        var sqlServer = Required("GROUNDWORK_SQLSERVER_CONNECTION");
-        var mongo = Required("GROUNDWORK_MONGO_CONNECTION");
+        var sqlServer = LiveSqlServer.Required();
+        var mongo = LiveMongo.Required();
         var matrix = new LinqExecutionMatrix("g2_linq_exec_" + Guid.NewGuid().ToString("N"));
         try
         {
