@@ -150,8 +150,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
     private void Complete()
     {
         terminal = true;
-        CloseSessions();
-        connection.Dispose();
+        WriteFailureCleanup.RunAll(CloseSessions, connection.Dispose);
     }
 
     private void ThrowIfTerminal()
