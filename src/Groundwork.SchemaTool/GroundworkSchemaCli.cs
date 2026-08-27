@@ -127,7 +127,7 @@ public static class GroundworkSchemaCli
                     "GW-CLI-006",
                     $"No provider plug-in is registered for '{providerName}'.");
             var schema = GroundworkSchemaCanonical.Read(schemaJson);
-            var targets = SchemaCompilation.CompileTargets(schema, provider.Provider);
+            var targets = SchemaCompilation.CompileTargets(schema, provider.Targets);
             var targetReports = new List<SchemaToolTargetReport>();
 
             if (command == "apply")

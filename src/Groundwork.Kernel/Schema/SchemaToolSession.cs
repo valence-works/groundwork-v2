@@ -1,9 +1,20 @@
 namespace Groundwork.Kernel.Schema;
 
+/// <summary>
+/// Physicalizes a logical declaration into the provider's schema target. A provider exposes the
+/// same compilation its runtime coordinator uses, so a deployed target and the runtime's expected
+/// target are one value rather than two that happen to agree.
+/// </summary>
+public interface IPhysicalSchemaTargetCompiler
+{
+    PhysicalSchemaTarget Compile(StorageUnit declaration);
+}
+
 /// <summary>One open deployment-tool connection to a provider's schema machinery.</summary>
 public interface ISchemaToolProviderSession : IDisposable
 {
     ProviderIdentity Provider { get; }
+    IPhysicalSchemaTargetCompiler Targets { get; }
     IPhysicalSchemaExecutor Executor { get; }
     IPhysicalSchemaHistoryInspector Inspector { get; }
 }

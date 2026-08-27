@@ -228,7 +228,7 @@ public sealed class SchemaToolContractTests
     public void Destructive_operations_require_the_exact_identity()
     {
         var target = SchemaCompilation.CompileTargets(
-            GroundworkSchemaCanonical.Read(ValidSchema), new ProviderIdentity("fake", "1"))[0];
+            GroundworkSchemaCanonical.Read(ValidSchema), new FakeTargets(new ProviderIdentity("fake", "1")))[0];
         target = new PhysicalSchemaTarget(
             new SchemaSubject(target.Subject.Definition, new SchemaEvolutionMetadata(true, "reclassify-v2")),
             target.Provider);
@@ -302,9 +302,16 @@ public sealed class SchemaToolContractTests
     {
         public FakeExecutor ExecutorImpl { get; } = new();
         public ProviderIdentity Provider { get; } = new(provider, "1");
+        public IPhysicalSchemaTargetCompiler Targets => new FakeTargets(Provider);
         public IPhysicalSchemaExecutor Executor => ExecutorImpl;
         public IPhysicalSchemaHistoryInspector Inspector => ExecutorImpl;
         public void Dispose() { }
+    }
+
+    private sealed class FakeTargets(ProviderIdentity provider) : IPhysicalSchemaTargetCompiler
+    {
+        public PhysicalSchemaTarget Compile(StorageUnit declaration) =>
+            new(new SchemaSubject(SearchKeyProjection.Expand(declaration)), provider);
     }
 
     public sealed class DiscoveredFactory : ISchemaToolProviderSessionFactory

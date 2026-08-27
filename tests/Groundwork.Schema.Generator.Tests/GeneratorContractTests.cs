@@ -88,6 +88,58 @@ public sealed class GeneratorContractTests
     }
 
     [Fact]
+    public void Lifecycle_policies_round_trip_from_attributes_to_the_compiled_declaration()
+    {
+        const string source = """
+            #nullable enable
+            using System;
+            using Groundwork.Schema;
+
+            [GwTable("orders", Scope = SchemaScope.Scoped, ConcurrencyToken = "version")]
+            [GwIndex("ix_orders_customer", "customer ASC")]
+            [GwRetention(50, "placed_at", Trigger = SchemaRetentionTrigger.OnAppend, PartitionBy = "status")]
+            [GwAppendIdempotency("00:10:00")]
+            [GwRetentionIdempotency("01:00:00", LedgerName = "orders_retention_ops")]
+            [GwAggregate("by_customer", "group customer, count orders, sum total amount")]
+            [GwAggregate("daily", "day bucket_day placed_at, count orders, firstBy newest id placed_at DESC")]
+            public partial class Order
+            {
+                [GwKey, GwColumn(Length = 64)] public string Id { get; set; } = "";
+                [GwColumn(Length = 64, Folding = TextFolding.AsciiIgnoreCase)] public string Customer { get; set; } = "";
+                [GwColumn] public DateTimeOffset PlacedAt { get; set; }
+                [GwColumn(Precision = 12, Scale = 2, Default = "0")] public decimal Amount { get; set; }
+                [GwColumn(Length = 16, Default = "pending")] public string Status { get; set; } = "";
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var canonical = (string)result.OutputCompilation.Assembly.GetAttributes()
+            .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName)
+            .ConstructorArguments[0].Value!;
+
+        using var emitted = new MemoryStream();
+        Assert.True(result.OutputCompilation.Emit(emitted).Success);
+        var generated = (Groundwork.Kernel.StorageUnit)System.Reflection.Assembly.Load(emitted.ToArray())
+            .GetType("OrderStorageUnit")!.GetProperty("Definition")!.GetValue(null)!;
+        var compiled = SchemaTool.SchemaCompilation.Compile(
+            Assert.Single(GroundworkSchemaCanonical.Read(canonical).Tables));
+
+        Assert.Equal(
+            new Groundwork.Kernel.Schema.SchemaSubject(compiled).Fingerprint,
+            new Groundwork.Kernel.Schema.SchemaSubject(generated).Fingerprint);
+        Assert.Equal(Groundwork.Kernel.ScopePolicy.Scoped, generated.Scope);
+        Assert.Equal("version", generated.Concurrency.TokenColumn);
+        Assert.Equal(Groundwork.Kernel.RetentionTrigger.OnAppend, generated.Retention!.Trigger);
+        Assert.Equal(TimeSpan.FromMinutes(10), generated.AppendIdempotency!.Window);
+        Assert.Equal("orders_retention_ops", generated.RetentionIdempotency!.LedgerName);
+        Assert.Equal("pending", generated.Columns.Single(column => column.Name == "status").Default!.Value);
+        Assert.Equal(2, generated.AggregationProfiles.Count);
+    }
+
+    [Fact]
     public void Invalid_index_spec_reports_at_the_spec_argument()
     {
         const string source = """

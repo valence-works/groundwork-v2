@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Groundwork.Kernel;
 
 namespace Groundwork.Testing;
 
@@ -37,6 +38,27 @@ public sealed class SchemaToolCliHarness : IDisposable
         {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"priority","type":"Int32","nullable":true,"length":null,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[{"name":"by_priority","columns":[{"name":"priority","descending":false}],"includeNulls":true,"unique":false}]}]}
         """;
 
+    /// <summary>
+    /// One unit expressed as a canonical schema document. <see cref="ParityDeclaration"/> expresses
+    /// the same unit through the fluent kernel builder, so a test can prove that a tool-applied
+    /// target and the runtime's expected target are the same value.
+    /// </summary>
+    public static string ParitySchema(string table = "parity_orders") =>
+        $$$"""
+        {"tables":[{"name":"{{{table}}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":null},{"name":"customer","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"AsciiIgnoreCase","generation":"Supplied","default":null},{"name":"status","type":"String","nullable":false,"length":16,"precision":null,"scale":null,"folding":"None","generation":"Supplied","default":{"value":"pending"}}],"key":["id"],"indexes":[{"name":"ix_parity_customer","columns":[{"name":"customer","descending":false}],"includeNulls":true,"unique":false}],"scope":"Scoped","concurrency":{"token":"version"},"timestamps":"None","retention":null,"appendIdempotency":null,"retentionIdempotency":null,"aggregations":[]}]}
+        """;
+
+    public static StorageUnit ParityDeclaration(string table = "parity_orders") =>
+        StorageUnit.Declare(table, table)
+            .String("id", 64, column => column.Required())
+            .String("customer", 64, column => column.Required().Collation(PortableCollation.OrdinalIgnoreCase))
+            .String("status", 16, column => column.Required().Default("pending"))
+            .Key("id")
+            .Index("ix_parity_customer", "customer")
+            .Scoped()
+            .OptimisticConcurrency()
+            .Build();
+
     public string Temp(string name, string contents)
     {
         var path = Path.Combine(Root, name);
@@ -44,16 +66,45 @@ public sealed class SchemaToolCliHarness : IDisposable
         return path;
     }
 
-    public async Task<SchemaToolCliRun> RunAsync(IReadOnlyList<string> arguments, string? connection = null)
+    /// <summary>Runs 'schema emit', which is provider-independent and takes no provider options.</summary>
+    public Task<SchemaToolCliRun> EmitAsync(string input, string file) =>
+        InvokeAsync(["schema", "emit", "--input", input, "--file", file, "--output", "json"]);
+
+    /// <summary>
+    /// Plans, then applies under exact-plan authorization, naming every destructive and semantic
+    /// identity the plan reported. Apply stays refused unless the plan is still the current one.
+    /// </summary>
+    public async Task<SchemaToolCliRun> ApplyAuthorizedAsync(string schemaFile, string connection)
+    {
+        var plan = await RunAsync(["plan", "--schema", schemaFile], connection);
+        var authorization = plan.Report.RootElement.GetProperty("authorization");
+        var arguments = new List<string>
+        {
+            "apply", "--schema", schemaFile,
+            "--expected-plan", plan.Report.RootElement.GetProperty("planFingerprint").GetString()!
+        };
+        foreach (var identity in authorization.GetProperty("destructiveOperationsRequired").EnumerateArray())
+            arguments.AddRange(["--allow-destructive", identity.GetString()!]);
+        foreach (var identity in authorization.GetProperty("semanticRequired").EnumerateArray())
+            arguments.AddRange(["--allow-semantic", identity.GetString()!]);
+        return await RunAsync(arguments, connection);
+    }
+
+    public Task<SchemaToolCliRun> RunAsync(IReadOnlyList<string> arguments, string? connection = null)
     {
         ArgumentNullException.ThrowIfNull(arguments);
-        var output = new StringWriter();
-        var error = new StringWriter();
         var composed = new List<string>(arguments) { "--provider", providerAlias };
         if (connection is not null)
             composed.AddRange(["--connection", connection]);
         composed.AddRange(["--provider-assembly", providerAssembly, "--output", "json"]);
-        var exitCode = await run(composed, output, error);
+        return InvokeAsync(composed);
+    }
+
+    private async Task<SchemaToolCliRun> InvokeAsync(IReadOnlyList<string> arguments)
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exitCode = await run(arguments, output, error);
         var text = output.ToString();
         return new SchemaToolCliRun(exitCode, JsonDocument.Parse(text), text, error.ToString());
     }

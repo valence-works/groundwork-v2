@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using Groundwork.Schema;
@@ -34,6 +36,18 @@ public sealed class SchemaGenerator : ISourceGenerator
         "GW_SCHEMA_TABLE_002",
         "Table name is duplicated",
         "Schema table name '{0}' is declared more than once.",
+        "Groundwork.Schema", DiagnosticSeverity.Error, isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor InvalidDefault = new(
+        "GW_SCHEMA_COLUMN_003",
+        "Column default is not readable",
+        "Column '{0}' declares a default that is not a valid {1}: {2}",
+        "Groundwork.Schema", DiagnosticSeverity.Error, isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor InvalidTablePolicy = new(
+        "GW_SCHEMA_TABLE_003",
+        "Table lifecycle policy is invalid",
+        "Table '{0}' declares an invalid lifecycle policy: {1}",
         "Groundwork.Schema", DiagnosticSeverity.Error, isEnabledByDefault: true);
 
     private static readonly DiagnosticDescriptor InvalidIndex = new(
@@ -172,6 +186,24 @@ public sealed class SchemaGenerator : ISourceGenerator
 
                     var name = StringNamedArgument(columnAttribute, "Name") ?? ToSnakeCase(memberSymbol.Name);
                     var nullable = IsNullable(memberType) && !BooleanNamedArgument(columnAttribute, "Required");
+                    SchemaDefault? columnDefault = null;
+                    if (StringNamedArgument(columnAttribute, "Default") is { } defaultText)
+                    {
+                        try
+                        {
+                            columnDefault = GroundworkSchemaCanonical.ReadDefault(defaultText, type);
+                        }
+                        catch (Exception exception) when (exception is FormatException or OverflowException or System.Text.Json.JsonException)
+                        {
+                            context.ReportDiagnostic(Diagnostic.Create(
+                                InvalidDefault,
+                                columnAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
+                                name,
+                                type.ToString(),
+                                exception.Message));
+                            continue;
+                        }
+                    }
                     var column = new SchemaColumn(
                         name,
                         type,
@@ -180,7 +212,8 @@ public sealed class SchemaGenerator : ISourceGenerator
                         IntNamedArgument(columnAttribute, "Precision"),
                         IntNamedArgument(columnAttribute, "Scale"),
                         EnumNamedArgument(columnAttribute, "Folding", TextFolding.None),
-                        EnumNamedArgument(columnAttribute, "Generation", SchemaGeneration.Supplied));
+                        EnumNamedArgument(columnAttribute, "Generation", SchemaGeneration.Supplied),
+                        columnDefault);
                     if (columnSymbols.ContainsKey(name))
                     {
                         context.ReportDiagnostic(Diagnostic.Create(
@@ -233,7 +266,118 @@ public sealed class SchemaGenerator : ISourceGenerator
                 BooleanNamedArgument(indexAttribute, "Unique")));
         }
 
-        return new SchemaTable(tableName, columns, keys, indexes);
+        var aggregations = new List<SchemaAggregation>();
+        foreach (var aggregateAttribute in symbol.GetAttributes().Where(attribute => IsAttribute(attribute, "GwAggregateAttribute")))
+        {
+            if (TryParseAggregation(context, aggregateAttribute, tableName, out var aggregation))
+                aggregations.Add(aggregation);
+        }
+
+        return new SchemaTable(
+            tableName,
+            columns,
+            keys,
+            indexes,
+            EnumNamedArgument(tableAttribute, "Scope", SchemaScope.Global),
+            StringNamedArgument(tableAttribute, "ConcurrencyToken") is { } token ? new SchemaConcurrency(token) : null,
+            EnumNamedArgument(tableAttribute, "Timestamps", SchemaTimestamps.None),
+            ReadRetention(symbol),
+            ReadIdempotency(context, symbol, tableName, "GwAppendIdempotencyAttribute"),
+            ReadIdempotency(context, symbol, tableName, "GwRetentionIdempotencyAttribute"),
+            aggregations);
+    }
+
+    private static SchemaRetention? ReadRetention(INamedTypeSymbol symbol)
+    {
+        if (FindAttribute(symbol, "GwRetentionAttribute") is not { } attribute)
+            return null;
+        return new SchemaRetention(
+            attribute.ConstructorArguments.Length > 0 && attribute.ConstructorArguments[0].Value is int keepNewest ? keepNewest : 0,
+            StringArgument(attribute, 1) ?? "<unnamed>",
+            EnumNamedArgument(attribute, "Trigger", SchemaRetentionTrigger.Explicit),
+            (StringNamedArgument(attribute, "PartitionBy") ?? string.Empty)
+                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(column => column.Trim())
+                .Where(column => column.Length != 0));
+    }
+
+    private static SchemaIdempotency? ReadIdempotency(
+        GeneratorExecutionContext context,
+        INamedTypeSymbol symbol,
+        string tableName,
+        string attributeName)
+    {
+        if (FindAttribute(symbol, attributeName) is not { } attribute)
+            return null;
+        var window = StringArgument(attribute, 0) ?? string.Empty;
+        if (!TimeSpan.TryParse(window, CultureInfo.InvariantCulture, out var parsed))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                InvalidTablePolicy,
+                attribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None,
+                tableName,
+                $"'{window}' is not a time span."));
+            return null;
+        }
+        return new SchemaIdempotency(parsed, StringNamedArgument(attribute, "LedgerName"));
+    }
+
+    private static bool TryParseAggregation(
+        GeneratorExecutionContext context,
+        AttributeData attribute,
+        string tableName,
+        out SchemaAggregation aggregation)
+    {
+        var name = StringArgument(attribute, 0) ?? "<unnamed>";
+        var groupByColumns = new List<string>();
+        var groupBy = new List<SchemaAggregationGroup>();
+        var aggregates = new List<SchemaAggregate>();
+        var location = attribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None;
+        foreach (var term in (StringArgument(attribute, 1) ?? string.Empty).Split(','))
+        {
+            var tokens = term.Trim().Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var parsed = tokens.Length != 0 && tokens[0] switch
+            {
+                "group" when tokens.Length == 2 => Add(groupByColumns, tokens[1]),
+                "bucket" when tokens.Length == 4 && TimeSpan.TryParse(tokens[3], CultureInfo.InvariantCulture, out var width) =>
+                    Add(groupBy, SchemaAggregationGroup.FixedUtcBucket(tokens[1], tokens[2], width)),
+                "day" when tokens.Length == 3 => Add(groupBy, SchemaAggregationGroup.LocalCalendarDayBucket(tokens[1], tokens[2])),
+                "count" when tokens.Length == 2 => Add(aggregates, SchemaAggregate.Count(tokens[1])),
+                "min" when tokens.Length == 3 => Add(aggregates, SchemaAggregate.Min(tokens[1], tokens[2])),
+                "max" when tokens.Length == 3 => Add(aggregates, SchemaAggregate.Max(tokens[1], tokens[2])),
+                "sum" when tokens.Length == 3 => Add(aggregates, SchemaAggregate.Sum(tokens[1], tokens[2])),
+                "setUnion" when tokens.Length == 4 && int.TryParse(tokens[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out var maxValues) =>
+                    Add(aggregates, SchemaAggregate.SetUnion(tokens[1], tokens[2], maxValues)),
+                "firstBy" when tokens.Length == 5 && tokens[4] is "ASC" or "DESC" =>
+                    Add(aggregates, SchemaAggregate.FirstBy(tokens[1], tokens[2], tokens[3], tokens[4] == "DESC")),
+                _ => false
+            };
+            if (!parsed)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    InvalidTablePolicy, location, tableName,
+                    $"aggregation '{name}' has an unreadable term '{term.Trim()}'."));
+                aggregation = null!;
+                return false;
+            }
+        }
+
+        if (aggregates.Count == 0)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                InvalidTablePolicy, location, tableName, $"aggregation '{name}' declares no aggregate."));
+            aggregation = null!;
+            return false;
+        }
+
+        aggregation = new SchemaAggregation(name, aggregates, groupByColumns, groupBy);
+        return true;
+    }
+
+    private static bool Add<T>(List<T> target, T value)
+    {
+        target.Add(value);
+        return true;
     }
 
     private static IReadOnlyList<ClassPart> GetClassParts(
@@ -416,6 +560,8 @@ public sealed class SchemaGenerator : ISourceGenerator
                     (column.Folding == TextFolding.AsciiIgnoreCase ? "OrdinalIgnoreCase" : "UnicodeOrdinalIgnoreCase") + ")");
             if (column.Generation == SchemaGeneration.ProviderSequence)
                 columnOptions.Add("ProviderSequence()");
+            if (column.Default is { } columnDefault)
+                columnOptions.Add("Default(" + DefaultLiteral(columnDefault.Value, column.Type) + ")");
             if (columnOptions.Count > 0)
                 builder.Append(" column => column.").Append(string.Join(".", columnOptions));
             builder.AppendLine(")");
@@ -435,11 +581,109 @@ public sealed class SchemaGenerator : ISourceGenerator
                 builder.AppendLine("                .ExcludeMissingValues()");
             builder.AppendLine("            )");
         }
+        if (table.Scope == SchemaScope.Scoped)
+            builder.AppendLine("            .Scoped()");
+        if (table.Concurrency is { } concurrency)
+            builder.Append("            .OptimisticConcurrency(").Append(Literal(concurrency.TokenColumn)).AppendLine(")");
+        if (table.Retention is { } retention)
+        {
+            builder.Append("            .Retention(").Append(retention.KeepNewest.ToString(CultureInfo.InvariantCulture))
+                .Append(", ").Append(Literal(retention.OrderBy))
+                .Append(", global::Groundwork.Kernel.RetentionTrigger.").Append(retention.Trigger);
+            foreach (var column in retention.PartitionBy)
+                builder.Append(", ").Append(Literal(column));
+            builder.AppendLine(")");
+        }
+        if (table.AppendIdempotency is { } append)
+            builder.Append("            .AppendIdempotency(").Append(Window(append)).AppendLine(")");
+        if (table.RetentionIdempotency is { } retentionIdempotency)
+            builder.Append("            .RetentionIdempotency(").Append(Window(retentionIdempotency)).AppendLine(")");
+        foreach (var aggregation in table.Aggregations)
+        {
+            builder.Append("            .Aggregate(").Append(Literal(aggregation.Name)).AppendLine(", aggregate => aggregate");
+            if (aggregation.GroupByColumns.Count != 0)
+            {
+                builder.Append("                .GroupBy(")
+                    .Append(string.Join(", ", aggregation.GroupByColumns.Select(Literal))).AppendLine(")");
+            }
+            foreach (var group in aggregation.GroupBy)
+            {
+                builder.Append("                ").AppendLine(group.Bucket switch
+                {
+                    SchemaTimeBucket.FixedUtc => $".FixedUtcBucket({Literal(group.Alias)}, {Literal(group.SourceColumn!)}, {Ticks(group.Width)})",
+                    SchemaTimeBucket.LocalCalendarDay => $".LocalCalendarDayBucket({Literal(group.Alias)}, {Literal(group.SourceColumn!)})",
+                    _ => $".GroupBy(global::Groundwork.Kernel.AggregationGroup.Column({Literal(group.Alias)}))"
+                });
+            }
+            foreach (var aggregate in aggregation.Aggregates)
+            {
+                builder.Append("                ").AppendLine(aggregate.Kind switch
+                {
+                    SchemaAggregateKind.Count => $".Count({Literal(aggregate.Alias)})",
+                    SchemaAggregateKind.SetUnion => $".SetUnion({Literal(aggregate.Alias)}, {Literal(aggregate.Column!)}, {aggregate.MaxValues.ToString(CultureInfo.InvariantCulture)})",
+                    SchemaAggregateKind.FirstBy => $".FirstBy({Literal(aggregate.Alias)}, {Literal(aggregate.Column!)}, {Literal(aggregate.OrderBy!)}, global::Groundwork.Kernel.SortDirection.{(aggregate.Descending ? "Descending" : "Ascending")})",
+                    _ => $".{aggregate.Kind}({Literal(aggregate.Alias)}, {Literal(aggregate.Column!)})"
+                });
+            }
+            builder.AppendLine("            )");
+        }
         builder.AppendLine("        ;");
         builder.AppendLine("        return declaration.Build();");
         builder.AppendLine("    }");
         builder.AppendLine("}");
         return builder.ToString();
+    }
+
+    private static string Window(SchemaIdempotency idempotency) =>
+        Ticks(idempotency.Window) + (idempotency.LedgerName is null ? string.Empty : ", " + Literal(idempotency.LedgerName));
+
+    private static string Ticks(TimeSpan value) =>
+        "global::System.TimeSpan.FromTicks(" + value.Ticks.ToString(CultureInfo.InvariantCulture) + "L)";
+
+    private static string DefaultLiteral(object? value, SchemaValueType type)
+    {
+        if (value is null)
+            return "null";
+        return type switch
+        {
+            SchemaValueType.String => Literal((string)value),
+            SchemaValueType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture),
+            SchemaValueType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture) + "L",
+            SchemaValueType.Decimal => Convert.ToDecimal(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture) + "m",
+            SchemaValueType.Boolean => Convert.ToBoolean(value, CultureInfo.InvariantCulture) ? "true" : "false",
+            SchemaValueType.DateTimeOffset =>
+                $"new global::System.DateTimeOffset({((DateTimeOffset)value).UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture)}L, global::System.TimeSpan.Zero)",
+            SchemaValueType.Guid => $"new global::System.Guid({Literal(((Guid)value).ToString("D", CultureInfo.InvariantCulture))})",
+            SchemaValueType.Binary => $"global::System.Convert.FromBase64String({Literal(Convert.ToBase64String((byte[])value))})",
+            _ => JsonLiteral(value)
+        };
+    }
+
+    private static string JsonLiteral(object? value)
+    {
+        switch (value)
+        {
+            case null:
+                return "null";
+            case string text:
+                return Literal(text);
+            case bool boolean:
+                return boolean ? "true" : "false";
+            case int int32:
+                return int32.ToString(CultureInfo.InvariantCulture);
+            case long int64:
+                return int64.ToString(CultureInfo.InvariantCulture) + "L";
+            case decimal number:
+                return number.ToString(CultureInfo.InvariantCulture) + "m";
+            case IReadOnlyDictionary<string, object?> map:
+                return "new global::System.Collections.Generic.Dictionary<string, object?>(global::System.StringComparer.Ordinal) { " +
+                    string.Join(", ", map.Select(entry => $"[{Literal(entry.Key)}] = {JsonLiteral(entry.Value)}")) + " }";
+            case IEnumerable sequence:
+                return "new global::System.Collections.Generic.List<object?> { " +
+                    string.Join(", ", sequence.Cast<object?>().Select(JsonLiteral)) + " }";
+            default:
+                throw new ArgumentOutOfRangeException(nameof(value));
+        }
     }
 
     private static AttributeData? FindAttribute(ISymbol symbol, string name) =>

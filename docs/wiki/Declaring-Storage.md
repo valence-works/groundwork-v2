@@ -203,6 +203,22 @@ base column and creates no derived column.
 Append and retention ledgers must use **distinct** names, and neither may claim a Groundwork-reserved
 name.
 
+The attribute surface declares the same policies, so an attribute or canonical-file declaration
+compiles to the same physical target the fluent builder does:
+
+```csharp
+[GwTable("orders", Scope = SchemaScope.Scoped, ConcurrencyToken = "version")]
+[GwRetention(1000, "seq", Trigger = SchemaRetentionTrigger.OnAppend, PartitionBy = "tenantId")]
+[GwAppendIdempotency("00:10:00")]
+[GwRetentionIdempotency("24:00:00")]
+[GwAggregate("summary", "group status, count n")]
+public sealed class Order
+{
+    [GwKey, GwColumn(Length = 64)] public string Id { get; init; } = "";
+    [GwColumn(Length = 16, Default = "pending")] public string Status { get; init; } = "";
+}
+```
+
 ## Next
 
 - **[Portable Semantics](Portable-Semantics)** — the exact rules behind the refusals
