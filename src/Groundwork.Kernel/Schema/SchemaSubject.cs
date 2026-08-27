@@ -54,8 +54,11 @@ public sealed class SchemaSubject
                 .. Columns.Select(CanonicalColumn),
                 .. Key.Columns.Select(column => $"key:{column}"),
                 .. DerivedColumns.Select(CanonicalDerivedColumn),
-                .. Indexes.Select(CanonicalIndex),
-                .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile),
+                // Indexes and aggregation profiles are sets, not sequences: naming the same ones
+                // in a different order describes the same subject.
+                .. Indexes.Select(CanonicalIndex).OrderBy(canonical => canonical, StringComparer.Ordinal),
+                .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile)
+                    .OrderBy(canonical => canonical, StringComparer.Ordinal),
                 Evolution.IsDestructive ? "destructive" : "safe",
                 Evolution.SemanticMigrationId
             ]);

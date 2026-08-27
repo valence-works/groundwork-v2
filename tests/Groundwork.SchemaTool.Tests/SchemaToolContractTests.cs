@@ -29,6 +29,134 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task Verify_refuses_a_folded_index_that_exceeds_the_budget_once_its_search_key_is_expanded()
+    {
+        var folded = Temp("folded.json", """
+            {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"customer","type":"String","nullable":false,"length":200,"precision":null,"scale":null,"folding":"UnicodeOrdinalIgnoreCase","generation":"Supplied"}],"key":["id"],"indexes":[{"name":"by_customer","columns":[{"name":"customer","descending":false}],"includeNulls":true,"unique":false}]}]}
+            """);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["validate", "--schema", folded, "--provider", "fake", "--offline", "--output", "json"]));
+        Assert.Contains("GW-PORT-004", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_provider_physicalization_refusal_keeps_its_code_as_a_validation_error()
+    {
+        var schema = Temp("refused-schema.json", ValidSchema);
+
+        Assert.Equal(
+            SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"],
+                _ => new FakeSession(refusal: "GW-PORT-011 at indexes.by_id.physicalName: the composed name is too long.")));
+        Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("GW-PORT-011", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("indexes.by_id.physicalName", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_offset_less_timestamp_default_reads_as_utc_on_any_machine()
+    {
+        var schema = ValidSchema.Replace(
+            "\"generation\":\"Supplied\"",
+            "\"generation\":\"Supplied\",\"default\":{\"value\":\"2024-01-01T00:00:00\"}")
+            .Replace("\"type\":\"String\"", "\"type\":\"DateTimeOffset\"");
+
+        var value = Assert.IsType<DateTimeOffset>(Assert.Single(
+            Assert.Single(GroundworkSchemaCanonical.Read(schema).Tables).Columns).Default!.Value);
+
+        Assert.Equal(TimeSpan.Zero, value.Offset);
+        Assert.Equal(new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero), value);
+        Assert.Contains(
+            @"2024-01-01T00:00:00.0000000\u002B00:00",
+            GroundworkSchemaCanonical.Emit(GroundworkSchemaCanonical.Read(schema)),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_default_whose_literal_contradicts_the_column_type_is_a_format_refusal()
+    {
+        var mistyped = ValidSchema.Replace(
+            "\"generation\":\"Supplied\"",
+            "\"generation\":\"Supplied\",\"default\":{\"value\":42}");
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Read(mistyped));
+        Assert.Contains("default", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("column")]
+    [InlineData("orderBy")]
+    public void A_mistyped_aggregate_member_is_refused_rather_than_read_as_absent(string member)
+    {
+        var aggregation = $$"""
+            "aggregations":[{"name":"summary","groupByColumns":["id"],"groupBy":[],"aggregates":[{"kind":"Count","alias":"n","column":null,"orderBy":null,"descending":false,"maxValues":0}]}]
+            """.Replace($"\"{member}\":null", $"\"{member}\":7", StringComparison.Ordinal);
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", "\"indexes\":[]," + aggregation)));
+        Assert.Contains(member, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_mistyped_ledger_name_is_refused_rather_than_reverting_to_the_default()
+    {
+        var mistyped = ValidSchema.Replace(
+            "\"indexes\":[]",
+            "\"indexes\":[],\"appendIdempotency\":{\"windowTicks\":600000000,\"ledger\":7}");
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Read(mistyped));
+        Assert.Contains("ledger", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("concurrency")]
+    [InlineData("retention")]
+    [InlineData("appendIdempotency")]
+    [InlineData("retentionIdempotency")]
+    public void A_wrong_typed_optional_member_is_refused_by_name(string member)
+    {
+        Assert.Null(Assert.Single(GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", $"\"indexes\":[],\"{member}\":null"))
+            .Tables).Retention);
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", $"\"indexes\":[],\"{member}\":5")));
+        Assert.Contains(member, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("\"type\":\"String\"", "\"type\":\"999\"", "type")]
+    [InlineData("\"folding\":\"None\"", "\"folding\":\"999\"", "folding")]
+    [InlineData(
+        "\"indexes\":[]",
+        "\"indexes\":[],\"aggregations\":[{\"name\":\"summary\",\"groupByColumns\":[],"
+        + "\"groupBy\":[{\"alias\":\"day\",\"bucket\":\"999\",\"sourceColumn\":\"id\",\"widthTicks\":0}],"
+        + "\"aggregates\":[]}]",
+        "bucket")]
+    public void An_enum_outside_its_declared_members_is_refused_by_name(
+        string original, string replacement, string member)
+    {
+        var undefined = ValidSchema.Replace(original, replacement, StringComparison.Ordinal);
+
+        var failure = Assert.Throws<FormatException>(() => GroundworkSchemaCanonical.Read(undefined));
+
+        Assert.Contains(member, failure.Message, StringComparison.Ordinal);
+        Assert.Contains("999", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_null_aggregations_member_is_absent_but_a_wrong_typed_one_is_refused()
+    {
+        Assert.Empty(Assert.Single(GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", "\"indexes\":[],\"aggregations\":null"))
+            .Tables).Aggregations);
+
+        Assert.Throws<FormatException>(() => GroundworkSchemaCanonical
+            .Read(ValidSchema.Replace("\"indexes\":[]", "\"indexes\":[],\"aggregations\":7")));
+    }
+
+    [Fact]
     public async Task Invalid_schema_and_portability_violations_are_validation_failures()
     {
         var malformed = Temp("invalid.json", "{}");
@@ -228,7 +356,7 @@ public sealed class SchemaToolContractTests
     public void Destructive_operations_require_the_exact_identity()
     {
         var target = SchemaCompilation.CompileTargets(
-            GroundworkSchemaCanonical.Read(ValidSchema), new ProviderIdentity("fake", "1"))[0];
+            GroundworkSchemaCanonical.Read(ValidSchema), new FakeTargets(new ProviderIdentity("fake", "1")))[0];
         target = new PhysicalSchemaTarget(
             new SchemaSubject(target.Subject.Definition, new SchemaEvolutionMetadata(true, "reclassify-v2")),
             target.Provider);
@@ -298,13 +426,21 @@ public sealed class SchemaToolContractTests
         return GroundworkSchemaCli.RunAsync(arguments, output, error, resolver ?? (_ => null));
     }
 
-    private sealed class FakeSession(string provider = "fake") : ISchemaToolProviderSession
+    private sealed class FakeSession(string provider = "fake", string? refusal = null) : ISchemaToolProviderSession
     {
         public FakeExecutor ExecutorImpl { get; } = new();
         public ProviderIdentity Provider { get; } = new(provider, "1");
+        public IPhysicalSchemaTargetCompiler Targets => new FakeTargets(Provider, refusal);
         public IPhysicalSchemaExecutor Executor => ExecutorImpl;
         public IPhysicalSchemaHistoryInspector Inspector => ExecutorImpl;
         public void Dispose() { }
+    }
+
+    private sealed class FakeTargets(ProviderIdentity provider, string? refusal = null) : IPhysicalSchemaTargetCompiler
+    {
+        public PhysicalSchemaTarget Compile(StorageUnit declaration) => refusal is null
+            ? new(new SchemaSubject(SearchKeyProjection.Expand(declaration)), provider)
+            : throw new InvalidOperationException(refusal);
     }
 
     public sealed class DiscoveredFactory : ISchemaToolProviderSessionFactory
