@@ -30,7 +30,7 @@ This is the part that catches people, so it comes first.
 | `IStorageProviderConnection` | **Process singleton**, one per database | `AddKeyedSingleton` per name, plus an unkeyed alias for the default connection |
 | `IGroundworkStorage` | **Scoped** — one per request | `AddKeyedScoped` per name, plus an unkeyed alias for the default connection |
 | `IStorageSession` | A cheap non-owning view; not disposable | Opened from `IGroundworkStorage`, never registered |
-| `IUnitOfWork` | Owned by the scope that opened it | Opened from `IGroundworkStorage`, never registered |
+| `IUnitOfWork` | Owned by the scope until it becomes terminal | Opened from `IGroundworkStorage`, never registered |
 
 A connection owns provider resources for its whole life — pools, transactions, and for SQLite the
 single `${database}.schema.lock` file handle. **One connection per database per process.** The
@@ -53,6 +53,11 @@ app.MapPost("/orders", (Order order, IGroundworkStorage storage) =>
     return work.CommitWithOutcomes();
 });
 ```
+
+A unit of work stops being owned as soon as it commits or rolls back, so a scope that outlives one
+request — a `BackgroundService` holding a single scope for the life of the process — does not
+accumulate them. Only units that never reached a terminal call are still there when the scope ends,
+and those are exactly the ones that need rolling back.
 
 ### The model is enforced, not suggested
 
@@ -172,6 +177,15 @@ orders: Blocked — CreateStorageUnit orders, AddColumn id …
 Apply it from the deployment step with `groundwork apply --schema groundwork.schema.json
 --provider <alias> --safe`; runtime is inspect-only by default.
 ```
+
+> **The classification here is a temporary duplicate.** The kernel already owns both rules —
+> `PhysicalSchemaInspection` decides column drift versus index drift, and
+> `PhysicalSchemaPlanProtection` decides what an auto-apply may execute. Neither is reachable through
+> `IStorageProviderConnection` yet, so this package maps the public `SchemaDiff` onto the same intent
+> by hand. It can therefore disagree with what the provider's own admission would do at the first
+> session open, in either direction.
+> [#201](https://github.com/valence-works/groundwork-v2/issues/201) removes the duplicate by exposing
+> runtime admission on the Store contract.
 
 ### Development auto-apply
 

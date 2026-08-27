@@ -14,6 +14,11 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// — the request completes, or fails — units of work that never reached commit or rollback are
 /// disposed, which rolls them back.
 /// </para>
+/// <para>
+/// A unit of work stops being owned the moment it becomes terminal, so a scope that outlives a
+/// single request — a <c>BackgroundService</c> holding one scope for the life of the process — does
+/// not accumulate them.
+/// </para>
 /// </remarks>
 public interface IGroundworkStorage : IDisposable
 {
@@ -38,7 +43,8 @@ public interface IGroundworkStorage : IDisposable
 
 internal sealed class GroundworkStorage : IGroundworkStorage
 {
-    private readonly List<IUnitOfWork> owned = [];
+    private readonly object gate = new();
+    private readonly List<ScopedUnitOfWork> owned = [];
     private bool disposed;
 
     internal GroundworkStorage(string name, IStorageProviderConnection connection)
@@ -71,17 +77,98 @@ internal sealed class GroundworkStorage : IGroundworkStorage
 
     private IUnitOfWork Own(IUnitOfWork work)
     {
-        owned.Add(work);
-        return work;
+        var scoped = new ScopedUnitOfWork(this, work);
+        lock (gate)
+        {
+            if (!disposed)
+            {
+                owned.Add(scoped);
+                return scoped;
+            }
+        }
+
+        // The scope ended while the provider was opening this unit of work. Nothing will ever come
+        // back for it, so release it here rather than leaking its provider connection.
+        work.Dispose();
+        throw new ObjectDisposedException(nameof(GroundworkStorage));
+    }
+
+    private void Release(ScopedUnitOfWork work)
+    {
+        lock (gate)
+        {
+            if (!disposed)
+                owned.Remove(work);
+        }
     }
 
     public void Dispose()
     {
-        if (disposed)
-            return;
-        disposed = true;
-        for (var index = owned.Count - 1; index >= 0; index--)
-            owned[index].Dispose();
-        owned.Clear();
+        ScopedUnitOfWork[] pending;
+        lock (gate)
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            pending = [.. owned];
+            owned.Clear();
+        }
+
+        for (var index = pending.Length - 1; index >= 0; index--)
+            pending[index].Dispose();
+    }
+
+    /// <summary>
+    /// Keeps the scope's list of live units of work honest.
+    /// </summary>
+    /// <remarks>
+    /// Without this, the list only ever grows: a request scope hides that because the list dies with
+    /// the request, but a scope held for the life of a process would retain one dead unit of work per
+    /// iteration, each holding a provider connection nobody will release. Releasing on the terminal
+    /// call rather than trusting the caller to dispose keeps the correct thing automatic — the same
+    /// reason the connection lifetime is not a setting.
+    ///
+    /// Release happens only when the terminal call returns normally. A commit that throws leaves the
+    /// unit owned, so scope disposal still gets its chance at it.
+    /// </remarks>
+    private sealed class ScopedUnitOfWork(GroundworkStorage owner, IUnitOfWork inner) : IUnitOfWork
+    {
+        public IStorageSession OpenSession(StorageUnit unit) => inner.OpenSession(unit);
+
+        public void Stage(RowWrite write) => inner.Stage(write);
+
+        public BatchWriteSummary Commit() => Complete(inner.Commit());
+
+        public BatchWriteReport CommitWithOutcomes() => Complete(inner.CommitWithOutcomes());
+
+        public async ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default) =>
+            Complete(await inner.CommitWithOutcomesAsync(cancellationToken).ConfigureAwait(false));
+
+        public async ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
+            Complete(await inner.CommitAsync(cancellationToken).ConfigureAwait(false));
+
+        public void Rollback()
+        {
+            inner.Rollback();
+            owner.Release(this);
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                inner.Dispose();
+            }
+            finally
+            {
+                owner.Release(this);
+            }
+        }
+
+        private T Complete<T>(T result)
+        {
+            owner.Release(this);
+            return result;
+        }
     }
 }

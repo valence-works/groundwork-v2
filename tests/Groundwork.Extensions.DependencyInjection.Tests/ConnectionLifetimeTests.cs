@@ -159,6 +159,116 @@ public sealed class ConnectionLifetimeTests
         Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "kept" })));
     }
 
+    // A request scope hides this: the list of owned units of work dies with the request either way.
+    // A BackgroundService that holds one scope for the life of the process does not, so a unit of
+    // work must stop being owned the moment it becomes terminal.
+    [Fact]
+    public void A_long_lived_scope_stops_owning_each_unit_of_work_once_it_commits()
+    {
+        fixture.Deploy(HostingFixture.Orders);
+        var counting = new CountingProviderFactory(fixture.Provider);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(counting, fixture.ConnectionString)
+            .AddUnits(HostingFixture.Orders));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        using (var scope = provider.CreateScope())
+        {
+            var storage = scope.ServiceProvider.GetRequiredService<IGroundworkStorage>();
+            foreach (var index in Enumerable.Range(0, 5))
+            {
+                var work = storage.BeginUnitOfWork(
+                    StorageAccess.Global, BatchWriteOptions.Exact, HostingFixture.Orders);
+                work.Stage(RowWrite.Upsert(HostingFixture.Orders, Order($"looped-{index}")));
+                work.CommitWithOutcomes();
+            }
+
+            Assert.Equal(5, counting.Created!.Units.Count);
+        }
+
+        // A committed unit is already terminal and already released. If the scope were still holding
+        // them, ending it would dispose every one of them here.
+        Assert.All(counting.Created!.Units, work => Assert.Equal(0, work.DisposeRequests));
+    }
+
+    [Fact]
+    public void A_scope_still_disposes_a_unit_of_work_that_never_reached_a_terminal_call()
+    {
+        fixture.Deploy(HostingFixture.Orders);
+        var counting = new CountingProviderFactory(fixture.Provider);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(counting, fixture.ConnectionString)
+            .AddUnits(HostingFixture.Orders));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        using (var scope = provider.CreateScope())
+        {
+            var storage = scope.ServiceProvider.GetRequiredService<IGroundworkStorage>();
+            var committed = storage.BeginUnitOfWork(
+                StorageAccess.Global, BatchWriteOptions.Exact, HostingFixture.Orders);
+            committed.Stage(RowWrite.Upsert(HostingFixture.Orders, Order("committed")));
+            committed.CommitWithOutcomes();
+
+            var abandoned = storage.BeginUnitOfWork(
+                StorageAccess.Global, BatchWriteOptions.Exact, HostingFixture.Orders);
+            abandoned.Stage(RowWrite.Upsert(HostingFixture.Orders, Order("abandoned")));
+        }
+
+        Assert.Equal(0, counting.Created!.Units[0].DisposeRequests);
+        Assert.Equal(1, counting.Created!.Units[1].DisposeRequests);
+
+        var session = provider.GetRequiredService<IStorageProviderConnection>()
+            .OpenSession(HostingFixture.Orders, StorageAccess.Global);
+        Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "committed" })));
+        Assert.Null(session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "abandoned" })));
+    }
+
+    // The default connection is reachable two ways — keyed by name and unkeyed — and both descriptors
+    // are factories returning the one instance the container already owns, so the container tracks it
+    // for disposal twice. That is safe because IDisposable requires Dispose to be callable more than
+    // once, and every Groundwork provider connection honours it. This test is what stops that from
+    // being a convention a future provider change could silently break.
+    [Fact]
+    public void Resolving_the_connection_both_keyed_and_unkeyed_still_disposes_it_exactly_once()
+    {
+        fixture.Deploy(HostingFixture.Orders);
+        var counting = new CountingProviderFactory(fixture.Provider);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(counting, fixture.ConnectionString)
+            .AddUnits(HostingFixture.Orders));
+
+        var provider = services.BuildServiceProvider(validateScopes: true);
+        var unkeyed = provider.GetRequiredService<IStorageProviderConnection>();
+        var keyed = provider.GetRequiredKeyedService<IStorageProviderConnection>(
+            GroundworkConnectionOptions.DefaultName);
+        using (var scope = provider.CreateScope())
+        {
+            var scopedUnkeyed = scope.ServiceProvider.GetRequiredService<IGroundworkStorage>();
+            var scopedKeyed = scope.ServiceProvider.GetRequiredKeyedService<IGroundworkStorage>(
+                GroundworkConnectionOptions.DefaultName);
+            Assert.Same(scopedUnkeyed, scopedKeyed);
+            Assert.Same(unkeyed, scopedUnkeyed.Connection);
+        }
+
+        var connection = counting.Created!;
+        Assert.Same(unkeyed, keyed);
+        Assert.Equal(0, connection.DisposeRequests);
+
+        provider.Dispose();
+
+        Assert.True(connection.DisposeRequests > 1,
+            "This test only proves anything while both aliases are tracked for disposal. If the " +
+            "container stopped double-tracking, tighten the assertion rather than deleting it.");
+        Assert.Equal(1, connection.EffectiveDisposals);
+
+        // A second disposal of the whole container must stay quiet too.
+        provider.Dispose();
+        Assert.Equal(1, connection.EffectiveDisposals);
+    }
+
     // SQLite is the provider that makes the lifetime model non-negotiable: the store holds one
     // schema-lock file handle for the life of the connection.
     [Fact]

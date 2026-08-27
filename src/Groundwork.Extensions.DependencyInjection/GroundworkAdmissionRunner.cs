@@ -14,6 +14,10 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// advertises the capabilities the application said it needs. It does not write, and it does not
 /// apply physical schema unless a connection explicitly opted into development auto-apply.
 /// </remarks>
+/// <seealso href="https://github.com/valence-works/groundwork-v2/issues/201">
+/// The drift classification below duplicates a rule the kernel owns, because that rule is not
+/// reachable through the public Store contract yet. Read the comment above the mapping methods.
+/// </seealso>
 public sealed class GroundworkAdmissionRunner
 {
     private readonly IGroundworkConnections connections;
@@ -90,6 +94,8 @@ public sealed class GroundworkAdmissionRunner
         if (pending.Count == 0)
             return new GroundworkUnitAdmission(unit.Name, GroundworkAdmissionStatus.Ready, []);
 
+        // "Additive" here approximates PhysicalSchemaPlanProtection.IsSafe from the public SchemaDiff.
+        // It is the weaker of the two tests — see the note above IsAdditive, and #201.
         if (autoApply && pending.All(IsAdditive))
         {
             connection.Schema.Apply(unit);
@@ -101,6 +107,24 @@ public sealed class GroundworkAdmissionRunner
             : GroundworkAdmissionStatus.Degraded;
         return new GroundworkUnitAdmission(unit.Name, status, pending);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // TEMPORARY DUPLICATE — this is not the authority. See
+    // https://github.com/valence-works/groundwork-v2/issues/201.
+    //
+    // The kernel already owns both of these rules: PhysicalSchemaInspection decides what is column
+    // drift (GW-RUNTIME-001) versus index drift (GW-RUNTIME-002), and PhysicalSchemaPlanProtection
+    // decides what a startup auto-apply may execute without authorization. Neither is reachable from
+    // IStorageProviderConnection — GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission needs an
+    // IPhysicalSchemaExecutor and a PhysicalSchemaTarget, which are provider-internal — so this maps
+    // the public SchemaDiff onto the same intent by hand.
+    //
+    // Two implementations of one rule, with nothing keeping them in step, is the shape #74 was about
+    // and #196 removed by making one physicalization the only implementation. It can disagree in both
+    // directions: a Ready verdict where the first session open would refuse with GW-RUNTIME-001, or a
+    // Blocked verdict where the runtime would have admitted. Do not extend these methods to cover new
+    // cases — close #201 by exposing runtime admission on the Store contract and delete them.
+    // ---------------------------------------------------------------------------------------------
 
     private static bool IsColumnLevel(SchemaChange change) => change.Kind is
         SchemaChangeKind.CreateStorageUnit or
