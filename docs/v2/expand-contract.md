@@ -2,7 +2,7 @@
 
 Additive-only was never a limitation to hide: it is the first half of expand–contract. This makes
 the pattern first-class. One declaration produces two plans — an **expand** plan that is additive
-and an **contract** plan that removes what the expand deliberately left behind — with an explicit
+and a **contract** plan that removes what the expand deliberately left behind — with an explicit
 readiness gate between them.
 
 ```text
