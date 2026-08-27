@@ -20,10 +20,14 @@ internal static class LiveMongo
 {
     /// <summary>
     /// How long a claimed database survives after its marker's timestamp before a sibling process
-    /// is willing to drop it on the assumption its owner is never coming back. Well past any
-    /// plausible test run, so a run still in progress is never mistaken for an abandoned one.
+    /// is willing to drop it on the assumption its owner is never coming back. Sized against
+    /// <c>concurrency-conformance</c>, the longest-running job that claims one of these: it is
+    /// capped at 30 minutes (<c>timeout-minutes: 30</c> in <c>.github/workflows/ci.yml</c>), so two
+    /// hours is four times that job's own ceiling — comfortably past any real run, including one
+    /// stalled right up to its timeout, so a run still in progress is never mistaken for an
+    /// abandoned one.
     /// </summary>
-    private static readonly TimeSpan StaleAfter = TimeSpan.FromHours(2);
+    internal static readonly TimeSpan StaleAfter = TimeSpan.FromHours(2);
 
     /// <summary>
     /// MongoDB only ever materializes a database once something writes to it, so this collection
@@ -87,7 +91,9 @@ internal static class LiveMongo
     /// <summary>
     /// Drops every database whose name starts with <paramref name="prefix"/> and whose marker
     /// records a claim older than <paramref name="olderThan"/>, skipping any database without a
-    /// readable marker because that is indistinguishable from a claim still in flight.
+    /// readable marker because that is indistinguishable from a claim still in flight. The age
+    /// decision itself is <see cref="IsStale"/>, kept separate and pure so a test can pin down its
+    /// boundary without writing to or dropping a real database.
     /// </summary>
     internal static void ReclaimStale(string configured, string prefix, TimeSpan olderThan)
     {
@@ -120,7 +126,7 @@ internal static class LiveMongo
                     continue;
 
                 var claimedAtUtc = marker["claimedAtUtc"].ToUniversalTime();
-                if (now - claimedAtUtc > olderThan)
+                if (IsStale(claimedAtUtc, now, olderThan))
                     client.DropDatabase(name);
             }
             catch (MongoException)
@@ -129,6 +135,16 @@ internal static class LiveMongo
             }
         }
     }
+
+    /// <summary>
+    /// Whether a database claimed at <paramref name="claimedAtUtc"/> is old enough, relative to
+    /// <paramref name="nowUtc"/>, that <paramref name="olderThan"/> calls it abandoned. Pure and
+    /// I/O-free by design: it is the whole of the reclaim decision, so a test can pin down that
+    /// decision's boundary — including a claim a heartbeat before the threshold, and one a
+    /// heartbeat after — without touching a live database.
+    /// </summary>
+    internal static bool IsStale(DateTime claimedAtUtc, DateTime nowUtc, TimeSpan olderThan) =>
+        nowUtc - claimedAtUtc > olderThan;
 
     private static void Release(string connectionString, string name)
     {

@@ -26,10 +26,14 @@ internal static class LiveSqlServer
 {
     /// <summary>
     /// How long a <c>groundwork_run_*</c> database survives after its creation before a sibling
-    /// process is willing to drop it on the assumption its owner is never coming back. Well past
-    /// any plausible test run, so a run still in progress is never mistaken for an abandoned one.
+    /// process is willing to drop it on the assumption its owner is never coming back. Sized
+    /// against <c>concurrency-conformance</c>, the longest-running job that claims one of these:
+    /// it carries the W2 harness against a live SQL Server and is capped at 30 minutes
+    /// (<c>timeout-minutes: 30</c> in <c>.github/workflows/ci.yml</c>), so two hours is four times
+    /// that job's own ceiling — comfortably past any real run, including one stalled right up to
+    /// its timeout, so a run still in progress is never mistaken for an abandoned one.
     /// </summary>
-    private static readonly TimeSpan StaleAfter = TimeSpan.FromHours(2);
+    internal static readonly TimeSpan StaleAfter = TimeSpan.FromHours(2);
 
     private static readonly Lazy<string?> Claimed = new(Claim, LazyThreadSafetyMode.ExecutionAndPublication);
 
@@ -73,26 +77,29 @@ internal static class LiveSqlServer
     /// Drops every <c>groundwork_run_*</c> database on <paramref name="configured"/> whose
     /// <c>sys.databases.create_date</c> is older than <paramref name="olderThan"/>, skipping any
     /// still within that window because that is indistinguishable from a run still in progress.
-    /// <c>create_date</c> and <c>GETDATE()</c> are read from the same server, so a comparison done
-    /// in the query itself sidesteps whatever time zone the server's clock happens to be in.
+    /// <c>create_date</c> and <c>GETDATE()</c> are read from the same server round trip, so the
+    /// age comparison in <see cref="SelectStale"/> sidesteps whatever time zone the server's clock
+    /// happens to be in, and never depends on this process's own clock.
     /// </summary>
     internal static void ReclaimStale(string configured, TimeSpan olderThan)
     {
-        var candidates = new List<string>();
+        var candidates = new List<(string Name, DateTime CreateDate)>();
+        var now = DateTime.MinValue;
         try
         {
             using var connection = new SqlConnection(configured);
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText = """
-                SELECT name FROM sys.databases
-                WHERE name LIKE 'groundwork\_run\_%' ESCAPE '\'
-                  AND create_date < DATEADD(minute, -@minutes, GETDATE());
+                SELECT name, create_date, GETDATE() AS server_now FROM sys.databases
+                WHERE name LIKE 'groundwork\_run\_%' ESCAPE '\';
                 """;
-            command.Parameters.AddWithValue("@minutes", olderThan.TotalMinutes);
             using var reader = command.ExecuteReader();
             while (reader.Read())
-                candidates.Add(reader.GetString(0));
+            {
+                candidates.Add((reader.GetString(0), reader.GetDateTime(1)));
+                now = reader.GetDateTime(2);
+            }
         }
         catch (SqlException)
         {
@@ -101,7 +108,7 @@ internal static class LiveSqlServer
             return;
         }
 
-        foreach (var name in candidates)
+        foreach (var name in SelectStale(candidates, now, olderThan))
         {
             try
             {
@@ -114,6 +121,19 @@ internal static class LiveSqlServer
             }
         }
     }
+
+    /// <summary>
+    /// The names among <paramref name="candidates"/> whose <c>create_date</c> is older than
+    /// <paramref name="olderThan"/> relative to <paramref name="now"/>. Pure and I/O-free by
+    /// design: it is the whole of the reclaim decision, so a test can pin down that decision's
+    /// boundary — including a database created a heartbeat before the threshold, and one a
+    /// heartbeat after — without opening a connection or dropping anything.
+    /// </summary>
+    internal static IReadOnlyList<string> SelectStale(
+        IEnumerable<(string Name, DateTime CreateDate)> candidates, DateTime now, TimeSpan olderThan) =>
+        candidates.Where(candidate => now - candidate.CreateDate > olderThan)
+            .Select(candidate => candidate.Name)
+            .ToList();
 
     private static void Release(string configured, string name)
     {
