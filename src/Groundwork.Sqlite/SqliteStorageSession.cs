@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -522,6 +522,57 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
                 CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
         });
+
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        ArgumentNullException.ThrowIfNull(assignments);
+        var columns = assignments.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
+        return ExecuteWrite(() =>
+        {
+            var rendered = new SqliteQueryRenderer().RenderUpdateWhere(
+                Unit.Name, ScopedSetPredicate(where), columns, VersionColumnDefinition?.Name);
+            using var command = Command(rendered.CommandText);
+            RelationalQueryResultReader.AddParameters(command, rendered);
+            for (var index = 0; index < columns.Length; index++)
+            {
+                command.Parameters.AddWithValue(
+                    "@" + rendered.AssignmentParameters[index],
+                    ToSqlite(assignments[columns[index]], Column(columns[index])) ?? DBNull.Value);
+            }
+            commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlite.update-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
+            return new SetMutationResult(command.ExecuteNonQuery());
+        });
+    }
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => UpdateWhere(where, assignments));
+
+    public SetMutationResult DeleteWhere(Predicate where)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        return ExecuteWrite(() =>
+        {
+            var rendered = new SqliteQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
+            using var command = Command(rendered.CommandText);
+            RelationalQueryResultReader.AddParameters(command, rendered);
+            commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlite.delete-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
+            return new SetMutationResult(command.ExecuteNonQuery());
+        });
+    }
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => DeleteWhere(where));
+
+    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
+        where, Unit.Name, ScopeColumnDefinition?.Name, Access.Scope?.Value);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));

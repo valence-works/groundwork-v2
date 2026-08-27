@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -540,6 +540,73 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
             return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
                 CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
         });
+
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+        UpdateWhere(where, assignments, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        UpdateWhere(where, assignments, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<SetMutationResult> UpdateWhere(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        ArgumentNullException.ThrowIfNull(assignments);
+        var columns = assignments.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
+        return ExecuteWrite(async () =>
+        {
+            var rendered = new SqlServerQueryRenderer().RenderUpdateWhere(
+                Unit.Name, ScopedSetPredicate(where), columns, VersionColumnDefinition?.Name);
+            using var command = Command(rendered.CommandText);
+            RelationalQueryResultReader.AddParameters(command, rendered);
+            for (var index = 0; index < columns.Length; index++)
+            {
+                SqlServerProviderConnection.AddParameter(
+                    command,
+                    "@" + rendered.AssignmentParameters[index],
+                    assignments[columns[index]],
+                    Column(columns[index]));
+            }
+            commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlserver.update-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
+            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
+        }, mode);
+    }
+
+    public SetMutationResult DeleteWhere(Predicate where) =>
+        DeleteWhere(where, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        DeleteWhere(where, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<SetMutationResult> DeleteWhere(Predicate where, RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        return ExecuteWrite(async () =>
+        {
+            var rendered = new SqlServerQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
+            using var command = Command(rendered.CommandText);
+            RelationalQueryResultReader.AddParameters(command, rendered);
+            commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlserver.delete-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
+            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
+        }, mode);
+    }
+
+    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
+        where,
+        Unit.Name,
+        Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn)
+            ? SqlServerSchemaCoordinator.ScopeColumn
+            : null,
+        Access.Scope?.Value);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ApplyRetention(options, RelationalExecution.Synchronous).GetAwaiter().GetResult();

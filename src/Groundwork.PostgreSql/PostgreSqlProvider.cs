@@ -55,7 +55,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         durableHighWaterInspection: true,
         exactRetention: true,
         atomicCommit: true,
-        compareAndDelete: true);
+        compareAndDelete: true,
+        setMutation: "Updates or deletes every row matching an index-covered portable predicate on PostgreSQL in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.");
 
     internal string ConnectionString => connectionString;
 

@@ -30,6 +30,8 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId CompareAndDelete { get; } = new("groundwork.storage.compare-and-delete");
 
+    public static CapabilityId SetMutation { get; } = new("groundwork.storage.set-mutation");
+
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
@@ -70,6 +72,11 @@ public static class BatchWriteCapabilities
         "Atomic compare-and-delete",
         "Deletes one identified row only when every declared equality value matches in the provider-owned atomic decision; row absence and comparison mismatch remain distinct.");
 
+    public static CapabilityDescriptor SetMutationDescriptor { get; } = new(
+        SetMutation,
+        "Set-based mutation",
+        "Updates or deletes every row matching an index-covered portable predicate in one provider-native statement, and reports the matched-row count.");
+
     public static CapabilityDescriptor AtomicCommitDescriptor { get; } = new(
         WellKnownCapabilities.AtomicCommit,
         "Atomic commit",
@@ -77,7 +84,7 @@ public static class BatchWriteCapabilities
         EvidenceGatedByDefault: true);
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, CompareAndDeleteDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, CompareAndDeleteDescriptor, SetMutationDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -107,7 +114,8 @@ public static class BatchWriteCapabilities
         bool durableHighWaterInspection,
         bool exactRetention,
         bool atomicCommit = false,
-        bool compareAndDelete = false)
+        bool compareAndDelete = false,
+        string? setMutation = null)
     {
         var descriptors = new List<CapabilityDescriptor>
         {
@@ -153,6 +161,8 @@ public static class BatchWriteCapabilities
             {
                 Description = $"Deletes one identified row on {provider} only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch."
             });
+        if (setMutation is not null)
+            descriptors.Add(SetMutationDescriptor with { Description = setMutation });
         if (nativeBatch)
             descriptors.Add(NativeBatchDescriptor);
         return Array.AsReadOnly(descriptors.ToArray());
@@ -781,7 +791,7 @@ internal sealed class BatchContext
 }
 
 /// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
-internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, ISetMutationStorageSession
 {
     protected readonly IStorageSession inner;
     protected readonly BatchContext context;
@@ -877,6 +887,43 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
         WriteOptions? options = null,
         CancellationToken cancellationToken = default) =>
         inner.DeleteAsync(key, options, cancellationToken);
+
+    // A set-based mutation can touch any key in the unit, so its write barrier is the whole staged
+    // set — the same barrier Query and ApplyRetention already take. Set-based mutation is therefore
+    // not a second write path: staged writes land first, and the provider statement then sees the
+    // rows the caller believes it staged.
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments)
+    {
+        context.FlushAll();
+        return RequireSetMutation().UpdateWhere(where, assignments);
+    }
+
+    public async ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default)
+    {
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return await RequireSetMutation().UpdateWhereAsync(where, assignments, cancellationToken).ConfigureAwait(false);
+    }
+
+    public SetMutationResult DeleteWhere(Predicate where)
+    {
+        context.FlushAll();
+        return RequireSetMutation().DeleteWhere(where);
+    }
+
+    public async ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default)
+    {
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return await RequireSetMutation().DeleteWhereAsync(where, cancellationToken).ConfigureAwait(false);
+    }
+
+    private ISetMutationStorageSession RequireSetMutation() =>
+        inner as ISetMutationStorageSession ?? throw new NotSupportedException(
+            "GW-SET-001: this provider session does not advertise set-based mutation.");
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {

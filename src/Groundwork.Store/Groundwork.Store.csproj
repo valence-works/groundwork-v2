@@ -12,6 +12,10 @@
   <ItemGroup>
     <ProjectReference Include="../Groundwork.Kernel/Groundwork.Kernel.csproj" />
     <ProjectReference Include="../Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+    <!-- Set-based mutation is admitted by the same coverage checker a read is admitted by. The
+         checker is provider-neutral and depends only on the query model, so this reference points
+         inward and closes the one path by which an uncovered write could reach a provider. -->
+    <ProjectReference Include="../Groundwork.Query.Planning/Groundwork.Query.Planning.csproj" />
   </ItemGroup>
 
 </Project>

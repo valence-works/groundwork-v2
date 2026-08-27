@@ -136,7 +136,7 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
 
     private RuntimeCoverageGate CreateGate()
     {
-        var declared = DeclaredIndexes(session.Unit);
+        var declared = StorageUnitCoverage.DeclaredIndexes(session.Unit);
         var profile = admission ?? connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
         return new RuntimeCoverageGate(
             declared,
@@ -149,23 +149,6 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
                     MaximumInValues = profile.MaximumInValues
                 }
             });
-    }
-
-    /// <summary>Converts the admitted declaration into the checker's provider-neutral index shape.</summary>
-    private static ImmutableArray<CoverageIndex> DeclaredIndexes(StorageUnit unit)
-    {
-        var nullable = unit.Columns.ToDictionary(column => column.Name, column => column.IsNullable, StringComparer.Ordinal);
-        return unit.Indexes
-            .Select(index => new CoverageIndex(
-                index.Name,
-                index.Columns.Select(column => new CoverageIndexColumn(
-                    column.Column,
-                    column.Direction == SortDirection.Descending ? OrderDirection.Descending : OrderDirection.Ascending,
-                    !nullable.TryGetValue(column.Column, out var isNullable) || isNullable)),
-                index.MissingValues == MissingValueBehavior.Excluded
-                    ? IndexMissingValueBehavior.Excluded
-                    : IndexMissingValueBehavior.Included))
-            .ToImmutableArray();
     }
 
     /// <summary>

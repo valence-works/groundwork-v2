@@ -36,7 +36,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
                 durableHighWaterInspection: true,
                 exactRetention: true,
                 atomicCommit: inner.ProviderSequenceFit is ProviderFit.Supported,
-                compareAndDelete: inner.ProviderSequenceFit is ProviderFit.Supported);
+                compareAndDelete: inner.ProviderSequenceFit is ProviderFit.Supported,
+                setMutation: "Updates or deletes every document matching an index-covered portable predicate on MongoDB with one updateMany/deleteMany, and reports matchedCount/deletedCount. Unlike the relational providers, a multi-document updateMany/deleteMany is atomic only when it runs inside a transaction: open a unit of work on a transaction-capable deployment when the whole set must apply or none of it.");
             return descriptors
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
@@ -128,7 +129,7 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
 internal class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null,
-    IProviderCommandObserver? commandObserver = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+    IProviderCommandObserver? commandObserver = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     public StorageUnit Unit => inner.Unit;
 
@@ -305,6 +306,30 @@ internal class MongoStoreSession(
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
+    }
+
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+        RequireSetMutation("update-where").UpdateWhere(where, assignments);
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        RequireSetMutation("update-where").UpdateWhereAsync(where, assignments, cancellationToken);
+
+    public SetMutationResult DeleteWhere(Predicate where) =>
+        RequireSetMutation("delete-where").DeleteWhere(where);
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        RequireSetMutation("delete-where").DeleteWhereAsync(where, cancellationToken);
+
+    private ISetMutationStorageSession RequireSetMutation(string operation)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, operation);
+        return inner as ISetMutationStorageSession ?? throw new NotSupportedException(
+            "GW-SET-001: this MongoDB session does not advertise set-based mutation.");
     }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)

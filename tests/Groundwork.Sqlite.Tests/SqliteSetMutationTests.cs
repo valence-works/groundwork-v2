@@ -1,0 +1,200 @@
+using Groundwork.Kernel;
+using Groundwork.Query.Model;
+using Groundwork.Query.Planning;
+using Groundwork.Store;
+using Xunit;
+
+namespace Groundwork.Sqlite.Tests;
+
+/// <summary>
+/// The provider-neutral admission rules for set-based mutation (#89), proven against a real
+/// provider rather than a stub so that every refusal is one a caller would actually meet.
+/// </summary>
+public sealed class SqliteSetMutationTests
+{
+    [Fact]
+    public void Set_based_mutation_refuses_every_assignment_no_provider_could_apply_faithfully()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "open", "one"));
+
+        var empty = Assert.Throws<ArgumentException>(() =>
+            session.UpdateWhere(Status(unit, "open"), new Dictionary<string, object?>()));
+        Assert.Contains("GW-SET-003", empty.Message, StringComparison.Ordinal);
+
+        var unknown = Assert.Throws<ArgumentException>(() => session.UpdateWhere(
+            Status(unit, "open"), new Dictionary<string, object?> { ["nope"] = 1L }));
+        Assert.Contains("GW-SET-002", unknown.Message, StringComparison.Ordinal);
+
+        var providerOwned = Assert.Throws<ArgumentException>(() => session.UpdateWhere(
+            Status(unit, "open"), new Dictionary<string, object?> { ["__groundwork_scope"] = "x" }));
+        Assert.Contains("GW-SET-002", providerOwned.Message, StringComparison.Ordinal);
+
+        var keyColumn = Assert.Throws<ArgumentException>(() => session.UpdateWhere(
+            Status(unit, "open"), new Dictionary<string, object?> { ["id"] = "b" }));
+        Assert.Contains("GW-SET-002", keyColumn.Message, StringComparison.Ordinal);
+
+        var json = Assert.Throws<ArgumentException>(() => session.UpdateWhere(
+            Status(unit, "open"), new Dictionary<string, object?> { ["document"] = "{}" }));
+        Assert.Contains("GW-SET-004", json.Message, StringComparison.Ordinal);
+
+        var wrongType = Assert.Throws<ArgumentException>(() => session.UpdateWhere(
+            Status(unit, "open"), new Dictionary<string, object?> { ["label"] = 7L }));
+        Assert.Contains("Assignment value for column 'label'", wrongType.Message, StringComparison.Ordinal);
+
+        Assert.Equal("one", Assert.Single(Read(session, unit))["label"]);
+    }
+
+    /// <summary>
+    /// A relational <c>RenderPredicateFragment</c> does not run the portability validation its full
+    /// query renderer runs, so set-based mutation runs it before reaching any provider. The
+    /// declared decimal is portable and index-covered; the one in this predicate is not, and
+    /// without the validation SQLite renders and executes it.
+    /// </summary>
+    [Fact]
+    public void A_non_portable_predicate_is_refused_before_a_provider_sees_it()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "open", "one"));
+
+        var amount = new ColumnRef(
+            new TableId(unit.Name), "amount", QueryType.Decimal, isNullable: true,
+            decimalPrecision: 10, decimalScale: 2);
+        var refusal = Assert.Throws<QueryRenderException>(() => session.DeleteWhere(
+            new Predicate.Equal(amount, QueryConstant.Of(amount, 1m))));
+        Assert.Equal("GW-SEM-DECIMAL-001", refusal.Code);
+        Assert.Single(Read(session, unit));
+    }
+
+    /// <summary>
+    /// A folded source column carries a provider-owned search key. Assigning the source through a
+    /// set-based update must move the search key with it, or the row stops answering the
+    /// case-insensitive query that found it a moment earlier.
+    /// </summary>
+    [Fact]
+    public void Assigning_a_folded_column_moves_its_search_key()
+    {
+        using var connection = Open();
+        var unit = FoldedUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "a",
+            ["status"] = "open",
+            ["name"] = "Alpha"
+        }));
+
+        Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "alph"))["id"]);
+        Assert.Equal(1L, session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["name"] = "Omega" }).MatchedRows);
+
+        Assert.Empty(ByNamePrefix(session, unit, "alph"));
+        Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "omeg"))["id"]);
+    }
+
+    [Fact]
+    public void A_privileged_cross_scope_session_cannot_mutate_a_set()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Scope = ScopePolicy.Scoped };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("s"))).Insert(Row("a", "open", "one"));
+        var privileged = connection.OpenSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("operator", "audit")));
+
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            privileged.DeleteWhere(Status(unit, "open")));
+        Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
+    }
+
+    private static IStorageProviderConnection Open() => new SqliteProviderFactory().Create(
+        "Data Source=file:groundwork_p43_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
+
+    private static Predicate Status(StorageUnit unit, string value)
+    {
+        var column = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, isNullable: false, maxLength: 32);
+        return new Predicate.Equal(column, QueryConstant.Of(column, value));
+    }
+
+    /// <summary>
+    /// A case-insensitive prefix read, which the provider answers from the search key rather than
+    /// from the source column. It is the only way to observe that the search key moved.
+    /// </summary>
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> ByNamePrefix(
+        IStorageSession session,
+        StorageUnit unit,
+        string prefix)
+    {
+        var column = new ColumnRef(
+            new TableId(unit.Name), "name", QueryType.String, isNullable: false, maxLength: 32,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        return session.Query(new QueryRequest(
+            new TableId(unit.Name),
+            new Predicate.StartsWith(column, prefix),
+            [],
+            Projection.All,
+            Paging.None)).Rows;
+    }
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
+        IStorageSession session,
+        StorageUnit unit) =>
+        session.Query(new QueryRequest(
+            new TableId(unit.Name), Status(unit, "open"), [], Projection.All, Paging.None)).Rows;
+
+    private static StorageValues Row(string id, string status, string label) =>
+        new(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = id,
+            ["status"] = status,
+            ["label"] = label,
+            ["document"] = null,
+            ["amount"] = null
+        });
+
+    private static StorageUnit Unit() => new()
+    {
+        Id = new StorageUnitId("p43_admission"),
+        Name = "p43_admission",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+            new() { Name = "status", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
+            new() { Name = "label", Type = PortableType.String, IsNullable = true, MaxLength = 64 },
+            new() { Name = "document", Type = PortableType.Json, IsNullable = true },
+            new() { Name = "amount", Type = PortableType.Decimal, IsNullable = true, Precision = 18, Scale = 4 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
+    };
+
+    private static StorageUnit FoldedUnit() => new()
+    {
+        Id = new StorageUnitId("p43_folded"),
+        Name = "p43_folded",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+            new() { Name = "status", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
+            new()
+            {
+                Name = "name",
+                Type = PortableType.String,
+                IsNullable = false,
+                MaxLength = 32,
+                Collation = PortableCollation.UnicodeOrdinalIgnoreCase
+            }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
+    };
+}
