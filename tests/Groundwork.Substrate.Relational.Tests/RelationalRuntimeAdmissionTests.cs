@@ -60,6 +60,28 @@ public sealed class RelationalRuntimeAdmissionTests
         Assert.Equal(2, inspections);
     }
 
+    [Fact]
+    public void Inspection_that_throws_still_reports_its_admission_round_trip()
+    {
+        var observer = new RecordingObserver();
+        var admission = new RelationalRuntimeAdmission(
+            "stub.schema-admission",
+            Target,
+            (_, _) => throw new InvalidOperationException("The catalog read failed."));
+
+        Assert.Throws<InvalidOperationException>(
+            () => admission.EnsureAdmitted(Unit("admission-throws"), observer));
+        Assert.Single(observer.Commands);
+        Assert.Equal("stub.schema-admission", observer.Commands[0].Operation);
+    }
+
+    private sealed class RecordingObserver : IProviderCommandObserver
+    {
+        public List<ProviderCommandEvent> Commands { get; } = [];
+
+        public void Observe(ProviderCommandEvent command) => Commands.Add(command);
+    }
+
     private static PhysicalSchemaTarget Target(StorageUnit unit) =>
         new(new SchemaSubject(unit), new ProviderIdentity("Stub", "1.0"), []);
 

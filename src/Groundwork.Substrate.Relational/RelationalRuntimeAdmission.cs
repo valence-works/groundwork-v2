@@ -50,21 +50,32 @@ public sealed class RelationalRuntimeAdmission
             admitted[desired.Id] = new Admission(desired, target.Fingerprint, stamp);
             return;
         }
-        var inspection = inspect(target, connection);
-        observer?.Observe(new ProviderCommandEvent(
-            observerOperation,
-            $"Runtime schema admission inspection for '{target.Subject.Name}'",
-            ProviderCommandKind.Read,
-            IsProbe: false));
+        PhysicalSchemaInspectionResult inspection;
+        try
+        {
+            inspection = inspect(target, connection);
+        }
+        finally
+        {
+            observer?.Observe(new ProviderCommandEvent(
+                observerOperation,
+                $"Runtime schema admission inspection for '{target.Subject.Name}'",
+                ProviderCommandKind.Read,
+                IsProbe: false));
+        }
         var applied = inspection.History.AppliedState;
         if (applied is not null)
         {
             var fingerprintMismatch = !string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal);
             if (fingerprintMismatch || !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
             {
-                var remedy = fingerprintMismatch
-                    ? "Apply the declared schema before opening a session."
-                    : "Restore the deployed catalog to the applied schema — rebuild derived search-key columns rather than reapplying — before opening a session.";
+                var remedy = (fingerprintMismatch, target.Subject.DerivedColumns.Length > 0) switch
+                {
+                    (true, true) => "Apply the declared schema and rebuild its derived search-key columns before opening a session.",
+                    (true, false) => "Apply the declared schema before opening a session.",
+                    (false, true) => "Restore the deployed catalog to the applied schema — rebuild derived search-key columns rather than reapplying — before opening a session.",
+                    (false, false) => "Restore the deployed catalog to the applied schema before opening a session.",
+                };
                 var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UtcNow);
                 throw new GroundworkRuntimeSchemaAdmissionException(
                     new GroundworkRuntimeSchemaAdmissionResult(inspection, plan),
