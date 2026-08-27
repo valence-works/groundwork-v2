@@ -156,6 +156,47 @@ public sealed class MongoSchemaExecutorTests : IDisposable
     }
 
     /// <summary>
+    /// Redefining a column rewrites what is stored only when the BSON representation changes. A
+    /// widened string is the ledger fact alone, because BSON strings carry no length; a retyped
+    /// number is decoded under the applied definition and re-encoded under the declared one, so a
+    /// document that stored an int stores a long afterwards rather than failing target validation.
+    /// </summary>
+    [SkippableFact]
+    public void An_alteration_re_encodes_stored_values_only_where_the_bson_representation_changes()
+    {
+        var context = Context();
+        var executor = new MongoSchemaExecutor(context);
+        var table = Table();
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.Applied,
+            PhysicalSchemaApplication.Apply(Target(WithAmount(table, PortableType.Int32, 64)), executor).Outcome);
+        Collection(context, table).InsertOne(new BsonDocument
+        {
+            ["_id"] = "one",
+            ["id"] = "one",
+            ["note"] = "kept",
+            ["amount"] = new BsonInt32(5)
+        });
+
+        // A wider string changes nothing stored.
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.Applied,
+            PhysicalSchemaApplication.Apply(Target(WithAmount(table, PortableType.Int32, 128)), executor).Outcome);
+        var widened = Collection(context, table).Find(new BsonDocument("_id", "one")).Single();
+        Assert.Equal(BsonType.String, widened["note"].BsonType);
+        Assert.Equal(BsonType.Int32, widened["amount"].BsonType);
+
+        // A retyped number is re-encoded, which is also what lets target validation pass.
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.Applied,
+            PhysicalSchemaApplication.Apply(Target(WithAmount(table, PortableType.Int64, 128)), executor).Outcome);
+        var retyped = Collection(context, table).Find(new BsonDocument("_id", "one")).Single();
+        Assert.Equal(BsonType.Int64, retyped["amount"].BsonType);
+        Assert.Equal(5L, retyped["amount"].AsInt64);
+        Assert.Equal("kept", retyped["note"].AsString);
+    }
+
+    /// <summary>
     /// Renaming a subject's storage renames every collection it owns, including the per-scope ones,
     /// and rewrites the scope registry that names them. Leaving those rows behind would make the
     /// next scoped session report <c>GW-ACCESS-006</c> registry drift.
@@ -344,6 +385,19 @@ public sealed class MongoSchemaExecutorTests : IDisposable
         ],
         Key = new KeyDefinition { Columns = ["id"] },
         Scope = ScopePolicy.Scoped
+    };
+
+    private static StorageUnit WithAmount(string table, PortableType amount, int noteLength) => new()
+    {
+        Id = new StorageUnitId(table),
+        Name = table,
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new ColumnDefinition { Name = "note", Type = PortableType.String, MaxLength = noteLength, IsNullable = true },
+            new ColumnDefinition { Name = "amount", Type = amount, IsNullable = true }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
     };
 
     private static PhysicalSchemaTarget Target(StorageUnit unit, SchemaEvolutionMetadata? evolution = null) =>
