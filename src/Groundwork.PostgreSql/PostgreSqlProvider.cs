@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data;
+using System.Data.Common;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Substrate.Relational;
@@ -67,8 +68,16 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = OpenConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
         OwnConnection(connection);
         return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null, observer);
     }
@@ -97,17 +106,17 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
-        foreach (var unit in units)
-        {
-            ArgumentNullException.ThrowIfNull(unit);
-            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
-            PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
-        }
-
         var connection = OpenConnection();
         try
         {
+            foreach (var unit in units)
+            {
+                ArgumentNullException.ThrowIfNull(unit);
+                PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+                PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+                schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            }
+
             var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
             OwnConnection(connection);
             return new PostgreSqlUnitOfWork(this, connection, transaction, units, access, options, observer);
@@ -170,33 +179,27 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly PostgreSqlDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+    private readonly RelationalRuntimeAdmission admission;
 
     internal PostgreSqlSchemaCoordinator(PostgreSqlProviderConnection owner)
     {
         this.owner = owner;
         executor = new RelationalSchemaExecutor(owner.OpenConnection, dialect);
+        admission = new RelationalRuntimeAdmission(
+            "postgresql.schema-admission",
+            desired => Target(Physicalize(desired)),
+            (target, connection) => connection is null
+                ? executor.InspectDeployedHistory(target)
+                : executor.InspectDeployedHistory(target, connection));
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired)
-    {
-        var physical = Physicalize(desired);
-        if (physical.DerivedColumns.Count == 0)
-            return;
-        var target = Target(physical);
-        var inspection = executor.InspectHistory(target);
-        var applied = inspection.History.AppliedState;
-        if (applied is null)
-            return;
-        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
-            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
-        {
-            throw new InvalidOperationException(
-                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
-        }
-    }
+    internal void EnsureRuntimeAdmission(
+        StorageUnit desired,
+        IProviderCommandObserver? observer = null,
+        DbConnection? connection = null) =>
+        admission.EnsureAdmitted(desired, observer, connection);
 
     public SchemaDiff Diff(StorageUnit desired)
     {
@@ -216,10 +219,17 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
-        var result = PhysicalSchemaApplication.Apply(target, executor);
-        owner.Remember(desired);
-        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        try
+        {
+            var result = PhysicalSchemaApplication.Apply(target, executor);
+            owner.Remember(desired);
+            return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
+        finally
+        {
+            admission.Invalidate(desired.Id);
+        }
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
@@ -382,7 +392,7 @@ internal sealed class PostgreSqlProviderCatalog
         var indexes = new List<ProviderIndex>();
         foreach (var index in unit.Indexes)
         {
-            var metadata = dialect.ReadIndex(connection, null!, unit.Name, index.Name);
+            var metadata = dialect.ReadIndex(connection, null, unit.Name, index.Name);
             if (metadata is null)
                 continue;
             indexes.Add(new ProviderIndex(index.Name,

@@ -193,7 +193,7 @@ internal sealed class SqliteDialect : RelationalDialect
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table)
         => RelationalSearchKeyCatalog.Read(
             connection,
@@ -242,16 +242,16 @@ internal sealed class SqliteDialect : RelationalDialect
             throw new InvalidOperationException($"SQLite schema history publish affected an unexpected number of rows for '{target}'.");
     }
 
-    public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+    public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
+        command.Transaction = (SqliteTransaction?)transaction;
         command.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=@name;";
         AddParameter(command, "@name", table);
         return command.ExecuteScalar() is not null;
     }
 
-    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction transaction, string table)
+    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction? transaction, string table)
     {
         var createSql = ReadCreateSql((SqliteConnection)connection, transaction, table);
         using var command = connection.CreateCommand();
@@ -272,7 +272,7 @@ internal sealed class SqliteDialect : RelationalDialect
         return result;
     }
 
-    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction transaction, string table, string index)
+    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index)
     {
         using var list = connection.CreateCommand();
         list.Transaction = transaction;
@@ -345,10 +345,10 @@ internal sealed class SqliteDialect : RelationalDialect
         command.ExecuteNonQuery();
     }
 
-    private static string? ReadCreateSql(SqliteConnection connection, DbTransaction transaction, string table)
+    private static string? ReadCreateSql(SqliteConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
+        command.Transaction = (SqliteTransaction?)transaction;
         command.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name=@name;";
         AddParameter(command, "@name", table);
         return command.ExecuteScalar() as string;

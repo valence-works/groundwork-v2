@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Store;
@@ -16,32 +17,33 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly SqliteDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+    private readonly RelationalRuntimeAdmission admission;
 
     internal SqliteSchemaCoordinator(SqliteProviderConnection owner)
     {
         this.owner = owner;
         executor = new RelationalSchemaExecutor(owner.CreateIndependentConnection, dialect);
+        admission = new RelationalRuntimeAdmission(
+            "sqlite.schema-admission",
+            desired => Target(Physicalize(desired)),
+            InspectDeployed);
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired)
+    internal void EnsureRuntimeAdmission(
+        StorageUnit desired,
+        IProviderCommandObserver? observer = null,
+        DbConnection? connection = null) =>
+        admission.EnsureAdmitted(desired, observer, connection);
+
+    private PhysicalSchemaInspectionResult InspectDeployed(PhysicalSchemaTarget target, DbConnection? connection)
     {
-        var physical = Physicalize(desired);
-        if (physical.DerivedColumns.Count == 0)
-            return;
-        var target = Target(physical);
-        var inspection = executor.InspectHistory(target);
-        var applied = inspection.History.AppliedState;
-        if (applied is null)
-            return;
-        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
-            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
-        {
-            throw new InvalidOperationException(
-                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
-        }
+        if (owner.UsesSharedSessionConnection)
+            lock (owner.Gate) return executor.InspectDeployedHistory(target, owner.Connection);
+        return connection is null
+            ? executor.InspectDeployedHistory(target)
+            : executor.InspectDeployedHistory(target, connection);
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -62,10 +64,17 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
-        var result = PhysicalSchemaApplication.Apply(target, executor);
-        owner.RefreshSchema();
-        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        try
+        {
+            var result = PhysicalSchemaApplication.Apply(target, executor);
+            owner.RefreshSchema();
+            return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
+        finally
+        {
+            admission.Invalidate(desired.Id);
+        }
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
@@ -236,7 +245,7 @@ internal sealed class SqliteProviderCatalog : IProviderCatalog
             var indexes = new List<ProviderIndex>();
             foreach (var index in unit.Indexes)
             {
-                var metadata = dialect.ReadIndex(catalogConnection, null!, unit.Name, index.Name);
+                var metadata = dialect.ReadIndex(catalogConnection, null, unit.Name, index.Name);
                 if (metadata is null) continue;
                 indexes.Add(new ProviderIndex(index.Name,
                     metadata.Columns.Where(column => column.Name != SqliteSchemaCoordinator.ScopeColumn)

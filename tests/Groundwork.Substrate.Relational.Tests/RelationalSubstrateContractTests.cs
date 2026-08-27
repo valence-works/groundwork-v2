@@ -465,20 +465,20 @@ public sealed class RelationalSubstrateContractTests
             LastExpectedAppliedTargetFingerprint = expectedAppliedTargetFingerprint;
             LastPublishHadTransaction = transaction is not null;
         }
-        public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+        public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
         {
             TableExistsCalls++;
             return TableExistsResult;
         }
-        public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction transaction, string table)
+        public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction? transaction, string table)
         {
             ReadColumnsCalls++;
             return CatalogColumns;
         }
-        public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(DbConnection connection, DbTransaction transaction, string table) =>
+        public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(DbConnection connection, DbTransaction? transaction, string table) =>
             DerivedSearchKeyAlgorithms;
-        public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction transaction, string table, string index) => null;
-        public override void ValidateTarget(DbConnection connection, DbTransaction transaction, PhysicalSchemaTarget target)
+        public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index) => null;
+        public override void ValidateTarget(DbConnection connection, DbTransaction? transaction, PhysicalSchemaTarget target)
         {
             ValidateTargetCalls++;
             if (ThrowOnValidateTarget)

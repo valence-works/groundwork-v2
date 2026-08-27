@@ -307,6 +307,7 @@ public sealed class ProviderCommandTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Unit("sqlite-interleaved");
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
 
         var observer = new ProviderCommandObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global, observer);
@@ -425,6 +426,7 @@ public sealed class ProviderCommandTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Unit("sqlite-none", ConcurrencyDeclaration.None);
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
 
         var firstObserver = new ProviderCommandObserver();
         var first = connection.OpenSession(unit, StorageAccess.Global, firstObserver).Conditional()
@@ -476,6 +478,7 @@ public sealed class ProviderCommandTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Unit("sqlite-none-missing-update", ConcurrencyDeclaration.None);
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
         var observer = new ProviderCommandObserver();
 
         var outcome = connection.OpenSession(unit, StorageAccess.Global, observer).Update(
@@ -570,6 +573,7 @@ public sealed class ProviderCommandTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Unit("sqlite-explicit-none", ConcurrencyDeclaration.None);
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
 
         using (var catalog = new SqliteConnection(store.ConnectionString))
         {
@@ -686,6 +690,7 @@ public sealed class ProviderCommandTests
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
         var unit = Unit("postgresql-scoped", ConcurrencyDeclaration.Optimistic(), scope: ScopePolicy.Scoped);
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
         var observer = new ProviderCommandObserver();
         var result = connection
             .OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")), observer)
@@ -705,6 +710,7 @@ public sealed class ProviderCommandTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Unit("sqlite-missing");
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
         var observer = new ProviderCommandObserver();
         var outcome = connection.OpenSession(unit, StorageAccess.Global, observer).Conditional().ConditionalUpsert(
             Values("missing", "value", DateTimeOffset.UnixEpoch),
@@ -801,6 +807,7 @@ public sealed class ProviderCommandTests
     {
         var unit = Unit(provider + "-ordinary-writes", ConcurrencyDeclaration.None);
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
 
         var observer = new ProviderCommandObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global, observer);
@@ -840,6 +847,7 @@ public sealed class ProviderCommandTests
     {
         var unit = Unit(provider + "-write-path");
         connection.Schema.Apply(unit);
+        _ = connection.OpenSession(unit, StorageAccess.Global);
         var firstTimestamp = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
         var firstObserver = new ProviderCommandObserver();
         var inserted = connection.OpenSession(unit, StorageAccess.Global, firstObserver).Conditional()

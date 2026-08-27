@@ -93,8 +93,17 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, sessionConnection);
+        }
+        catch
+        {
+            if (!isMemory)
+                sessionConnection.Dispose();
+            throw;
+        }
         if (!isMemory)
             lock (gate) sessionConnections.Add(sessionConnection);
         return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer);
@@ -124,17 +133,17 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
-        foreach (var unit in units)
-        {
-            ArgumentNullException.ThrowIfNull(unit);
-            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
-            SqliteSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
-        }
-
         var transactional = CreateIndependentConnection();
         try
         {
+            foreach (var unit in units)
+            {
+                ArgumentNullException.ThrowIfNull(unit);
+                PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+                SqliteSchemaCoordinator.ValidateAccess(unit, access);
+                schemaCoordinator.EnsureRuntimeAdmission(unit, observer, transactional);
+            }
+
             var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
             return new SqliteUnitOfWork(this, transactional, transaction, units, access, options, observer);
         }

@@ -12,9 +12,11 @@ public enum ProviderCommandKind
 /// </summary>
 /// <remarks>
 /// Every command a session sends to its provider raises exactly one of these — reads, writes, probes and
-/// retention alike. Schema work does not: <c>ISchemaCoordinator</c> hangs off the connection rather than a
-/// session and issues its own commands, so DDL never reaches a session observer. That boundary is structural
-/// rather than a documented exclusion.
+/// retention alike. Runtime schema admission raises one read event per inspection it actually performs while
+/// a session or unit of work is opened; an admission satisfied from the connection's cache raises nothing.
+/// Other schema work does not: <c>ISchemaCoordinator</c> hangs off the connection rather than a session and
+/// issues its own commands, so DDL never reaches a session observer. That boundary is structural rather than
+/// a documented exclusion.
 /// </remarks>
 public readonly record struct ProviderCommandEvent(
     string Operation,
