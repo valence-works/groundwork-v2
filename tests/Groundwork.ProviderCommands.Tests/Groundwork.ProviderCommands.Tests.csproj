@@ -20,4 +20,8 @@
     <ProjectReference Include="../../src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Groundwork.LiveDatabases/LiveSqlServer.cs" Link="LiveSqlServer.cs" />
+    <Compile Include="../Groundwork.LiveDatabases/LiveMongo.cs" Link="LiveMongo.cs" />
+  </ItemGroup>
 </Project>
