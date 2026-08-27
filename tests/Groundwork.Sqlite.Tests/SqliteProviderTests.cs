@@ -814,7 +814,8 @@ public sealed class SqliteProviderTests
         {
             Id = new StorageUnitId("linq-tickets"), Name = "linq_tickets",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }, new() { Name = "code_col", Type = PortableType.String }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -843,7 +844,8 @@ public sealed class SqliteProviderTests
         {
             Id = new StorageUnitId("linq-counts"), Name = "linq_counts",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -877,7 +879,8 @@ public sealed class SqliteProviderTests
         {
             Id = new StorageUnitId("linq-uow"), Name = "linq_uow",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         using var unitOfWork = connection.BeginUnitOfWork(StorageAccess.Global, unit);
@@ -906,7 +909,8 @@ public sealed class SqliteProviderTests
         {
             Id = new StorageUnitId("linq-serial"), Name = "linq_serial",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -923,20 +927,25 @@ public sealed class SqliteProviderTests
                 session.Upsert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "row-" + iteration % 10, ["value_col"] = "v" + iteration }));
         });
         while (!writes.IsCompleted)
-            Assert.InRange(await table.Query.CountAsync(executor), 0, 10);
+            Assert.InRange(await Scanned(table).CountAsync(executor), 0, 10);
         await writes;
-        Assert.Equal(10, await table.Query.CountAsync(executor));
+        Assert.Equal(10, await Scanned(table).CountAsync(executor));
     }
 
     [Fact]
-    public async Task Configured_linq_executor_completes_synchronously_without_the_async_capability()
+    public async Task Configured_linq_executor_completes_synchronously_over_an_in_process_provider()
     {
         using var database = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("linq-foreign"), Name = "linq_foreign",
-            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            // The declared key is physically indexed by every provider, but is not a coverage
+            // candidate, so `Where(t => t.Id == ...)` below needs this second declaration over the
+            // same column to be admitted at all. Tracked in #203; an application should use the
+            // point read instead of querying by key.
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
         };
         Assert.True(database.Schema.Apply(unit).Applied);
         var session = database.OpenSession(unit, StorageAccess.Global);
@@ -952,7 +961,7 @@ public sealed class SqliteProviderTests
         Assert.True(pending.IsCompleted);
         Assert.Equal(1, await pending);
         Assert.True(await table.Query.Where(ticket => ticket.Id == "a").AnyAsync(executor));
-        Assert.Equal("a", Assert.Single(await table.Query.ToListAsync(executor)).Id);
+        Assert.Equal("a", Assert.Single(await Scanned(table).ToListAsync(executor)).Id);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             table.Query.CountAsync(executor, new CancellationToken(canceled: true)));
     }
@@ -965,31 +974,52 @@ public sealed class SqliteProviderTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("linq-decorated"), Name = "linq_decorated",
-            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
         Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).Status);
 
-        var executor = new SqliteLinqExecutor(new PassThroughStorageSession(session));
+        var decorated = new PassThroughStorageSession(session);
+        var executor = new SqliteLinqExecutor(decorated);
         var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
             new GwTableModel<LinqCountTicket>("linq_decorated", [
                 new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
             ]));
 
-        Assert.Equal(1, await table.Query.CountAsync(executor));
-        Assert.Equal("a", Assert.Single(await table.Query.ToListAsync(executor)).Id);
+        Assert.Equal(1, await Scanned(table).CountAsync(executor));
+        Assert.Equal("a", Assert.Single(await Scanned(table).ToListAsync(executor)).Id);
+
+        // The executor reaches storage through the session contract's asynchronous member, which is
+        // the only one that carries the caller's token. Reading through the synchronous member would
+        // still return these rows, so the counters are what distinguish the two routes.
+        Assert.Equal(0, decorated.SynchronousQueries);
+        Assert.Equal(2, decorated.AsynchronousQueries);
     }
 
     private sealed class PassThroughStorageSession(IStorageSession inner) : IStorageSession
     {
+        internal int SynchronousQueries { get; private set; }
+
+        internal int AsynchronousQueries { get; private set; }
+
         public StorageUnit Unit => inner.Unit;
         public StorageAccess Access => inner.Access;
         public StoredEntry? Read(StorageKey key) => inner.Read(key);
         public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) => inner.ReadAsync(key, cancellationToken);
-        public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => inner.Query(request, options);
-        public ValueTask<QueryMaterializedResult> QueryAsync(QueryRequest request, QueryRenderOptions? options = null, CancellationToken cancellationToken = default) => inner.QueryAsync(request, options, cancellationToken);
+        public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+        {
+            SynchronousQueries++;
+            return inner.Query(request, options);
+        }
+
+        public ValueTask<QueryMaterializedResult> QueryAsync(QueryRequest request, QueryRenderOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            AsynchronousQueries++;
+            return inner.QueryAsync(request, options, cancellationToken);
+        }
         public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);
         public ValueTask<AggregationResult> AggregateAsync(AggregationQuery query, CancellationToken cancellationToken = default) => inner.AggregateAsync(query, cancellationToken);
         public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
@@ -1012,8 +1042,9 @@ public sealed class SqliteProviderTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("linq-gate"), Name = "linq_gate",
-            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -1027,7 +1058,7 @@ public sealed class SqliteProviderTests
         Task<long> pending;
         lock (((SqliteProviderConnection)connection).Gate)
         {
-            pending = Task.Run(() => table.Query.CountAsync(executor, cancellation.Token));
+            pending = Task.Run(() => Scanned(table).CountAsync(executor, cancellation.Token));
             Thread.Sleep(250);
             cancellation.Cancel();
         }
@@ -1042,8 +1073,9 @@ public sealed class SqliteProviderTests
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("linq-window"), Name = "linq_window",
-            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -1068,6 +1100,15 @@ public sealed class SqliteProviderTests
         Assert.False(await executor.AnyAsync(exhausted));
         Assert.Equal(3, await executor.CountAsync(exhausted));
     }
+
+    /// <summary>
+    /// Marks a deliberately unfiltered read. These tests are about execution mechanics, not coverage,
+    /// and an unbounded read is a scan on every provider — so it says so explicitly rather than
+    /// slipping past the gate.
+    /// </summary>
+    private static IGwQueryable<LinqCountTicket> Scanned(GwQueryTable<LinqCountTicket> table) =>
+        table.AcceptScan("GW-SCAN-0001", "provider execution mechanics", "groundwork-tests",
+            DateTimeOffset.UtcNow.AddYears(10));
 
     private sealed class LinqCountTicket
     {

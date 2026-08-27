@@ -51,6 +51,12 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     public StorageAccess Access { get; }
 
+    /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
+    private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(
+        index => index.Name,
+        index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
+        StringComparer.Ordinal);
+
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
         QueryCore(request, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
 
@@ -75,10 +81,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         {
             Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
                 .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(
-                index => index.Name,
-                index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal),
+            PhysicalIndexNames = PhysicalIndexNames(),
             SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
@@ -142,10 +145,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
                     column => QueryTypeOf(column.Type),
                     StringComparer.Ordinal)))
                 .ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(
-                index => index.Name,
-                index => PostgreSqlDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal),
+            PhysicalIndexNames = PhysicalIndexNames(),
             SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
             LatestPartitionColumns = [scopeToken]
         };

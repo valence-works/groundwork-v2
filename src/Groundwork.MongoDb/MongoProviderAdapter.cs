@@ -11,8 +11,15 @@ public sealed class MongoProviderFactory : IStorageProviderFactory
         new MongoStoreConnection(new MongoDbProviderFactory().Create(connectionString));
 }
 
-internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : IStorageProviderConnection
+internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
+    /// <summary>
+    /// MongoDB has no bound-parameter budget — its real bound is the 16 MB command document — so
+    /// the portable defaults are stated deliberately rather than a Mongo-specific number being
+    /// invented for them.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission => QueryAdmissionProfile.Default;
+
     public IProviderCatalog Catalog { get; } = new MongoStoreCatalog(inner.Catalog);
 
     public ISchemaCoordinator Schema { get; } = new MongoStoreSchema(inner.Schema);
