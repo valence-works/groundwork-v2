@@ -50,8 +50,8 @@ Every terminal is admitted through the shared runtime coverage gate before the p
 anything, so an uncovered query is refused with the same `GW-COVER-*` code the analyzer gave you at
 build time, on whichever provider you happen to be running. See
 **[Query Coverage & Indexes](Query-Coverage-and-Indexes)** — including
-[why a key filter is refused](Query-Coverage-and-Indexes#a-declared-key-is-not-a-coverage-candidate)
-and why `session.Read(key)` is the right call for fetching a row by its key.
+[why the declared key counts as coverage](Query-Coverage-and-Indexes#what-counts-as-a-covering-index)
+and when `session.Read(key)` is still the right call for fetching a row by its key.
 
 `SqliteLinqExecutor` remains as the named SQLite entry point and adds no behavior of its own.
 

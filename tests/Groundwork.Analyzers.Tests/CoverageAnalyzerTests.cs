@@ -200,6 +200,18 @@ public sealed class CoverageAnalyzerTests
         Assert.True(diagnostic.Location.GetLineSpan().StartLinePosition.Line > 0);
     }
 
+    /// <summary>
+    /// The declared key is a coverage candidate. This schema declares an index on an unrelated
+    /// column, so nothing but the key itself can cover the read.
+    /// </summary>
+    [Fact]
+    public async Task Declared_key_equality_is_covered_without_a_declared_index()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) + QuerySource("var result = db.Table<Ticket>().Where(t => t.Id == status).ToListAsync();"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task WhereIf_enumerates_shapes_and_the_all_filters_absent_shape_fails()
     {
@@ -554,7 +566,7 @@ public sealed class CoverageAnalyzerTests
         using System.Threading.Tasks;
         using Groundwork.Schema;
         using static QueryHost;
-        [GwTable("tickets")] public sealed class Ticket { public string Status { get; set; } = ""; public string Other { get; set; } = ""; public DateTimeOffset CreatedAt { get; set; } }
+        [GwTable("tickets")] public sealed class Ticket { public string Id { get; set; } = ""; public string Status { get; set; } = ""; public string Other { get; set; } = ""; public DateTimeOffset CreatedAt { get; set; } }
         public sealed class Db { public Query<T> Table<T>() => new Query<T>(); }
         public sealed class Query<T>
         {

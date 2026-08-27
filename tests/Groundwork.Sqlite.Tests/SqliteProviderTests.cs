@@ -1017,11 +1017,9 @@ public sealed class SqliteProviderTests
             Id = new StorageUnitId("linq-foreign"), Name = "linq_foreign",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
             Key = new KeyDefinition { Columns = ["Id"] },
-            // The declared key is physically indexed by every provider, but is not a coverage
-            // candidate, so `Where(t => t.Id == ...)` below needs this second declaration over the
-            // same column to be admitted at all. Tracked in #203; an application should use the
-            // point read instead of querying by key.
-            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+            // No declared index. The key is a coverage candidate in its own right, so the
+            // `Where(t => t.Id == ...)` below is admitted on the key alone — this unit used to
+            // carry a second declaration over the same column purely to get past the gate.
         };
         Assert.True(database.Schema.Apply(unit).Applied);
         var session = database.OpenSession(unit, StorageAccess.Global);
