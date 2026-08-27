@@ -49,9 +49,24 @@ only `Groundwork.Kernel` — no Records, no Documents, no provider.
 | `Guid` | RFC-4122 network-byte key | ✅ | ✅ | ✅ |
 | `Binary` | Exact equality/membership only | equality only | ❌ `GW-SEM-ORDER-001` | equality only |
 | `Json` | Opaque payload | ❌ | ❌ | ❌ `GW-DECL-INDEX-003` |
+| `Double` | Storage-only IEEE-754 binary64 | ❌ `GW-SEM-TYPE-006` | ❌ `GW-SEM-ORDER-001` | ❌ `GW-PORT-012` |
 
-There is deliberately **no `Double`/`Single`**. Binary floating point is refused in predicates,
-ordering, and indexes (`GW-SEM-TYPE-006`) because rounding and comparison differ across stores.
+`Double` is **declarable and storable but never comparable**. Binary64 round-trips bit-for-bit on
+PostgreSQL `double precision`, SQL Server `float`, SQLite `REAL`, and MongoDB `double`, so telemetry,
+coordinates, and embeddings can be declared and stored. Comparison is a different question: rounding
+and index behaviour differ across stores, so predicates, ordering, index membership, key membership,
+and aggregation grouping are all refused. Declare `Decimal(18,4)` or `Int64` for a value you query on.
+
+Only the binary64 values that every store returns unchanged can be written. NaN and the infinities
+are refused outright by SQL Server and SQLite, and negative zero comes back as positive zero from
+SQLite and MongoDB, so all four are refused at the write with `GW-VALUE-DOUBLE-001` rather than
+stored and quietly changed. There is deliberately **no `Single`**: SQLite `REAL` and BSON `double`
+are both binary64, so a 32-bit column would be a widened one on half the providers.
+
+```csharp
+.Double("reading")                              // stored, never compared
+.Double("calibration", c => c.Required().Default(0.1))
+```
 
 ### Typed helpers
 

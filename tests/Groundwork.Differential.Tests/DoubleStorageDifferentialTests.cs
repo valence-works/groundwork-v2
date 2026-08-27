@@ -138,6 +138,30 @@ public sealed class DoubleStorageDifferentialTests
         }
     }
 
+    /// <summary>
+    /// A declared default is rendered into DDL by each provider and then read back out of its
+    /// catalog to be compared with the declaration, so a Double default exercises the literal
+    /// renderer and the catalog round-trip that a written value never touches.
+    /// </summary>
+    [SkippableFact]
+    public void Every_provider_renders_and_applies_a_declared_double_default()
+    {
+        using var matrix = DoubleMatrix.OpenAll();
+        var defaults = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var provider in matrix.Providers)
+        {
+            provider.Session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 4L }));
+            var stored = provider.Session.Read(Key(4L));
+            Assert.NotNull(stored);
+            defaults[provider.Name] = Hex(BitConverter.DoubleToInt64Bits(
+                Assert.IsType<double>(stored!.Values.Values["calibration"])));
+        }
+
+        Assert.Equal(
+            matrix.Providers.ToDictionary(provider => provider.Name, _ => "0x3fb999999999999a", StringComparer.Ordinal),
+            defaults);
+    }
+
     private static StorageKey Key(long id) =>
         new(new Dictionary<string, object?> { ["id"] = id });
 
@@ -199,7 +223,8 @@ public sealed class DoubleStorageDifferentialTests
             Columns =
             [
                 new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
-                new() { Name = "reading", Type = PortableType.Double, IsNullable = true }
+                new() { Name = "reading", Type = PortableType.Double, IsNullable = true },
+                new() { Name = "calibration", Type = PortableType.Double, IsNullable = false, Default = new PortableDefault(0.1d) }
             ],
             Key = new KeyDefinition { Columns = ["id"] }
         };

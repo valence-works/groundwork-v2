@@ -90,8 +90,6 @@ public static class MongoValueCodec
             PortableType.Guid => new BsonBinaryData(ExactGuid(value, column), GuidRepresentation.Standard),
             PortableType.Binary => EncodeBinary(value, column),
             PortableType.Json => EncodeJson(value, column),
-            // The BsonDouble constructor keeps the caller's bit pattern; BsonDouble.Create and the
-            // implicit BsonValue conversion route small values through a cache that collapses -0.
             PortableType.Double => new BsonDouble(ExactDouble(value, column)),
             _ => throw new ArgumentOutOfRangeException(nameof(column), column.Type, null)
         };
