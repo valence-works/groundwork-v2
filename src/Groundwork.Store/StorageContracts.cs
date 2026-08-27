@@ -309,8 +309,13 @@ public static class WritePreconditionValidator
                 $"GW-WRITE-CONCURRENCY-003: optimistic token column '{token}' is system-owned and cannot be supplied or mutated by application values.");
         }
 
-        foreach (var column in unit.Columns.Where(column => column.Type == PortableType.Double))
+        // Indexed rather than LINQ: this runs on every write of every unit, and the overwhelmingly
+        // common case is a declaration with no Double column at all.
+        for (var index = 0; index < unit.Columns.Count; index++)
         {
+            var column = unit.Columns[index];
+            if (column.Type != PortableType.Double)
+                continue;
             if (values.TryGetValue(column.Name, out var value) && value is double number &&
                 !PortableDouble.IsStorable(number))
                 throw new ArgumentException(PortableDouble.RefusalMessage(column.Name, number), nameof(values));

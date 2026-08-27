@@ -3,7 +3,8 @@ using System.Globalization;
 namespace Groundwork.Kernel;
 
 /// <summary>
-/// The storable domain of <see cref="PortableType.Double"/>.
+/// The two value domains of <see cref="PortableType.Double"/>: what can be written, and the
+/// narrower set of what can be declared as a default.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -28,6 +29,10 @@ namespace Groundwork.Kernel;
 /// <see cref="double.MaxValue"/>, and <see cref="double.MinValue"/> — round-trips identically
 /// on all four. Values outside the domain are refused rather than normalized, because
 /// normalizing would silently return a value the caller did not write.
+/// </para>
+/// <para>
+/// A declared default is held to a narrower domain, because it reaches the store as a SQL
+/// literal rather than as a parameter. See <see cref="IsStorableAsDefault"/>.
 /// </para>
 /// </remarks>
 public static class PortableDouble
