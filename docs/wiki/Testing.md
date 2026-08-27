@@ -122,6 +122,27 @@ docker exec gw-mongo mongosh --quiet --eval \
 Remember: MongoDB **must** be a replica set for the transactional capabilities. A standalone instance
 will legitimately skip or refuse those tests.
 
+### The variable gates the tests; the database still has to exist
+
+The skip logic asks whether the connection variable is **set**, not whether the server behind it can
+be reached. Point `GROUNDWORK_POSTGRES_CONNECTION` at a database that does not exist and the suites
+run and **fail** — dozens of them, with a provider stack trace:
+
+```text
+Npgsql.PostgresException : 3D000: database "gw_scratch" does not exist
+```
+
+That reads like a broken provider rather than an absent one, and a red suite you have learned to
+explain away is worse than a skipped one. If a live suite fails everywhere at once, check the
+database exists before reading the diff:
+
+```bash
+psql "$GROUNDWORK_POSTGRES_CONNECTION" -c 'select 1'   # or: createdb gw_scratch
+```
+
+The same applies to `GROUNDWORK_SQLSERVER_CONNECTION` and the MongoDB variables. Unset the variable
+if you want a clean skip; a set-but-unreachable variable is not the same thing.
+
 ## Explain-plan assertions
 
 Verify that a query carrying a coverage-proven selected index actually uses its deployed physical
