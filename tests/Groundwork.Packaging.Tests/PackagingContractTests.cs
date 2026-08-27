@@ -10,6 +10,7 @@ public sealed class PackagingContractTests
         "src/Groundwork.Analyzers/Groundwork.Analyzers.csproj",
         "src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj",
         "src/Groundwork.Documents/Groundwork.Documents.csproj",
+        "src/Groundwork.Extensions.DependencyInjection/Groundwork.Extensions.DependencyInjection.csproj",
         "src/Groundwork.Kernel/Groundwork.Kernel.csproj",
         "src/Groundwork.MongoDb/Groundwork.MongoDb.csproj",
         "src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj",

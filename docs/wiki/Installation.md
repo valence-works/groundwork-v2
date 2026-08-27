@@ -62,6 +62,7 @@ A typical application references:
 | Build-time query coverage enforcement | add `Groundwork.Analyzers` and `Groundwork.Schema.Generator` |
 | Deployment-time schema tooling | `Groundwork.Tool` (a `dotnet tool`) and/or `Groundwork.SchemaTool.MSBuild` |
 | Provider authoring / conformance | `Groundwork.Testing` |
+| Hosting in ASP.NET Core or a generic host | add `Groundwork.Extensions.DependencyInjection` |
 
 See **[Package Map](Package-Map)** for the full list and the dependency rules.
 
@@ -150,4 +151,5 @@ allowlist and asserts it against the resulting `.nupkg` and `.snupkg`.
 ## Next
 
 - **[Package Map](Package-Map)** — what each package owns
+- **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)** — `AddGroundwork()` and the connection lifetime
 - **[Core Concepts](Core-Concepts)** — the mental model before you write real code

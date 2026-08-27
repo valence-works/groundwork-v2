@@ -91,6 +91,13 @@ Rules worth memorising:
 3. **Never retain a session obtained from a unit of work** after that unit is terminal.
 4. `RecordTableStoreUnitOfWork<T>` follows exactly the same rules.
 
+Under a host, `Groundwork.Extensions.DependencyInjection` encodes those lifetimes for you — the
+connection is a process singleton, sessions and units of work come from a scoped `IGroundworkStorage`,
+and a connection registered any other way is refused with `GW-HOST-001`. See
+**[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)**, which also documents a
+current limitation: a session keeps its provider connection until the storage connection is disposed
+([#199](https://github.com/valence-works/groundwork-v2/issues/199)).
+
 ---
 
 ## Storage access

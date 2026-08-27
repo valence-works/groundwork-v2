@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   architecture-boundaries:
     runs-on: ubuntu-latest
@@ -363,6 +367,7 @@ jobs:
 
   concurrency-conformance:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17.6-alpine3.22
@@ -422,7 +427,17 @@ jobs:
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w2ci?replicaSet=w2rs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-        run: dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj --no-restore --configuration Release
+        run: >-
+          dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj
+          --no-restore --configuration Release
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type full
+      - name: Upload W2 hang diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w2-hang-diagnostics
+          path: tests/Groundwork.Concurrency.Tests/TestResults/**
+          if-no-files-found: ignore
       - name: Run SQL Server W2 concurrency conformance
         env:
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
