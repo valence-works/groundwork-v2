@@ -329,13 +329,35 @@ public sealed class DataMigrationTests
     [Fact]
     public void A_provider_that_advances_without_scanning_is_refused_rather_than_looping()
     {
-        var executor = new FakeExecutor(Unit, Seed(2)) { ClaimProgressWithoutScanning = true };
+        // The spin starts after one genuine chunk, so the entry already carries a resume cursor.
+        // That matters: on the very first chunk the cursor is still null, and the neighbouring
+        // "advanced without recording a resume cursor" guard would catch it — this test would pass
+        // while proving nothing about the loop. With a cursor in hand, the scanned-nothing check is
+        // the only thing standing between the runner and an endless run of chunks claiming
+        // progress, which is what the name claims it proves.
+        var executor = new FakeExecutor(Unit, Seed(6)) { SpinAfterChunks = 1 };
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => DataMigrationRunner.Run(
+            executor, Target, Unit, Migration(), new DataMigrationBudget { MaxRowsPerBatch = 2 }, Now));
+
+        Assert.Equal("GW-MIGRATION-005", refusal.Code);
+        Assert.Contains("without scanning a row and without reporting its source exhausted", refusal.Message, StringComparison.Ordinal);
+        Assert.Equal(2, executor.ChunkCalls);
+    }
+
+    [Fact]
+    public void A_provider_that_advances_without_a_resume_cursor_is_refused()
+    {
+        // Unreachable through Advance, which always records a cursor — so this is the backstop for
+        // a provider that builds a ledger entry itself. It has to report a scanned row, or the
+        // scanned-nothing check above would catch it first and this would prove that guard twice.
+        var executor = new FakeExecutor(Unit, Seed(2)) { AdvanceWithoutCursor = true };
 
         var refusal = Assert.Throws<DataMigrationRefusedException>(() =>
             DataMigrationRunner.Run(executor, Target, Unit, Migration(), null, Now));
 
         Assert.Equal("GW-MIGRATION-005", refusal.Code);
-        Assert.Contains("without scanning a row and without reporting its source exhausted", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("without recording a resume cursor", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -531,7 +553,20 @@ public sealed class DataMigrationTests
 
         public DataMigrationCapabilities Capabilities { get; set; } = DataMigrationRunner.Required;
 
-        public bool ClaimProgressWithoutScanning { get; set; }
+        /// <summary>
+        /// A ceiling on chunks this source will serve. No budget can bound a runner that spins —
+        /// a chunk claiming progress without scanning advances neither the row nor the batch count,
+        /// so MaxRows and MaxBatches never trip. That is exactly why the runner needs its own
+        /// scanned-nothing guard, and why this fake refuses rather than letting a regression there
+        /// hang the suite instead of failing it.
+        /// </summary>
+        public int MaxChunkCalls { get; set; } = 64;
+
+        /// <summary>Return the entry unchanged from this chunk onward; -1 never does.</summary>
+        public int SpinAfterChunks { get; set; } = -1;
+
+        /// <summary>Report a scanned row but hand back an entry carrying no resume cursor.</summary>
+        public bool AdvanceWithoutCursor { get; set; }
 
         public int ChunkCalls { get; private set; }
 
@@ -568,8 +603,24 @@ public sealed class DataMigrationTests
         public DataMigrationChunkOutcome ExecuteChunk(DataMigrationChunkRequest request)
         {
             ChunkCalls++;
-            if (ClaimProgressWithoutScanning)
+            if (ChunkCalls > MaxChunkCalls)
+            {
+                throw new InvalidOperationException(
+                    $"The runner requested {ChunkCalls} chunks from a source of {Rows.Count} rows; " +
+                    "a guard that bounds the loop is missing.");
+            }
+            if (SpinAfterChunks >= 0 && ChunkCalls > SpinAfterChunks)
                 return DataMigrationChunkOutcome.Advanced(request.Entry);
+
+            if (AdvanceWithoutCursor)
+            {
+                var current = request.Entry;
+                return DataMigrationChunkOutcome.Advanced(new DataMigrationLedgerEntry(
+                    current.Target, current.MigrationId, current.UnitName, current.RequestFingerprint,
+                    DataMigrationRunState.Running, cursor: null,
+                    current.RowsScanned + 1, current.RowsChanged, current.Batches + 1,
+                    current.StartedAt, Now, completedAt: null));
+            }
 
             var after = request.Cursor is null ? int.MinValue : (int)request.Cursor.Values[0]!;
             var chunk = Rows.Where(row => (int)row["id"]! > after)
