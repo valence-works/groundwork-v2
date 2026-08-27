@@ -22,7 +22,14 @@ public sealed class VersionIntegrityTests
     // A "pin" installs or references packages at the current release, with or without a prerelease
     // suffix. Prose naming a historical release boundary (e.g. the SQLite catalog reset) is not a pin.
     private static readonly Regex DocumentationPinPattern =
-        new(@"(?:Version=""|--version\s+)(?<version>\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?)", RegexOptions.Compiled);
+        new(@"(?:Version=""|--version[\s=:]\s*)(?<version>\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?)", RegexOptions.Compiled);
+
+    [Theory] // the pin pattern must recognize every delimiter `dotnet` accepts after --version
+    [InlineData("dotnet add package Groundwork.Sqlite --version 1.2.3-rc.4")]
+    [InlineData("dotnet add package Groundwork.Sqlite --version=1.2.3-rc.4")]
+    [InlineData("dotnet add package Groundwork.Sqlite --version:1.2.3-rc.4")]
+    public void Pin_pattern_recognizes_every_version_delimiter(string line) =>
+        Assert.Equal("1.2.3-rc.4", DocumentationPinPattern.Match(line).Groups["version"].Value);
 
     [Fact]
     public void Documentation_and_build_props_agree_on_the_current_release()
