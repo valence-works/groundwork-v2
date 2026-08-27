@@ -120,13 +120,11 @@ public sealed class ContractReadinessAssessment
     internal ContractReadinessAssessment(
         PhysicalSchemaTargetIdentity target,
         string? appliedSnapshotFingerprint,
-        DateTimeOffset assessedAt,
         ImmutableArray<ColumnSupersessionStatus> supersessions,
         ImmutableArray<SchemaRefusal> refusals)
     {
         Target = target;
         AppliedSnapshotFingerprint = appliedSnapshotFingerprint;
-        AssessedAt = assessedAt;
         Supersessions = supersessions;
         Refusals = refusals;
     }
@@ -135,8 +133,6 @@ public sealed class ContractReadinessAssessment
 
     /// <summary>The applied snapshot this evidence was established against; null when nothing is applied.</summary>
     public string? AppliedSnapshotFingerprint { get; }
-
-    public DateTimeOffset AssessedAt { get; }
 
     public ImmutableArray<ColumnSupersessionStatus> Supersessions { get; }
 
@@ -267,7 +263,6 @@ public static class ExpandContractWorkflow
         return new ContractReadinessAssessment(
             target.Identity,
             applied?.Snapshot.Fingerprint,
-            now,
             statuses.ToImmutable(),
             refusals.ToImmutable());
     }
@@ -326,8 +321,6 @@ internal sealed class ColumnSupersessionPlan
     /// its own operation, which works whether or not the applied subject still describes it.
     /// </summary>
     public IReadOnlySet<string> WithheldColumns { get; }
-
-    public bool IsEmpty => Supersessions.IsEmpty;
 
     /// <summary>
     /// The still-present superseded columns, as declarations the rest of the kernel can treat like
