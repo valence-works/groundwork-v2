@@ -17,12 +17,13 @@ public sealed class MongoProviderIntegrationTests
     {
         using var connection = OpenConnection();
         // A per-run GUID keeps the name unique across reruns while still landing exactly on the
-        // boundary length the test exists to prove.
+        // boundary length the test exists to prove. The logical id is likewise per-run, so a
+        // rerun never has metadata pointing a stale id at a now-abandoned physical collection.
         var name = ("boundary_" + Guid.NewGuid().ToString("N")).PadRight(
             PortabilityValidator.MaximumPortableIdentifierLength, 'a')[..PortabilityValidator.MaximumPortableIdentifierLength];
         var unit = new StorageUnit
         {
-            Id = new StorageUnitId("logical.boundary.id"),
+            Id = new StorageUnitId("logical.boundary." + Guid.NewGuid().ToString("N")),
             Name = name,
             Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
             Key = new KeyDefinition { Columns = ["id"] }
