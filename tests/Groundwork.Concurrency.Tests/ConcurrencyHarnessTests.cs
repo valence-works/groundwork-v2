@@ -477,6 +477,7 @@ public sealed class ConcurrencyHarnessTests
                 WriteOptions.Unconditional);
         })).ToArray();
 
+        Exception? primaryFailure = null;
         try
         {
             Assert.True(observer.AllCommandsEntered.Wait(TimeSpan.FromSeconds(30)),
@@ -489,20 +490,37 @@ public sealed class ConcurrencyHarnessTests
                 $"Eight one-second PostgreSQL commands took {elapsed.Elapsed}; owned sessions were physically serialized.");
             Assert.All(outcomes, outcome => Assert.True(outcome.Succeeded));
         }
+        catch (Exception failure)
+        {
+            primaryFailure = failure;
+        }
         finally
         {
             observer.Release.Set();
             try
             {
-                await Task.WhenAll(work).WaitAsync(TimeSpan.FromSeconds(30));
+                await Task.WhenAll(work);
             }
-            catch
+            catch (Exception cleanupFailure)
             {
-                // Preserve the primary assertion or command failure while still releasing every connection.
+                primaryFailure ??= cleanupFailure;
             }
 
-            await Task.WhenAll(sessions.Select(session => session.DisposeAsync().AsTask()));
+            foreach (var session in sessions)
+            {
+                try
+                {
+                    await session.DisposeAsync();
+                }
+                catch (Exception cleanupFailure)
+                {
+                    primaryFailure ??= cleanupFailure;
+                }
+            }
         }
+
+        if (primaryFailure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
 
         // Released: a fresh session still reads every row, and the provider never accumulated the eight
         // connections — they went back to the pool when each session was disposed.
