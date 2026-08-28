@@ -176,6 +176,14 @@ internal static class PublicApiApprovalFixture
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<decimal?>>(query => query.Sum(row => row.Amount));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<string?>>(query => query.Min(row => row.Label));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<Guid?>>(query => query.Max(row => row.Id));
+        _ = new Func<IGwQueryable<ApprovalMetric>, IGwQueryExecutor, Task<long?>>(
+            (query, executor) => query.SumAsync(executor, row => row.Count));
+        _ = new Func<IGwQueryable<ApprovalMetric>, IGwQueryExecutor, Task<decimal?>>(
+            (query, executor) => query.SumAsync(executor, row => row.Amount));
+        _ = new Func<IGwQueryable<ApprovalMetric>, IGwQueryExecutor, Task<string?>>(
+            (query, executor) => query.MinAsync(executor, row => row.Label));
+        _ = new Func<IGwQueryable<ApprovalMetric>, IGwQueryExecutor, Task<Guid?>>(
+            (query, executor) => query.MaxAsync(executor, row => row.Id));
         _ = new Func<string, IStorageProviderConnection>(connectionString => new InMemoryProviderFactory().Create(connectionString));
         _ = new Func<QueryRequest, RuntimeCoverageGate>(request => new RuntimeCoverageGate([], []).Check(request) is not null ? new RuntimeCoverageGate([], []) : throw new InvalidOperationException());
     }

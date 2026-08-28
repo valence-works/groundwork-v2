@@ -688,21 +688,73 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
             }
 
             var selectedIndex = renderOptions.FindPinnedIndex()?.Name;
+            if (request.Result is ResultShape.Reduction reduction)
+            {
+                // A reduction's Distinct unit is the reduced value, not the raw source row. Keep
+                // the continuation boundary after de-duplication so a duplicate straddling two
+                // pages cannot consume or repeat a value.
+                if (request.Distinct && request.Paging.ContinuationToken is { } reductionToken)
+                {
+                    IReadOnlyList<QueryConstant> cursor;
+                    try
+                    {
+                        cursor = QueryContinuationToken.Decode(reductionToken, executionRequest, renderOptions);
+                    }
+                    catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
+                    {
+                        throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
+                    }
+                    rows = rows
+                        .GroupBy(row => row.TryGetValue(reduction.Column.Name, out var value) ? value : null)
+                        .Select(group => group.First())
+                        .Where(row => IsAfter(row, order, cursor))
+                        .ToList();
+                }
+                var reduced = ReduceRows(reduction, request, rows);
+                return QueryResultMaterializer.Materialize(request, renderOptions, [reduced], selectedIndex,
+                    sourceIncludesRequestedOffset: true,
+                    sourceIncludesContinuation: true,
+                    sourceIncludesDistinct: true);
+            }
+            long? distinctTotalCount = null;
+            if (request.Distinct)
+            {
+                rows = DistinctRows(request, rows);
+                if (request.Result.IncludesTotalCount)
+                    distinctTotalCount = rows.Count;
+                if (request.Paging.ContinuationToken is { } distinctToken)
+                {
+                    IReadOnlyList<QueryConstant> cursor;
+                    try
+                    {
+                        cursor = QueryContinuationToken.Decode(distinctToken, executionRequest, renderOptions);
+                    }
+                    catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
+                    {
+                        throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
+                    }
+                    rows = rows.Where(row => IsAfter(row, order, cursor)).ToList();
+                }
+            }
             if (!request.Result.IncludesTotalCount)
-                return QueryResultMaterializer.Materialize(request, renderOptions, rows, selectedIndex, sourceIncludesRequestedOffset: false);
+                return QueryResultMaterializer.Materialize(request, renderOptions, rows, selectedIndex,
+                    sourceIncludesRequestedOffset: false,
+                    sourceIncludesDistinct: true);
 
             if (rows.Count == 0)
-                return new QueryMaterializedResult(Array.Empty<IReadOnlyDictionary<string, object?>>(), 0L, null, selectedIndex);
+                return new QueryMaterializedResult(Array.Empty<IReadOnlyDictionary<string, object?>>(), distinctTotalCount ?? 0L, null, selectedIndex);
 
+            var totalCount = distinctTotalCount ?? rows.Count;
             var counted = rows.Select((row, index) => index == 0
                 ? (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(row)
                 {
-                    ["__groundwork_total_count"] = (long)rows.Count
+                    ["__groundwork_total_count"] = (long)totalCount
                 }
                 : row).ToArray();
             return QueryResultMaterializer.Materialize(request, renderOptions, counted, selectedIndex,
                 sourceIncludesRequestedOffset: false,
-                sourceIncludesContinuation: !deferContinuation);
+                sourceIncludesContinuation: request.Distinct || !deferContinuation,
+                sourceIncludesDistinct: true);
         }
     }
 
@@ -875,11 +927,61 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
             .ToList();
     }
 
+    private static IReadOnlyDictionary<string, object?> ReduceRows(
+        ResultShape.Reduction reduction,
+        QueryRequest request,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        IEnumerable<IReadOnlyDictionary<string, object?>> input = rows;
+        if (request.Distinct)
+            input = input.GroupBy(row => row.TryGetValue(reduction.Column.Name, out var value) ? value : null).Select(group => group.First());
+        if (request.Paging.Offset is int offset)
+            input = input.Skip(offset);
+        if (request.Paging.Limit is int limit)
+            input = input.Take(limit);
+
+        var values = input
+            .Select(row => row.TryGetValue(reduction.Column.Name, out var value) ? value : null)
+            .Where(value => value is not null)
+            .ToArray();
+        object? result = reduction switch
+        {
+            ResultShape.Sum when reduction.Column.Type is QueryType.Int32 or QueryType.Int64 =>
+                values.Length == 0 ? null : values.Select(Convert.ToInt64).Aggregate(0L, checked((total, value) => total + value)),
+            ResultShape.Sum when reduction.Column.Type == QueryType.Decimal =>
+                values.Length == 0 ? null : values.Select(Convert.ToDecimal).Aggregate(0m, checked((total, value) => total + value)),
+            ResultShape.Min => values.Length == 0 ? null : values.Aggregate((best, candidate) => CompareValues(candidate!, best!) < 0 ? candidate : best),
+            ResultShape.Max => values.Length == 0 ? null : values.Aggregate((best, candidate) => CompareValues(candidate!, best!) > 0 ? candidate : best),
+            _ => throw new InvalidOperationException("The in-memory reduction column is not portable.")
+        };
+        return new Dictionary<string, object?>(StringComparer.Ordinal) { [reduction.Column.Name] = result };
+    }
+
+    private static List<IReadOnlyDictionary<string, object?>> DistinctRows(
+        QueryRequest request,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<IReadOnlyDictionary<string, object?>>(rows.Count);
+        foreach (var row in rows)
+        {
+            var fields = request.Projection.AllColumns
+                ? row.Where(pair => !pair.Key.StartsWith("__groundwork_", StringComparison.Ordinal))
+                    .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                : request.Projection.Columns.Select(column => new KeyValuePair<string, object?>(
+                    column.Name, row.TryGetValue(column.Name, out var value) ? value : null));
+            var identity = string.Join("|", fields.Select(pair => pair.Key + "=" + QueryStructuralIdentity.ForDistinct(pair.Value)));
+            if (seen.Add(identity))
+                result.Add(row);
+        }
+        return result;
+    }
+
     private static string CompositeIdentity(
         IReadOnlyDictionary<string, object?> row,
         IReadOnlyList<ColumnRef> columns) => string.Concat(columns.Select(column =>
     {
-        var identity = ValueIdentity(row.TryGetValue(column.Name, out var value) ? value : null);
+        var identity = QueryStructuralIdentity.ForDistinct(row.TryGetValue(column.Name, out var value) ? value : null);
         return identity.Length.ToString(CultureInfo.InvariantCulture) + ":" + identity;
     }));
 
@@ -964,20 +1066,6 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
             return CompareBytes(leftBytes, rightBytes);
         return ((IComparable)left).CompareTo(right);
     }
-
-    private static string ValueIdentity(object? value) => value switch
-    {
-        null => "n:",
-        string text => "s:" + text,
-        int number => "i32:" + number.ToString(CultureInfo.InvariantCulture),
-        long number => "i64:" + number.ToString(CultureInfo.InvariantCulture),
-        decimal number => "d:" + number.ToString(CultureInfo.InvariantCulture),
-        bool flag => flag ? "bool:1" : "bool:0",
-        Guid guid => "g:" + guid.ToString("D"),
-        byte[] bytes => "b:" + Convert.ToBase64String(bytes),
-        DateTimeOffset instant => "t:" + instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
-        _ => value.GetType().FullName + ":" + (value.ToString() ?? string.Empty)
-    };
 
     private static byte[] GuidBytes(Guid value)
     {

@@ -22,6 +22,18 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
 
     protected override string RenderCountAggregate() => "COUNT_BIG(*)";
 
+    protected override string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression)
+    {
+        if (reduction.Column.Type == QueryType.Guid && reduction is (ResultShape.Min or ResultShape.Max))
+        {
+            var aggregate = reduction is ResultShape.Min ? "MIN" : "MAX";
+            return "CONVERT(uniqueidentifier, " + aggregate + "(CONVERT(char(36), " + valueExpression + ") COLLATE Latin1_General_100_BIN2))";
+        }
+        if (reduction is ResultShape.Sum && reduction.Column.Type == QueryType.Int32)
+            return "CASE WHEN COUNT(" + valueExpression + ") = 0 THEN NULL ELSE SUM(CAST(" + valueExpression + " AS bigint)) END";
+        return base.RenderReductionAggregate(reduction, valueExpression);
+    }
+
     protected override bool RequiresOrderForOffset => true;
 
     protected override string RenderIndexHint(string indexName) =>
@@ -58,6 +70,14 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
             return rendered;
         var direction = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
         return rendered + ", DATALENGTH(" + RenderColumn(term.Column) + ") " + direction;
+    }
+
+    protected override string RenderDistinctPartition(ColumnRef column)
+    {
+        var expression = RenderColumn(column);
+        return column.Type == QueryType.String
+            ? "CONVERT(varbinary(max), " + expression + ")"
+            : expression;
     }
 
     protected override string RenderEquality(

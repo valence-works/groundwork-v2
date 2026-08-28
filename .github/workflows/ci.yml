@@ -135,6 +135,21 @@ jobs:
             echo "::error::The four-provider set-based mutation proofs did not run against every provider." >&2
             exit 1
           fi
+      - name: Refuse a run whose LINQ query differential proofs did not execute
+        run: |
+          outcomes() {
+            grep -o "testName=\"Groundwork.Differential.Tests.LinqExecutionDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
+              artifacts/differential/*.trx | grep -c "outcome=\"$1\"" || true
+          }
+          total=$(grep -o "testName=\"Groundwork.Differential.Tests.LinqExecutionDifferentialTests[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
+              artifacts/differential/*.trx | wc -l)
+          executed=$(outcomes Passed)
+          notExecuted=$(outcomes NotExecuted)
+          echo "LinqExecutionDifferentialTests total: $total, passed: $executed, not executed: $notExecuted"
+          if [ "$total" -lt 10 ] || [ "$executed" -ne "$total" ] || [ "$notExecuted" -ne 0 ]; then
+            echo "::error::The LINQ query differential proofs did not run against every configured provider." >&2
+            exit 1
+          fi
       - name: Upload native query plans
         if: always()
         uses: actions/upload-artifact@v4

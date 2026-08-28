@@ -26,4 +26,7 @@ neither materializes the matching rows, and a result without a provider-side tot
 rather than counted client-side.
 
 `Sum`, `Min`, and `Max` use the same scalar request path over a covered mapped column. SQLite
-rendering and four-provider differential evidence for these shapes are tracked by issue #150.
+rendering is native: the provider applies the input window and aggregate in one SQL statement, and
+`SqliteLinqExecutor` reads only the resulting scalar row. The same request shape is rendered by
+SQLite, PostgreSQL, SQL Server, and MongoDB; four-provider live differential execution remains CI
+evidence.

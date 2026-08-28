@@ -49,9 +49,11 @@ Three details worth knowing:
 - **A refusal that pins your whole key points you at the point read, not at a duplicate index.** When
   the predicate fixes every key column with a single-value equality, at most one row can match, so no
   index would help: the suggestion is withheld and the message names `session.Read(key)`, or the typed
-  `Records` read. Only that shape gets it. A disjunction, a range, or an equality over part of a
-  composite key can mention exactly the key's columns and still need an index, so those keep the
-  ordinary `[GwIndex(...)]` suggestion.
+  `Records` read. Only that shape gets that direct-read remedy. A `GW-COVER-016` refusal also
+  withholds an index suggestion because the shape itself is not representable by an ordered index;
+  rewrite it into a portable shape where possible, or accept the scan. Refusal sets containing only
+  actionable codes such as `GW-COVER-005`, `GW-COVER-006`, and `GW-COVER-009` keep the ordinary
+  `[GwIndex(...)]` suggestion.
 
 > **MongoDB caveat.** MongoDB stores the key in `_id` but filters on the declared field names, and
 > creates no index over them, so a key-bounded read is admitted by the gate and then scans. The
@@ -66,7 +68,8 @@ attribute, from referenced assemblies via `GroundworkSchemaMetadata`, or from a 
 The closed query surface it understands: `Table<T>()`, `Where`, `WhereIf`, ordering, `Skip`/`Take`,
 mapped-column `Select`, `Distinct`, and the terminals `ToList`, `ToListAsync`, `Count`,
 `CountAsync`, `Any`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, `SingleOrDefault`, `Sum`,
-`Min`, and `Max`. Async reduction adapters are deferred to #150. `First` and `FirstOrDefault` require an explicit
+`Min`, and `Max`, including provider-native async reductions `SumAsync`, `MinAsync`, and `MaxAsync`.
+`First` and `FirstOrDefault` require an explicit
 deterministic order. A distinct projection is covered only when every projected column is present in
 the candidate index
 and an equality/range predicate bounds the unpaged provider read. Otherwise the query must carry an
@@ -83,8 +86,8 @@ Roslyn requires compiler-valid diagnostic ids, so emitted ids use underscores
 
 | Roslyn id | Meaning |
 | --- | --- |
-| `GW_COVER_005` / `GW_COVER_006` | Uncovered query — the message includes the suggested `[GwIndex(...)]` |
-| `GW_COVER_009`, `GW_COVER_016` | Additional coverage refusals |
+| `GW_COVER_005` / `GW_COVER_006` / `GW_COVER_009` | Actionable coverage refusal — includes a suggested `[GwIndex(...)]` when no `GW_COVER_016` also applies |
+| `GW_COVER_016` | Nonportable query shape — rewrite it or accept the scan; no index suggestion is emitted |
 | `GW_COVER_900` | Unresolved composition. **Error by default**, downgradeable via `.editorconfig` |
 | `GW_COVER_901` | Scan marker on an already-covered query |
 | `GW_COVER_902` | Accepted scan without `[assembly: GwAllowAcceptedScans]` |
@@ -125,9 +128,10 @@ QueryCoverageEnforcer.EnsureCovered(request, DateTimeOffset.UtcNow);
 catch (QueryCoverageException ex)
 {
     ex.Code;                                  // e.g. "GW-COVER-006"
-    ex.Message;                               // explains the corrective index action
-    // Refusals carry NearestIndex, SuggestedIndex, and SuggestedDeclaration:
+    ex.Message;                               // explains the corrective action
+    // Actionable refusals carry NearestIndex, SuggestedIndex, and SuggestedDeclaration:
     //   [GwIndex("ix_email_createdat", "email ASC, createdAt DESC")]
+    // GW-COVER-016 refusals carry no suggested index: rewrite the shape or accept the scan.
 }
 ```
 
@@ -252,7 +256,9 @@ Extra native indexes are never used to satisfy a declared index, on any provider
 
 - An index covers a query when its **ordered** columns can serve the predicate **and** the ordering.
 - Equality columns come first, then range, then order columns.
-- Refusals include a `SuggestedIndex` and a ready-to-paste `SuggestedDeclaration`. Use it.
+- Actionable coverage refusals include a `SuggestedIndex` and ready-to-paste `SuggestedDeclaration`.
+  `GW-COVER-016` refusals do not: no ordered index can clear a nonportable shape, so rewrite it or
+  explicitly accept the scan.
 - A **sparse** index (`MissingValueBehavior.Excluded`) cannot serve a predicate that could match an
   excluded null.
 - Two indexes with the same physical signature are refused (`GW-PORT-009`) — consolidate.

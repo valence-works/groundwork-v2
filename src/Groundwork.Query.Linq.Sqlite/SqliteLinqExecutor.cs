@@ -54,4 +54,7 @@ public sealed class SqliteLinqExecutor : IGwQueryExecutor
 
     public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) =>
         executor.AnyAsync(request, cancellationToken);
+
+    public Task<TResult> ReduceAsync<TResult>(QueryRequest request, CancellationToken cancellationToken = default) =>
+        executor.ReduceAsync<TResult>(request, cancellationToken);
 }

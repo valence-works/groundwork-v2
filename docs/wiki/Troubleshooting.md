@@ -139,10 +139,11 @@ Outcome mode is chosen when the unit begins. Use `BatchWriteOptions.Exact`.
 
 No candidate covers the query. The candidates are the unit's declared key and its declared indexes,
 so a filter on the key — or on the leading columns of a composite key — does not raise this. The
-exception usually carries `SuggestedIndex` and a ready-to-paste `SuggestedDeclaration`; where the
-predicate pins every key column with a single-value equality both are empty, because at most one row
-can match and the message names `session.Read(key)` instead. Either declare and deploy the suggested
-index, or accept the scan explicitly:
+exception usually carries `SuggestedIndex` and a ready-to-paste `SuggestedDeclaration`. A
+`GW-COVER-016` refusal has neither, because no ordered index can clear a nonportable shape; rewrite
+the query into a portable shape where possible, or accept the scan explicitly. When the predicate
+pins every key column with a single-value equality, the message names `session.Read(key)` instead.
+For actionable coverage refusals, declare and deploy the suggested index, or accept the scan:
 
 ```csharp
 query.AcceptScan("GW-SCAN-0007", "reason", "owner", "2026-12-31")

@@ -1106,7 +1106,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
                     continue;
                 if (document.TryGetValue(column.Name, out var value))
-                    row[column.Name] = MongoValueCodec.Decode(value, column);
+                {
+                    row[column.Name] = executionSource.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
+                        string.Equals(sum.Column.Name, column.Name, StringComparison.Ordinal)
+                        ? (value.IsBsonNull ? null : value.ToInt64())
+                        : MongoValueCodec.Decode(value, column);
+                }
             }
             if (document.TryGetValue("__groundwork_total_count", out var count))
                 row["__groundwork_total_count"] = count.ToInt64();
@@ -1155,7 +1160,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             command.ExpectedIndex,
             command.Hint is not null,
             sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
+            sourceIncludesContinuation: true,
+            sourceIncludesDistinct: true);
     }
 
     public CrossScopeQueryResult QueryAcrossScopes(
