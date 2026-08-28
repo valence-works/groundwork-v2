@@ -139,6 +139,53 @@ public sealed class SqliteTransactionCleanupTests
         AssertMarkerMissing(store.ConnectionString);
     }
 
+    /// <summary>
+    /// Uses SQLite's native authorizer to reject the actual ROLLBACK statement after a public
+    /// session write has failed. This proves that cleanup retires the checked-out connection and
+    /// makes the same session unusable, rather than merely marking its managed transaction inactive.
+    /// </summary>
+    [Fact]
+    public void SqliteStorageSession_native_rollback_failure_retires_the_session()
+    {
+        using var store = TemporaryStore.Create();
+        var unit = Unit();
+        var observer = new ThrowOnWrite();
+
+        using var providerConnection = new SqliteProviderConnection(store.ConnectionString);
+        providerConnection.Schema.Apply(unit);
+
+        var session = providerConnection.OpenSession(unit, StorageAccess.Global, observer);
+        var sessionConnection = PrivateField<SqliteConnection>(session, "connection");
+        CreateMarker(sessionConnection);
+
+        // SQLite authorizers run inside the native engine, so this rejects the real ROLLBACK
+        // statement rather than throwing from the managed helper before the provider is reached.
+        SQLitePCL.strdelegate_authorizer denyRollback =
+            (_, actionCode, param0, _, _, _) => actionCode == SQLitePCL.raw.SQLITE_TRANSACTION &&
+                string.Equals(param0, "ROLLBACK", StringComparison.OrdinalIgnoreCase)
+                    ? SQLitePCL.raw.SQLITE_DENY
+                    : SQLitePCL.raw.SQLITE_OK;
+        Assert.Equal(SQLitePCL.raw.SQLITE_OK,
+            SQLitePCL.raw.sqlite3_set_authorizer(sessionConnection.Handle, denyRollback, null));
+
+        var values = new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "row-1",
+            ["value"] = "value-1"
+        });
+
+        var original = Assert.Throws<InvalidOperationException>(() => session.Insert(values));
+        Assert.Equal(ThrowOnWrite.Message, original.Message);
+        var cleanupFailure = Assert.IsType<string>(original.Data[WriteFailureCleanup.CleanupFailureKey]);
+        Assert.Contains("not authorized", cleanupFailure, StringComparison.OrdinalIgnoreCase);
+
+        // The native transaction is stranded by the denied rollback, so a second write must be
+        // refused by the session lifecycle before it can touch a retired connection.
+        var unusable = Assert.Throws<ObjectDisposedException>(() => session.Insert(values));
+        Assert.Equal("SqliteStorageSession", unusable.ObjectName);
+        AssertMarkerMissing(store.ConnectionString);
+    }
+
     private static void CreateMarker(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
         using var command = connection.CreateCommand();
@@ -201,6 +248,17 @@ public sealed class SqliteTransactionCleanupTests
         {
             if (command.Kind == ProviderCommandKind.Write)
                 connection!.Close();
+        }
+    }
+
+    private sealed class ThrowOnWrite : IProviderCommandObserver
+    {
+        public const string Message = "forced write failure";
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Kind == ProviderCommandKind.Write)
+                throw new InvalidOperationException(Message);
         }
     }
 
