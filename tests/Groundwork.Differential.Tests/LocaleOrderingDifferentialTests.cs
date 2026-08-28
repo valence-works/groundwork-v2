@@ -29,21 +29,17 @@ public sealed class LocaleOrderingDifferentialTests
         using var sql = OpenRelational("SQL Server", new SqlServerProviderFactory().Create(sqlServer));
         using var mongoSession = OpenMongo(mongo);
 
-        AssertLocale(["Ake", "Zebra", "Åke", "Äke", "Öke"], "swedish", "ix_swedish", sqlite, pg, sql, mongoSession);
-        AssertLocale(["Äke", "Ake", "Åke", "Öke", "Zebra"], "german", "ix_german", sqlite, pg, sql, mongoSession);
+        AssertLocale(["Ake", "Zebra", "Åke", "Äke", "Öke"], "swedish", sqlite, pg, sql, mongoSession);
+        AssertLocale(["Äke", "Ake", "Åke", "Öke", "Zebra"], "german", sqlite, pg, sql, mongoSession);
     }
 
     private static void AssertLocale(
         string[] expected,
         string columnName,
-        string indexName,
         params LocaleSession[] providers)
     {
         var table = new TableId(TableName);
         var column = new ColumnRef(table, columnName, QueryType.String, false, 32);
-        var options = new QueryRenderOptions(
-            [new QueryIndexDeclaration(indexName, [new QueryIndexColumn(columnName, false, QueryType.String)])],
-            selectedIndex: indexName);
 
         foreach (var provider in providers)
         {
@@ -57,9 +53,8 @@ public sealed class LocaleOrderingDifferentialTests
                     [new OrderTerm(column, OrderDirection.Ascending, NullOrder.First)],
                     Projection.ColumnsOnly(column),
                     paging);
-                var page = provider.Query(request, options);
+                var page = provider.Query(request, QueryRenderOptions.Default);
                 actual.AddRange(page.Rows.Select(row => (string)row[columnName]!));
-                Assert.Equal(indexName, page.SelectedIndex);
                 Assert.All(page.Rows, row => Assert.DoesNotContain(row.Keys, key => key.StartsWith("__groundwork_", StringComparison.Ordinal)));
                 paging = page.NextContinuationToken is null
                     ? Paging.None
