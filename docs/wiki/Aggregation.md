@@ -112,9 +112,12 @@ var query = AggregationQuery.ForAdHoc(
     [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")],
     AggregationAcceptance.Allow(
         "GW-AGG-0001", "temporary support report", "operations",
-        DateTimeOffset.UtcNow.AddDays(30), maxGroups: 100, maxInputRows: 10_000));
+        new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero), maxGroups: 100, maxInputRows: 10_000));
 var result = session.Aggregate(query);
 ```
+
+Acceptance metadata is audited statically, so use a fixed `DateTimeOffset` construction (and
+constants for the other fields) rather than a runtime clock expression.
 
 `AggregationAcceptance` is the operational inventory entry: id, reason, owner, expiry,
 `MaxGroups`, and `MaxInputRows` are all required. An ad-hoc query without an active acceptance,

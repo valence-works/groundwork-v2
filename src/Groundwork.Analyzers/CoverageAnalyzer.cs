@@ -6,6 +6,7 @@ using Groundwork.Query.Planning;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Operations;
 
 namespace Groundwork.Analyzers;
 
@@ -83,8 +84,7 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             return;
 
         var location = invocation.GetLocation();
-        var arguments = invocation.ArgumentList.Arguments;
-        var id = ConstantString(context.SemanticModel, arguments, 0, "id", out var idResolved);
+        var id = ConstantString(context.SemanticModel, invocation, 0, "id", out var idResolved);
         if (!acceptedAggregationsEnabled)
         {
             context.ReportDiagnostic(Diagnostic.Create(
@@ -94,11 +94,11 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
                 "' requires [assembly: GwAllowAcceptedAggregations]."));
         }
 
-        var reason = ConstantString(context.SemanticModel, arguments, 1, "reason", out var reasonResolved);
-        var owner = ConstantString(context.SemanticModel, arguments, 2, "owner", out var ownerResolved);
-        var expiry = TryGetDate(context.SemanticModel, arguments, 3, "expiresOn", out var expiryResolved);
-        var groups = ConstantInt(context.SemanticModel, arguments, 4, "maxGroups", out var groupsResolved);
-        var inputRows = ConstantInt(context.SemanticModel, arguments, 5, "maxInputRows", out var inputRowsResolved);
+        var reason = ConstantString(context.SemanticModel, invocation, 1, "reason", out var reasonResolved);
+        var owner = ConstantString(context.SemanticModel, invocation, 2, "owner", out var ownerResolved);
+        var expiry = TryGetDate(context.SemanticModel, invocation, 3, "expiresOn", out var expiryResolved);
+        var groups = ConstantInt(context.SemanticModel, invocation, 4, "maxGroups", out var groupsResolved);
+        var inputRows = ConstantInt(context.SemanticModel, invocation, 5, "maxInputRows", out var inputRowsResolved);
         if (!idResolved || !reasonResolved || !ownerResolved || !expiryResolved || !groupsResolved || !inputRowsResolved)
         {
             context.ReportDiagnostic(Diagnostic.Create(
@@ -146,12 +146,12 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
     private static string? ConstantString(
         SemanticModel semanticModel,
-        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        InvocationExpressionSyntax invocation,
         int index,
         string name,
         out bool resolved)
     {
-        var expression = ArgumentExpression(arguments, index, name);
+        var expression = ArgumentExpression(semanticModel, invocation, index, name);
         var constant = expression is null ? default : semanticModel.GetConstantValue(expression);
         resolved = constant.HasValue && constant.Value is string;
         return resolved ? (string)constant.Value! : null;
@@ -159,12 +159,12 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
     private static int? ConstantInt(
         SemanticModel semanticModel,
-        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        InvocationExpressionSyntax invocation,
         int index,
         string name,
         out bool resolved)
     {
-        var expression = ArgumentExpression(arguments, index, name);
+        var expression = ArgumentExpression(semanticModel, invocation, index, name);
         var constant = expression is null ? default : semanticModel.GetConstantValue(expression);
         resolved = constant.HasValue && constant.Value is int;
         return resolved ? (int)constant.Value! : null;
@@ -172,25 +172,22 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
     private static DateTimeOffset? TryGetDate(
         SemanticModel semanticModel,
-        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        InvocationExpressionSyntax invocation,
         int index,
         string name,
         out bool resolved)
     {
         resolved = false;
-        if (ArgumentExpression(arguments, index, name) is not ObjectCreationExpressionSyntax creation ||
-            creation.ArgumentList is not { Arguments.Count: >= 3 } argumentList ||
-            semanticModel.GetSymbolInfo(creation).Symbol is not IMethodSymbol constructor ||
+        if (ArgumentExpression(semanticModel, invocation, index, name) is not ObjectCreationExpressionSyntax creation ||
+            semanticModel.GetOperation(creation) is not IObjectCreationOperation operation ||
+            operation.Constructor is not IMethodSymbol constructor ||
             constructor.ContainingType.ToDisplayString() != "System.DateTimeOffset")
             return null;
         var values = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        for (var argumentIndex = 0; argumentIndex < argumentList.Arguments.Count; argumentIndex++)
+        foreach (var argument in operation.Arguments)
         {
-            var argument = argumentList.Arguments[argumentIndex];
-            var parameter = argument.NameColon is not null
-                ? constructor.Parameters.FirstOrDefault(candidate => string.Equals(candidate.Name, argument.NameColon.Name.Identifier.ValueText, StringComparison.OrdinalIgnoreCase))
-                : argumentIndex < constructor.Parameters.Length ? constructor.Parameters[argumentIndex] : null;
-            var constant = semanticModel.GetConstantValue(argument.Expression);
+            var parameter = argument.Parameter;
+            var constant = semanticModel.GetConstantValue(argument.Value.Syntax);
             if (parameter is not null && constant.HasValue && constant.Value is int value)
                 values[parameter.Name] = value;
         }
@@ -210,16 +207,24 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
     }
 
     private static ExpressionSyntax? ArgumentExpression(
-        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        SemanticModel semanticModel,
+        InvocationExpressionSyntax invocation,
         int index,
         string name)
     {
-        var named = arguments.FirstOrDefault(argument =>
-            string.Equals(argument.NameColon?.Name.Identifier.ValueText, name, StringComparison.Ordinal));
-        if (named is not null)
-            return named.Expression;
-        var positional = arguments.Where(argument => argument.NameColon is null).ElementAtOrDefault(index);
-        return positional?.Expression;
+        if (semanticModel.GetOperation(invocation) is not IInvocationOperation operation)
+            return null;
+
+        foreach (var argument in operation.Arguments)
+        {
+            var parameter = argument.Parameter;
+            if (parameter is not null &&
+                parameter.Ordinal == index &&
+                string.Equals(parameter.Name, name, StringComparison.Ordinal))
+                return argument.Value.Syntax as ExpressionSyntax;
+        }
+
+        return null;
     }
 
     private static DateTimeOffset NormalizeDate(DateTimeOffset value) =>

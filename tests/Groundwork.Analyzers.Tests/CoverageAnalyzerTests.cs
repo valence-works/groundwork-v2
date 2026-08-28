@@ -500,6 +500,21 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Accepted_aggregation_resolves_mixed_named_and_positional_arguments()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0010\", reason: \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        var inventory = Assert.Single(diagnostics.Where(item => item.Id == "GW_AGG_ADHOC_905"));
+        Assert.Contains("GW-AGG-0010", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxGroups='20'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxInputRows='200'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_906");
+    }
+
+    [Fact]
     public async Task Accepted_aggregation_with_runtime_id_fails_closed_instead_of_bypassing_opt_in()
     {
         var source = WithSchema("{\"tables\":[]}") +
