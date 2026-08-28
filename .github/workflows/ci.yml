@@ -280,7 +280,14 @@ jobs:
         run: dotnet run --project benchmarks/Groundwork.Benchmarks --configuration Release -- records --n 10000
 
   sqlserver-conformance:
+    name: SQL Server conformance (${{ matrix.target-framework }})
     runs-on: ubuntu-latest
+    strategy:
+      # A failed framework must not cancel the other leg: both target
+      # frameworks are required evidence for this conformance job.
+      fail-fast: false
+      matrix:
+        target-framework: [net8.0, net10.0]
     services:
       sqlserver:
         image: mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04
@@ -298,47 +305,44 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
+          # global.json pins the .NET 10 SDK, while the net8.0 leg also needs
+          # the .NET 8 runtime to execute its test assembly.
           dotnet-version: |
             8.0.x
             10.0.x
       - run: dotnet restore tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
-      # Run the target frameworks explicitly and serially. The W2 harness saturates the one SQL
-      # Server container, so parallel TFMs measure container capacity rather than runtime behavior.
-      - name: Run SQL Server conformance suite (net8.0)
+      - name: Run SQL Server conformance suite (${{ matrix.target-framework }})
         env:
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
         run: >-
           dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
-          --no-restore --configuration Release --framework net8.0
-          --logger "trx;LogFileName=sqlserver-conformance-net8.0.trx"
-          --results-directory artifacts/sqlserver-conformance
-      - name: Run SQL Server conformance suite (net10.0)
+          --no-restore --configuration Release --framework ${{ matrix.target-framework }}
+          --logger "trx;LogFileName=sqlserver-conformance-${{ matrix.target-framework }}.trx"
+          --results-directory artifacts/sqlserver-conformance/${{ matrix.target-framework }}
+      - name: Refuse a run whose SQL Server W2 proof did not execute exactly once (${{ matrix.target-framework }})
         env:
-          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: >-
-          dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
-          --no-restore --configuration Release --framework net10.0
-          --logger "trx;LogFileName=sqlserver-conformance-net10.0.trx"
-          --results-directory artifacts/sqlserver-conformance
-      - name: Refuse a run whose SQL Server W2 proofs did not execute
+          TFM: ${{ matrix.target-framework }}
         run: |
           proof="Groundwork.SqlServer.Tests.SqlServerProviderTests.W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix"
-          for tfm in net8.0 net10.0; do
-            results="artifacts/sqlserver-conformance/sqlserver-conformance-$tfm.trx"
-            passed=$(grep -o "testName=\"$proof\"[^>]*outcome=\"Passed\"" "$results" | wc -l || true)
-            notExecuted=$(grep -o "testName=\"$proof\"[^>]*outcome=\"NotExecuted\"" "$results" | wc -l || true)
-            echo "[$tfm] SQL Server W2 passed: $passed, not executed: $notExecuted"
-            if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ]; then
-              echo "::error::[$tfm] The SQL Server W2 proof did not execute exactly once." >&2
-              exit 1
-            fi
-          done
-      - name: Upload SQL Server conformance diagnostics
+          results="artifacts/sqlserver-conformance/$TFM/sqlserver-conformance-$TFM.trx"
+          if [ ! -f "$results" ]; then
+            echo "::error::[$TFM] SQL Server conformance TRX was not produced." >&2
+            exit 1
+          fi
+          passed=$(grep -o "testName=\"$proof\"[^>]*outcome=\"Passed\"" "$results" | wc -l || true)
+          notExecuted=$(grep -o "testName=\"$proof\"[^>]*outcome=\"NotExecuted\"" "$results" | wc -l || true)
+          observed=$(grep -o "testName=\"$proof\"[^>]*outcome=\"[A-Za-z]*\"" "$results" | wc -l || true)
+          echo "[$TFM] SQL Server W2 passed: $passed, not executed: $notExecuted, observed: $observed"
+          if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ] || [ "$observed" -ne 1 ]; then
+            echo "::error::[$TFM] The SQL Server W2 proof was absent, skipped, or duplicated." >&2
+            exit 1
+          fi
+      - name: Upload SQL Server conformance diagnostics (${{ matrix.target-framework }})
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: sqlserver-conformance-diagnostics
-          path: artifacts/sqlserver-conformance/**
+          name: sqlserver-conformance-diagnostics-${{ matrix.target-framework }}
+          path: artifacts/sqlserver-conformance/${{ matrix.target-framework }}/**
           if-no-files-found: ignore
           retention-days: 14
 
