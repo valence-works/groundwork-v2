@@ -945,6 +945,7 @@ public sealed class MongoProviderIntegrationTests
         connection.Schema.Apply(unit);
         var metadata = Assert.IsType<MongoDbProviderConnection>(connection).Database
             .GetCollection<BsonDocument>("__groundwork_metadata");
+        Assert.Equal(0, metadata.CountDocuments(new BsonDocument("_id", "schema:" + unit.Id.Value)));
         var derivedName = SearchKeyProjection.ColumnName("status");
         metadata.ReplaceOne(
             new BsonDocument("_id", "schema:" + unit.Id.Value),
