@@ -39,7 +39,7 @@ internal static class SchemaValue
     ];
 
     public static object? Snapshot(object? value, PortableType type) =>
-        Snapshot(value, type, new HashSet<object>(ReferenceEqualityComparer.Instance));
+        Snapshot(value, type, new HashSet<object>(ReferenceEqualityComparer.Instance), topLevel: true);
 
     internal static bool IsPortableJsonValue(object value) =>
         IsPortableJsonValue(value, new HashSet<object>(ReferenceEqualityComparer.Instance), topLevel: true);
@@ -47,18 +47,18 @@ internal static class SchemaValue
     public static string Canonicalize(object? value, PortableType type) => type switch
     {
         PortableType.Binary when value is byte[] bytes => $"binary:{Convert.ToHexString(bytes)}",
-        PortableType.Json => CanonicalJson(value, new HashSet<object>(ReferenceEqualityComparer.Instance)),
+        PortableType.Json => CanonicalJson(value, new HashSet<object>(ReferenceEqualityComparer.Instance), topLevel: true),
         _ => CanonicalScalar(value)
     };
 
-    private static object? Snapshot(object? value, PortableType type, ISet<object> active)
+    private static object? Snapshot(object? value, PortableType type, ISet<object> active, bool topLevel)
     {
         if (value is null || IsImmutable(value))
             return value;
         if (type == PortableType.Json && value is JsonDocument document)
-            return SnapshotJsonElement(document.RootElement, topLevel: true);
+            return SnapshotJsonElement(document.RootElement, topLevel);
         if (type == PortableType.Json && value is JsonElement element)
-            return SnapshotJsonElement(element, topLevel: true);
+            return SnapshotJsonElement(element, topLevel);
         if (value is byte[] bytes)
             return bytes.ToArray();
         if (type != PortableType.Json)
@@ -72,7 +72,7 @@ internal static class SchemaValue
             {
                 var snapshot = new Dictionary<string, object?>(StringComparer.Ordinal);
                 foreach (var entry in readOnlyDictionary)
-                    snapshot[entry.Key] = Snapshot(entry.Value, type, active);
+                    snapshot[entry.Key] = Snapshot(entry.Value, type, active, topLevel: false);
                 return snapshot;
             }
 
@@ -83,7 +83,7 @@ internal static class SchemaValue
                 {
                     if (entry.Key is not string key)
                         throw new ArgumentException("JSON schema default object keys must be strings.", nameof(value));
-                    snapshot[key] = Snapshot(entry.Value, type, active);
+                    snapshot[key] = Snapshot(entry.Value, type, active, topLevel: false);
                 }
                 return snapshot;
             }
@@ -92,7 +92,7 @@ internal static class SchemaValue
             {
                 var snapshot = new List<object?>();
                 foreach (var item in sequence)
-                    snapshot.Add(Snapshot(item, type, active));
+                    snapshot.Add(Snapshot(item, type, active, topLevel: false));
                 return snapshot;
             }
         }
@@ -104,14 +104,14 @@ internal static class SchemaValue
         throw new ArgumentException("JSON schema defaults must contain only portable scalar, object, or array values.", nameof(value));
     }
 
-    private static string CanonicalJson(object? value, ISet<object> active)
+    private static string CanonicalJson(object? value, ISet<object> active, bool topLevel)
     {
         if (value is null || IsImmutable(value))
             return CanonicalScalar(value);
         if (value is JsonDocument document)
-            return CanonicalJsonElement(document.RootElement);
+            return CanonicalJsonElement(document.RootElement, topLevel);
         if (value is JsonElement element)
-            return CanonicalJsonElement(element);
+            return CanonicalJsonElement(element, topLevel);
         if (!active.Add(value))
             throw new ArgumentException("JSON schema defaults cannot contain reference cycles.", nameof(value));
 
@@ -121,7 +121,7 @@ internal static class SchemaValue
             {
                 return "object:" + SchemaFingerprint.Canonicalize(readOnlyDictionary
                     .OrderBy(entry => entry.Key, StringComparer.Ordinal)
-                    .Select(entry => SchemaFingerprint.Canonicalize([entry.Key, CanonicalJson(entry.Value, active)])));
+                    .Select(entry => SchemaFingerprint.Canonicalize([entry.Key, CanonicalJson(entry.Value, active, topLevel: false)])));
             }
 
             if (value is IDictionary dictionary)
@@ -135,11 +135,11 @@ internal static class SchemaValue
                 }
                 return "object:" + SchemaFingerprint.Canonicalize(entries
                     .OrderBy(entry => entry.Key, StringComparer.Ordinal)
-                    .Select(entry => SchemaFingerprint.Canonicalize([entry.Key, CanonicalJson(entry.Value, active)])));
+                    .Select(entry => SchemaFingerprint.Canonicalize([entry.Key, CanonicalJson(entry.Value, active, topLevel: false)])));
             }
 
             if (value is IEnumerable sequence && value is not string)
-                return "array:" + SchemaFingerprint.Canonicalize(sequence.Cast<object?>().Select(item => CanonicalJson(item, active)));
+                return "array:" + SchemaFingerprint.Canonicalize(sequence.Cast<object?>().Select(item => CanonicalJson(item, active, topLevel: false)));
         }
         finally
         {
@@ -277,8 +277,8 @@ internal static class SchemaValue
         }
     }
 
-    private static string CanonicalJsonElement(JsonElement element) =>
-        CanonicalJson(SnapshotJsonElement(element, topLevel: true), new HashSet<object>(ReferenceEqualityComparer.Instance));
+    private static string CanonicalJsonElement(JsonElement element, bool topLevel) =>
+        CanonicalJson(SnapshotJsonElement(element, topLevel), new HashSet<object>(ReferenceEqualityComparer.Instance), topLevel);
 
     private static string CanonicalScalar(object? value) => value switch
     {

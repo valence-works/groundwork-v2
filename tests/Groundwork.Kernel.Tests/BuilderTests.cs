@@ -182,6 +182,42 @@ public sealed class BuilderTests
     }
 
     [Fact]
+    public void Fluent_build_snapshots_nested_json_document_and_element_scalars_as_clr_values()
+    {
+        using var stringDocument = JsonDocument.Parse("\"pending\"");
+        using var nullDocument = JsonDocument.Parse("null");
+        var value = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = stringDocument,
+            ["elementString"] = stringDocument.RootElement,
+            ["documentNull"] = nullDocument,
+            ["elementNull"] = nullDocument.RootElement,
+            ["items"] = new List<object?>
+            {
+                stringDocument,
+                stringDocument.RootElement,
+                nullDocument,
+                nullDocument.RootElement
+            }
+        };
+
+        var definition = Groundwork.Records.StorageUnit
+            .Declare("nested-json-default", "nested_json_default")
+            .Guid("id", column => column.Required())
+            .Json("payload", column => column.Default(value))
+            .Key("id")
+            .Build();
+
+        var snapshot = Assert.IsType<Dictionary<string, object?>>(
+            definition.Columns.Single(column => column.Name == "payload").Default!.Value);
+        Assert.Equal("pending", snapshot["documentString"]);
+        Assert.Equal("pending", snapshot["elementString"]);
+        Assert.Null(snapshot["documentNull"]);
+        Assert.Null(snapshot["elementNull"]);
+        Assert.Equal(["pending", "pending", null, null], Assert.IsType<List<object?>>(snapshot["items"]));
+    }
+
+    [Fact]
     public void Typed_record_table_infers_columns_and_exposes_plain_definition()
     {
         var table = RecordTable.For<Customer>("customers")

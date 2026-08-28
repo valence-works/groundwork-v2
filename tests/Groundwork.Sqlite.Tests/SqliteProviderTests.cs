@@ -228,6 +228,60 @@ public sealed class SqliteProviderTests
         }
     }
 
+    [Fact]
+    public void Nested_json_document_and_element_scalars_are_serialized_as_nested_json_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        using var stringDocument = JsonDocument.Parse("\"pending\"");
+        using var nullDocument = JsonDocument.Parse("null");
+        var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = stringDocument,
+            ["elementString"] = stringDocument.RootElement,
+            ["documentNull"] = nullDocument,
+            ["elementNull"] = nullDocument.RootElement,
+            ["items"] = new List<object?>
+            {
+                stringDocument,
+                stringDocument.RootElement,
+                nullDocument,
+                nullDocument.RootElement
+            }
+        };
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-nested-json-elements"),
+            Name = "gw_sqlite_nested_json_elements",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(payload) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var id = Guid.NewGuid();
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+                new Dictionary<string, object?> { ["id"] = id })).Status);
+
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = id }));
+        Assert.NotNull(stored);
+        var json = Assert.IsType<JsonElement>(stored!.Values.Values["payload"]);
+        Assert.Equal("pending", json.GetProperty("documentString").GetString());
+        Assert.Equal("pending", json.GetProperty("elementString").GetString());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("documentNull").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("elementNull").ValueKind);
+        var items = json.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Equal("pending", items[0].GetString());
+        Assert.Equal("pending", items[1].GetString());
+        Assert.Equal(JsonValueKind.Null, items[2].ValueKind);
+        Assert.Equal(JsonValueKind.Null, items[3].ValueKind);
+    }
+
     /// <summary>
     /// The runtime convenience apply takes no authorization callback, so it is the one path where a
     /// declaration edit could reach a live catalog unreviewed. It performs what re-applying could

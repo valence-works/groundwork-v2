@@ -771,6 +771,57 @@ public sealed class K5SchemaEvolutionTests
         }
     }
 
+    [Fact]
+    public void Schema_subject_snapshots_nested_json_document_and_element_scalars_and_fingerprints_them_as_clr_values()
+    {
+        using var stringDocument = JsonDocument.Parse("\"pending\"");
+        using var nullDocument = JsonDocument.Parse("null");
+        var value = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = stringDocument,
+            ["elementString"] = stringDocument.RootElement,
+            ["documentNull"] = nullDocument,
+            ["elementNull"] = nullDocument.RootElement,
+            ["items"] = new List<object?>
+            {
+                stringDocument,
+                stringDocument.RootElement,
+                nullDocument,
+                nullDocument.RootElement
+            }
+        };
+
+        var subject = new SchemaSubject(Unit(value));
+        var equivalentClrSubject = new SchemaSubject(Unit(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = "pending",
+            ["elementString"] = "pending",
+            ["documentNull"] = null,
+            ["elementNull"] = null,
+            ["items"] = new List<object?> { "pending", "pending", null, null }
+        }));
+
+        var snapshot = Assert.IsType<Dictionary<string, object?>>(subject.Columns[1].Default!.Value);
+        Assert.Equal("pending", snapshot["documentString"]);
+        Assert.Equal("pending", snapshot["elementString"]);
+        Assert.Null(snapshot["documentNull"]);
+        Assert.Null(snapshot["elementNull"]);
+        Assert.Equal(["pending", "pending", null, null], Assert.IsType<List<object?>>(snapshot["items"]));
+        Assert.Equal(equivalentClrSubject.Fingerprint, subject.Fingerprint);
+
+        static StorageUnit Unit(object payload) => new()
+        {
+            Id = new StorageUnitId("nested-json-elements"),
+            Name = "NestedJsonElements",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(payload) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+    }
+
     [Theory]
     [InlineData("{\"state\":\"pending\",\"state\":\"complete\"}")]
     [InlineData("{\"payload\":{\"state\":\"pending\",\"state\":\"complete\"}}")]
