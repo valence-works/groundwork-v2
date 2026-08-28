@@ -182,7 +182,11 @@ internal sealed class MongoProviderState
         var applied = new MongoAppliedUnit(
             MongoDeclarationSnapshot.Clone(appliedState.Snapshot.Subject.Definition),
             appliedState.Snapshot.Subject.Name);
-        _ = MongoSchemaCoordinator.CollectionName(applied, access);
+        // Privileged access intentionally has no single scope. Its query path fans out across the
+        // registered per-scope collections, while ordinary scoped sessions validate one concrete
+        // scope-to-collection route here.
+        if (!access.IsPrivilegedAcrossScopes)
+            _ = MongoSchemaCoordinator.CollectionName(applied, access);
         if (!CollectionExists(applied.CollectionName))
         {
             throw new InvalidOperationException(

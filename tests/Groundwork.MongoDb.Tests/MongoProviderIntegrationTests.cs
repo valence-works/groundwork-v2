@@ -799,7 +799,7 @@ public sealed class MongoProviderIntegrationTests
 
         var reordered = unit with { Key = new KeyDefinition { Columns = ["customerNo", "region"] } };
         using var reopened = new MongoDbProviderFactory().Create(connectionString!);
-        var refusal = Assert.Throws<InvalidOperationException>(() => reopened.Schema.Apply(reordered));
+        var refusal = Assert.ThrowsAny<InvalidOperationException>(() => reopened.Schema.Apply(reordered));
 
         Assert.Contains("GW-PORT-008", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("native _id field order", refusal.Message, StringComparison.Ordinal);

@@ -358,7 +358,11 @@ public sealed class SchemaToolMongoEndToEndTests : IDisposable
 
     private string? HistoryJson(string connectionString) =>
         Metadata(connectionString)
-            .Find(new BsonDocument("kind", "schema-history"))
+            .Find(new BsonDocument
+            {
+                ["kind"] = "schema-history",
+                ["stateJson"] = new BsonDocument("$type", "string")
+            })
             .FirstOrDefault()?["stateJson"].AsString;
 
     private IMongoCollection<BsonDocument> Metadata(string connectionString) =>
