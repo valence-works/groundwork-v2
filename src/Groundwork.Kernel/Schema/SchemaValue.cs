@@ -56,9 +56,9 @@ internal static class SchemaValue
         if (value is null || IsImmutable(value))
             return value;
         if (type == PortableType.Json && value is JsonDocument document)
-            return SnapshotJsonElement(document.RootElement);
+            return SnapshotJsonElement(document.RootElement, topLevel: true);
         if (type == PortableType.Json && value is JsonElement element)
-            return SnapshotJsonElement(element);
+            return SnapshotJsonElement(element, topLevel: true);
         if (value is byte[] bytes)
             return bytes.ToArray();
         if (type != PortableType.Json)
@@ -149,9 +149,10 @@ internal static class SchemaValue
         throw new ArgumentException("JSON schema defaults must contain only portable scalar, object, or array values.", nameof(value));
     }
 
-    private static object? SnapshotJsonElement(JsonElement element) => element.ValueKind switch
+    private static object? SnapshotJsonElement(JsonElement element, bool topLevel) => element.ValueKind switch
     {
         JsonValueKind.Null => null,
+        JsonValueKind.String when topLevel => element.GetRawText(),
         JsonValueKind.String => element.GetString(),
         JsonValueKind.True => true,
         JsonValueKind.False => false,
@@ -159,10 +160,10 @@ internal static class SchemaValue
         JsonValueKind.Number when element.TryGetInt64(out var int64) => int64,
         JsonValueKind.Number when element.TryGetDecimal(out var decimalValue) => decimalValue,
         JsonValueKind.Number => element.GetDouble(),
-        JsonValueKind.Array => element.EnumerateArray().Select(SnapshotJsonElement).ToList(),
+        JsonValueKind.Array => element.EnumerateArray().Select(item => SnapshotJsonElement(item, topLevel: false)).ToList(),
         JsonValueKind.Object => element.EnumerateObject().ToDictionary(
             property => property.Name,
-            property => SnapshotJsonElement(property.Value),
+            property => SnapshotJsonElement(property.Value, topLevel: false),
             StringComparer.Ordinal),
         _ => throw new ArgumentException($"Unsupported JSON schema default token '{element.ValueKind}'.", nameof(element))
     };
@@ -237,7 +238,7 @@ internal static class SchemaValue
     }
 
     private static string CanonicalJsonElement(JsonElement element) =>
-        CanonicalJson(SnapshotJsonElement(element), new HashSet<object>(ReferenceEqualityComparer.Instance));
+        CanonicalJson(SnapshotJsonElement(element, topLevel: true), new HashSet<object>(ReferenceEqualityComparer.Instance));
 
     private static string CanonicalScalar(object? value) => value switch
     {

@@ -726,6 +726,29 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Schema_subject_preserves_raw_json_text_for_root_json_string_defaults()
+    {
+        using var document = JsonDocument.Parse("\"pending\"");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var subject = new SchemaSubject(new StorageUnit
+            {
+                Id = new StorageUnitId("json-string-element"),
+                Name = "JsonStringElement",
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            });
+
+            Assert.Equal("\"pending\"", Assert.IsType<string>(subject.Columns[1].Default!.Value));
+        }
+    }
+
+    [Fact]
     public void Applied_history_rejects_an_identity_that_does_not_match_its_payload()
     {
         var target = CreateTarget(CreateUnit(includePriority: false));
