@@ -14,8 +14,9 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -259,15 +260,26 @@ def build_sync_plan(
 class GitHubError(RuntimeError):
     """An API call failed in a way that should fail the workflow."""
 
+    def __init__(self, message: str, *, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
 
 class GitHubClient:
     """Small GitHub REST/GraphQL client with no third-party dependencies."""
 
-    def __init__(self, token: str, api_url: str = "https://api.github.com", graphql_url: Optional[str] = None):
+    def __init__(
+        self,
+        token: str,
+        api_url: str = "https://api.github.com",
+        graphql_url: Optional[str] = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ):
         if not token:
             raise ValueError("PROJECT_TOKEN is required")
         self._api_url = api_url.rstrip("/")
         self._graphql_url = graphql_url or self._api_url + "/graphql"
+        self._sleep = sleep_fn
         self._headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
@@ -280,24 +292,62 @@ class GitHubClient:
         headers = dict(self._headers)
         if body is not None:
             headers["Content-Type"] = "application/json"
-        request = Request(url, data=encoded, headers=headers, method=method)
-        try:
-            with urlopen(request, timeout=45) as response:
-                payload = response.read()
-        except (HTTPError, URLError) as error:
-            details = ""
-            if isinstance(error, HTTPError):
+        retry_safe = method.upper() in {"GET", "HEAD"}
+        if method.upper() == "POST" and isinstance(body, Mapping):
+            query = body.get("query")
+            retry_safe = isinstance(query, str) and query.lstrip().startswith("query")
+
+        for attempt in range(1, 4):
+            request = Request(url, data=encoded, headers=headers, method=method)
+            try:
+                with urlopen(request, timeout=45) as response:
+                    payload = response.read()
+            except HTTPError as error:
+                details = ""
                 try:
                     details = error.read().decode("utf-8", errors="replace")
                 except OSError:
                     pass
-            raise GitHubError(f"GitHub {method} {url} failed: {error} {details}") from error
+                if retry_safe and attempt < 3 and self._should_retry_http_error(error, details):
+                    self._sleep(self._retry_delay(attempt, error))
+                    continue
+                raise GitHubError(
+                    f"GitHub {method} {url} failed: {error} {details}",
+                    status=error.code,
+                ) from error
+            except (URLError, TimeoutError) as error:
+                if retry_safe and attempt < 3:
+                    self._sleep(float(2 ** (attempt - 1)))
+                    continue
+                raise GitHubError(f"GitHub {method} {url} failed: {error}") from error
+            break
         if not payload:
             return None
         try:
             return json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise GitHubError(f"GitHub {method} {url} returned invalid JSON") from error
+
+    @staticmethod
+    def _should_retry_http_error(error: HTTPError, details: str) -> bool:
+        status = error.code
+        if status == 429 or 500 <= status <= 599:
+            return True
+        if status != 403:
+            return False
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        lowered = details.casefold()
+        return bool(retry_after) or "secondary rate limit" in lowered or "abuse detection" in lowered
+
+    @staticmethod
+    def _retry_delay(attempt: int, error: HTTPError) -> float:
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        try:
+            if retry_after is not None:
+                return min(max(float(retry_after), 0.0), 10.0)
+        except ValueError:
+            pass
+        return float(min(2 ** (attempt - 1), 10))
 
     def get_pages(self, path: str, **params: Any) -> list[Mapping[str, Any]]:
         """Fetch every REST page, including a final empty page when needed."""
@@ -334,7 +384,15 @@ class GitHubClient:
             if not isinstance(number, int):
                 enriched.append(pull_request)
                 continue
-            commits = self.get_pages(f"/repos/{repository}/pulls/{number}/commits")
+            try:
+                commits = self.get_pages(f"/repos/{repository}/pulls/{number}/commits")
+            except GitHubError as error:
+                # A PR can disappear or close between the list and commit
+                # requests.  Its closing state is no longer trustworthy, so
+                # omit that PR rather than treating it as body-only work.
+                if error.status in (404, 410):
+                    continue
+                raise
             enriched_pull_request = dict(pull_request)
             enriched_pull_request["commits"] = commits
             enriched.append(enriched_pull_request)

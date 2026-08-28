@@ -1,4 +1,7 @@
 import unittest
+from io import BytesIO
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from eng.project_board_sync import (
     DONE,
@@ -7,9 +10,11 @@ from eng.project_board_sync import (
     build_sync_plan,
     closing_issue_numbers,
     derive_status,
+    GitHubError,
     GitHubClient,
     is_roadmap_issue,
     roadmap_issues,
+    reconcile,
 )
 
 
@@ -295,6 +300,137 @@ class SnapshotTests(unittest.TestCase):
         )
         self.assertIn("fieldValueByName(name: \"Status\")", client.requests[2][2]["query"])
         self.assertNotIn("fieldValues(first: 100)", client.requests[2][2]["query"])
+
+
+class ClientResilienceTests(unittest.TestCase):
+    @staticmethod
+    def http_error(status, headers=None, body=b"failure"):
+        return HTTPError(
+            "https://example.test/resource",
+            status,
+            "failure",
+            headers or {},
+            BytesIO(body),
+        )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        @staticmethod
+        def read():
+            return b"[]"
+
+    def test_retryable_get_succeeds_after_bounded_transient_failure(self):
+        delays = []
+        with patch(
+            "eng.project_board_sync.urlopen",
+            side_effect=[self.http_error(503), self.Response()],
+        ):
+            client = GitHubClient("token", sleep_fn=delays.append)
+            self.assertEqual([], client._request("GET", "https://example.test/resource"))
+        self.assertEqual([1.0], delays)
+
+    def test_retryable_url_error_is_bounded(self):
+        delays = []
+        with patch(
+            "eng.project_board_sync.urlopen",
+            side_effect=[URLError("temporary network failure"), self.Response()],
+        ):
+            client = GitHubClient("token", sleep_fn=delays.append)
+            self.assertEqual([], client._request("GET", "https://example.test/resource"))
+        self.assertEqual([1.0], delays)
+
+    def test_forbidden_request_retries_only_with_rate_limit_signal(self):
+        delays = []
+        with patch(
+            "eng.project_board_sync.urlopen",
+            side_effect=[
+                self.http_error(403, {"Retry-After": "0"}),
+                self.Response(),
+            ],
+        ):
+            client = GitHubClient("token", sleep_fn=delays.append)
+            self.assertEqual([], client._request("GET", "https://example.test/resource"))
+        self.assertEqual([0.0], delays)
+
+        delays = []
+        with patch(
+            "eng.project_board_sync.urlopen",
+            side_effect=[self.http_error(403), self.Response()],
+        ):
+            client = GitHubClient("token", sleep_fn=delays.append)
+            with self.assertRaises(GitHubError) as context:
+                client._request("GET", "https://example.test/resource")
+        self.assertEqual(403, context.exception.status)
+        self.assertEqual([], delays)
+
+    def test_retry_exhaustion_raises_and_reconcile_does_not_mutate(self):
+        delays = []
+        with patch(
+            "eng.project_board_sync.urlopen",
+            side_effect=[self.http_error(503), self.http_error(503), self.http_error(503)],
+        ):
+            client = GitHubClient("token", sleep_fn=delays.append)
+            with self.assertRaises(GitHubError) as context:
+                client._request("GET", "https://example.test/resource")
+        self.assertEqual(503, context.exception.status)
+        self.assertEqual([1.0, 2.0], delays)
+
+        class FailingSnapshotClient:
+            def __init__(self):
+                self.mutations = []
+
+            def list_roadmap_issues(self, repository):
+                return [issue(24)]
+
+            def get_default_branch(self, repository):
+                return "main"
+
+            def list_open_pull_requests(self, repository):
+                raise GitHubError("commit lookup exhausted", status=503)
+
+            def get_project_snapshot(self, organization, project_number):
+                raise AssertionError("project must not be read after an incomplete PR snapshot")
+
+            def add_project_item(self, project_id, content_id):
+                self.mutations.append(("add", content_id))
+
+            def update_project_status(self, project_id, item_id, field_id, option_id):
+                self.mutations.append(("status", item_id))
+
+        failing = FailingSnapshotClient()
+        with self.assertRaises(GitHubError):
+            reconcile(failing, REPOSITORY, "valence-works", 6)
+        self.assertEqual([], failing.mutations)
+
+    def test_disappeared_pull_request_is_dropped_from_snapshot(self):
+        pull_request = {
+            "number": 25,
+            "state": "open",
+            "base": {"repo": {"full_name": REPOSITORY}},
+            "body": "Fixes #25",
+        }
+
+        for status in (404, 410):
+            with self.subTest(status=status):
+                class DisappearedClient(GitHubClient):
+                    def __init__(self, disappearance_status):
+                        super().__init__("token", sleep_fn=lambda delay: None)
+                        self.disappearance_status = disappearance_status
+
+                    def get_pages(self, path, **params):
+                        if path.endswith("/pulls"):
+                            return [pull_request]
+                        raise GitHubError(
+                            "pull request disappeared", status=self.disappearance_status
+                        )
+
+                client = DisappearedClient(status)
+                self.assertEqual([], client.list_open_pull_requests(REPOSITORY))
 
 
 if __name__ == "__main__":
