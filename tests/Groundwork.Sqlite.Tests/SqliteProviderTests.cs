@@ -189,6 +189,45 @@ public sealed class SqliteProviderTests
         }
     }
 
+    [Fact]
+    public void Json_document_and_element_root_null_defaults_are_serialized_and_deployed()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        using var document = JsonDocument.Parse("null");
+
+        foreach (var (kind, value) in new[]
+        {
+            ("document", (object)document),
+            ("element", (object)document.RootElement)
+        })
+        {
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId("sqlite-json-null-default-" + kind),
+                Name = "gw_sqlite_json_null_default_" + kind,
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            };
+
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var id = Guid.NewGuid();
+            Assert.Equal(WriteOutcomeStatus.Inserted,
+                connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+                    new Dictionary<string, object?> { ["id"] = id })).Status);
+
+            var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+                new Dictionary<string, object?> { ["id"] = id }));
+            Assert.NotNull(stored);
+            var payload = Assert.IsType<JsonElement>(stored!.Values.Values["payload"]);
+            Assert.Equal(JsonValueKind.Null, payload.ValueKind);
+        }
+    }
+
     /// <summary>
     /// The runtime convenience apply takes no authorization callback, so it is the one path where a
     /// declaration edit could reach a live catalog unreviewed. It performs what re-applying could

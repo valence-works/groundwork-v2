@@ -151,6 +151,7 @@ internal static class SchemaValue
 
     private static object? SnapshotJsonElement(JsonElement element, bool topLevel) => element.ValueKind switch
     {
+        JsonValueKind.Null when topLevel => element.GetRawText(),
         JsonValueKind.Null => null,
         JsonValueKind.String when topLevel => element.GetRawText(),
         JsonValueKind.String => element.GetString(),

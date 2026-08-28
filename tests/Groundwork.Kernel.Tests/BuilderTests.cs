@@ -142,6 +142,25 @@ public sealed class BuilderTests
     }
 
     [Fact]
+    public void Fluent_build_preserves_raw_json_text_for_root_json_null_defaults()
+    {
+        using var document = JsonDocument.Parse("null");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var definition = Groundwork.Records.StorageUnit
+                .Declare("json-null-default", "json_null_default")
+                .Guid("id", column => column.Required())
+                .Json("payload", column => column.Default(value))
+                .Key("id")
+                .Build();
+
+            Assert.Equal("null", Assert.IsType<string>(
+                definition.Columns.Single(column => column.Name == "payload").Default!.Value));
+        }
+    }
+
+    [Fact]
     public void Typed_record_table_infers_columns_and_exposes_plain_definition()
     {
         var table = RecordTable.For<Customer>("customers")
