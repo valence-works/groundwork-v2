@@ -2,6 +2,7 @@ using Groundwork.Documents;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
