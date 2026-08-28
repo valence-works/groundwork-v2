@@ -211,8 +211,9 @@ public sealed class LinqExecutionDifferentialTests
         Assert.Equal(SqliteQueryRenderer.ParameterBudget, budgets["SQLite"]);
         Assert.Equal(PostgreSqlQueryRenderer.ParameterBudget, budgets["PostgreSQL"]);
         Assert.Equal(SqlServerQueryRenderer.ParameterBudget, budgets["SQL Server"]);
-        // MongoDB has no bound-parameter budget of its own and says so by keeping the portable one.
-        Assert.Equal(QueryAdmissionProfile.Default.MaximumParameters, budgets["MongoDB"]);
+        // MongoDB binds no SQL parameters. Its ordinary membership ceiling remains the portable
+        // 1,000-value renderer limit, while the parameter budget truthfully reports no ceiling.
+        Assert.Equal(int.MaxValue, budgets["MongoDB"]);
     }
 
     /// <summary>Runs one terminal on every provider and requires a single agreed answer.</summary>

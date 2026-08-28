@@ -219,7 +219,8 @@ Parameter budgets are enforced against the provider's real limit — **SQLite 99
 PostgreSQL 65,535** — including cursor and page parameters. Exceeding it is a refusal, not a
 truncation. Each provider connection advertises that limit as a `QueryAdmissionProfile`, so the
 pre-execution fence and the renderer use the same number rather than two guesses at it. MongoDB has
-no bound-parameter budget and keeps the portable default for ordinary queries.
+no bound-parameter budget and advertises no parameter ceiling; ordinary membership still uses the
+portable 1,000-value renderer limit.
 
 Keyed batch reads use the profile's separate `MaximumBatchReadKeys` budget (999 by default; SQLite
 999, SQL Server 2,098, and PostgreSQL 65,535). A scoped session reserves one key slot for its
