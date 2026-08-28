@@ -160,10 +160,15 @@ internal static class PublicApiApprovalFixture
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));
         _ = new Func<DocumentUnit<ApprovalDocument>, RowValues, DocumentReadResult<ApprovalDocument>>((unit, values) => unit.Read(values, null));
         _ = new Func<RecordTable<ApprovalRecord>, IGwQueryable<ApprovalRecord>>(table => table.Query.Where(row => row.Value == "approved"));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<long?>>(query => query.Sum(row => row.Count));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<decimal?>>(query => query.Sum(row => row.Amount));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<string?>>(query => query.Min(row => row.Label));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<Guid?>>(query => query.Max(row => row.Id));
         _ = new Func<string, IStorageProviderConnection>(connectionString => new InMemoryProviderFactory().Create(connectionString));
         _ = new Func<QueryRequest, RuntimeCoverageGate>(request => new RuntimeCoverageGate([], []).Check(request) is not null ? new RuntimeCoverageGate([], []) : throw new InvalidOperationException());
     }
 
     private sealed record ApprovalRecord(Guid Id, string Value);
+    private sealed record ApprovalMetric(Guid Id, string Label, int Count, decimal Amount);
     private sealed record ApprovalDocument(Guid Id, string Value);
 }

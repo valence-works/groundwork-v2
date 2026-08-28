@@ -79,6 +79,11 @@ Only compile shapes for which `Validate` returns **no** refusals.
 ### Numbers
 - Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` are portable.
 - **No numeric coercion or rounding is performed.**
+- Scalar `Sum` is limited to mapped `Int32`, `Int64`, and `Decimal` columns. Integer sums return
+  `Int64`; decimal sums retain `Decimal`; reductions return nullable results and null when no
+  non-null input exists. `Min` and `Max` accept mapped orderable columns, ignore nulls, and return
+  null when no non-null value exists. The
+  reduction column is part of the query shape and must be present in the covering index.
 - Portable `Decimal` requires exactly `decimal(18,4)` (`GW-SEM-DECIMAL-001`).
 - Binary floating point is **storable but not comparable**. `PortableType.Double` can be declared,
   written, and read back bit-for-bit, and is refused in predicates and indexes (`GW-SEM-TYPE-006`),

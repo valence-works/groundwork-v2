@@ -24,3 +24,6 @@ command on the connection's gate, so a call waiting for that gate blocks its thr
 executes the provider's total-count shape over a single-row page and `Any()` a limit-1 probe;
 neither materializes the matching rows, and a result without a provider-side total count is refused
 rather than counted client-side.
+
+`Sum`, `Min`, and `Max` use the same scalar request path over a covered mapped column. SQLite
+rendering and four-provider differential evidence for these shapes are tracked by issue #150.
