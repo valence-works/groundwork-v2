@@ -483,6 +483,35 @@ public sealed class CoverageAnalyzerTests
         Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
     }
 
+    [Fact]
+    public async Task Accepted_aggregation_resolves_const_and_reordered_named_arguments()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "static class Values { public const string Id = \"GW-AGG-0009\"; public const string Reason = \"admin report\"; public const string Owner = \"billing\"; public const int Groups = 20; public const int InputRows = 200; } class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(maxInputRows: Values.InputRows, owner: Values.Owner, id: Values.Id, maxGroups: Values.Groups, reason: Values.Reason, expiresOn: new System.DateTimeOffset(day: 1, month: 1, year: 2027, hour: 0, minute: 0, second: 0, offset: System.TimeSpan.Zero)); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        var inventory = Assert.Single(diagnostics.Where(item => item.Id == "GW_AGG_ADHOC_905"));
+        Assert.Contains("GW-AGG-0009", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxGroups='20'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxInputRows='200'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_904");
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_906");
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_with_runtime_id_fails_closed_instead_of_bypassing_opt_in()
+    {
+        var source = WithSchema("{\"tables\":[]}") +
+                     "static class Values { static string Id => \"GW-AGG-0013\"; } class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(Values.Id, \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_902");
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_906" && item.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
     private static async Task<ImmutableArray<Diagnostic>> Analyze(
         string source,
         AdditionalText? additional = null,

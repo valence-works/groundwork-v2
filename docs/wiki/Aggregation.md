@@ -246,6 +246,7 @@ Accepted ad-hoc aggregation values are inventoried by the coverage analyzer when
 in with `[assembly: GwAllowAcceptedAggregations]`. The analyzer emits `GW-AGG-ADHOC-905` inventory
 records, warns with `GW-AGG-ADHOC-904` during the final 30 days, and errors with
 `GW-AGG-ADHOC-903` after expiry; `GW-AGG-ADHOC-902` refuses an acceptance without the opt-in.
+`GW-AGG-ADHOC-906` fails closed when required acceptance metadata cannot be resolved to constants.
 
 ## Next
 

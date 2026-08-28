@@ -259,7 +259,7 @@ Grouped by concern:
 | `GW-AGG-SUM-001` | `Sum` accepts only `Int32`/`Int64`/`Decimal` |
 | `GW-AGG-FIRST-001` | `FirstBy` requires a non-null orderable order column |
 | `GW-AGG-ADHOC-001`…`004` | Missing, expired, or mismatched ad-hoc acceptance |
-| `GW-AGG-ADHOC-902`…`905` | Accepted-aggregation opt-in, expiry, and inventory diagnostics |
+| `GW-AGG-ADHOC-902`…`906` | Accepted-aggregation opt-in, expiry, inventory, and statically unresolved metadata diagnostics |
 
 ---
 

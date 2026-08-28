@@ -25,6 +25,7 @@ internal static class AnalyzerDiagnostics
             ["GW-AGG-ADHOC-903"] = Create("GW_AGG_ADHOC_903", "Accepted aggregation has expired", "{0}", DiagnosticSeverity.Error),
             ["GW-AGG-ADHOC-904"] = Create("GW_AGG_ADHOC_904", "Accepted aggregation is expiring", "{0}", DiagnosticSeverity.Warning),
             ["GW-AGG-ADHOC-905"] = Create("GW_AGG_ADHOC_905", "Accepted aggregation inventory", "{0}", DiagnosticSeverity.Info),
+            ["GW-AGG-ADHOC-906"] = Create("GW_AGG_ADHOC_906", "Accepted aggregation metadata is not statically resolvable", "{0}", DiagnosticSeverity.Error),
             ["GW-LINQ-101"] = Create("GW_LINQ_101", "Column expression is not portable", "{0}"),
             ["GW-LINQ-102"] = Create("GW_LINQ_102", "Column arithmetic is not portable", "{0}"),
             ["GW-LINQ-103"] = Create("GW_LINQ_103", "Column comparison requires scan acceptance", "{0}"),
