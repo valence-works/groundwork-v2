@@ -117,9 +117,15 @@ public static class CrossScopeQueryMaterializer
         }
 
         var offset = request.Paging.Offset ?? 0;
-        var limit = request.Paging.Limit;
+        var limit = request.Result.MaxRows is int maxRows
+            ? request.Paging.Limit is int requestedLimit
+                ? Math.Min(requestedLimit, maxRows)
+                : maxRows
+            : request.Paging.Limit;
         var hasMore = limit is int pageSize && rows.Length > checked(offset + pageSize);
         var visible = rows.Skip(offset).Take(limit ?? int.MaxValue).ToArray();
+        if (request.Result is ResultShape.Single or ResultShape.SingleOrDefault && visible.Length > 1)
+            throw new InvalidOperationException("Sequence contains more than one element.");
         var orderTerms = options.GetEffectiveOrder(request);
         string? nextToken = null;
         if (hasMore && orderTerms.Length != 0 && visible.Length != 0)

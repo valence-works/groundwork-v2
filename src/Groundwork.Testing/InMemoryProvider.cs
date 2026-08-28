@@ -665,7 +665,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             if (order.Length != 0)
                 rows.Sort(new MemoryRowComparer(order));
 
-            var deferContinuation = request.Result.IncludesTotalCount && request.Paging.ContinuationToken is not null;
+            var deferContinuation = request.Paging.ContinuationToken is not null &&
+                (request.Result.IncludesTotalCount || request.Distinct);
             if (!deferContinuation && request.Paging.ContinuationToken is { } token)
             {
                 IReadOnlyList<QueryConstant> cursor;

@@ -219,6 +219,16 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Take_zero_first_terminals_still_require_deterministic_order()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var first = db.Table<Ticket>().Take(0).FirstAsync(); var fallback = db.Table<Ticket>().Take(0).FirstOrDefaultAsync();"));
+
+        Assert.Equal(2, diagnostics.Count(item => item.Id == "GW_COVER_016"));
+        Assert.All(diagnostics, item => Assert.Contains("deterministic order", item.GetMessage(), StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Projection_initializers_and_constructors_are_resolved_for_distinct_and_cardinality()
     {
         var source = QuerySource("""
