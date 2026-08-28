@@ -310,9 +310,15 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
             return;
         if (!previous.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
             throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change its key.");
+        if (previous.Concurrency != desired.Concurrency)
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change its concurrency declaration.");
         if (previous.Scope != desired.Scope)
             throw new SchemaConflictException(
                 $"Storage unit '{desired.Name}' cannot change scope from {previous.Scope} to {desired.Scope}.");
+        if (previous.SchemaVersion != desired.SchemaVersion)
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change its schema version.");
         if (!string.Equals(
                 RetentionCanonicalization.Canonicalize(previous.Retention),
                 RetentionCanonicalization.Canonicalize(desired.Retention),
@@ -408,10 +414,8 @@ internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database) 
             ? current.TargetFingerprint
             : null;
         if (!string.Equals(actual, expectedAppliedTargetFingerprint, StringComparison.Ordinal))
-            throw new PhysicalSchemaFingerprintConflictException(
-                state.TargetIdentity.ToString(),
-                expectedAppliedTargetFingerprint ?? "<none>",
-                actual ?? "<none>");
+            throw new InvalidOperationException(
+                $"In-memory schema history CAS failed for '{state.TargetIdentity}'.");
 
         if (lease.HasPendingState)
         {

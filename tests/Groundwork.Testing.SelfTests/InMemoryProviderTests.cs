@@ -537,10 +537,11 @@ public sealed class InMemoryProviderTests
         var acknowledgements = coordinator.Executor.ApplyOperationBatch(target.Identity, operations, lease);
         var applied = plan.Complete(acknowledgements, appliedAt);
 
-        var conflict = Assert.Throws<PhysicalSchemaFingerprintConflictException>(() =>
+        var conflict = Assert.Throws<InvalidOperationException>(() =>
             coordinator.Executor.PublishAppliedState(applied, "stale-fingerprint", lease));
-        Assert.Equal("stale-fingerprint", conflict.ExpectedFingerprint);
-        Assert.Equal(history.AppliedState!.TargetFingerprint, conflict.ActualFingerprint);
+        Assert.Equal(
+            "In-memory schema history CAS failed for 'InMemory:schema-history-cas'.",
+            conflict.Message);
     }
 
     [Fact]
@@ -646,6 +647,30 @@ public sealed class InMemoryProviderTests
 
         var changedScope = initial with { Scope = ScopePolicy.Scoped };
         Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedScope));
+    }
+
+    [Fact]
+    public void Schema_diff_refuses_unplanned_concurrency_declaration_changes()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-concurrency-drift");
+        var initial = TestingFixture.GlobalUnit("schema-concurrency-drift");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+
+        var changed = initial with { Concurrency = ConcurrencyDeclaration.Optimistic() };
+
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
+    }
+
+    [Fact]
+    public void Schema_diff_refuses_unplanned_schema_version_changes()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-version-drift");
+        var initial = TestingFixture.GlobalUnit("schema-version-drift");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+
+        var changed = initial with { SchemaVersion = 2 };
+
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
     }
 
     [Fact]
