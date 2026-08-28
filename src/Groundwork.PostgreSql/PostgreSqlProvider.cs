@@ -117,6 +117,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = Resolve(unit);
         var connection = OpenConnection();
         try
         {
@@ -128,7 +129,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
             throw;
         }
         OwnConnection(connection);
-        return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null, observer);
+        return new PostgreSqlStorageSession(this, physicalUnit, access, connection, null, observer);
     }
 
     public IOwnedStorageSession OpenOwnedSession(
@@ -141,6 +142,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = Resolve(unit);
         var connection = OpenConnection();
         try
         {
@@ -154,7 +156,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         // Deliberately NOT OwnConnection: the caller releases it, which is the whole point — a per-caller
         // session that neither leaks a connection nor queues behind unrelated callers on a shared one.
         return new PostgreSqlStorageSession(
-            this, Resolve(unit), access, connection, null, observer, ownsConnection: true);
+            this, physicalUnit, access, connection, null, observer, ownsConnection: true);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

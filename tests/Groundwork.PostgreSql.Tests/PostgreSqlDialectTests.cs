@@ -671,7 +671,7 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
-    public async Task Nested_write_is_refused_rather_than_blocking()
+    public async Task Batch_fallback_completes_without_reentering_the_connection_gate()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();
         using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
@@ -692,17 +692,81 @@ public sealed class PostgreSqlDialectTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
 
-        // A non-unconditional precondition takes the batch fallback, which re-enters the write
-        // path from inside the batch's own transaction.
+        // A non-unconditional precondition takes the batch fallback. The fallback must reuse the
+        // batch transaction without waiting for the non-reentrant connection gate it already holds.
         var write = RowWrite.Upsert(
             unit,
             new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "nested" }),
             WriteOptions.CreateOnly);
 
-        var pending = Task.Run(() => batched.ApplyBatch([write]));
-        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
-        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
-        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var outcomes = await batched.ApplyBatchAsync([write], exactOutcomes: true, timeout.Token);
+        Assert.Equal(WriteOutcomeStatus.Upserted, outcomes.Single().Outcome.Status);
+    }
+
+    [SkippableFact]
+    public async Task Shared_session_serializes_a_second_caller_during_batch_fallback()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_batch_gate_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var observer = new BlockingFallbackObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+        var first = batched.ApplyBatchAsync(
+            [RowWrite.Upsert(
+                unit,
+                new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "first" }),
+                WriteOptions.CreateOnly)],
+            exactOutcomes: true);
+
+        Assert.True(observer.FallbackEntered.Wait(TimeSpan.FromSeconds(5)),
+            "The fallback did not reach its provider command in time.");
+        var second = Task.Run(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "missing" })));
+        await Task.Delay(TimeSpan.FromMilliseconds(150));
+        Assert.False(observer.Overlapped,
+            "A concurrent caller reached the shared connection while the batch fallback held its gate.");
+
+        observer.Release.Set();
+        var outcomes = await first;
+        Assert.Equal(WriteOutcomeStatus.Inserted, outcomes.Single().Outcome.Status);
+        Assert.Null(await second);
+    }
+
+    private sealed class BlockingFallbackObserver : IProviderCommandObserver
+    {
+        internal ManualResetEventSlim FallbackEntered { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+        private int overlapped;
+        internal bool Overlapped => Volatile.Read(ref overlapped) != 0;
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Operation == "postgresql.conditional-upsert")
+            {
+                FallbackEntered.Set();
+                Release.Wait(TimeSpan.FromSeconds(5));
+                return;
+            }
+
+            if (!Release.IsSet && command.Kind == ProviderCommandKind.Read)
+                Interlocked.Exchange(ref overlapped, 1);
+        }
     }
 
     [SkippableFact]

@@ -19,10 +19,14 @@ internal sealed class CountingProviderFactory(IStorageProviderFactory inner) : I
 internal sealed class CountingConnection(IStorageProviderConnection inner) : IStorageProviderConnection
 {
     private readonly List<CountingUnitOfWork> units = [];
+    private readonly List<IOwnedStorageSession> sessions = [];
     private bool disposed;
 
     /// <summary>Every unit of work this connection has handed out, in order.</summary>
     internal IReadOnlyList<CountingUnitOfWork> Units => units;
+
+    /// <summary>Every scope-owned session this connection has handed out, in order.</summary>
+    internal IReadOnlyList<IOwnedStorageSession> Sessions => sessions;
 
     /// <summary>How many times <see cref="Dispose"/> was called.</summary>
     internal int DisposeRequests { get; private set; }
@@ -39,8 +43,12 @@ internal sealed class CountingConnection(IStorageProviderConnection inner) : ISt
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null) =>
         inner.OpenSession(unit, access, observer);
 
-    public IOwnedStorageSession OpenOwnedSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null) =>
-        inner.OpenOwnedSession(unit, access, observer);
+    public IOwnedStorageSession OpenOwnedSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
+    {
+        var session = inner.OpenOwnedSession(unit, access, observer);
+        sessions.Add(session);
+        return session;
+    }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] storageUnits) =>
         Track(inner.BeginUnitOfWork(access, storageUnits));

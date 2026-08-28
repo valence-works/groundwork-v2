@@ -17,6 +17,8 @@ internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSessi
     private readonly SqliteConnection connection;
     private readonly SqliteTransaction? transaction;
     private SqliteTransaction? activeTransaction;
+    private readonly AsyncLocal<bool> batchFallbackScope = new();
+    private readonly AsyncLocal<bool> writeExecutionScope = new();
     private bool closed;
 
     /// <summary>
@@ -1203,18 +1205,29 @@ internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSessi
             SQLitePCL.raw.SQLITE_LIMIT_VARIABLE_NUMBER,
             -1);
 
-    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
-        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes)
+    {
+        var previousScope = batchFallbackScope.Value;
+        batchFallbackScope.Value = true;
+        try
         {
-            RowWriteMode.Insert => Insert(write.Values!, write.Options),
-            RowWriteMode.Update => Update(write.Values!, write.Options),
-            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ConditionalUpsert(write.Values!, write.Options),
-            RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
-            RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
-            RowWriteMode.Delete => Delete(write.Key!, write.Options),
-            RowWriteMode.CompareAndDelete => CompareAndDelete(write.Key!, write.ExpectedValues, write.Options),
-            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
-        })).ToArray();
+            return writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+            {
+                RowWriteMode.Insert => Insert(write.Values!, write.Options),
+                RowWriteMode.Update => Update(write.Values!, write.Options),
+                RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ConditionalUpsert(write.Values!, write.Options),
+                RowWriteMode.Upsert => Upsert(write.Values!, write.Options),
+                RowWriteMode.ConditionalUpsert => ConditionalUpsert(write.Values!, write.Options),
+                RowWriteMode.Delete => Delete(write.Key!, write.Options),
+                RowWriteMode.CompareAndDelete => CompareAndDelete(write.Key!, write.ExpectedValues, write.Options),
+                _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
+            })).ToArray();
+        }
+        finally
+        {
+            batchFallbackScope.Value = previousScope;
+        }
+    }
 
     private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
         logicalUnit.Indexes.Any(index => index.IsUnique &&
@@ -1755,7 +1768,7 @@ internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSessi
         ThrowIfClosed();
         try
         {
-            if (transaction is not null) return operation();
+            if (transaction is not null || batchFallbackScope.Value || ownsConnection) return operation();
             lock (owner.Gate) { owner.ThrowIfDisposed(); return operation(); }
         }
         catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
@@ -1768,29 +1781,44 @@ internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSessi
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         ThrowIfClosed();
-        if (transaction is not null) return Translate(operation);
-        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
+        if (transaction is not null || batchFallbackScope.Value) return Translate(operation);
+        if (writeExecutionScope.Value)
+            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
+        if (ownsConnection)
+        {
+            owner.ThrowIfDisposed();
+            return ExecuteWriteTransaction(operation);
+        }
         lock (owner.Gate)
         {
             owner.ThrowIfDisposed();
-            using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-            activeTransaction = writeTransaction;
-            try
-            {
-                var result = Translate(operation);
-                writeTransaction.Commit();
-                return result;
-            }
-            catch (Exception failure)
-            {
-                WriteFailureCleanup.Run(failure,
-                    () => RollbackOrRetire(writeTransaction));
-                throw;
-            }
-            finally
-            {
-                activeTransaction = null;
-            }
+            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
+            return ExecuteWriteTransaction(operation);
+        }
+    }
+
+    private T ExecuteWriteTransaction<T>(Func<T> operation)
+    {
+        using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
+        activeTransaction = writeTransaction;
+        var previousScope = writeExecutionScope.Value;
+        writeExecutionScope.Value = true;
+        try
+        {
+            var result = Translate(operation);
+            writeTransaction.Commit();
+            return result;
+        }
+        catch (Exception failure)
+        {
+            WriteFailureCleanup.Run(failure,
+                () => RollbackOrRetire(writeTransaction));
+            throw;
+        }
+        finally
+        {
+            writeExecutionScope.Value = previousScope;
+            activeTransaction = null;
         }
     }
 

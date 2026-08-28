@@ -109,6 +109,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqlServerSchemaCoordinator.Physicalize(unit);
         var connection = CreateIndependentConnection();
         try
         {
@@ -121,7 +122,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         }
         using (EnterGate())
             sessionConnections.Add(connection);
-        return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer);
+        return new SqlServerStorageSession(this, physicalUnit, access, connection, null, observer);
     }
 
     public IOwnedStorageSession OpenOwnedSession(
@@ -134,6 +135,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqlServerSchemaCoordinator.Physicalize(unit);
         var connection = CreateIndependentConnection();
         try
         {
@@ -146,7 +148,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         }
         // Deliberately not added to sessionConnections: the caller releases it on disposal.
         return new SqlServerStorageSession(
-            this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer, ownsConnection: true);
+            this, physicalUnit, access, connection, null, observer, ownsConnection: true);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

@@ -32,7 +32,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}"));
 
     [SkippableFact]
-    public async Task Nested_write_is_refused_rather_than_blocking()
+    public async Task Batch_fallback_completes_without_reentering_the_connection_gate()
     {
         var connectionString = fixture.Reset();
         using var connection = new SqlServerProviderFactory().Create(connectionString);
@@ -53,18 +53,16 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
 
-        // A non-unconditional precondition takes the batch fallback, which re-enters the write
-        // path from inside the batch's own transaction. The gate is a non-reentrant semaphore, so
-        // a regression here hangs rather than throwing; the timeout turns that into a failure.
+        // A non-unconditional precondition takes the batch fallback. The fallback must reuse the
+        // batch transaction without waiting for the non-reentrant connection gate it already holds.
         var write = RowWrite.Upsert(
             unit,
             new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "nested" }),
             WriteOptions.CreateOnly);
 
-        var pending = Task.Run(() => batched.ApplyBatch([write]));
-        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
-        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
-        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var outcomes = await batched.ApplyBatchAsync([write], exactOutcomes: true, timeout.Token);
+        Assert.Equal(WriteOutcomeStatus.Upserted, outcomes.Single().Outcome.Status);
     }
 
     [SkippableFact]

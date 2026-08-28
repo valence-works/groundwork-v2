@@ -193,6 +193,58 @@ public sealed class ConnectionLifetimeTests
     }
 
     [Fact]
+    public void Finished_scopes_release_their_owned_sessions_instead_of_retaining_provider_handles()
+    {
+        fixture.Deploy(HostingFixture.Orders);
+        var counting = new CountingProviderFactory(fixture.Provider);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(counting, fixture.ConnectionString)
+            .AddUnits(HostingFixture.Orders));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        var sessions = new List<IOwnedStorageSession>();
+        foreach (var index in Enumerable.Range(0, 5))
+        {
+            using var scope = provider.CreateScope();
+            var storage = scope.ServiceProvider.GetRequiredService<IGroundworkStorage>();
+            var session = storage.OpenSession(HostingFixture.Orders, StorageAccess.Global);
+            sessions.Add(Assert.IsAssignableFrom<IOwnedStorageSession>(session));
+            Assert.Null(session.Read(new StorageKey(new Dictionary<string, object?>
+            {
+                ["id"] = $"not-present-{index}"
+            })));
+        }
+
+        Assert.Equal(5, counting.Created!.Sessions.Count);
+        Assert.All(sessions, session => Assert.Throws<ObjectDisposedException>(() => session.Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "after-scope" }))));
+    }
+
+    [Fact]
+    public async Task Async_scope_disposal_releases_owned_sessions()
+    {
+        fixture.Deploy(HostingFixture.Orders);
+        var counting = new CountingProviderFactory(fixture.Provider);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(counting, fixture.ConnectionString)
+            .AddUnits(HostingFixture.Orders));
+        await using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        IOwnedStorageSession session;
+        await using (var scope = provider.CreateAsyncScope())
+        {
+            session = Assert.IsAssignableFrom<IOwnedStorageSession>(scope.ServiceProvider
+                .GetRequiredService<IGroundworkStorage>()
+                .OpenSession(HostingFixture.Orders, StorageAccess.Global));
+        }
+
+        Assert.Throws<ObjectDisposedException>(() => session.Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "after-async-scope" })));
+    }
+
+    [Fact]
     public void A_scope_still_disposes_a_unit_of_work_that_never_reached_a_terminal_call()
     {
         fixture.Deploy(HostingFixture.Orders);

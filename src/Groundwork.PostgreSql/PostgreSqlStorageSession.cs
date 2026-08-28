@@ -19,6 +19,8 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
     private readonly NpgsqlConnection connection;
     private readonly NpgsqlTransaction? transaction;
     private NpgsqlTransaction? activeTransaction;
+    private readonly AsyncLocal<bool> batchFallbackScope = new();
+    private readonly AsyncLocal<bool> writeExecutionScope = new();
     private bool closed;
 
     /// <summary>
@@ -1224,22 +1226,31 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
     private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchFallback(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         var outcomes = new List<RowWriteOutcome>(writes.Count);
-        foreach (var write in writes)
+        var previousScope = batchFallbackScope.Value;
+        batchFallbackScope.Value = true;
+        try
         {
-            outcomes.Add(new RowWriteOutcome(write, write.Mode switch
+            foreach (var write in writes)
             {
-                RowWriteMode.Insert => await InsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Update => await UpdateAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
-                    await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Upsert => await UpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.ConditionalUpsert => await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Delete => await DeleteAsync(write.Key!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.CompareAndDelete => await CompareAndDeleteAsync(write.Key!, write.ExpectedValues, write.Options, mode).ConfigureAwait(false),
-                _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
-            }));
+                outcomes.Add(new RowWriteOutcome(write, write.Mode switch
+                {
+                    RowWriteMode.Insert => await InsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Update => await UpdateAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
+                        await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Upsert => await UpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.ConditionalUpsert => await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Delete => await DeleteAsync(write.Key!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.CompareAndDelete => await CompareAndDeleteAsync(write.Key!, write.ExpectedValues, write.Options, mode).ConfigureAwait(false),
+                    _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
+                }));
+            }
+            return outcomes;
         }
-        return outcomes;
+        finally
+        {
+            batchFallbackScope.Value = previousScope;
+        }
     }
 
     private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
@@ -1710,8 +1721,12 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
     {
         // Serialized for the whole operation: a cached session is shared by concurrent callers and Npgsql
         // refuses concurrent commands on one connection. Reads need this as much as writes — a colliding
-        // read is what surfaces on SQL Server as "already an open DataReader".
-        using var lease = await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false);
+        // read is what surfaces on SQL Server as "already an open DataReader". An owned session has an
+        // independent connection, and a batch fallback marks its own logical execution scope; neither path
+        // may wait for this session's non-reentrant gate a second time.
+        using var lease = ownsConnection || batchFallbackScope.Value
+            ? null
+            : await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false);
         try
         {
             ThrowIfClosed();
@@ -1725,14 +1740,20 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
 
     private async ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
     {
-        using var lease = await owner.EnterGate(mode).ConfigureAwait(false);
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         ThrowIfClosed();
-        if (transaction is not null)
+        if (transaction is not null || batchFallbackScope.Value)
             return await Translate(operation).ConfigureAwait(false);
+        if (writeExecutionScope.Value)
+            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
+        using var lease = ownsConnection
+            ? null
+            : await owner.EnterGate(mode).ConfigureAwait(false);
         WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
         var write = (NpgsqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.ReadCommitted).ConfigureAwait(false);
         activeTransaction = write;
+        var previousScope = writeExecutionScope.Value;
+        writeExecutionScope.Value = true;
         try
         {
             var result = await Translate(operation).ConfigureAwait(false);
@@ -1746,6 +1767,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
         }
         finally
         {
+            writeExecutionScope.Value = previousScope;
             activeTransaction = null;
             await mode.Dispose(write).ConfigureAwait(false);
         }

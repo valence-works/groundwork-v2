@@ -326,8 +326,10 @@ that advertises the capability.
 
 ### `ObjectDisposedException` from a session
 
-You disposed the connection, or the unit of work reached a terminal state. Sessions are non-owning
-views: keep the owner alive, and never retain a unit-of-work session past commit/rollback/dispose.
+You disposed the connection, an owned session reached its disposal point, or the unit of work reached
+a terminal state. Direct connection sessions are non-owning views: keep the connection alive, and
+never retain a unit-of-work session past commit/rollback/dispose. Dispose an `IOwnedStorageSession`
+only after its caller-owned operation is complete.
 
 ### My unit of work silently rolled back
 

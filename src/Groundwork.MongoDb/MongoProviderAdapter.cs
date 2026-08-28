@@ -78,8 +78,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
     {
         var session = inner.OpenSession(unit, ToNative(access), observer);
         return inner.ProviderSequenceFit is ProviderFit.Supported
-            ? new MongoExactStoreSession(session, observer)
-            : new MongoStoreSession(session, commandObserver: observer);
+            ? new MongoExactStoreSession(session, commandObserver: observer, providerConnection: this)
+            : new MongoStoreSession(session, commandObserver: observer, providerConnection: this);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
@@ -180,6 +180,7 @@ internal class MongoStoreSession(
 
     public StoredEntry? Read(StorageKey key)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "read");
         beforeRead?.Invoke(key);
         return ToStore(inner.Read(new MongoStorageKey(key.Values)));
@@ -187,6 +188,7 @@ internal class MongoStoreSession(
 
     public async ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "read");
         beforeRead?.Invoke(key);
         return ToStore(await inner.ReadAsync(new MongoStorageKey(key.Values), cancellationToken).ConfigureAwait(false));
@@ -194,6 +196,7 @@ internal class MongoStoreSession(
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
         return inner.Query(request, options);
     }
@@ -203,21 +206,29 @@ internal class MongoStoreSession(
         QueryRenderOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
         return inner.QueryAsync(request, options, cancellationToken);
     }
 
-    public CrossScopeQueryResult QueryAcrossScopes(QueryRequest request, QueryRenderOptions? options = null) =>
-        inner.QueryAcrossScopes(request, options);
+    public CrossScopeQueryResult QueryAcrossScopes(QueryRequest request, QueryRenderOptions? options = null)
+    {
+        ThrowIfReleased();
+        return inner.QueryAcrossScopes(request, options);
+    }
 
     public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
         QueryRequest request,
         QueryRenderOptions? options = null,
-        CancellationToken cancellationToken = default) =>
-        inner.QueryAcrossScopesAsync(request, options, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfReleased();
+        return inner.QueryAcrossScopesAsync(request, options, cancellationToken);
+    }
 
     public AggregationResult Aggregate(AggregationQuery query)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         return inner.Aggregate(query);
     }
@@ -226,12 +237,14 @@ internal class MongoStoreSession(
         AggregationQuery query,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
         return inner.AggregateAsync(query, cancellationToken);
     }
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
+        ThrowIfReleased();
         ValidateInsert(values, options);
         return ToStore(inner.Insert(new MongoStorageValues(values.Values), ToNative(options)));
     }
@@ -241,6 +254,7 @@ internal class MongoStoreSession(
         WriteOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         ValidateInsert(values, options);
         return ToStore(await inner.InsertAsync(
             new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
@@ -255,6 +269,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
+        ThrowIfReleased();
         ValidateUpdate(values, options);
         return ToStore(inner.Update(new MongoStorageValues(values.Values), ToNative(options)));
     }
@@ -264,6 +279,7 @@ internal class MongoStoreSession(
         WriteOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         ValidateUpdate(values, options);
         return ToStore(await inner.UpdateAsync(
             new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
@@ -278,6 +294,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
+        ThrowIfReleased();
         ValidateUpsert(values, options);
         return ToStore(inner.Upsert(new MongoStorageValues(values.Values), ToNative(options)));
     }
@@ -287,6 +304,7 @@ internal class MongoStoreSession(
         WriteOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         ValidateUpsert(values, options);
         return ToStore(await inner.UpsertAsync(
             new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
@@ -301,6 +319,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
+        ThrowIfReleased();
         ValidateConditionalUpsert(values, options);
         return ToStore(inner.ConditionalUpsert(new MongoStorageValues(values.Values), ToNative(options)), values, options);
     }
@@ -310,6 +329,7 @@ internal class MongoStoreSession(
         WriteOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         ValidateConditionalUpsert(values, options);
         return ToStore(await inner.ConditionalUpsertAsync(
             new MongoStorageValues(values.Values), ToNative(options), cancellationToken).ConfigureAwait(false),
@@ -325,6 +345,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
+        ThrowIfReleased();
         ValidateDelete(options);
         return ToStore(inner.Delete(new MongoStorageKey(key.Values), ToNative(options)));
     }
@@ -334,6 +355,7 @@ internal class MongoStoreSession(
         WriteOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         ValidateDelete(options);
         return ToStore(await inner.DeleteAsync(
             new MongoStorageKey(key.Values), ToNative(options), cancellationToken).ConfigureAwait(false));
@@ -345,21 +367,34 @@ internal class MongoStoreSession(
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
     }
 
-    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
-        SetMutation.UpdateWhere(where, assignments);
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments)
+    {
+        ThrowIfReleased();
+        return SetMutation.UpdateWhere(where, assignments);
+    }
 
     public ValueTask<SetMutationResult> UpdateWhereAsync(
         Predicate where,
         IReadOnlyDictionary<string, object?> assignments,
-        CancellationToken cancellationToken = default) =>
-        SetMutation.UpdateWhereAsync(where, assignments, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfReleased();
+        return SetMutation.UpdateWhereAsync(where, assignments, cancellationToken);
+    }
 
-    public SetMutationResult DeleteWhere(Predicate where) => SetMutation.DeleteWhere(where);
+    public SetMutationResult DeleteWhere(Predicate where)
+    {
+        ThrowIfReleased();
+        return SetMutation.DeleteWhere(where);
+    }
 
     public ValueTask<SetMutationResult> DeleteWhereAsync(
         Predicate where,
-        CancellationToken cancellationToken = default) =>
-        SetMutation.DeleteWhereAsync(where, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfReleased();
+        return SetMutation.DeleteWhereAsync(where, cancellationToken);
+    }
 
     /// <summary>
     /// Total by construction: this adapter is built only by <see cref="MongoProviderFactory"/> over
@@ -370,6 +405,7 @@ internal class MongoStoreSession(
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "retention");
         if (inner is IRetentionStorageSession native)
             return native.ApplyRetention(options);
@@ -378,6 +414,7 @@ internal class MongoStoreSession(
 
     public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "retention");
         return inner is IRetentionStorageSession native
             ? native.ApplyRetentionAsync(options)
@@ -386,6 +423,7 @@ internal class MongoStoreSession(
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
+        ThrowIfReleased();
         var native = ValidateAppend(operationId, values);
         return ToStore(inner.Append(operationId, native));
     }
@@ -395,6 +433,7 @@ internal class MongoStoreSession(
         IReadOnlyList<StorageValues> values,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         var native = ValidateAppend(operationId, values);
         return ToStore(await inner.AppendAsync(operationId, native, cancellationToken).ConfigureAwait(false));
     }
@@ -415,6 +454,7 @@ internal class MongoStoreSession(
         bool exactOutcomes,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         ArgumentNullException.ThrowIfNull(writes);
         if (inner is IBatchedStorageSession native)
@@ -442,6 +482,7 @@ internal class MongoStoreSession(
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         ArgumentNullException.ThrowIfNull(writes);
         if (inner is IBatchedStorageSession native)
@@ -495,6 +536,12 @@ internal class MongoStoreSession(
     private static StoredEntry? ToStore(MongoStoredEntry? entry) => entry is null
         ? null
         : new StoredEntry(new StorageValues(entry.Values.Values), entry.Version);
+
+    protected void ThrowIfReleased()
+    {
+        if (released)
+            throw new ObjectDisposedException(nameof(MongoStoreSession));
+    }
 }
 
 internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, ICompareAndDeleteStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
@@ -523,6 +570,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 
     private IMongoExactAppendStorageSession RequireExactAppend(IReadOnlyList<StorageValues> values)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "append");
         ArgumentNullException.ThrowIfNull(values);
         return exactInner as IMongoExactAppendStorageSession ?? throw new NotSupportedException(
@@ -564,6 +612,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
             IReadOnlyDictionary<string, object?> expectedValues,
             WriteOptions? options)
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "compare-and-delete");
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
         var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
@@ -580,6 +629,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 
     private IStorageInspectionSession RequireInspection()
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         return exactInner as IStorageInspectionSession ?? throw new NotSupportedException(
@@ -596,6 +646,7 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 
     private IExactRetentionStorageSession RequireExactRetention()
     {
+        ThrowIfReleased();
         StorageAccessValidation.EnsurePointOperation(Access, "retention");
         return exactInner as IExactRetentionStorageSession ?? throw new NotSupportedException(
             "GW-RETENTION-003: this provider session does not advertise exact retention operations.");

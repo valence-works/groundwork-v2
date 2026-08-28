@@ -1613,7 +1613,7 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public async Task Nested_write_is_refused_rather_than_blocking()
+    public async Task Batch_fallback_completes_without_reentering_the_connection_gate()
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
@@ -1632,17 +1632,16 @@ public sealed class SqliteProviderTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
 
-        // A non-unconditional precondition takes the batch fallback, which re-enters the write
-        // path from inside the batch's own transaction.
+        // A non-unconditional precondition takes the batch fallback. The fallback must reuse the
+        // batch transaction rather than re-entering the non-reentrant connection gate.
         var write = RowWrite.Upsert(
             unit,
             new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["Value"] = "nested" }),
             WriteOptions.CreateOnly);
 
-        var pending = Task.Run(() => batched.ApplyBatch([write]));
-        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
-        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
-        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var outcomes = await batched.ApplyBatchAsync([write], exactOutcomes: true, timeout.Token);
+        Assert.Equal(WriteOutcomeStatus.Upserted, outcomes.Single().Outcome.Status);
     }
 
     [Fact]

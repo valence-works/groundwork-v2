@@ -104,6 +104,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqliteSchemaCoordinator.Physicalize(unit);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         try
         {
@@ -117,7 +118,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         }
         if (!isMemory)
             lock (gate) sessionConnections.Add(sessionConnection);
-        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer);
+        return new SqliteStorageSession(this, physicalUnit, access, sessionConnection, null, observer);
     }
 
     public IOwnedStorageSession OpenOwnedSession(
@@ -130,6 +131,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqliteSchemaCoordinator.Physicalize(unit);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         try
         {
@@ -145,7 +147,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         // so releasing it would drop every table. Disposal there closes the session only. SQLite serializes
         // internally, so the concurrency this seam buys elsewhere costs nothing to forgo here.
         return new SqliteStorageSession(
-            this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer,
+            this, physicalUnit, access, sessionConnection, null, observer,
             ownsConnection: !isMemory);
     }
 

@@ -19,6 +19,8 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
     private readonly SqlTransaction? transaction;
     private readonly SqlServerDialect dialect = new();
     private SqlTransaction? activeTransaction;
+    private readonly AsyncLocal<bool> batchFallbackScope = new();
+    private readonly AsyncLocal<bool> writeExecutionScope = new();
     private bool closed;
 
     /// <summary>
@@ -1380,22 +1382,31 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
     private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchFallback(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         var outcomes = new List<RowWriteOutcome>(writes.Count);
-        foreach (var write in writes)
+        var previousScope = batchFallbackScope.Value;
+        batchFallbackScope.Value = true;
+        try
         {
-            outcomes.Add(new RowWriteOutcome(write, write.Mode switch
+            foreach (var write in writes)
             {
-                RowWriteMode.Insert => await InsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Update => await UpdateAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
-                    await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Upsert => await UpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.ConditionalUpsert => await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.Delete => await DeleteAsync(write.Key!, write.Options, mode).ConfigureAwait(false),
-                RowWriteMode.CompareAndDelete => await CompareAndDeleteAsync(write.Key!, write.ExpectedValues, write.Options, mode).ConfigureAwait(false),
-                _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
-            }));
+                outcomes.Add(new RowWriteOutcome(write, write.Mode switch
+                {
+                    RowWriteMode.Insert => await InsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Update => await UpdateAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
+                        await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Upsert => await UpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.ConditionalUpsert => await ConditionalUpsertAsync(write.Values!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.Delete => await DeleteAsync(write.Key!, write.Options, mode).ConfigureAwait(false),
+                    RowWriteMode.CompareAndDelete => await CompareAndDeleteAsync(write.Key!, write.ExpectedValues, write.Options, mode).ConfigureAwait(false),
+                    _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
+                }));
+            }
+            return outcomes;
         }
-        return outcomes;
+        finally
+        {
+            batchFallbackScope.Value = previousScope;
+        }
     }
 
     private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
@@ -1941,13 +1952,14 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
     {
         // Reads take the connection gate for the same reason writes do: a cached session is shared by
         // concurrent callers, and a colliding read is what SqlClient reports as "already an open
-        // DataReader". A session inside a unit of work already holds its transaction's exclusive use.
-        using var lease = transaction is null
-            ? await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false)
-            : null;
+        // DataReader". A session inside a unit of work already holds its transaction's exclusive use. An
+        // owned session has an independent connection, and a batch fallback marks its own logical scope.
+        using var lease = ownsConnection || transaction is not null || batchFallbackScope.Value
+            ? null
+            : await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false);
         try
         {
-            if (transaction is not null) return await operation().ConfigureAwait(false);
+            if (transaction is not null || batchFallbackScope.Value) return await operation().ConfigureAwait(false);
             owner.ThrowIfDisposed();
             return await operation().ConfigureAwait(false);
         }
@@ -1960,31 +1972,40 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
     private async ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
-        if (transaction is not null) return await Translate(operation).ConfigureAwait(false);
+        if (closed)
+            throw new ObjectDisposedException(nameof(SqlServerStorageSession));
+        if (transaction is not null || batchFallbackScope.Value)
+            return await Translate(operation).ConfigureAwait(false);
         // The connection gate is a non-reentrant semaphore, so a nested write must be refused
-        // before it is asked for; waiting on a permit this call already holds would never return.
+        // before it is asked for; a batch fallback is the intentional exception and reuses its active
+        // transaction above instead of waiting on a permit this call already holds.
+        if (writeExecutionScope.Value)
+            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
+        using var lease = ownsConnection
+            ? null
+            : await owner.EnterGate(mode).ConfigureAwait(false);
+        owner.ThrowIfDisposed();
         WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        using (await owner.EnterGate(mode).ConfigureAwait(false))
+        var writeTransaction = (SqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.Serializable).ConfigureAwait(false);
+        activeTransaction = writeTransaction;
+        var previousScope = writeExecutionScope.Value;
+        writeExecutionScope.Value = true;
+        try
         {
-            owner.ThrowIfDisposed();
-            var writeTransaction = (SqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.Serializable).ConfigureAwait(false);
-            activeTransaction = writeTransaction;
-            try
-            {
-                var result = await Translate(operation).ConfigureAwait(false);
-                await mode.Commit(writeTransaction).ConfigureAwait(false);
-                return result;
-            }
-            catch (Exception failure)
-            {
-                await WriteFailureCleanup.Run(failure, () => mode.Rollback(writeTransaction)).ConfigureAwait(false);
-                throw;
-            }
-            finally
-            {
-                activeTransaction = null;
-                await mode.Dispose(writeTransaction).ConfigureAwait(false);
-            }
+            var result = await Translate(operation).ConfigureAwait(false);
+            await mode.Commit(writeTransaction).ConfigureAwait(false);
+            return result;
+        }
+        catch (Exception failure)
+        {
+            await WriteFailureCleanup.Run(failure, () => mode.Rollback(writeTransaction)).ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            writeExecutionScope.Value = previousScope;
+            activeTransaction = null;
+            await mode.Dispose(writeTransaction).ConfigureAwait(false);
         }
     }
 

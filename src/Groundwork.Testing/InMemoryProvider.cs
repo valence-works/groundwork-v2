@@ -84,7 +84,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
-        return new InMemoryStorageSession(database, state, access, liveState: true, observer: observer);
+        return new InMemoryStorageSession(database, state, access, liveState: true, providerConnection: this, observer: observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
