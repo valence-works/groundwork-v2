@@ -120,9 +120,11 @@ def closing_issue_numbers(
 ) -> frozenset[int]:
     """Return issue numbers explicitly closed by open PRs in ``repository``.
 
-    The API query is scoped to open pull requests, but checking ``state`` here
-    keeps the pure function correct for fixtures and callers that pass a mixed
-    collection.  Cross-repository references are ignored.
+    GitHub recognizes closing keywords in a pull-request body and in commit
+    messages that will be merged.  The API query is scoped to open pull
+    requests, but checking ``state`` here keeps the pure function correct for
+    fixtures and callers that pass a mixed collection.  Cross-repository
+    references are ignored.
     """
 
     numbers: set[int] = set()
@@ -132,10 +134,20 @@ def closing_issue_numbers(
         pull_request_repository = _pull_request_repository(pull_request)
         if pull_request_repository is not None and pull_request_repository.casefold() != repository.casefold():
             continue
-        text = pull_request.get("body")
-        if not isinstance(text, str):
-            continue
-        numbers.update(_closing_references(text, repository))
+        body = pull_request.get("body")
+        if isinstance(body, str):
+            numbers.update(_closing_references(body, repository))
+        for commit in pull_request.get("commits") or ():
+            if not isinstance(commit, Mapping):
+                continue
+            commit_data = commit.get("commit")
+            message = (
+                commit_data.get("message")
+                if isinstance(commit_data, Mapping)
+                else commit.get("message")
+            )
+            if isinstance(message, str):
+                numbers.update(_closing_references(message, repository))
     return frozenset(numbers)
 
 
@@ -299,7 +311,20 @@ class GitHubClient:
         return [issue for issue in issues if "pull_request" not in issue]
 
     def list_open_pull_requests(self, repository: str) -> list[Mapping[str, Any]]:
-        return self.get_pages(f"/repos/{repository}/pulls", state="open", sort="updated", direction="desc")
+        pull_requests = self.get_pages(
+            f"/repos/{repository}/pulls", state="open", sort="updated", direction="desc"
+        )
+        enriched: list[Mapping[str, Any]] = []
+        for pull_request in pull_requests:
+            number = pull_request.get("number")
+            if not isinstance(number, int):
+                enriched.append(pull_request)
+                continue
+            commits = self.get_pages(f"/repos/{repository}/pulls/{number}/commits")
+            enriched_pull_request = dict(pull_request)
+            enriched_pull_request["commits"] = commits
+            enriched.append(enriched_pull_request)
+        return enriched
 
     def get_project_snapshot(self, organization: str, project_number: int) -> Mapping[str, Any]:
         query = """

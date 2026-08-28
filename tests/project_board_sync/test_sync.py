@@ -117,6 +117,28 @@ class ClosingPullRequestTests(unittest.TestCase):
             ),
         )
 
+    def test_commit_only_closing_keyword_counts(self):
+        pull_requests = [
+            {
+                "state": "open",
+                "base": {"repo": {"full_name": REPOSITORY}},
+                "body": "",
+                "commits": [{"commit": {"message": "Fixes #17\n\nImplement it."}}],
+            }
+        ]
+        self.assertEqual({17}, set(closing_issue_numbers(pull_requests)))
+        self.assertEqual(
+            [("status", 17, IN_PROGRESS, "existing-17", None)],
+            [
+                (a.kind, a.issue_number, a.status, a.item_id, a.content_id)
+                for a in build_sync_plan(
+                    [issue(17)],
+                    pull_requests,
+                    [project_issue_item(17, TODO, item_id="existing-17")],
+                )
+            ],
+        )
+
 
 class PlanTests(unittest.TestCase):
     def test_plan_adds_missing_issue_and_updates_only_stale_in_scope_item(self):
