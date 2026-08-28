@@ -1650,6 +1650,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     private T Execute<T>(Func<T> operation)
     {
+        ThrowIfClosed();
         try
         {
             if (transaction is not null) return operation();

@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using System.Reflection;
 using Groundwork.Kernel;
+using Groundwork.Query.Model;
 using Groundwork.Sqlite;
 using Groundwork.Store;
 using Xunit;
@@ -175,6 +176,14 @@ public sealed class SqliteTransactionCleanupTests
         // refused by the session lifecycle before it can touch a retired connection.
         var unusable = Assert.Throws<ObjectDisposedException>(() => session.Insert(values));
         Assert.Equal("SqliteStorageSession", unusable.ObjectName);
+        var request = new QueryRequest(
+            new TableId(unit.Name),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+        Assert.Throws<ObjectDisposedException>(() => session.Query(request));
+        Assert.Throws<ObjectDisposedException>(() => session.QueryAsync(request).GetAwaiter().GetResult());
         AssertMarkerMissing(store.ConnectionString);
     }
 
