@@ -77,6 +77,64 @@ public sealed class AdHocAggregationTests
         Assert.Contains(expiry.Errors, error => error.Code == "GW-AGG-ADHOC-002");
     }
 
+    [Fact]
+    public void Ad_hoc_query_enforces_acceptance_group_and_input_budgets()
+    {
+        var unit = Unit();
+        var rows = new[] { Row("a", 1), Row("b", 2) };
+        var acceptance = AggregationAcceptance.Allow(
+            "GW-AGG-0004", "bounded report", "operations", DateTimeOffset.UtcNow.AddDays(1),
+            maxGroups: 1, maxInputRows: 10);
+        var groups = AggregationQuery.ForAdHoc("budgeted", ["team"], [new Aggregate.Count("count")], acceptance);
+
+        var groupOverflow = Assert.Throws<AggregationBudgetExceededException>(() =>
+            AggregationExecutor.Execute(unit, rows, groups));
+        Assert.Equal("GW-AGG-BOUND-005", groupOverflow.Code);
+
+        var rowBound = AggregationAcceptance.Allow(
+            "GW-AGG-0006", "bounded input report", "operations", DateTimeOffset.UtcNow.AddDays(1),
+            maxGroups: 10, maxInputRows: 1);
+        var rowsQuery = AggregationQuery.ForAdHoc("budgeted", ["team"], [new Aggregate.Count("count")], rowBound);
+        var inputOverflow = Assert.Throws<AggregationBudgetExceededException>(() =>
+            AggregationExecutor.Execute(unit, rows, rowsQuery));
+        Assert.Equal("GW-AGG-BOUND-004", inputOverflow.Code);
+    }
+
+    [Fact]
+    public void Ad_hoc_aliases_use_portable_identifier_and_reserved_name_refusals()
+    {
+        var unit = Unit();
+        var acceptance = AggregationAcceptance.Allow(
+            "GW-AGG-0005", "alias validation", "operations", DateTimeOffset.UtcNow.AddDays(1), 10, 10);
+        var tooLong = AggregationQuery.ForAdHoc(
+            "invalid-aliases", [new AggregationGroup.Column("team")],
+            [new Aggregate.Count(new string('x', PortabilityValidator.MaximumPortableIdentifierLength + 1))], acceptance);
+        var lengthError = Assert.Throws<AggregationValidationException>(() =>
+            AggregationExecutor.Execute(unit, [Row("a", 1)], tooLong));
+        Assert.Contains(lengthError.Errors, error => error.Code == "GW-PORT-010");
+
+        var tooLongGroup = AggregationQuery.ForAdHoc(
+            "invalid-aliases", [new AggregationGroup.Column(new string('x', PortabilityValidator.MaximumPortableIdentifierLength + 1))],
+            [new Aggregate.Count("count")], acceptance);
+        var groupLengthError = Assert.Throws<AggregationValidationException>(() =>
+            AggregationExecutor.Execute(unit, [Row("a", 1)], tooLongGroup));
+        Assert.Contains(groupLengthError.Errors, error => error.Code == "GW-PORT-010");
+
+        var reserved = AggregationQuery.ForAdHoc(
+            "invalid-aliases", [new AggregationGroup.Column("__groundwork_aggregation_group")],
+            [new Aggregate.Count("count")], acceptance);
+        var reservedError = Assert.Throws<AggregationValidationException>(() =>
+            AggregationExecutor.Execute(unit, [Row("a", 1)], reserved));
+        Assert.Contains(reservedError.Errors, error => error.Code == "GW-AGG-DECL-009");
+
+        var reservedAggregate = AggregationQuery.ForAdHoc(
+            "invalid-aliases", [new AggregationGroup.Column("team")],
+            [new Aggregate.Count("__groundwork_aggregation_count")], acceptance);
+        var reservedAggregateError = Assert.Throws<AggregationValidationException>(() =>
+            AggregationExecutor.Execute(unit, [Row("a", 1)], reservedAggregate));
+        Assert.Contains(reservedAggregateError.Errors, error => error.Code == "GW-AGG-DECL-010");
+    }
+
     private static StorageUnit Unit() => new()
     {
         Id = new StorageUnitId("adhoc-aggregation"),

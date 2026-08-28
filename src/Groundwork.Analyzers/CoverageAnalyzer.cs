@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Collections.Concurrent;
+using System.Globalization;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
 using Microsoft.CodeAnalysis;
@@ -38,7 +40,11 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             AnalyzerDiagnostics.For("GW-COVER-902"),
             AnalyzerDiagnostics.For("GW-COVER-903"),
             AnalyzerDiagnostics.For("GW-COVER-904"),
-            AnalyzerDiagnostics.For("GW-COVER-905")
+            AnalyzerDiagnostics.For("GW-COVER-905"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-902"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-903"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-904"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-905")
         ];
 
     public override void Initialize(AnalysisContext context)
@@ -49,11 +55,127 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         {
             var schema = AnalyzerSchema.Read(start.Compilation, start.Options);
             var acceptedScansEnabled = HasAcceptedScanOptIn(start.Compilation);
+            var acceptedAggregationsEnabled = HasAcceptedAggregationOptIn(start.Compilation);
+            var aggregationInventory = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
             start.RegisterSyntaxNodeAction(
                 action => AnalyzeInvocation(action, schema, acceptedScansEnabled),
                 Microsoft.CodeAnalysis.CSharp.SyntaxKind.InvocationExpression);
+            start.RegisterSyntaxNodeAction(
+                action => AnalyzeAggregationAcceptance(
+                    action, acceptedAggregationsEnabled, aggregationInventory),
+                Microsoft.CodeAnalysis.CSharp.SyntaxKind.InvocationExpression);
         });
     }
+
+    private void AnalyzeAggregationAcceptance(
+        SyntaxNodeAnalysisContext context,
+        bool acceptedAggregationsEnabled,
+        ConcurrentDictionary<string, byte> inventory)
+    {
+        if (context.Node is not InvocationExpressionSyntax invocation ||
+            context.SemanticModel.GetSymbolInfo(invocation, context.CancellationToken).Symbol is not IMethodSymbol method ||
+            method.Name != "Allow" ||
+            method.ContainingType?.ToDisplayString() != "Groundwork.Kernel.AggregationAcceptance")
+            return;
+
+        var location = invocation.GetLocation();
+        var arguments = invocation.ArgumentList.Arguments;
+        var id = ConstantString(arguments, 0);
+        if (id is null)
+            return;
+        if (!acceptedAggregationsEnabled)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-902"),
+                location,
+                "GW-AGG-ADHOC-902: AggregationAcceptance '" + id +
+                "' requires [assembly: GwAllowAcceptedAggregations]."));
+        }
+
+        if (!inventory.TryAdd(id, 0))
+            return;
+        var reason = ConstantString(arguments, 1) ?? "<runtime>";
+        var owner = ConstantString(arguments, 2) ?? "<runtime>";
+        var expiry = TryGetDate(arguments, 3);
+        if (expiry is DateTimeOffset expiresOn)
+        {
+            if (NormalizeDate(clock()) >= expiresOn)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    AnalyzerDiagnostics.For("GW-AGG-ADHOC-903"),
+                    location,
+                    "GW-AGG-ADHOC-903: accepted aggregation '" + id + "' expired on " +
+                    expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "."));
+            }
+            else if (expiresOn - NormalizeDate(clock()) <= TimeSpan.FromDays(30))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    AnalyzerDiagnostics.For("GW-AGG-ADHOC-904"),
+                    location,
+                    "GW-AGG-ADHOC-904: accepted aggregation '" + id + "' expires on " +
+                    expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) +  "."));
+            }
+        }
+
+        if (acceptedAggregationsEnabled)
+        {
+            var groups = ConstantInt(arguments, 4);
+            var inputRows = ConstantInt(arguments, 5);
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-905"),
+                location,
+                "GW-AGG-ADHOC-905: accepted aggregation '" + id + "' reason='" + reason +
+                "' owner='" + owner + "' expiresOn='" +
+                (expiry?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "<runtime>") +
+                "' maxGroups='" + (groups?.ToString(CultureInfo.InvariantCulture) ?? "<runtime>") +
+                "' maxInputRows='" + (inputRows?.ToString(CultureInfo.InvariantCulture) ?? "<runtime>") + "'."));
+        }
+    }
+
+    private static string? ConstantString(
+        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        int index) => arguments.Count > index &&
+            arguments[index].Expression is LiteralExpressionSyntax literal &&
+            literal.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralExpression)
+            ? literal.Token.ValueText
+            : null;
+
+    private static int? ConstantInt(
+        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        int index)
+    {
+        if (arguments.Count <= index || arguments[index].Expression is not LiteralExpressionSyntax literal ||
+            !literal.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NumericLiteralExpression))
+            return null;
+        return literal.Token.Value is int value ? value : null;
+    }
+
+    private static DateTimeOffset? TryGetDate(
+        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        int index)
+    {
+        if (arguments.Count <= index || arguments[index].Expression is not ObjectCreationExpressionSyntax creation ||
+            creation.ArgumentList is not { Arguments.Count: >= 3 } argumentList)
+            return null;
+        var values = argumentList.Arguments.Take(3)
+            .Select(argument => argument.Expression is LiteralExpressionSyntax literal &&
+                                literal.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NumericLiteralExpression) &&
+                                literal.Token.Value is int value ? (int?)value : null)
+            .ToArray();
+        if (values.Any(value => value is null))
+            return null;
+        try
+        {
+            return new DateTimeOffset(values[0]!.Value, values[1]!.Value, values[2]!.Value, 0, 0, 0, TimeSpan.Zero);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static DateTimeOffset NormalizeDate(DateTimeOffset value) =>
+        new(value.Year, value.Month, value.Day, 0, 0, 0, TimeSpan.Zero);
 
     private void AnalyzeInvocation(
         SyntaxNodeAnalysisContext context,
@@ -169,6 +291,13 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             string.Equals(
                 attribute.AttributeClass?.ToDisplayString(),
                 "Groundwork.Query.Model.GwAllowAcceptedScansAttribute",
+                StringComparison.Ordinal));
+
+    private static bool HasAcceptedAggregationOptIn(Compilation compilation) =>
+        compilation.Assembly.GetAttributes().Any(attribute =>
+            string.Equals(
+                attribute.AttributeClass?.ToDisplayString(),
+                "Groundwork.Kernel.GwAllowAcceptedAggregationsAttribute",
                 StringComparison.Ordinal));
 
     private static bool IsTerminal(string name) => QueryResolver.TerminalNames.Contains(name);

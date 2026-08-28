@@ -3,8 +3,10 @@ using System.Diagnostics;
 using System.Text;
 using Groundwork.Analyzers;
 using Groundwork.Schema;
+using Groundwork.Kernel;
 using Groundwork.Query.Linq.Fragments;
 using Groundwork.Query.Linq;
+using Groundwork.Query.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CodeActions;
 using Microsoft.CodeAnalysis.CodeFixes;
@@ -451,6 +453,36 @@ public sealed class CoverageAnalyzerTests
         Assert.Contains(error, item => item.Id == "GW_COVER_905" && item.Severity == DiagnosticSeverity.Info);
     }
 
+    [Fact]
+    public async Task Accepted_aggregation_emits_inventory_and_expiry_diagnostics()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0007\", \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var warning = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+        var inventory = Assert.Single(warning.Where(item => item.Id == "GW_AGG_ADHOC_905"));
+        Assert.Contains("GW-AGG-0007", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("admin report", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("billing", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains(warning, item => item.Id == "GW_AGG_ADHOC_904" && item.Severity == DiagnosticSeverity.Warning);
+
+        var expired = await Analyze(source, now: new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        Assert.Contains(expired, item => item.Id == "GW_AGG_ADHOC_903" && item.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(expired, item => item.Id == "GW_AGG_ADHOC_905" && item.Severity == DiagnosticSeverity.Info);
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_without_assembly_opt_in_is_a_build_error()
+    {
+        var source = WithSchema("{\"tables\":[]}") +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0008\", \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_902");
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
     private static async Task<ImmutableArray<Diagnostic>> Analyze(
         string source,
         AdditionalText? additional = null,
@@ -516,6 +548,8 @@ public sealed class CoverageAnalyzerTests
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
         return paths
             .Concat([typeof(GroundworkSchemaAttribute).Assembly.Location])
+            .Concat([typeof(ScanAcceptance).Assembly.Location])
+            .Concat([typeof(AggregationAcceptance).Assembly.Location])
             .Concat([typeof(GwQueryTable<>).Assembly.Location])
             .Concat([typeof(ExternalFragments).Assembly.Location])
             .Where(File.Exists)
@@ -523,12 +557,16 @@ public sealed class CoverageAnalyzerTests
             .Select(path => MetadataReference.CreateFromFile(path));
     }
 
-    private static string WithSchema(string schema, bool allowAcceptedScans = false)
+    private static string WithSchema(
+        string schema,
+        bool allowAcceptedScans = false,
+        bool allowAcceptedAggregations = false)
     {
         var document = GroundworkSchemaCanonical.Parse(schema);
         var fingerprint = GroundworkSchemaCanonical.Fingerprint(document);
         return "using Groundwork.Schema; using Groundwork.Query.Model; " +
                (allowAcceptedScans ? "[assembly: GwAllowAcceptedScans] " : string.Empty) +
+               (allowAcceptedAggregations ? "[assembly: Groundwork.Kernel.GwAllowAcceptedAggregations] " : string.Empty) +
                "[assembly: GroundworkSchema(" + Literal(schema) + ", " + Literal(fingerprint) + ")]\n";
     }
 

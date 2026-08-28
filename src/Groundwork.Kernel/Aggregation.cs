@@ -271,6 +271,12 @@ public sealed record AggregationAcceptance
         new(value.Year, value.Month, value.Day, 0, 0, 0, TimeSpan.Zero);
 }
 
+/// <summary>Opts an assembly into explicit, attributed accepted-aggregation diagnostics.</summary>
+[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = false, Inherited = false)]
+public sealed class GwAllowAcceptedAggregationsAttribute : Attribute
+{
+}
+
 /// <summary>
 /// A bounded, named aggregation shape.  A caller can select this shape by name but cannot submit
 /// an arbitrary aggregate expression.
@@ -873,6 +879,7 @@ public static class AggregationProfileValidator
                 }
                 if (group.Alias.StartsWith("__groundwork_aggregation_", StringComparison.Ordinal))
                     Add("GW-AGG-DECL-009", $"Group-by alias '{group.Alias}' uses a reserved aggregation alias.", paths + ".groupByExpressions");
+                AddPortabilityRefusals(group.Alias, paths + ".groupByExpressions." + group.Alias);
                 switch (group)
                 {
                     case AggregationGroup.Column column when !columns.ContainsKey(column.Alias):
@@ -917,6 +924,7 @@ public static class AggregationProfileValidator
                     Add("GW-AGG-DECL-004", "Aggregate aliases are required.", paths + ".aggregates");
                 if (aggregate.Alias.StartsWith("__groundwork_aggregation_", StringComparison.Ordinal))
                     Add("GW-AGG-DECL-010", $"Aggregate alias '{aggregate.Alias}' uses a reserved name.", paths + ".aggregates");
+                AddPortabilityRefusals(aggregate.Alias, paths + ".aggregates." + aggregate.Alias);
                 if (groups.Any(group => string.Equals(group.Alias, aggregate.Alias, StringComparison.Ordinal)))
                     Add("GW-AGG-DECL-005", $"Aggregate alias '{aggregate.Alias}' collides with a group-by column.", paths + ".aggregates");
                 switch (aggregate)
@@ -985,6 +993,11 @@ public static class AggregationProfileValidator
             throw new AggregationValidationException(errors);
 
         void Add(string code, string message, string path) => errors.Add(new(code, message, path));
+        void AddPortabilityRefusals(string identifier, string path)
+        {
+            foreach (var refusal in PortabilityValidator.ValidatePhysicalIdentifier(identifier, path).Refusals)
+                Add(refusal.Code, refusal.Message, refusal.Path);
+        }
         void AddDuplicateErrors(IEnumerable<string> values, string kind, string path)
         {
             foreach (var duplicate in values.GroupBy(value => value, StringComparer.Ordinal).Where(group => group.Count() > 1))

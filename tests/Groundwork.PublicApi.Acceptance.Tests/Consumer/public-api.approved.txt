@@ -8,6 +8,7 @@ Groundwork.Kernel.StorageDeclarationBuilder
 Groundwork.Kernel.PortabilityValidator
 Groundwork.Kernel.AggregationOrderTerm
 Groundwork.Kernel.AggregationAcceptance
+Groundwork.Kernel.GwAllowAcceptedAggregationsAttribute
 Groundwork.Kernel.AggregationQuery
 Groundwork.Kernel.AggregationGroup
 Groundwork.Kernel.AggregationGroup.Column

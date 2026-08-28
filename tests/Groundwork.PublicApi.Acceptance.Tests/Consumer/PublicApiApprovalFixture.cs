@@ -28,6 +28,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(PortabilityValidator);
         _ = typeof(AggregationOrderTerm);
         _ = typeof(AggregationAcceptance);
+        _ = typeof(GwAllowAcceptedAggregationsAttribute);
         _ = typeof(AggregationQuery);
         _ = typeof(AggregationGroup);
         _ = typeof(AggregationGroup.Column);

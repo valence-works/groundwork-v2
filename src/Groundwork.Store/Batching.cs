@@ -834,6 +834,7 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
 
     public AggregationResult Aggregate(AggregationQuery query)
     {
+        ValidateAggregation(query);
         context.FlushAll();
         return inner.Aggregate(query);
     }
@@ -842,8 +843,16 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
         AggregationQuery query,
         CancellationToken cancellationToken = default)
     {
+        ValidateAggregation(query);
         await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
         return await inner.AggregateAsync(query, cancellationToken).ConfigureAwait(false);
+    }
+
+    private void ValidateAggregation(AggregationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
+        AggregationExecutor.ValidateQuery(Unit, profile, query);
     }
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);

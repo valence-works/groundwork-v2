@@ -242,6 +242,11 @@ Aggregation diagnostics are grouped by concern: `GW-AGG-DECL-*` (declaration), `
 `GW-AGG-GROUP-*` (grouping), `GW-AGG-BOUND-*` (budgets), `GW-AGG-TYPE-*` / `GW-AGG-COLUMN-*` /
 `GW-AGG-SUM-001` / `GW-AGG-FIRST-001` (reducers). See **[Diagnostics Reference](Diagnostics-Reference)**.
 
+Accepted ad-hoc aggregation values are inventoried by the coverage analyzer when the assembly opts
+in with `[assembly: GwAllowAcceptedAggregations]`. The analyzer emits `GW-AGG-ADHOC-905` inventory
+records, warns with `GW-AGG-ADHOC-904` during the final 30 days, and errors with
+`GW-AGG-ADHOC-903` after expiry; `GW-AGG-ADHOC-902` refuses an acceptance without the opt-in.
+
 ## Next
 
 - **[Streams: Append & Retention](Streams-Append-and-Retention)** — the stream this usually summarizes

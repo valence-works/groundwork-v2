@@ -64,6 +64,38 @@ public sealed class AggregationConformanceTests
     }
 
     [Fact]
+    public void Accepted_ad_hoc_aggregation_keeps_scope_and_privileged_refusals()
+    {
+        using var connection = new InMemoryProviderFactory().Create("aggregation-adhoc-access-" + Guid.NewGuid().ToString("N"));
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation_adhoc_access"),
+            Name = "aggregation_adhoc_access",
+            Scope = ScopePolicy.Scoped,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "team", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var acceptance = AggregationAcceptance.Allow(
+            "GW-AGG-0011", "scoped support report", "operations", DateTimeOffset.UtcNow.AddDays(1), 5, 10);
+        var query = AggregationQuery.ForAdHoc(
+            "scoped-summary", ["team"], [new Aggregate.Count("count")], acceptance);
+        var scoped = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        Assert.Equal(WriteOutcomeStatus.Inserted, scoped.Insert(new StorageValues(
+            new Dictionary<string, object?> { ["id"] = 1L, ["team"] = "a" })).Status);
+        Assert.Equal(1L, Assert.Single(scoped.Aggregate(query).Rows)["count"]);
+
+        var privileged = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("operator", "audit")));
+        var refusal = Assert.Throws<InvalidOperationException>(() => privileged.Aggregate(query));
+        Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SQLite_native_aggregation_is_bit_identical_to_the_portable_oracle()
     {
         var directory = Path.Combine(Path.GetTempPath(), "groundwork-aggregation-" + Guid.NewGuid().ToString("N"));
