@@ -116,7 +116,9 @@ def _closing_references(text: str, repository: str) -> set[int]:
 
 
 def closing_issue_numbers(
-    pull_requests: Iterable[Mapping[str, Any]], repository: str = DEFAULT_REPOSITORY
+    pull_requests: Iterable[Mapping[str, Any]],
+    repository: str = DEFAULT_REPOSITORY,
+    default_branch: Optional[str] = None,
 ) -> frozenset[int]:
     """Return issue numbers explicitly closed by open PRs in ``repository``.
 
@@ -124,7 +126,8 @@ def closing_issue_numbers(
     messages that will be merged.  The API query is scoped to open pull
     requests, but checking ``state`` here keeps the pure function correct for
     fixtures and callers that pass a mixed collection.  Cross-repository
-    references are ignored.
+    references are ignored.  When ``default_branch`` is supplied, only PRs
+    targeting that branch can contribute closing references.
     """
 
     numbers: set[int] = set()
@@ -134,6 +137,11 @@ def closing_issue_numbers(
         pull_request_repository = _pull_request_repository(pull_request)
         if pull_request_repository is not None and pull_request_repository.casefold() != repository.casefold():
             continue
+        if default_branch is not None:
+            base = pull_request.get("base")
+            base_ref = base.get("ref") if isinstance(base, Mapping) else None
+            if not isinstance(base_ref, str) or base_ref.casefold() != default_branch.casefold():
+                continue
         body = pull_request.get("body")
         if isinstance(body, str):
             numbers.update(_closing_references(body, repository))
@@ -211,11 +219,12 @@ def build_sync_plan(
     pull_requests: Iterable[Mapping[str, Any]],
     project_items: Iterable[Mapping[str, Any]],
     repository: str = DEFAULT_REPOSITORY,
+    default_branch: Optional[str] = None,
 ) -> tuple[SyncAction, ...]:
     """Plan additions and status updates without mutating GitHub."""
 
     selected = roadmap_issues(issues, repository)
-    closing_numbers = closing_issue_numbers(pull_requests, repository)
+    closing_numbers = closing_issue_numbers(pull_requests, repository, default_branch)
     existing: dict[tuple[str, int], Mapping[str, Any]] = {}
     for item in project_items:
         key = _item_issue_key(item, repository)
@@ -325,6 +334,13 @@ class GitHubClient:
             enriched_pull_request["commits"] = commits
             enriched.append(enriched_pull_request)
         return enriched
+
+    def get_default_branch(self, repository: str) -> str:
+        payload = self._request("GET", f"{self._api_url}/repos/{repository}")
+        default_branch = payload.get("default_branch") if isinstance(payload, Mapping) else None
+        if not isinstance(default_branch, str) or not default_branch:
+            raise GitHubError(f"GitHub repository {repository} has no default branch")
+        return default_branch
 
     def get_project_snapshot(self, organization: str, project_number: int) -> Mapping[str, Any]:
         query = """
@@ -505,9 +521,16 @@ def reconcile(
     dry_run: bool = False,
 ) -> int:
     issues = client.list_roadmap_issues(repository)
+    default_branch = client.get_default_branch(repository)
     pull_requests = client.list_open_pull_requests(repository)
     project = client.get_project_snapshot(organization, project_number)
-    actions = build_sync_plan(issues, pull_requests, project["items"], repository)
+    actions = build_sync_plan(
+        issues,
+        pull_requests,
+        project["items"],
+        repository,
+        default_branch,
+    )
     _print_plan(actions, dry_run)
     if dry_run:
         return 0

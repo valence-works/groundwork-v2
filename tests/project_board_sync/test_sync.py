@@ -139,6 +139,32 @@ class ClosingPullRequestTests(unittest.TestCase):
             ],
         )
 
+    def test_non_default_base_closers_do_not_count(self):
+        pull_requests = [
+            {
+                "state": "open",
+                "base": {
+                    "ref": "release/2.0",
+                    "repo": {"full_name": REPOSITORY},
+                },
+                "body": "Fixes #18",
+                "commits": [{"commit": {"message": "Fixes #19"}}],
+            },
+            {
+                "state": "open",
+                "base": {
+                    "ref": "main",
+                    "repo": {"full_name": REPOSITORY},
+                },
+                "body": "Fixes #20",
+                "commits": [{"commit": {"message": "Fixes #21"}}],
+            },
+        ]
+        self.assertEqual(
+            {20, 21},
+            set(closing_issue_numbers(pull_requests, default_branch="main")),
+        )
+
 
 class PlanTests(unittest.TestCase):
     def test_plan_adds_missing_issue_and_updates_only_stale_in_scope_item(self):
