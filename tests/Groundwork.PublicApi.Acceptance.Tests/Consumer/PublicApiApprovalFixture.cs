@@ -52,6 +52,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RetentionExecutionOptions);
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
+        _ = typeof(SetMutationOptions);
         _ = typeof(ISetMutationStorageSession);
         _ = typeof(SetMutationResult);
         _ = typeof(StorageAccess);
@@ -96,6 +97,14 @@ internal static class PublicApiApprovalFixture
         _ = new Func<IStorageSession, OperationId, RetentionExecutionOptions, RetentionOperationResult>(
             (session, operation, options) => session.ApplyRetention(operation, options));
         _ = new RetentionExecutionOptions { KeepNewestOverride = 0 };
+        _ = new Func<SetMutationOptions>(() => new SetMutationOptions
+        {
+            AcceptedScan = ScanAcceptance.Allow(
+                "GW-SET-API",
+                "clean-room public API approval",
+                "groundwork",
+                DateTimeOffset.UtcNow.AddMinutes(5))
+        });
         _ = new Func<IStorageSession, StorageInspection>(session => session.Inspect());
         _ = new Func<StorageAccessAudit, StorageAccess>(StorageAccess.PrivilegedAcrossScopes);
         _ = new Func<IStorageSession, QueryRequest, CrossScopeQueryResult>(
