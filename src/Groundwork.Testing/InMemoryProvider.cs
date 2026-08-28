@@ -279,7 +279,10 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         var history = Executor.ReadHistory(target.Identity, lease);
         ValidateUnplannedChanges(history.AppliedState?.Snapshot.Subject.Definition, physical);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(Describe(plan.Operations, history.AppliedState?.Snapshot.Subject.Definition, physical));
+        return new SchemaDiff(SchemaChangeMapping.Describe(
+            plan.Operations,
+            plan.PreviousDefinition,
+            physical));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -292,7 +295,10 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
             ValidateUnplannedChanges(previous, physical);
             var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, Executor);
             return new SchemaApplyResult(
-                new SchemaDiff(Describe(result.Plan.Operations, previous, physical)),
+                new SchemaDiff(SchemaChangeMapping.Describe(
+                    result.Plan.Operations,
+                    result.Plan.PreviousDefinition,
+                    physical)),
                 result.Outcome == PhysicalSchemaApplicationOutcome.Applied);
         }
     }
@@ -358,28 +364,6 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         return unit.Key.Columns.Select(column => columns[column].LogicalId).ToArray();
     }
 
-    private static IReadOnlyList<SchemaChange> Describe(
-        IEnumerable<PhysicalSchemaOperation> operations,
-        StorageUnit? previous,
-        StorageUnit desired)
-    {
-        var changes = SchemaChangeMapping.Describe(operations).ToList();
-        var previousProfiles = previous?.AggregationProfiles
-            .ToDictionary(profile => profile.Name, StringComparer.Ordinal) ?? [];
-        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
-        changes.AddRange(desiredProfiles.Values
-            .Where(profile =>
-                !previousProfiles.TryGetValue(profile.Name, out var prior) ||
-                !string.Equals(
-                    AggregationProfileCanonicalization.Canonicalize(prior),
-                    AggregationProfileCanonicalization.Canonicalize(profile),
-                    StringComparison.Ordinal))
-            .Select(profile => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, profile.Name)));
-        changes.AddRange(previousProfiles.Keys
-            .Where(name => !desiredProfiles.ContainsKey(name))
-            .Select(name => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, name)));
-        return changes;
-    }
 }
 
 internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database)

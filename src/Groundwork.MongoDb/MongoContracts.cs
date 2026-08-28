@@ -437,6 +437,10 @@ public sealed class MongoSchemaConflictException : InvalidOperationException
     public MongoSchemaConflictException(string message) : base(message)
     {
     }
+
+    internal MongoSchemaConflictException(SchemaRefusal refusal) : base(refusal.Message) => Refusal = refusal;
+
+    internal SchemaRefusal? Refusal { get; }
 }
 
 /// <summary>

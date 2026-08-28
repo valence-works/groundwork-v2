@@ -149,6 +149,14 @@ generated. A foreign column a write that omits it would fail on stays `GW-RUNTIM
 policy makes it writable. Nothing else about drift changes: a declared column that differs, a
 missing column, and index drift are unaffected.
 
+## `GW-MONGO-*` — MongoDB stable declarations
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `GW-MONGO-001` | MongoDB retention declaration changed non-additively after apply | Keep the applied retention declaration, or perform an explicit migration |
+| `GW-MONGO-002` | MongoDB retention idempotency declaration changed after apply | Keep the applied declaration, or perform an explicit migration |
+| `GW-MONGO-003` | MongoDB scope, concurrency, timestamp, schema-version, or append-idempotency metadata changed after apply | Keep the applied metadata, or perform an explicit migration |
+
 ---
 
 ## `GW-WRITE-CONCURRENCY-*`

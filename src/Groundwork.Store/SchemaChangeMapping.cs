@@ -1,3 +1,4 @@
+using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 
 namespace Groundwork.Store;
@@ -30,6 +31,38 @@ public static class SchemaChangeMapping
                                 not PhysicalSchemaOperationKind.ColumnSupersession)
             .Select(operation => new SchemaChange(Describe(operation), operation.SubjectIdentity))
             .ToArray();
+    }
+
+    /// <summary>
+    /// Describes physical work and declaration-only aggregation-profile changes. Profiles are part
+    /// of the kernel target fingerprint but have no physical operation, so providers that expose
+    /// schema diffs must supply the prior declaration to retain that public change vocabulary.
+    /// </summary>
+    public static IReadOnlyList<SchemaChange> Describe(
+        IEnumerable<PhysicalSchemaOperation> operations,
+        StorageUnit? previous,
+        StorageUnit desired)
+    {
+        ArgumentNullException.ThrowIfNull(desired);
+        var changes = Describe(operations).ToList();
+        var previousProfiles = previous?.AggregationProfiles
+            .ToDictionary(profile => profile.Name, StringComparer.Ordinal) ?? [];
+        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        changes.AddRange(desiredProfiles.Keys
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .Select(name => desiredProfiles[name])
+            .Where(profile =>
+                !previousProfiles.TryGetValue(profile.Name, out var prior) ||
+                !string.Equals(
+                    AggregationProfileCanonicalization.Canonicalize(prior),
+                    AggregationProfileCanonicalization.Canonicalize(profile),
+                    StringComparison.Ordinal))
+            .Select(profile => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, profile.Name)));
+        changes.AddRange(previousProfiles.Keys
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .Where(name => !desiredProfiles.ContainsKey(name))
+            .Select(name => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, name)));
+        return changes;
     }
 
     private static SchemaChangeKind Describe(PhysicalSchemaOperation operation) => operation switch

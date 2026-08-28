@@ -83,7 +83,8 @@ public static class PhysicalSchemaDiffPlanner
                 plannedAt,
                 refusals,
                 CreateSnapshot(target, desired),
-                phase: phase);
+                phase: phase,
+                previousDefinition: applied?.Snapshot.Subject.Definition);
         }
 
         var appliedIdentities = applied?.Snapshot.SemanticOperations
@@ -106,7 +107,14 @@ public static class PhysicalSchemaDiffPlanner
             .ToList();
 
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
-            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint, phase);
+            return PhysicalSchemaDiffPlan.Valid(
+                target,
+                plannedAt,
+                snapshot,
+                [],
+                applied.TargetFingerprint,
+                phase,
+                applied.Snapshot.Subject.Definition);
 
         pending.Add(new ValidatePhysicalSchemaOperation(target));
         var publish = new PublishAppliedStateOperation(target);
@@ -118,7 +126,14 @@ public static class PhysicalSchemaDiffPlanner
             publish.SemanticMigrationId = $"aggregation-profile:{target.Subject.Id.Value}";
         }
         pending.Add(publish);
-        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint, phase);
+        return PhysicalSchemaDiffPlan.Valid(
+            target,
+            plannedAt,
+            snapshot,
+            pending,
+            applied?.TargetFingerprint,
+            phase,
+            applied?.Snapshot.Subject.Definition);
     }
 
     private static bool HasAggregationProfileDrift(
@@ -159,11 +174,25 @@ public static class PhysicalSchemaDiffPlanner
                 applied.Snapshot.ProviderDefinitions));
         }
         if (applied?.TargetFingerprint == target.Fingerprint && pending.Count == 0)
-            return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint, phase);
+            return PhysicalSchemaDiffPlan.Valid(
+                target,
+                plannedAt,
+                snapshot,
+                [],
+                applied.TargetFingerprint,
+                phase,
+                applied.Snapshot.Subject.Definition);
 
         pending.Add(new ValidatePhysicalSchemaOperation(target));
         pending.Add(new PublishAppliedStateOperation(target));
-        return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint, phase);
+        return PhysicalSchemaDiffPlan.Valid(
+            target,
+            plannedAt,
+            snapshot,
+            pending,
+            applied?.TargetFingerprint,
+            phase,
+            applied?.Snapshot.Subject.Definition);
     }
 
     private static ImmutableArray<PhysicalSchemaOperation> DeriveSemanticOperations(
@@ -390,7 +419,8 @@ public sealed class PhysicalSchemaDiffPlan
         IEnumerable<PhysicalSchemaOperation> operations,
         IEnumerable<SchemaRefusal> refusals,
         string? expectedAppliedTargetFingerprint,
-        SchemaEvolutionPhase phase)
+        SchemaEvolutionPhase phase,
+        StorageUnit? previousDefinition)
     {
         Target = target;
         PlannedAt = plannedAt;
@@ -399,6 +429,7 @@ public sealed class PhysicalSchemaDiffPlan
         Refusals = refusals.ToImmutableArray();
         ExpectedAppliedTargetFingerprint = expectedAppliedTargetFingerprint;
         Phase = phase;
+        PreviousDefinition = previousDefinition;
     }
 
     public PhysicalSchemaTarget Target { get; }
@@ -413,6 +444,13 @@ public sealed class PhysicalSchemaDiffPlan
     public ImmutableArray<SchemaRefusal> Refusals { get; }
 
     public string? ExpectedAppliedTargetFingerprint { get; }
+
+    /// <summary>
+    /// The exact declaration the plan was derived against. Provider coordinators use this
+    /// immutable snapshot when describing declaration-only changes; they must not perform a second
+    /// unlocked history read after planning.
+    /// </summary>
+    public StorageUnit? PreviousDefinition { get; }
 
     public bool IsApplicable => Refusals.Length == 0;
 
@@ -480,8 +518,9 @@ public sealed class PhysicalSchemaDiffPlan
         PhysicalSchemaAppliedSnapshot snapshot,
         IEnumerable<PhysicalSchemaOperation> operations,
         string? expectedAppliedTargetFingerprint,
-        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand) =>
-        new(target, plannedAt, snapshot, operations, [], expectedAppliedTargetFingerprint, phase);
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand,
+        StorageUnit? previousDefinition = null) =>
+        new(target, plannedAt, snapshot, operations, [], expectedAppliedTargetFingerprint, phase, previousDefinition);
 
     internal static PhysicalSchemaDiffPlan Invalid(
         PhysicalSchemaTarget target,
@@ -489,7 +528,8 @@ public sealed class PhysicalSchemaDiffPlan
         IEnumerable<SchemaRefusal> refusals,
         PhysicalSchemaAppliedSnapshot? snapshot = null,
         string? expectedAppliedTargetFingerprint = null,
-        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand) =>
+        SchemaEvolutionPhase phase = SchemaEvolutionPhase.Expand,
+        StorageUnit? previousDefinition = null) =>
         new(
             target,
             plannedAt,
@@ -497,7 +537,8 @@ public sealed class PhysicalSchemaDiffPlan
             [],
             refusals,
             expectedAppliedTargetFingerprint,
-            phase);
+            phase,
+            previousDefinition);
 }
 
 /// <summary>One planned operation that startup auto-apply must not execute without authorization.</summary>

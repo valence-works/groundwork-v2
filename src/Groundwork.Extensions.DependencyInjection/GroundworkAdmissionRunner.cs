@@ -86,13 +86,33 @@ public sealed class GroundworkAdmissionRunner
         StorageUnit unit,
         bool autoApply)
     {
+        // Establish the kernel verdict before asking the reporting-only public diff surface. The
+        // first inspect is intentionally read-only; when auto-apply is enabled the second inspect
+        // executes the same provider seam after the pending display has been captured.
+        var initial = connection.Schema.InspectRuntimeAdmission(
+            unit,
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = false });
+
         // Keep the established public description for logs and health data. It is deliberately
         // reporting only: the admission verdict and any auto-apply decision come from the provider
         // seam below, not from the legacy display vocabulary.
-        var pending = connection.Schema.Diff(unit).Changes;
-        var result = connection.Schema.InspectRuntimeAdmission(
-            unit,
-            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = autoApply });
+        IReadOnlyList<SchemaChange> pending;
+        try
+        {
+            pending = connection.Schema.Diff(unit).Changes;
+        }
+        catch
+        {
+            // Reporting must not replace a kernel admission verdict. A provider may reject its
+            // public display diff for a declaration that the seam has already classified as
+            // blocked, while the unit status remains actionable.
+            pending = [];
+        }
+        var result = autoApply
+            ? connection.Schema.InspectRuntimeAdmission(
+                unit,
+                new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true })
+            : initial;
         return new GroundworkUnitAdmission(
             unit.Name,
             Status(result),

@@ -422,8 +422,8 @@ public sealed record GroundworkRuntimeSchemaAdmissionResult(
             : 0;
 
     /// <summary>
-    /// The kernel's hosting-neutral serviceability verdict. Physical index drift is degrading
-    /// because dependent query shapes can refuse while the rest of the application serves; any
+    /// The kernel's hosting-neutral serviceability verdict. Unrepaired physical index drift is
+    /// degrading because dependent query shapes can refuse while the rest of the application serves; any
     /// result that is not runtime-ready is blocked. Safe auto-apply can turn a previously pending
     /// plan back into <see cref="GroundworkRuntimeSchemaAdmissionStatus.Ready"/>.
     /// </summary>
@@ -479,7 +479,8 @@ public static class GroundworkRuntimeSchemaAdmission
         GroundworkRuntimeSchemaAdmissionOptions? options = null,
         Action<GroundworkRuntimeSchemaAdmissionLogEntry>? log = null,
         Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? authorization = null,
-        PhysicalSchemaInspectionResult? inspected = null)
+        PhysicalSchemaInspectionResult? inspected = null,
+        Func<PhysicalSchemaInspectionResult>? inspectAfterApplication = null)
     {
         ArgumentNullException.ThrowIfNull(executor);
         ArgumentNullException.ThrowIfNull(target);
@@ -539,6 +540,12 @@ public static class GroundworkRuntimeSchemaAdmission
         };
 
         var application = PhysicalSchemaApplication.Apply(target, executor, planAuthorization: safeAuthorization);
-        return new GroundworkRuntimeSchemaAdmissionResult(inspection, application.Plan, application);
+        if (application.Outcome is not (PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges))
+            return new GroundworkRuntimeSchemaAdmissionResult(inspection, application.Plan, application);
+
+        var finalInspection = inspectAfterApplication?.Invoke() ??
+            (executor as IPhysicalSchemaHistoryInspector)?.InspectHistory(target) ?? inspection;
+        var finalPlan = PhysicalSchemaDiffPlanner.Plan(target, finalInspection.History, DateTimeOffset.UtcNow);
+        return new GroundworkRuntimeSchemaAdmissionResult(finalInspection, finalPlan, application);
     }
 }

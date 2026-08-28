@@ -129,12 +129,57 @@ public sealed class MongoSchemaExecutor
         ArgumentNullException.ThrowIfNull(operation);
         var lease = RequireLock(target, applicationLock);
         lease.Verify();
+        EnsureStableDeclaration(target, DesiredDefinition(operation));
         Execute(operation);
         return new PhysicalSchemaOperationAcknowledgement(
             operation.Identity,
             operation.Fingerprint,
             DateTimeOffset.UtcNow);
     }
+
+    public IReadOnlyList<PhysicalSchemaOperationAcknowledgement> ApplyOperationBatch(
+        PhysicalSchemaTargetIdentity target,
+        IReadOnlyList<PhysicalSchemaOperation> operations,
+        IPhysicalSchemaApplicationLock applicationLock)
+    {
+        ArgumentNullException.ThrowIfNull(operations);
+        var lease = RequireLock(target, applicationLock);
+        lease.Verify();
+        if (operations.Select(DesiredDefinition).FirstOrDefault(definition => definition is not null) is { } desired)
+            EnsureStableDeclaration(target, desired);
+        return operations.Select(operation => ApplyOperation(target, operation, applicationLock)).ToArray();
+    }
+
+    private void EnsureStableDeclaration(
+        PhysicalSchemaTargetIdentity target,
+        StorageUnit? desired)
+    {
+        if (desired is null)
+            return;
+        var history = ReadHistory(target);
+        MongoDeclarationRules.ThrowIfStableDeclarationChanged(
+            history.AppliedState?.Snapshot.Subject.Definition,
+            desired);
+    }
+
+    private static StorageUnit? DesiredDefinition(PhysicalSchemaOperation operation) => operation switch
+    {
+        CreatePrimaryStorageOperation value => value.Subject.Definition,
+        AddColumnOperation value => value.Subject.Definition,
+        BackfillColumnOperation value => value.Subject.Definition,
+        FinalizeColumnOperation value => value.Subject.Definition,
+        CreatePhysicalIndexOperation value => value.Subject.Definition,
+        RebuildPhysicalIndexOperation value => value.Subject.Definition,
+        RenamePrimaryStorageOperation value => value.Subject.Definition,
+        RenameColumnOperation value => value.Subject.Definition,
+        AlterColumnOperation value => value.Subject.Definition,
+        DropColumnOperation value => value.Subject.Definition,
+        ColumnSupersessionOperation value => value.Subject.Definition,
+        DropPhysicalIndexOperation value => value.Subject.Definition,
+        DropPrimaryStorageOperation value => value.Subject.Definition,
+        ValidatePhysicalSchemaOperation value => value.Target.Subject.Definition,
+        _ => null
+    };
 
     public void PublishAppliedState(
         PhysicalSchemaAppliedState state,
@@ -145,18 +190,15 @@ public sealed class MongoSchemaExecutor
         var lease = RequireLock(state.TargetIdentity, applicationLock);
         var id = HistoryPrefix + state.TargetIdentity;
 
-        // Public provider Schema.Apply has historically supported standalone MongoDB. It cannot
-        // provide the atomic history/catalog publication the schema tool requires, but it can
-        // still serialize the two writes under the schema lease and publish the history last. A
-        // completed call therefore leaves both runtime metadata and kernel history coherent while
-        // retaining the standalone provider surface; the tool continues to reject standalone
-        // deployments where atomic publication is a hard requirement.
+        // Public provider Schema.Apply has historically supported standalone MongoDB. It can
+        // serialize the one authoritative history write under the schema lease, but cannot make
+        // the physical DDL and that publication one transaction. Runtime resolution nevertheless
+        // trusts only this history row, so a derived catalog record can never make an unapplied
+        // target appear openable after a crash.
         if (!context.SupportsTransactions())
         {
             lease.Verify();
             EnsureExpectedHistory(id, expectedAppliedTargetFingerprint, session: null);
-            PublishProviderCatalog(session: null, state);
-            lease.Verify();
             ReplaceHistory(session: null, state);
             lease.Verify();
             return;
@@ -169,7 +211,6 @@ public sealed class MongoSchemaExecutor
             lease.Assert(session);
             EnsureExpectedHistory(id, expectedAppliedTargetFingerprint, session);
             ReplaceHistory(session, state);
-            PublishProviderCatalog(session, state);
             lease.Assert(session);
             session.CommitTransaction();
         }
@@ -215,69 +256,6 @@ public sealed class MongoSchemaExecutor
         }
 
         Metadata.ReplaceOne(session, filter, document, new ReplaceOptions { IsUpsert = true });
-    }
-
-    /// <summary>
-    /// Rewrites the runtime provider's own <c>__groundwork_metadata</c> record for this subject in
-    /// the same atomic publication transaction where MongoDB transactions are available. On a
-    /// standalone deployment, the schema lease serializes the catalog/history writes and history
-    /// is published last. A collection the deployment tool applied is therefore openable by
-    /// <c>MongoProviderState.Resolve</c> without a second in-process apply: the fingerprint the
-    /// runtime compares against is the one the tool just deployed.
-    /// </summary>
-    private void PublishProviderCatalog(IClientSessionHandle? session, PhysicalSchemaAppliedState state)
-    {
-        var unit = state.Snapshot.Subject.Definition;
-        var id = SchemaPrefix + unit.Id.Value;
-        if (state.Snapshot.Subject.Evolution.RetiresPrimaryStorage)
-        {
-            if (session is null)
-            {
-                Metadata.DeleteOne(new BsonDocument("_id", id));
-                Metadata.DeleteMany(new BsonDocument
-                {
-                    ["kind"] = "scope",
-                    ["unit"] = unit.Id.Value
-                });
-            }
-            else
-            {
-                Metadata.DeleteOne(session, new BsonDocument("_id", id));
-                Metadata.DeleteMany(session, new BsonDocument
-                {
-                    ["kind"] = "scope",
-                    ["unit"] = unit.Id.Value
-                });
-            }
-            return;
-        }
-
-        var document = new BsonDocument
-        {
-            ["_id"] = id,
-            ["collection"] = unit.Name,
-            ["key"] = new BsonArray(unit.Key.Columns),
-            ["fingerprint"] = SchemaIdentity.Fingerprint(unit),
-            ["derived"] = new BsonArray(unit.DerivedColumns.Select(column => new BsonDocument
-            {
-                ["name"] = column.Name,
-                ["algorithmId"] = MongoSchemaCoordinator.ProjectionAlgorithmId(column)
-            }))
-        };
-        if (session is null)
-        {
-            Metadata.ReplaceOne(
-                new BsonDocument("_id", id),
-                document,
-                new ReplaceOptions { IsUpsert = true });
-            return;
-        }
-
-        Metadata.ReplaceOne(
-            session,
-            new BsonDocument("_id", id),
-            document,
-            new ReplaceOptions { IsUpsert = true });
     }
 
     public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target)
@@ -358,7 +336,7 @@ public sealed class MongoSchemaExecutor
             CompareDocuments(name, unit, columnDrift);
             CompareIndexes(name, unit, indexDrift);
         }
-        CompareSearchKeyAlgorithms(unit, columnDrift);
+        CompareSearchKeyAlgorithms(unit, history, columnDrift);
         return new PhysicalSchemaInspectionResult(
             history,
             // Index drift is deliberately a degraded, serviceable state: dependent query shapes
@@ -439,17 +417,19 @@ public sealed class MongoSchemaExecutor
     /// stores. A collection Groundwork never applied to therefore cannot show that its search-key
     /// contents were produced by the declared algorithm, and adoption refuses by name.
     /// </summary>
-    private void CompareSearchKeyAlgorithms(StorageUnit unit, List<SchemaRefusal> drift)
+    private void CompareSearchKeyAlgorithms(
+        StorageUnit unit,
+        PhysicalSchemaHistoryState history,
+        List<SchemaRefusal> drift)
     {
         if (unit.DerivedColumns.Count == 0)
             return;
-        var document = Metadata.Find(new BsonDocument("_id", SchemaPrefix + unit.Id.Value)).FirstOrDefault();
-        var persisted = document is not null && document.TryGetValue("derived", out var derived) && derived.IsBsonArray
-            ? derived.AsBsonArray.OfType<BsonDocument>().ToDictionary(
-                item => item["name"].AsString,
-                item => item["algorithmId"].AsString,
+        var persisted = history.AppliedState is { } applied
+            ? applied.Snapshot.Subject.DerivedColumns.ToDictionary(
+                column => column.Name,
+                column => column.AlgorithmId ?? string.Empty,
                 StringComparer.Ordinal)
-            : new Dictionary<string, string>(StringComparer.Ordinal);
+            : ReadCatalogDerivedAlgorithms(unit);
         foreach (var expected in unit.DerivedColumns)
         {
             var algorithm = MongoSchemaCoordinator.ProjectionAlgorithmId(expected);
@@ -463,6 +443,17 @@ public sealed class MongoSchemaExecutor
                     $"columns.{expected.Name}.searchKeyAlgorithm"));
             }
         }
+    }
+
+    private Dictionary<string, string> ReadCatalogDerivedAlgorithms(StorageUnit unit)
+    {
+        var document = Metadata.Find(new BsonDocument("_id", SchemaPrefix + unit.Id.Value)).FirstOrDefault();
+        return document is not null && document.TryGetValue("derived", out var derived) && derived.IsBsonArray
+            ? derived.AsBsonArray.OfType<BsonDocument>().ToDictionary(
+                item => item["name"].AsString,
+                item => item["algorithmId"].AsString,
+                StringComparer.Ordinal)
+            : new Dictionary<string, string>(StringComparer.Ordinal);
     }
 
     // ---- operation execution ------------------------------------------------------------------
