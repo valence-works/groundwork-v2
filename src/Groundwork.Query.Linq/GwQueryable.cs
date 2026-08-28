@@ -140,6 +140,8 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         }
         if (expression is MemberInitExpression initialized)
         {
+            foreach (var argument in initialized.NewExpression.Arguments)
+                foreach (var column in ProjectionColumns(argument, parameter)) yield return column;
             foreach (var binding in initialized.Bindings.OfType<MemberAssignment>())
                 foreach (var column in ProjectionColumns(binding.Expression, parameter)) yield return column;
         }

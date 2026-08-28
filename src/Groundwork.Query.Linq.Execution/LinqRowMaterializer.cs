@@ -72,9 +72,10 @@ internal static class LinqRowMaterializer
                     .Where(member => member is PropertyInfo or FieldInfo)
                     .Select(member => (Member: member.Name, Column: member.Name))
                 : model.Columns.Select(column => (Member: column.Key, Column: column.Value.Name));
+            var mappingArray = mappings.ToArray();
 
             var bindings = new List<MemberBinding>();
-            foreach (var (memberName, columnName) in mappings)
+            foreach (var (memberName, columnName) in mappingArray)
             {
                 var member = typeof(T)
                     .GetMember(memberName, BindingFlags.Public | BindingFlags.Instance)
@@ -93,26 +94,52 @@ internal static class LinqRowMaterializer
                 .Select(candidate => new
                 {
                     Constructor = candidate,
-                    Arguments = candidate.GetParameters().Select((parameter, index) =>
+                    Parameters = candidate.GetParameters().Select((parameter, index) =>
                     {
                         var column = projection?.Columns.FirstOrDefault(item =>
                             string.Equals(item.Name, parameter.Name, StringComparison.OrdinalIgnoreCase));
                         column ??= projection is not null && index < projection.Columns.Length
                             ? projection.Columns[index]
                             : null;
-                        return column is null
+                        var member = column is null
                             ? null
-                            : Expression.Call(ReadMethod.MakeGenericMethod(parameter.ParameterType), row,
-                                Expression.Constant(column.Name, typeof(string)));
+                            : mappingArray.FirstOrDefault(item =>
+                                string.Equals(item.Column, column.Name, StringComparison.OrdinalIgnoreCase)).Member;
+                        return new
+                        {
+                            Column = column,
+                            Member = member,
+                            Argument = column is null
+                                ? null
+                                : Expression.Call(ReadMethod.MakeGenericMethod(parameter.ParameterType), row,
+                                    Expression.Constant(column.Name, typeof(string)))
+                        };
                     }).ToArray()
+                })
+                .Select(candidate => new
+                {
+                    candidate.Constructor,
+                    candidate.Parameters,
+                    Arguments = candidate.Parameters.Select(parameter => parameter.Argument).ToArray()
                 })
                 .FirstOrDefault(candidate => candidate.Arguments.All(argument => argument is not null));
 
             var defaultConstructor = typeof(T).GetConstructor(Type.EmptyTypes);
             if (constructor is not null && (bindings.Count == 0 || defaultConstructor is null))
             {
+                var constructorMembers = constructor.Parameters
+                    .Select(parameter => parameter.Member)
+                    .Where(member => member is not null)
+                    .ToHashSet(StringComparer.Ordinal);
+                var remainingBindings = bindings
+                    .Where(binding => !constructorMembers.Contains(binding.Member.Name))
+                    .ToArray();
+                var created = Expression.New(constructor.Constructor, constructor.Arguments!);
+                Expression body = remainingBindings.Length == 0
+                    ? created
+                    : Expression.MemberInit(created, remainingBindings);
                 return Expression.Lambda<Func<IReadOnlyDictionary<string, object?>, T>>(
-                    Expression.New(constructor.Constructor, constructor.Arguments!),
+                    body,
                     row).Compile();
             }
 

@@ -43,6 +43,7 @@ public sealed class LinqExecutorTests
     {
         public SettableConstructorStatusDto(string? status) => Status = status;
         public string? Status { get; set; }
+        public string? Identifier { get; set; }
     }
 
     [Fact]
@@ -85,13 +86,13 @@ public sealed class LinqExecutorTests
             .FirstOrDefaultAsync(fixture.Executor);
         var settable = await fixture.Table.Query
             .OrderBy(ticket => ticket.Status)
-            .Select(ticket => new SettableConstructorStatusDto(ticket.Status))
-            .Distinct()
+            .Select(ticket => new SettableConstructorStatusDto(ticket.Status) { Identifier = ticket.Id })
             .SingleAsync(fixture.Executor);
 
         Assert.Equal("open", scalar);
         Assert.Equal("open", record.Status);
         Assert.Equal("open", settable.Status);
+        Assert.Equal("a", settable.Identifier);
     }
 
     [Fact]

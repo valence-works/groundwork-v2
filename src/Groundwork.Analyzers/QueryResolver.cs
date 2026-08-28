@@ -582,14 +582,11 @@ internal static class QueryResolver
 
     private static IEnumerable<ExpressionSyntax> ProjectionArgumentsAndInitializers(ObjectCreationExpressionSyntax created)
     {
-        if (created.Initializer is null)
-        {
-            foreach (var argument in created.ArgumentList?.Arguments ?? [])
-                yield return argument.Expression;
-            yield break;
-        }
-        foreach (var expression in created.Initializer.Expressions)
-            yield return expression is AssignmentExpressionSyntax assignment ? assignment.Right : expression;
+        foreach (var argument in created.ArgumentList?.Arguments ?? [])
+            yield return argument.Expression;
+        if (created.Initializer is not null)
+            foreach (var expression in created.Initializer.Expressions)
+                yield return expression is AssignmentExpressionSyntax assignment ? assignment.Right : expression;
     }
 
     private static bool TryParsePredicate(
