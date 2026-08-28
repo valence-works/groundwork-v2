@@ -342,23 +342,13 @@ internal static class OnAppendRetentionCoordinator
     internal static AppendRegistration Begin(
         object owner,
         StorageUnit unit,
-        string? scope,
-        Action? onRegistered = null)
+        string? scope)
     {
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(unit);
         var state = State(owner, unit, scope);
         Interlocked.Increment(ref state.Appenders);
-        try
-        {
-            onRegistered?.Invoke();
-            return new AppendRegistration(state);
-        }
-        catch
-        {
-            Interlocked.Decrement(ref state.Appenders);
-            throw;
-        }
+        return new AppendRegistration(state);
     }
 
     private static DrainState State(object owner, StorageUnit unit, string? scope)

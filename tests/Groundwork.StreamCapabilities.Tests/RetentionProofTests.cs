@@ -111,6 +111,49 @@ public sealed class RetentionProofTests
     }
 
     [Fact]
+    public async Task SQLite_registration_observer_failure_drains_pending_OnAppend_cleanup()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-s3-registration-failure-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
+            var unit = RetentionUnit(
+                "s3_registration_failure_" + Guid.NewGuid().ToString("N"),
+                RetentionTrigger.OnAppend);
+            connection.Schema.Apply(unit);
+            var seed = connection.OpenSession(unit, StorageAccess.Global);
+            for (var index = 0; index < 3; index++)
+                Assert.True(seed.Insert(Values("a")).Succeeded);
+
+            using var observer = new FailingRegistrationObserver();
+            var first = Task.Factory.StartNew(
+                () => connection.OpenSession(unit, StorageAccess.Global, observer).Insert(Values("a")),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Assert.True(observer.FirstRegistered.Wait(TimeSpan.FromSeconds(5)), "The first appender did not register.");
+
+            var second = Task.Factory.StartNew(
+                () => connection.OpenSession(unit, StorageAccess.Global, observer).Insert(Values("a")),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Assert.True(observer.SecondRegistered.Wait(TimeSpan.FromSeconds(5)), "The second appender did not register.");
+
+            observer.ReleaseFirst.Set();
+            Assert.True((await first).Succeeded);
+            observer.FailSecond.Set();
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await second);
+
+            Assert.Equal(3, seed.Query(All(unit)).Rows.Count);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
     public void OnAppend_proof_rejects_effectively_serial_cleanup()
     {
         var serial = new OnAppendMeasurement(TimeSpan.Zero, 32, 8, 1, 32, false);
@@ -1019,6 +1062,45 @@ public sealed class RetentionProofTests
             allRegistered.Dispose();
             AllRegistered.Dispose();
             Release.Dispose();
+        }
+    }
+
+    private sealed class FailingRegistrationObserver : IProviderCommandObserver, IOnAppendRegistrationObserver, IDisposable
+    {
+        private int registrations;
+
+        internal ManualResetEventSlim FirstRegistered { get; } = new();
+
+        internal ManualResetEventSlim SecondRegistered { get; } = new();
+
+        internal ManualResetEventSlim ReleaseFirst { get; } = new();
+
+        internal ManualResetEventSlim FailSecond { get; } = new();
+
+        public void Observe(ProviderCommandEvent command) { }
+
+        public void OnAppendRegistered()
+        {
+            if (Interlocked.Increment(ref registrations) == 1)
+            {
+                FirstRegistered.Set();
+                ReleaseFirst.Wait();
+                return;
+            }
+
+            SecondRegistered.Set();
+            FailSecond.Wait();
+            throw new InvalidOperationException("Synthetic registration failure.");
+        }
+
+        public void Dispose()
+        {
+            ReleaseFirst.Set();
+            FailSecond.Set();
+            FirstRegistered.Dispose();
+            SecondRegistered.Dispose();
+            ReleaseFirst.Dispose();
+            FailSecond.Dispose();
         }
     }
 
