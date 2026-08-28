@@ -257,7 +257,9 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     {
         var connectionString = fixture.Reset();
         using var connection = new SqlServerProviderFactory().Create(connectionString);
-        var name = new string('a', PortabilityValidator.MaximumPortableIdentifierLength);
+        // A per-run GUID keeps the name unique across reruns while still landing exactly on the
+        // boundary length the test exists to prove.
+        var name = BoundaryName();
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("logical.boundary.id"),
@@ -278,7 +280,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         var unit = new StorageUnit
         {
             Id = new StorageUnitId("logical.id/with spaces/" + new string('x', 80)),
-            Name = "sqlserver_batch_boundary",
+            Name = "sqlserver_batch_boundary_" + Guid.NewGuid().ToString("N"),
             Columns =
             [
                 new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
@@ -486,6 +488,18 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Equal(0, secondObserver.RoundTrips);
     }
 
+    /// <summary>
+    /// A name landing exactly on <see cref="PortabilityValidator.MaximumPortableIdentifierLength"/>,
+    /// unique per call so a rerun against the same database does not collide with a table an earlier
+    /// run left behind.
+    /// </summary>
+    private static string BoundaryName()
+    {
+        var name = ("boundary_" + Guid.NewGuid().ToString("N")).PadRight(
+            PortabilityValidator.MaximumPortableIdentifierLength, 'a');
+        return name[..PortabilityValidator.MaximumPortableIdentifierLength];
+    }
+
     private static StorageUnit AdmissionUnit(string name) => new()
     {
         Id = new StorageUnitId(name),
@@ -526,7 +540,11 @@ public sealed class SqlServerFixture
             DECLARE @sql nvarchar(max) = N'';
             SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
             FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
-            WHERE t.name IN (N'conformance-global',N'conformance-scoped',N'__groundwork_schema_history',N'__groundwork_schema_fences',N'__groundwork_sequence_high_waters',N'__groundwork_operations',N'__groundwork_retention_operations')
+            WHERE t.name IN (N'__groundwork_schema_history',N'__groundwork_schema_fences',N'__groundwork_sequence_high_waters',N'__groundwork_operations',N'__groundwork_retention_operations')
+               OR t.name LIKE N'conformance[_]global%'
+               OR t.name LIKE N'conformance[_]scoped%'
+               OR t.name LIKE N'boundary[_]%'
+               OR t.name LIKE N'sqlserver[_]batch[_]boundary[_]%'
                OR t.name LIKE N'customer[_]%'
                OR t.name LIKE N'w2_sqlserver[_]%'
                OR t.name LIKE N's7_sqlserver[_]%'
