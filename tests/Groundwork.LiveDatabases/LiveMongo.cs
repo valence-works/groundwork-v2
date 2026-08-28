@@ -21,6 +21,7 @@ internal static class LiveMongo
     private const string MarkerCollection = "__groundwork_run_lease";
     private const string MarkerId = "lease";
     private const int TokenLength = 32;
+    private const int MaxDatabaseNameLength = 63;
 
     /// <summary>
     /// The lease duration for a run. Heartbeats refresh this lease for the process lifetime; a
@@ -58,6 +59,12 @@ internal static class LiveMongo
         var configuredName = string.IsNullOrWhiteSpace(url.DatabaseName) ? "groundwork" : url.DatabaseName;
         var prefix = configuredName + "_run_";
         var name = prefix + Guid.NewGuid().ToString("N");
+        if (name.Length > MaxDatabaseNameLength)
+        {
+            throw new InvalidOperationException(
+                $"The configured MongoDB database name is too long to derive a Groundwork run database within MongoDB's {MaxDatabaseNameLength}-character limit.");
+        }
+
         var ownerToken = Guid.NewGuid().ToString("N");
         try
         {
@@ -199,7 +206,8 @@ internal static class LiveMongo
     {
         if (string.IsNullOrEmpty(prefix) ||
             !name.StartsWith(prefix, StringComparison.Ordinal) ||
-            name.Length != prefix.Length + TokenLength)
+            name.Length != prefix.Length + TokenLength ||
+            name.Length > MaxDatabaseNameLength)
             return false;
 
         for (var index = prefix.Length; index < name.Length; index++)

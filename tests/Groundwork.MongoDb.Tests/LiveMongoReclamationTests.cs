@@ -43,11 +43,14 @@ public sealed class LiveMongoReclamationTests
     [Fact]
     public void Mongo_reclamation_requires_the_exact_generated_name_shape()
     {
-        var prefix = "groundwork_run_" + Guid.NewGuid().ToString("N") + "_";
+        var prefix = "gw_run_" + Guid.NewGuid().ToString("N")[..20] + "_";
 
         Assert.True(LiveMongo.IsValidRunName(prefix, prefix + Guid.NewGuid().ToString("N")));
         Assert.False(LiveMongo.IsValidRunName(prefix, prefix + "scratch"));
         Assert.False(LiveMongo.IsValidRunName(prefix, prefix + Guid.NewGuid().ToString("N") + "extra"));
+
+        var overlongPrefix = "gw_run_" + Guid.NewGuid().ToString("N")[..24] + "_";
+        Assert.False(LiveMongo.IsValidRunName(overlongPrefix, overlongPrefix + Guid.NewGuid().ToString("N")));
     }
 
     [SkippableFact]
@@ -145,7 +148,7 @@ public sealed class LiveMongoReclamationTests
 
     private static (string Prefix, string Name) NewRunName()
     {
-        var prefix = "groundwork_run_" + Guid.NewGuid().ToString("N") + "_";
+        var prefix = "gw_run_" + Guid.NewGuid().ToString("N")[..20] + "_";
         return (prefix, prefix + Guid.NewGuid().ToString("N"));
     }
 
