@@ -34,5 +34,6 @@
   <ItemGroup>
     <Compile Include="../Groundwork.LiveDatabases/LiveSqlServer.cs" Link="LiveSqlServer.cs" />
     <Compile Include="../Groundwork.LiveDatabases/LiveMongo.cs" Link="LiveMongo.cs" />
+    <Compile Include="../Groundwork.LiveDatabases/LivePostgreSql.cs" Link="LivePostgreSql.cs" />
   </ItemGroup>
 </Project>

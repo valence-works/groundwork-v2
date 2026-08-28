@@ -218,8 +218,10 @@ native index nobody declared never satisfies a declared index. A shape the share
 prove is refused with the same `GW-COVER-*` code and the same named fix as on SQLite, PostgreSQL, and
 SQL Server; it is never silently permitted.
 
-MongoDB has no bound-parameter budget — its real bound is the 16 MB command document — so it states
-the portable literal and membership defaults rather than advertising a Mongo-specific number.
+MongoDB has no bound-parameter budget — its real bound is the 16 MB command document — so its
+connection advertises no parameter ceiling. Ordinary membership retains the portable 1,000-value
+renderer limit. Keyed batch reads advertise an effectively unbounded key count plus a conservative
+15 MiB encoded-payload fence, allowing the shared planner to split commands before BSON refusal.
 
 Test/CI connection variables: `GROUNDWORK_MONGO_CONNECTION`,
 `GROUNDWORK_MONGO_STANDALONE_CONNECTION`.

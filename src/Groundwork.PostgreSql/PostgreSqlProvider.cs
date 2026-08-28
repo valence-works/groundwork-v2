@@ -25,7 +25,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     /// </summary>
     public QueryAdmissionProfile QueryAdmission { get; } = new()
     {
-        MaximumParameters = PostgreSqlQueryRenderer.ParameterBudget
+        MaximumParameters = PostgreSqlQueryRenderer.ParameterBudget,
+        MaximumBatchReadKeys = PostgreSqlQueryRenderer.ParameterBudget
     };
 
     private readonly string connectionString;

@@ -368,6 +368,10 @@ durable state. See **[expand–contract workflows](../v2/expand-contract.md)**.
 | Code | Meaning |
 | --- | --- |
 | `GW-COMPARE-DELETE-001` | Invalid compare-and-delete request (e.g. a JSON column in the equality set) |
+| `GW-BATCHREAD-001` | A keyed batch-read's key column does not belong to the requested table |
+| `GW-BATCHREAD-002` | A keyed batch-read key cannot be null |
+| `GW-BATCHREAD-003` | A provider's query result omitted the batch-read key column, so a matched row could not be attributed to its key |
+| `GW-BATCHREAD-004` | A single keyed batch-read value exceeds the provider's conservative encoded-payload budget |
 | `GW-BATCH-FINGERPRINT-001` | Batch fingerprint refusal |
 | `GW-SQLSERVER-LIFECYCLE-001` | SQL Server lifecycle table has a non-`BIN2` collation — migration required |
 | `GW-SQLITE-LIFETIME-001` | A second Groundwork connection to the same SQLite file — the schema lock is held for the life of a connection. One `IStorageProviderConnection` per database file per process; in tests, one file per test or `Data Source=:memory:` |

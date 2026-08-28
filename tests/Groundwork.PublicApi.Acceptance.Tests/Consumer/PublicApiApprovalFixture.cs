@@ -68,6 +68,11 @@ internal static class PublicApiApprovalFixture
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
         _ = typeof(StorageUnitQueryRenderOptions);
+        _ = typeof(QueryAdmissionProfile);
+        _ = typeof(KeyedBatchReadRow);
+        _ = typeof(KeyedBatchReadResult);
+        _ = typeof(KeyedBatchReadRequest);
+        _ = typeof(KeyedBatchReadSessionExtensions);
         _ = typeof(SqliteProviderFactory);
         _ = typeof(InMemoryProviderFactory);
     }
@@ -123,6 +128,15 @@ internal static class PublicApiApprovalFixture
         _ = new Func<StorageAccessAudit, StorageAccess>(StorageAccess.PrivilegedAcrossScopes);
         _ = new Func<IStorageSession, QueryRequest, CrossScopeQueryResult>(
             (session, request) => session.QueryAcrossScopes(request));
+        _ = new Func<IStorageSession, KeyedBatchReadRequest, IStorageProviderConnection?, KeyedBatchReadResult>(
+            (session, request, connection) => session.BatchRead(request, connection));
+        _ = new Func<IStorageSession, KeyedBatchReadRequest, IStorageProviderConnection?, CancellationToken, ValueTask<KeyedBatchReadResult>>(
+            (session, request, connection, cancellationToken) => session.BatchReadAsync(request, connection, cancellationToken));
+        _ = new QueryAdmissionProfile
+        {
+            MaximumBatchReadKeys = 999,
+            MaximumBatchReadPayloadBytes = 1_000_000
+        };
         _ = new Func<Groundwork.Kernel.StorageUnit, string, QueryRenderOptions>(
             (unit, selectedIndex) => unit.CreateQueryRenderOptions(selectedIndex));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));

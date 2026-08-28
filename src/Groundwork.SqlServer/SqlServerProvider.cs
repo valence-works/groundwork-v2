@@ -24,7 +24,10 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     /// </summary>
     public QueryAdmissionProfile QueryAdmission { get; } = new()
     {
-        MaximumParameters = SqlServerQueryRenderer.ParameterBudget
+        MaximumParameters = SqlServerQueryRenderer.ParameterBudget,
+        // Keep two slots below SQL Server's 2,100-parameter renderer ceiling, as required by the
+        // keyed batch-read admission budget.
+        MaximumBatchReadKeys = 2_098
     };
 
     private readonly SemaphoreSlim gate = new(1, 1);

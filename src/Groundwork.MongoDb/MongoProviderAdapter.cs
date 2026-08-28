@@ -14,11 +14,18 @@ public sealed class MongoProviderFactory : IStorageProviderFactory
 internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
     /// <summary>
-    /// MongoDB has no bound-parameter budget — its real bound is the 16 MB command document — so
-    /// the portable defaults are stated deliberately rather than a Mongo-specific number being
-    /// invented for them.
+    /// MongoDB has no bound-parameter budget — its real bound is the 16 MB command document. Keep
+    /// the keyed batch count effectively unbounded and reserve a conservative payload budget below
+    /// that BSON limit. Ordinary membership predicates retain the renderer's portable 1,000-value
+    /// limit so admission and rendering cannot disagree.
     /// </summary>
-    public QueryAdmissionProfile QueryAdmission => QueryAdmissionProfile.Default;
+    public QueryAdmissionProfile QueryAdmission { get; } = new()
+    {
+        MaximumParameters = int.MaxValue,
+        MaximumInValues = QueryRenderOptions.Default.InValueLimit,
+        MaximumBatchReadKeys = int.MaxValue,
+        MaximumBatchReadPayloadBytes = 15L * 1024 * 1024
+    };
 
     public IProviderCatalog Catalog { get; } = new MongoStoreCatalog(inner.Catalog);
 

@@ -1,7 +1,5 @@
-using System.Collections;
 using System.Collections.ObjectModel;
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
@@ -124,6 +122,7 @@ internal sealed class InMemoryDatabase
 {
     internal readonly object Gate = new();
     internal readonly Dictionary<StorageUnitId, InMemoryUnitState> Units = [];
+    internal readonly Dictionary<PhysicalSchemaTargetIdentity, PhysicalSchemaAppliedState> SchemaHistory = [];
 
     // This is the reference provider's durable kernel-owned ledger. It lives beside, rather than
     // inside, a storage unit so the key is always (unit, scope, nonce), including for global units.
@@ -162,7 +161,9 @@ internal sealed class InMemoryUnitState
         Unit = StorageDeclaration.Clone(unit);
     }
 
-    internal StorageUnit Unit { get; }
+    internal StorageUnit Unit { get; private set; }
+
+    internal void ReplaceDeclaration(StorageUnit unit) => Unit = StorageDeclaration.Clone(unit);
 
     // Compare-and-swap token used by unit-of-work commits.
     internal long Revision { get; set; }
@@ -243,322 +244,298 @@ internal sealed class InMemoryProviderCatalog(InMemoryDatabase database) : IProv
     }
 }
 
-internal sealed class InMemorySchemaCoordinator(InMemoryDatabase database) : ISchemaCoordinator
+internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
 {
+    internal static readonly ProviderIdentity Identity = new("InMemory", "1.0");
+    private readonly InMemoryDatabase database;
+
+    internal InMemorySchemaCoordinator(InMemoryDatabase database)
+    {
+        this.database = database;
+        Executor = new InMemoryPhysicalSchemaExecutor(database);
+    }
+
+    internal InMemoryPhysicalSchemaExecutor Executor { get; }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
-        ArgumentNullException.ThrowIfNull(desired);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
-        ConcurrencyDeclaration.ValidateDeclaration(desired);
-        ValidatePortability(desired);
-        desired.AppendIdempotency?.Validate(desired);
-        desired.RetentionIdempotency?.Validate(desired);
-        desired = SearchKeyProjection.Expand(desired);
-        AggregationProfileValidator.ValidateUnit(desired);
-        lock (database.Gate)
-        {
-            return new SchemaDiff(BuildChanges(desired, database.Units.TryGetValue(desired.Id, out var current)
-                ? current.Unit
-                : null));
-        }
+        var physical = Prepare(desired);
+        var target = Target(physical);
+        using var lease = Executor.AcquireApplicationLock(target.Identity);
+        var history = Executor.ReadHistory(target.Identity, lease);
+        ValidateUnplannedChanges(history.AppliedState?.Snapshot.Subject.Definition, physical);
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
+        return new SchemaDiff(Describe(plan.Operations, history.AppliedState?.Snapshot.Subject.Definition, physical));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
     {
-        ArgumentNullException.ThrowIfNull(desired);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
-        ConcurrencyDeclaration.ValidateDeclaration(desired);
-        ValidatePortability(desired);
-        desired.AppendIdempotency?.Validate(desired);
-        desired.RetentionIdempotency?.Validate(desired);
-        desired = SearchKeyProjection.Expand(desired);
-        AggregationProfileValidator.ValidateUnit(desired);
+        var physical = Prepare(desired);
+        var target = Target(physical);
         lock (database.Gate)
         {
-            database.Units.TryGetValue(desired.Id, out var current);
-            var changes = BuildChanges(desired, current?.Unit);
-            var diff = new SchemaDiff(changes);
-            if (diff.IsEmpty)
-                return new SchemaApplyResult(diff, false);
-
-            var merged = Merge(current?.Unit, desired);
-            var physicalIndexes = current?.PhysicalIndexes.ToList() ?? [];
-            foreach (var index in desired.Indexes)
-            {
-                var existing = physicalIndexes.FirstOrDefault(item => item.Name == index.Name);
-                var previous = current?.Unit.Indexes.FirstOrDefault(item => item.Name == index.Name);
-                if (existing is not null && previous is not null &&
-                    SearchKeyProjection.IsIndexRetarget(previous, index, desired.DerivedColumns))
-                {
-                    physicalIndexes.Remove(existing);
-                }
-                else if (existing is not null)
-                {
-                    continue;
-                }
-
-                physicalIndexes.Add(new ProviderIndex(
-                    index.Name,
-                    index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
-                    index.IsUnique,
-                    index.MissingValues,
-                    index.SchemaVersion));
-            }
-
-            InMemoryUnitState next;
-            if (current is null)
-                next = new InMemoryUnitState(merged);
-            else
-            {
-                var replacement = new InMemoryUnitState(merged);
-                foreach (var partition in current.Partitions)
-                    replacement.Partitions[partition.Key] = partition.Value.ToDictionary(
-                        pair => pair.Key,
-                        pair => pair.Value.Clone(),
-                        StringComparer.Ordinal);
-                replacement.Revision = checked(current.Revision + 1);
-                next = replacement;
-            }
-
-            BackfillSearchKeys(next, desired, current?.Unit);
-
-            next.PhysicalIndexes.AddRange(physicalIndexes);
-
-            database.Units[desired.Id] = next;
-            return new SchemaApplyResult(diff, true);
+            var previous = database.Units.TryGetValue(physical.Id, out var state) ? state.Unit : null;
+            ValidateUnplannedChanges(previous, physical);
+            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, Executor);
+            return new SchemaApplyResult(
+                new SchemaDiff(Describe(result.Plan.Operations, previous, physical)),
+                result.Outcome == PhysicalSchemaApplicationOutcome.Applied);
         }
     }
 
-    private static void ValidatePortability(StorageUnit unit)
+    internal static StorageUnit Prepare(StorageUnit desired)
     {
-        var portability = PortabilityValidator.Validate(unit);
+        ArgumentNullException.ThrowIfNull(desired);
+        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
+        ConcurrencyDeclaration.ValidateDeclaration(desired);
+        var portability = PortabilityValidator.Validate(desired);
         if (!portability.IsPortable)
         {
             var refusal = portability.Refusals[0];
             throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
         }
+        desired.AppendIdempotency?.Validate(desired);
+        desired.RetentionIdempotency?.Validate(desired);
+        var physical = SearchKeyProjection.Expand(desired);
+        AggregationProfileValidator.ValidateUnit(physical);
+        return physical;
     }
 
-    private static IReadOnlyList<SchemaChange> BuildChanges(StorageUnit desired, StorageUnit? current)
+    internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
+        new(new SchemaSubject(physical), Identity);
+
+    private static void ValidateUnplannedChanges(StorageUnit? previous, StorageUnit desired)
     {
-        if (current is not null && !string.Equals(current.Name, desired.Name, StringComparison.Ordinal))
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Id.Value}' cannot change name from '{current.Name}' to '{desired.Name}'.");
-        if (current is not null && !SchemaIdentity.KeyEquals(current.Key, desired.Key))
-            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change its key non-additively.");
-        if (current is not null && current.Concurrency != desired.Concurrency)
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change concurrency declaration non-additively.");
-        if (current is not null && current.Timestamps != desired.Timestamps)
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change timestamp declaration non-additively.");
-        if (current is not null && current.Scope != desired.Scope)
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change scope from {current.Scope} to {desired.Scope}.");
-        if (current is not null && current.SchemaVersion != desired.SchemaVersion)
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change schema version non-additively.");
-        if (current is not null && !SchemaIdentity.RetentionEquals(current.Retention, desired.Retention))
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change retention non-additively.");
-        if (current is not null && !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change append idempotency window or ledger non-additively.");
-        if (current is not null && !SchemaIdentity.RetentionIdempotencyEquals(current.RetentionIdempotency, desired.RetentionIdempotency))
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change retention idempotency window or ledger non-additively.");
-
-        if (current is null)
-        {
-            return [
-                new SchemaChange(SchemaChangeKind.CreateStorageUnit, desired.Name),
-                .. desired.Columns.Select(column => new SchemaChange(SchemaChangeKind.AddColumn, column.Name)),
-                .. desired.DerivedColumns.Select(column =>
-                    new SchemaChange(SchemaChangeKind.AddDerivedColumn, column.Name)),
-                .. desired.Indexes.Select(index => new SchemaChange(SchemaChangeKind.CreateIndex, index.Name))
-            ];
-        }
-
-        var changes = new List<SchemaChange>();
-        foreach (var column in desired.Columns)
-        {
-            var previous = current.Columns.FirstOrDefault(item => item.Name == column.Name);
-            if (previous is null)
-                changes.Add(new SchemaChange(SchemaChangeKind.AddColumn, column.Name));
-            else if (!SchemaIdentity.ColumnEquals(previous, column))
-                throw new SchemaConflictException($"Column '{column.Name}' changed non-additively.");
-        }
-
-        foreach (var previous in current.Columns)
-        {
-            if (!desired.Columns.Any(column => column.Name == previous.Name))
-                throw new SchemaConflictException($"Column '{previous.Name}' was removed non-additively.");
-        }
-
-        foreach (var derived in desired.DerivedColumns)
-        {
-            var previous = current.DerivedColumns.FirstOrDefault(item => item.Name == derived.Name);
-            if (previous is null)
-                changes.Add(new SchemaChange(SchemaChangeKind.AddDerivedColumn, derived.Name));
-            else if (previous != derived)
-                throw new SchemaConflictException($"Derived column '{derived.Name}' changed non-additively.");
-        }
-
-        foreach (var previous in current.DerivedColumns)
-        {
-            if (!desired.DerivedColumns.Any(column => column.Name == previous.Name))
-                throw new SchemaConflictException($"Derived column '{previous.Name}' was removed non-additively.");
-        }
-
-        foreach (var index in desired.Indexes)
-        {
-            var previous = current.Indexes.FirstOrDefault(item => item.Name == index.Name);
-            if (previous is null)
-                changes.Add(new SchemaChange(SchemaChangeKind.CreateIndex, index.Name));
-            else if (!SchemaIdentity.IndexEquals(previous, index))
-            {
-                if (SearchKeyProjection.IsIndexRetarget(previous, index, desired.DerivedColumns))
-                    changes.Add(new SchemaChange(SchemaChangeKind.CreateIndex, index.Name));
-                else
-                    throw new SchemaConflictException($"Index '{index.Name}' changed non-additively.");
-            }
-        }
-
-        foreach (var previous in current.Indexes)
-        {
-            if (!desired.Indexes.Any(index => index.Name == previous.Name))
-                throw new SchemaConflictException($"Index '{previous.Name}' was removed non-additively.");
-        }
-
-        var previousProfiles = current.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
-        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
-        foreach (var profile in desiredProfiles.Values)
-        {
-            if (!previousProfiles.TryGetValue(profile.Name, out var previous) ||
-                !SchemaIdentity.AggregationProfileEquals(previous, profile))
-                changes.Add(new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, profile.Name));
-        }
-        foreach (var previous in previousProfiles.Values)
-        {
-            if (!desiredProfiles.ContainsKey(previous.Name))
-                changes.Add(new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, previous.Name));
-        }
-
-        return changes;
-    }
-
-    private static void BackfillSearchKeys(
-        InMemoryUnitState state,
-        StorageUnit desired,
-        StorageUnit? previous)
-    {
-        var previousDerived = previous?.DerivedColumns.ToDictionary(column => column.Name, StringComparer.Ordinal) ?? [];
-        var pending = desired.DerivedColumns.Where(column =>
-            !previousDerived.TryGetValue(column.Name, out var prior) || prior != column).ToArray();
-        if (pending.Length == 0)
+        if (previous is null)
             return;
-
-        foreach (var partition in state.Partitions.Values)
-        {
-            foreach (var pair in partition.ToArray())
-            {
-                var projected = SearchKeyProjection.Populate(desired, pair.Value.Values);
-                partition[pair.Key] = pair.Value.With(projected, pair.Value.Version);
-            }
-        }
+        if (!LogicalKeyColumns(previous).SequenceEqual(LogicalKeyColumns(desired), StringComparer.Ordinal))
+            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change its key.");
+        if (previous.Concurrency != desired.Concurrency)
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change its concurrency declaration.");
+        if (previous.Scope != desired.Scope)
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change scope from {previous.Scope} to {desired.Scope}.");
+        if (previous.SchemaVersion != desired.SchemaVersion)
+            throw new SchemaConflictException(
+                $"Storage unit '{desired.Name}' cannot change its schema version.");
+        if (!string.Equals(
+                RetentionCanonicalization.Canonicalize(previous.Retention),
+                RetentionCanonicalization.Canonicalize(desired.Retention),
+                StringComparison.Ordinal))
+            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change retention.");
+        if (previous.AppendIdempotency?.Window != desired.AppendIdempotency?.Window ||
+            !string.Equals(
+                previous.AppendIdempotency?.LedgerName,
+                desired.AppendIdempotency?.LedgerName,
+                StringComparison.Ordinal))
+            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change append idempotency.");
+        if (previous.RetentionIdempotency?.Window != desired.RetentionIdempotency?.Window ||
+            !string.Equals(
+                previous.RetentionIdempotency?.LedgerName,
+                desired.RetentionIdempotency?.LedgerName,
+                StringComparison.Ordinal))
+            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change retention idempotency.");
     }
 
-    private static StorageUnit Merge(StorageUnit? current, StorageUnit desired)
+    private static IReadOnlyList<string> LogicalKeyColumns(StorageUnit unit)
     {
-        if (current is null)
-            return desired;
+        var columns = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        return unit.Key.Columns.Select(column => columns[column].LogicalId).ToArray();
+    }
 
-        return desired with
-        {
-            Columns = desired.Columns.ToArray(),
-            DerivedColumns = desired.DerivedColumns.ToArray(),
-            Indexes = desired.Indexes.ToArray()
-        };
+    private static IReadOnlyList<SchemaChange> Describe(
+        IEnumerable<PhysicalSchemaOperation> operations,
+        StorageUnit? previous,
+        StorageUnit desired)
+    {
+        var changes = SchemaChangeMapping.Describe(operations).ToList();
+        var previousProfiles = previous?.AggregationProfiles
+            .ToDictionary(profile => profile.Name, StringComparer.Ordinal) ?? [];
+        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        changes.AddRange(desiredProfiles.Values
+            .Where(profile =>
+                !previousProfiles.TryGetValue(profile.Name, out var prior) ||
+                !string.Equals(
+                    AggregationProfileCanonicalization.Canonicalize(prior),
+                    AggregationProfileCanonicalization.Canonicalize(profile),
+                    StringComparison.Ordinal))
+            .Select(profile => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, profile.Name)));
+        changes.AddRange(previousProfiles.Keys
+            .Where(name => !desiredProfiles.ContainsKey(name))
+            .Select(name => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, name)));
+        return changes;
     }
 }
 
-internal static class SchemaIdentity
+internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database) : IPhysicalSchemaExecutor
 {
-    internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
-        string.Equals(Column(left), Column(right), StringComparison.Ordinal);
+    public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target)
+    {
+        Monitor.Enter(database.Gate);
+        return new ApplicationLock(database.Gate, target);
+    }
 
-    internal static bool IndexEquals(IndexDefinition left, IndexDefinition right) =>
-        string.Equals(Index(left), Index(right), StringComparison.Ordinal);
+    public PhysicalSchemaHistoryState ReadHistory(
+        PhysicalSchemaTargetIdentity target,
+        IPhysicalSchemaApplicationLock applicationLock) =>
+        database.SchemaHistory.TryGetValue(target, out var applied)
+            ? PhysicalSchemaHistoryState.FromApplied(applied)
+            : PhysicalSchemaHistoryState.Empty;
 
-    internal static bool KeyEquals(KeyDefinition left, KeyDefinition right) =>
-        left.Columns.SequenceEqual(right.Columns, StringComparer.Ordinal);
+    public PhysicalSchemaOperationAcknowledgement ApplyOperation(
+        PhysicalSchemaTargetIdentity target,
+        PhysicalSchemaOperation operation,
+        IPhysicalSchemaApplicationLock applicationLock) =>
+        ApplyOperationBatch(target, [operation], applicationLock)[0];
 
-    internal static bool IdempotencyEquals(
-        AppendIdempotencyDeclaration? left,
-        AppendIdempotencyDeclaration? right) =>
-        left?.Window == right?.Window &&
-        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
+    public IReadOnlyList<PhysicalSchemaOperationAcknowledgement> ApplyOperationBatch(
+        PhysicalSchemaTargetIdentity target,
+        IReadOnlyList<PhysicalSchemaOperation> operations,
+        IPhysicalSchemaApplicationLock applicationLock)
+    {
+        var lease = (ApplicationLock)applicationLock;
+        database.Units.TryGetValue(target.SubjectId, out var current);
+        var next = current?.Clone();
+        foreach (var operation in operations)
+            ApplyOperation(operation, ref next);
+        if (next is not null && current is not null)
+            next.Revision = checked(current.Revision + 1);
+        lease.PendingState = next;
+        lease.HasPendingState = true;
+        var appliedAt = DateTimeOffset.UtcNow;
+        return operations.Select(operation => new PhysicalSchemaOperationAcknowledgement(
+            operation.Identity,
+            operation.Fingerprint,
+            appliedAt)).ToArray();
+    }
 
-    internal static bool RetentionIdempotencyEquals(
-        RetentionIdempotencyDeclaration? left,
-        RetentionIdempotencyDeclaration? right) =>
-        left?.Window == right?.Window &&
-        string.Equals(left?.LedgerName, right?.LedgerName, StringComparison.Ordinal);
+    public void PublishAppliedState(
+        PhysicalSchemaAppliedState state,
+        string? expectedAppliedTargetFingerprint,
+        IPhysicalSchemaApplicationLock applicationLock)
+    {
+        var lease = (ApplicationLock)applicationLock;
+        var actual = database.SchemaHistory.TryGetValue(state.TargetIdentity, out var current)
+            ? current.TargetFingerprint
+            : null;
+        if (!string.Equals(actual, expectedAppliedTargetFingerprint, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"In-memory schema history CAS failed for '{state.TargetIdentity}'.");
 
-    internal static bool AggregationProfileEquals(AggregationProfile left, AggregationProfile right) =>
-        string.Equals(AggregationProfile(left), AggregationProfile(right), StringComparison.Ordinal);
+        if (lease.HasPendingState)
+        {
+            if (lease.PendingState is null)
+                database.Units.Remove(state.TargetIdentity.SubjectId);
+            else
+                database.Units[state.TargetIdentity.SubjectId] = lease.PendingState;
+        }
+        database.SchemaHistory[state.TargetIdentity] = state;
+    }
 
-    internal static bool RetentionEquals(RetentionDeclaration? left, RetentionDeclaration? right) =>
-        string.Equals(
-            RetentionCanonicalization.Canonicalize(left),
-            RetentionCanonicalization.Canonicalize(right),
-            StringComparison.Ordinal);
+    private static void ApplyOperation(PhysicalSchemaOperation operation, ref InMemoryUnitState? state)
+    {
+        switch (operation)
+        {
+            case CreatePrimaryStorageOperation create:
+                state ??= new InMemoryUnitState(create.Subject.Definition);
+                break;
+            case AddColumnOperation:
+            case FinalizeColumnOperation:
+            case AlterColumnOperation:
+            case RenamePrimaryStorageOperation:
+            case ColumnSupersessionOperation:
+            case ApplyProviderPhysicalSchemaDefinitionOperation:
+            case PublishAppliedStateOperation:
+                break;
+            case BackfillColumnOperation { Derived: not null } backfill:
+                RewriteRows(state!, values => SearchKeyProjection.Populate(backfill.Subject.Definition, values));
+                break;
+            case BackfillColumnOperation { Column.Default: not null } backfill:
+                RewriteRows(state!, values =>
+                {
+                    var next = new Dictionary<string, object?>(values, StringComparer.Ordinal);
+                    next[backfill.Column.Name] = StorageValues.CloneValue(backfill.Column.Default.Value);
+                    return next;
+                });
+                break;
+            case BackfillColumnOperation:
+                break;
+            case CreatePhysicalIndexOperation createIndex:
+                state!.PhysicalIndexes.Add(ProviderIndex(createIndex.Index));
+                break;
+            case RebuildPhysicalIndexOperation rebuildIndex:
+                state!.PhysicalIndexes.RemoveAll(index => index.Name == rebuildIndex.Index.Name);
+                state.PhysicalIndexes.Add(ProviderIndex(rebuildIndex.Index));
+                break;
+            case RenameColumnOperation rename:
+                RewriteRows(state!, values =>
+                {
+                    var next = new Dictionary<string, object?>(values, StringComparer.Ordinal);
+                    if (next.Remove(rename.FromName, out var value))
+                        next[rename.ToName] = value;
+                    return next;
+                });
+                break;
+            case DropColumnOperation dropColumn:
+                RewriteRows(state!, values =>
+                {
+                    var next = new Dictionary<string, object?>(values, StringComparer.Ordinal);
+                    next.Remove(dropColumn.Column.Name);
+                    return next;
+                });
+                break;
+            case DropPhysicalIndexOperation dropIndex:
+                state!.PhysicalIndexes.RemoveAll(index => index.Name == dropIndex.Index.Name);
+                break;
+            case DropPrimaryStorageOperation:
+                state = null;
+                break;
+            case ValidatePhysicalSchemaOperation validate when validate.Subject.Evolution.RetiresPrimaryStorage:
+                if (state is not null)
+                    throw new InvalidOperationException(
+                        $"In-memory schema validation expected retired storage '{validate.Subject.Name}' to be absent.");
+                break;
+            case ValidatePhysicalSchemaOperation validate:
+                if (state is null)
+                    throw new InvalidOperationException(
+                        $"In-memory schema validation expected active storage '{validate.Subject.Name}' to exist.");
+                state.ReplaceDeclaration(validate.Subject.Definition);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(operation), operation.Kind, null);
+        }
+    }
 
-    private static string Column(ColumnDefinition column) => Encode(
-        column.Name,
-        column.Type,
-        column.IsNullable,
-        column.MaxLength,
-        column.Precision,
-        column.Scale,
-        column.Type == PortableType.String && (column.Collation is null or PortableCollation.Ordinal)
-            ? PortableCollation.Ordinal
-            : column.Collation,
-        column.Default is null ? "default:absent" : $"default:present:{Value(column.Default.Value)}",
-        column.Generation);
+    private static void RewriteRows(
+        InMemoryUnitState state,
+        Func<IReadOnlyDictionary<string, object?>, IReadOnlyDictionary<string, object?>> rewrite)
+    {
+        foreach (var partition in state.Partitions.Values)
+        {
+            foreach (var pair in partition.ToArray())
+                partition[pair.Key] = pair.Value.With(rewrite(pair.Value.Values), pair.Value.Version);
+        }
+    }
 
-    private static string Index(IndexDefinition index) => Encode(
+    private static ProviderIndex ProviderIndex(IndexDefinition index) => new(
         index.Name,
+        index.Columns.Select(column => new ProviderIndexColumn(column.Column, column.Direction)).ToArray(),
         index.IsUnique,
         index.MissingValues,
-        index.SchemaVersion,
-        string.Join("", index.Columns.Select(column => Encode(column.Column, column.Direction))));
+        index.SchemaVersion);
 
-    private static string AggregationProfile(AggregationProfile profile) =>
-        AggregationProfileCanonicalization.Canonicalize(profile);
-
-    private static string Encode(params object?[] parts) => string.Join(";", parts.Select(part =>
+    private sealed class ApplicationLock(object gate, PhysicalSchemaTargetIdentity target)
+        : IPhysicalSchemaApplicationLock
     {
-        var value = part?.ToString() ?? "<null>";
-        return $"{value.Length}:{value}";
-    }));
+        internal InMemoryUnitState? PendingState { get; set; }
 
-    private static string Value(object? value) => value switch
-    {
-        null => "null",
-        string text => $"s:{text.Length}:{text}",
-        byte[] bytes => $"b:{Convert.ToBase64String(bytes)}",
-        IReadOnlyDictionary<string, object?> dictionary =>
-            $"dict:{string.Join("", dictionary.OrderBy(pair => pair.Key, StringComparer.Ordinal)
-                .Select(pair => Encode(pair.Key, Value(pair.Value))))}",
-        IDictionary dictionary =>
-            $"dict:{string.Join("", dictionary.Cast<DictionaryEntry>()
-                .OrderBy(pair => pair.Key?.ToString(), StringComparer.Ordinal)
-                .Select(pair => Encode(pair.Key?.ToString(), Value(pair.Value))))}",
-        IEnumerable sequence => $"seq:{string.Join("", sequence.Cast<object?>().Select(Value))}",
-        IFormattable formattable => $"{value.GetType().FullName}:{formattable.ToString(null, CultureInfo.InvariantCulture)}",
-        _ => $"{value.GetType().FullName}:{value}"
-    };
+        internal bool HasPendingState { get; set; }
+
+        public PhysicalSchemaTargetIdentity Target { get; } = target;
+
+        public void Dispose() => Monitor.Exit(gate);
+    }
 }
 
 internal static class StorageDeclaration

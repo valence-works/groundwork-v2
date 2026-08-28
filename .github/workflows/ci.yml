@@ -612,6 +612,10 @@ jobs:
 
   stream-capabilities-retention:
     runs-on: ubuntu-latest
+    env:
+      GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+      GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+      GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s3ci?replicaSet=s3rs&directConnection=true
     services:
       postgres:
         image: postgres:17.6-alpine3.22
@@ -656,9 +660,47 @@ jobs:
           done
           docker exec groundwork-s3-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
       - run: dotnet restore tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
-      - name: Run four-provider retention proof
-        env:
-          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s3ci?replicaSet=s3rs&directConnection=true
-        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Retention
+      # Each target framework runs Retention separately, with its own trx: a single invocation builds and
+      # runs both net8.0 and net10.0, and the second run's trx silently overwrites the first's, which would
+      # let one framework's OnAppend coalescing proofs go unchecked below.
+      - name: Run four-provider retention proof (net8.0)
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release --filter Retention --framework net8.0
+          --logger "trx;LogFileName=stream-capabilities-retention-net8.0.trx"
+          --results-directory artifacts/stream-capabilities-retention
+      - name: Run four-provider retention proof (net10.0)
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release --filter Retention --framework net10.0
+          --logger "trx;LogFileName=stream-capabilities-retention-net10.0.trx"
+          --results-directory artifacts/stream-capabilities-retention
+      # A skipped OnAppend coalescing proof is a Skip.If, not a failure: it reads as inconclusive rather than
+      # a verified pass, which is the whole point, but only if something checks for it. Left unchecked, a
+      # busy runner would make the skip routine and the coalescing property would quietly stop being
+      # verified -- the same "an assertion standing in for the thing it claims" defect the retry in
+      # RetentionProofTests exists to avoid. This asserts every OnAppend coalescing proof actually executed,
+      # on both target frameworks.
+      - name: Refuse a run whose OnAppend coalescing proofs did not execute
+        run: |
+          proofs="PostgreSQL_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline
+          SQLServer_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline
+          SQLite_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline
+          SQLite_in_memory_OnAppend_serializes_the_shared_connection_and_coalesces_cleanup
+          MongoDB_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline"
+          for tfm in net8.0 net10.0; do
+            results="artifacts/stream-capabilities-retention/stream-capabilities-retention-$tfm.trx"
+            outcomes() {
+              grep -o "testName=\"Groundwork.StreamCapabilities.Tests.RetentionProofTests.$1\"[^>]*outcome=\"[A-Za-z]*\"" \
+                "$results" | grep -c "outcome=\"$2\"" || true
+            }
+            while IFS= read -r proof; do
+              passed=$(outcomes "$proof" Passed)
+              notExecuted=$(outcomes "$proof" NotExecuted)
+              echo "[$tfm] $proof passed: $passed, not executed: $notExecuted"
+              if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ]; then
+                echo "::error::[$tfm] $proof did not execute. It may have been skipped as inconclusive after retries found no overlapping writers." >&2
+                exit 1
+              fi
+            done <<< "$proofs"
+          done

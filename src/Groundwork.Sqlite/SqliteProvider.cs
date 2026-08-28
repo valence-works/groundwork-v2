@@ -23,7 +23,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     /// </summary>
     public QueryAdmissionProfile QueryAdmission { get; } = new()
     {
-        MaximumParameters = SqliteQueryRenderer.ParameterBudget
+        MaximumParameters = SqliteQueryRenderer.ParameterBudget,
+        MaximumBatchReadKeys = SqliteQueryRenderer.ParameterBudget
     };
 
     private readonly object gate = new();
