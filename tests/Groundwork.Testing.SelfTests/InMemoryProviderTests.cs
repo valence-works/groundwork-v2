@@ -1606,7 +1606,7 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
-    public void Unsupported_mutable_default_is_rejected_at_snapshot_boundary()
+    public void Unsupported_mutable_default_is_rejected_at_declaration_boundary()
     {
         var factory = new InMemoryProviderFactory();
         using var connection = factory.Create("memory://default-rejection");
@@ -1620,7 +1620,8 @@ public sealed class InMemoryProviderTests
                 .ToArray()
         };
 
-        Assert.Throws<ArgumentException>(() => connection.Schema.Apply(unit));
+        var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+        Assert.Contains("GW-PORT-013", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

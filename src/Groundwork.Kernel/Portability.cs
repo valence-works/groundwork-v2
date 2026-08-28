@@ -95,6 +95,24 @@ public static class PortabilityValidator
     private const int MinimumPortableDecimalPrecision = 1;
     private const int MaximumPortableDecimalPrecision = 38;
 
+    private static readonly IReadOnlyDictionary<PortableType, Type> PortableDefaultClrTypes =
+        new Dictionary<PortableType, Type>
+        {
+            [PortableType.String] = typeof(string),
+            [PortableType.Int32] = typeof(int),
+            [PortableType.Int64] = typeof(long),
+            [PortableType.Decimal] = typeof(decimal),
+            [PortableType.Boolean] = typeof(bool),
+            [PortableType.DateTimeOffset] = typeof(DateTimeOffset),
+            [PortableType.Guid] = typeof(Guid),
+            [PortableType.Binary] = typeof(byte[]),
+            // JSON is intentionally opaque and has no single CLR scalar type, so object keeps
+            // this generic exact-type rule from narrowing JSON-compatible scalar/object/array
+            // graphs.
+            [PortableType.Json] = typeof(object),
+            [PortableType.Double] = typeof(double)
+        };
+
     public static PortabilityValidationResult Validate(
         StorageUnit? unit,
         PortabilityValidationContext? context = null)
@@ -121,6 +139,7 @@ public static class PortabilityValidator
         ValidateDuplicatePhysicalIndexSignatures(indexes, diagnostics);
         ValidateUniqueNullability(indexes, byName, diagnostics);
         ValidateDecimalShape(columns, diagnostics);
+        ValidatePortableDefaultClrTypes(columns, diagnostics);
         ValidateStorageOnlyDouble(unit, columns, byName, diagnostics);
         ValidateBoundedIndexKeys(indexes, byName, diagnostics);
         ValidateIndexBudget(indexes, byName, diagnostics);
@@ -599,23 +618,34 @@ public static class PortabilityValidator
         foreach (var column in columns.Where(column =>
             column is { Type: PortableType.Double, Default: not null }))
         {
-            if (column.Default!.Value is double value)
-            {
-                if (!PortableDouble.IsStorableAsDefault(value))
-                {
-                    diagnostics.Add(new(
-                        "GW-PORT-013",
-                        PortableDouble.ExplainDefault(column.Name, value),
-                        $"columns.{column.Name}.default"));
-                }
-            }
-            else if (column.Default.Value is not null)
+            if (column.Default!.Value is double value && !PortableDouble.IsStorableAsDefault(value))
             {
                 diagnostics.Add(new(
                     "GW-PORT-013",
-                    PortableDouble.ExplainNonDoubleDefault(column.Name, column.Default.Value),
+                    PortableDouble.ExplainDefault(column.Name, value),
                     $"columns.{column.Name}.default"));
             }
+        }
+    }
+
+    private static void ValidatePortableDefaultClrTypes(
+        IReadOnlyList<ColumnDefinition> columns,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        foreach (var column in columns.Where(column => column is not null && column.Default?.Value is not null))
+        {
+            var value = column.Default!.Value!;
+            if (!PortableDefaultClrTypes.TryGetValue(column.Type, out var expected) ||
+                expected.IsInstanceOfType(value))
+            {
+                continue;
+            }
+
+            diagnostics.Add(new(
+                "GW-PORT-013",
+                $"Column '{column.Name}' declares portable type '{column.Type}' but its default " +
+                $"supplies CLR type '{value.GetType().Name}'; use a default of CLR type '{expected.Name}'.",
+                $"columns.{column.Name}.default"));
         }
     }
 

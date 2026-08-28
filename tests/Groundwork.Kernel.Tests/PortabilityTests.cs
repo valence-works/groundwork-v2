@@ -5,6 +5,61 @@ namespace Groundwork.Kernel.Tests;
 
 public sealed class PortabilityTests
 {
+    [Theory]
+    [InlineData(PortableType.String)]
+    [InlineData(PortableType.Int32)]
+    [InlineData(PortableType.Int64)]
+    [InlineData(PortableType.Decimal)]
+    [InlineData(PortableType.Boolean)]
+    [InlineData(PortableType.DateTimeOffset)]
+    [InlineData(PortableType.Guid)]
+    [InlineData(PortableType.Binary)]
+    [InlineData(PortableType.Double)]
+    public void A_default_must_supply_the_clr_type_named_by_its_portable_type(PortableType type)
+    {
+        var supplied = MismatchedDefault(type);
+        var result = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("value", type, nullable: false, maxLength: 32, precision: 18, scale: 4) with
+            {
+                Default = new PortableDefault(supplied)
+            }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Equal("columns.value.default", refusal.Path);
+        Assert.Contains("value", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(type.ToString(), refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(supplied.GetType().Name, refusal.Message, StringComparison.Ordinal);
+    }
+
+    private static object MismatchedDefault(PortableType type) => type switch
+    {
+        PortableType.String => 7,
+        PortableType.Int32 => 7L,
+        PortableType.Int64 => 1.5d,
+        PortableType.Decimal => 1,
+        PortableType.Boolean => 1,
+        PortableType.DateTimeOffset => "2024-01-01T00:00:00Z",
+        PortableType.Guid => "00000000-0000-0000-0000-000000000000",
+        PortableType.Binary => "AQI=",
+        PortableType.Double => 1,
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
+
+    [Fact]
+    public void An_int64_default_is_not_widened_from_an_int()
+    {
+        var result = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("value", PortableType.Int64) with { Default = new PortableDefault(1) }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Contains("Int64", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("Int32", refusal.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Decimal_without_precision_and_scale_is_refused()
     {

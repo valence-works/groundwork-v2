@@ -71,6 +71,23 @@ public sealed class BuilderTests
     }
 
     [Fact]
+    public void Fluent_build_refuses_a_default_with_the_wrong_clr_type()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() =>
+            Groundwork.Records.StorageUnit
+                .Declare("invalid-default", "invalid_default")
+                .Guid("id", column => column.Required())
+                .Int64("attempts", column => column.Default(1.5d))
+                .Key("id")
+                .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-013");
+        Assert.Equal("columns.attempts.default", diagnostic.Path);
+        Assert.Contains("Int64", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Double", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Typed_record_table_infers_columns_and_exposes_plain_definition()
     {
         var table = RecordTable.For<Customer>("customers")
