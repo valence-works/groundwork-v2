@@ -123,12 +123,34 @@ public sealed class SqliteSetMutationTests
         Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void A_scoped_key_mutation_only_affects_the_callers_scope()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Scope = ScopePolicy.Scoped };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+        first.Insert(Row("a", "open", "first"));
+        second.Insert(Row("a", "open", "second"));
+
+        Assert.Equal(1L, first.DeleteWhere(KeyEquals(unit, "a")).MatchedRows);
+        Assert.Null(first.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
+        Assert.NotNull(second.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
+    }
+
     private static IStorageProviderConnection Open() => new SqliteProviderFactory().Create(
         "Data Source=file:groundwork_p43_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
 
     private static Predicate Status(StorageUnit unit, string value)
     {
         var column = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, isNullable: false, maxLength: 32);
+        return new Predicate.Equal(column, QueryConstant.Of(column, value));
+    }
+
+    private static Predicate KeyEquals(StorageUnit unit, string value)
+    {
+        var column = new ColumnRef(new TableId(unit.Name), "id", QueryType.String, isNullable: false, maxLength: 64);
         return new Predicate.Equal(column, QueryConstant.Of(column, value));
     }
 

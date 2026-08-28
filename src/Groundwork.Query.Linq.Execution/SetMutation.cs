@@ -202,9 +202,20 @@ internal static class StorageUnitCoverage
     public static ImmutableArray<CoverageIndex> PortableIndexes(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
-        return CoverageCandidates.Derive(
-            unit.Key.Columns.Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal)),
-            PortableDeclaredIndexes(unit));
+        return CoverageCandidates.Derive(PortableKeyColumns(unit), PortableDeclaredIndexes(unit));
+    }
+
+    /// <summary>
+    /// Returns the logical key used by a portable predicate. Relational providers prepend their
+    /// scope discriminator to the physical key, but that provider-owned column is not part of a
+    /// caller's key predicate and must not make an otherwise key-covered mutation look uncovered.
+    /// </summary>
+    internal static ImmutableArray<string> PortableKeyColumns(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        return unit.Key.Columns
+            .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal))
+            .ToImmutableArray();
     }
 
     internal static ImmutableArray<CoverageIndex> PortableDeclaredIndexes(StorageUnit unit)
@@ -270,7 +281,12 @@ internal static class RuntimeCoverage
         QueryAdmissionProfile? admission)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return Create(session.Unit, StorageUnitCoverage.DeclaredIndexes(session.Unit), connection, admission);
+        return Create(
+            session.Unit,
+            StorageUnitCoverage.DeclaredIndexes(session.Unit),
+            connection,
+            admission,
+            session.Unit.Key.Columns.ToImmutableArray());
     }
 
     public static RuntimeCoverageGate ForMutation(IStorageSession session)
@@ -283,16 +299,21 @@ internal static class RuntimeCoverage
     public static RuntimeCoverageGate ForMutation(StorageUnit unit, IStorageProviderConnection? connection)
     {
         ArgumentNullException.ThrowIfNull(unit);
-        return Create(unit, StorageUnitCoverage.PortableDeclaredIndexes(unit), connection, admission: null);
+        return Create(
+            unit,
+            StorageUnitCoverage.PortableDeclaredIndexes(unit),
+            connection,
+            admission: null,
+            StorageUnitCoverage.PortableKeyColumns(unit));
     }
 
     private static RuntimeCoverageGate Create(
         StorageUnit unit,
         ImmutableArray<CoverageIndex> declared,
         IStorageProviderConnection? connection,
-        QueryAdmissionProfile? admission)
+        QueryAdmissionProfile? admission,
+        ImmutableArray<string> key)
     {
-        var key = unit.Key.Columns;
         var declaredCandidates = CoverageCandidates.Derive(key, declared);
         var deployedNames = connection?.Catalog.ReadIndexes(unit.Id)
             .Select(index => index.Name)
