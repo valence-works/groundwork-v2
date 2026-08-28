@@ -39,4 +39,9 @@ Groundwork.Store.CrossScopeQueryRow
 Groundwork.Store.StorageKey
 Groundwork.Store.StorageValues
 Groundwork.Store.StorageUnitQueryRenderOptions
+Groundwork.Store.QueryAdmissionProfile
+Groundwork.Store.KeyedBatchReadRow
+Groundwork.Store.KeyedBatchReadResult
+Groundwork.Store.KeyedBatchReadRequest
+Groundwork.Store.KeyedBatchReadSessionExtensions
 Groundwork.Sqlite.SqliteProviderFactory
