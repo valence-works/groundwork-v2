@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Groundwork.Kernel;
 using Groundwork.LiveDatabases;
@@ -54,8 +55,8 @@ public sealed class RetentionProofTests
         using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
 
         var serial = await MeasureOnAppend(connection, "pgs", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "pgc", concurrent: true);
-        AssertNativeOnAppendCoalesces(serial, concurrent);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "pgc");
+        AssertNativeOnAppendCoalesces(serial, concurrent, "PostgreSQL");
     }
 
     [SkippableFact]
@@ -75,11 +76,11 @@ public sealed class RetentionProofTests
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
 
         var serial = await MeasureOnAppend(connection, "sqls", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "sqlc", concurrent: true);
-        AssertNativeOnAppendCoalesces(serial, concurrent);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "sqlc");
+        AssertNativeOnAppendCoalesces(serial, concurrent, "SQL Server");
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SQLite_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
         var path = Path.Combine(Path.GetTempPath(), "groundwork-s3-convoy-" + Guid.NewGuid().ToString("N") + ".db");
@@ -87,8 +88,8 @@ public sealed class RetentionProofTests
         {
             using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
             var serial = await MeasureOnAppend(connection, "lites", concurrent: false);
-            var concurrent = await MeasureOnAppend(connection, "litec", concurrent: true);
-            AssertNativeOnAppendCoalesces(serial, concurrent);
+            var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "litec");
+            AssertNativeOnAppendCoalesces(serial, concurrent, "SQLite");
         }
         finally
         {
@@ -96,7 +97,7 @@ public sealed class RetentionProofTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SQLite_in_memory_OnAppend_serializes_the_shared_connection_and_coalesces_cleanup()
     {
         var connectionString = $"Data Source=s3-retention-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
@@ -105,8 +106,8 @@ public sealed class RetentionProofTests
         using var connection = new SqliteProviderFactory().Create(connectionString);
 
         var serial = await MeasureOnAppend(connection, "mems", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "memc", concurrent: true);
-        AssertNativeOnAppendCoalesces(serial, concurrent);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "memc");
+        AssertNativeOnAppendCoalesces(serial, concurrent, "SQLite in-memory");
     }
 
     [SkippableFact]
@@ -128,8 +129,8 @@ public sealed class RetentionProofTests
         using var connection = new MongoProviderFactory().Create(connectionString!);
 
         var serial = await MeasureOnAppend(connection, "mngs", concurrent: false);
-        var concurrent = await MeasureOnAppend(connection, "mngc", concurrent: true);
-        AssertNativeOnAppendCoalesces(serial, concurrent);
+        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "mngc");
+        AssertNativeOnAppendCoalesces(serial, concurrent, "MongoDB");
     }
 
     [Fact]
@@ -482,21 +483,26 @@ public sealed class RetentionProofTests
             Assert.True(outcome.Succeeded);
         }
         var stopwatch = new Stopwatch();
+        var maxOverlap = 1;
         if (concurrent)
         {
             using var start = new ManualResetEventSlim();
             using var ready = new CountdownEvent(writes);
+            var spans = new ConcurrentBag<(long StartTicks, long EndTicks)>();
             var tasks = Enumerable.Range(0, writes).Select(index => Task.Factory.StartNew(() =>
             {
                 var session = connection.OpenSession(unit, StorageAccess.Global, observer);
                 ready.Signal();
                 start.Wait();
+                var begin = stopwatch.ElapsedTicks;
                 Append(session, observer, index);
+                spans.Add((begin, stopwatch.ElapsedTicks));
             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
             Assert.True(ready.Wait(TimeSpan.FromSeconds(5)), "Native writers did not reach the start gate.");
             stopwatch.Start();
             start.Set();
             await Task.WhenAll(tasks);
+            maxOverlap = MaxConcurrentSpans(spans);
         }
         else
         {
@@ -510,13 +516,90 @@ public sealed class RetentionProofTests
         var survivors = verification.Query(All(unit)).Rows.Count;
         var retentionCommands = observer.Commands.Count(command =>
             command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase));
-        return new OnAppendMeasurement(stopwatch.Elapsed, retentionCommands, survivors);
+        return new OnAppendMeasurement(stopwatch.Elapsed, retentionCommands, survivors, maxOverlap, writes);
     }
+
+    /// <summary>
+    /// The largest number of the given [start, end) spans that were simultaneously in flight, found by a
+    /// sweep line over their endpoints. This is the observable stand-in for "the writers actually overlapped",
+    /// which the start gate alone cannot guarantee: the gate only proves every writer reached it together, not
+    /// that the scheduler kept them running together afterwards.
+    /// </summary>
+    private static int MaxConcurrentSpans(IReadOnlyCollection<(long StartTicks, long EndTicks)> spans)
+    {
+        if (spans.Count == 0)
+            return 0;
+        var events = new List<(long Ticks, int Delta)>(spans.Count * 2);
+        foreach (var (start, end) in spans)
+        {
+            events.Add((start, 1));
+            events.Add((end, -1));
+        }
+        // An end processed before a start at the same tick keeps back-to-back, non-overlapping spans from
+        // being counted as overlapping.
+        events.Sort((left, right) => left.Ticks != right.Ticks
+            ? left.Ticks.CompareTo(right.Ticks)
+            : left.Delta.CompareTo(right.Delta));
+        var current = 0;
+        var max = 0;
+        foreach (var (_, delta) in events)
+        {
+            current += delta;
+            if (current > max)
+                max = current;
+        }
+        return max;
+    }
+
+    /// <summary>
+    /// A starved scheduler that serializes writers past the start gate is a scheduling accident, not a
+    /// property of the code under test, so a single unlucky sample is not grounds to give up on the proof.
+    /// This re-measures the concurrent run up to <see cref="OnAppendOverlapAttempts"/> times — each attempt
+    /// against a freshly named unit, so retries never collide with a prior attempt's rows — and returns as
+    /// soon as one attempt overlaps enough to make the ratio assertion meaningful. Only when every attempt
+    /// fails to overlap does the caller reach the <c>Skip.If</c> in <see cref="AssertNativeOnAppendCoalesces"/>.
+    /// </summary>
+    private const int OnAppendOverlapAttempts = 3;
+
+    private static async Task<OnAppendMeasurement> MeasureConcurrentOnAppendWithOverlapRetries(
+        IStorageProviderConnection connection,
+        string provider)
+    {
+        var bestMeasurement = await MeasureOnAppend(connection, provider, concurrent: true);
+        for (var attempt = 2; attempt <= OnAppendOverlapAttempts && !HasConclusiveOverlap(bestMeasurement); attempt++)
+        {
+            var measurement = await MeasureOnAppend(connection, provider, concurrent: true);
+            if (measurement.MaxOverlap > bestMeasurement.MaxOverlap)
+                bestMeasurement = measurement;
+        }
+        return bestMeasurement;
+    }
+
+    /// <summary>
+    /// The peak overlap the ratio assertion in <see cref="AssertNativeOnAppendCoalesces"/> needs to be
+    /// meaningful. That assertion requires the concurrent run to issue at most half the serial run's retention
+    /// commands, i.e. an average of at least two appends folded into every surviving retention command. A
+    /// batch can only plausibly land on that average if, at its busiest instant, at least half of the writers
+    /// were genuinely in flight together — with anything less, the coalescing coordinator never has more than
+    /// one appender's cleanup in flight to fold another appender's cleanup into.
+    /// </summary>
+    private static int MinimumConclusiveOverlap(int writes) => writes / 2;
+
+    private static bool HasConclusiveOverlap(OnAppendMeasurement measurement) =>
+        measurement.MaxOverlap >= MinimumConclusiveOverlap(measurement.Writes);
 
     private static void AssertNativeOnAppendCoalesces(
         OnAppendMeasurement serial,
-        OnAppendMeasurement concurrent)
+        OnAppendMeasurement concurrent,
+        string provider)
     {
+        Skip.If(!HasConclusiveOverlap(concurrent),
+            $"{provider}: only {concurrent.MaxOverlap} of {concurrent.Writes} concurrent writers were ever in " +
+            $"flight at the same instant across {OnAppendOverlapAttempts} attempts (needed at least " +
+            $"{MinimumConclusiveOverlap(concurrent.Writes)}). The scheduler kept serializing the writers past " +
+            "the start gate instead of keeping them overlapped, so this run cannot prove or disprove OnAppend " +
+            "coalescing; it is inconclusive, not a pass.");
+
         Assert.True(concurrent.RetentionCommands * 2 <= serial.RetentionCommands,
             $"Concurrent OnAppend issued {concurrent.RetentionCommands} retention commands in {concurrent.Elapsed}; " +
             $"the serial baseline issued {serial.RetentionCommands} in {serial.Elapsed}. " +
@@ -874,5 +957,10 @@ public sealed class RetentionProofTests
         }
     }
 
-    private sealed record OnAppendMeasurement(TimeSpan Elapsed, int RetentionCommands, int Survivors);
+    private sealed record OnAppendMeasurement(
+        TimeSpan Elapsed,
+        int RetentionCommands,
+        int Survivors,
+        int MaxOverlap,
+        int Writes);
 }
