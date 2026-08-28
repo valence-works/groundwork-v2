@@ -30,9 +30,8 @@ IN_PROGRESS = "In Progress"
 DONE = "Done"
 
 # GitHub recognizes these keywords when they precede an issue reference in a
-# pull-request body (and in commit messages).  Looking at the title as well is
-# harmless and makes this backstop useful when a repository uses a closing
-# keyword in the title.
+# pull-request body (and in commit messages).  The title is intentionally not
+# included: a closing-looking title does not close an issue when the PR merges.
 _CLOSING_REFERENCE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t]+"
     r"(?:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+))?#(?P<number>[0-9]+)",
@@ -133,11 +132,9 @@ def closing_issue_numbers(
         pull_request_repository = _pull_request_repository(pull_request)
         if pull_request_repository is not None and pull_request_repository.casefold() != repository.casefold():
             continue
-        text = "\n".join(
-            value
-            for value in (pull_request.get("title"), pull_request.get("body"))
-            if isinstance(value, str)
-        )
+        text = pull_request.get("body")
+        if not isinstance(text, str):
+            continue
         numbers.update(_closing_references(text, repository))
     return frozenset(numbers)
 

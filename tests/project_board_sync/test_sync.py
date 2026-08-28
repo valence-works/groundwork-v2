@@ -98,6 +98,25 @@ class ClosingPullRequestTests(unittest.TestCase):
         ]
         self.assertEqual({15}, set(closing_issue_numbers(pull_requests)))
 
+    def test_title_only_closing_keyword_does_not_count(self):
+        pull_requests = [
+            {
+                "state": "open",
+                "base": {"repo": {"full_name": REPOSITORY}},
+                "title": "Closes #16",
+                "body": "",
+            }
+        ]
+        self.assertEqual(set(), set(closing_issue_numbers(pull_requests)))
+        self.assertEqual(
+            (),
+            build_sync_plan(
+                [issue(16)],
+                pull_requests,
+                [project_issue_item(16, TODO)],
+            ),
+        )
+
 
 class PlanTests(unittest.TestCase):
     def test_plan_adds_missing_issue_and_updates_only_stale_in_scope_item(self):
