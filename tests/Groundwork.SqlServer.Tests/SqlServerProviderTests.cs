@@ -224,6 +224,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         })));
         Assert.True(observer.RetentionEntered.Wait(TimeSpan.FromSeconds(5)),
             "On-append retention did not start in time.");
+        observer.CheckForOverlap.Set();
 
         using var secondStarted = new ManualResetEventSlim();
         var second = Task.Run(() =>
@@ -731,6 +732,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         private int overlapped;
 
         internal ManualResetEventSlim RetentionEntered { get; } = new();
+        internal ManualResetEventSlim CheckForOverlap { get; } = new();
         internal ManualResetEventSlim Release { get; } = new();
         internal bool Overlapped => Volatile.Read(ref overlapped) != 0;
 
@@ -741,7 +743,8 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
                 RetentionEntered.Set();
                 Release.Wait(TimeSpan.FromSeconds(5));
             }
-            else if (!Release.IsSet && command.Kind == ProviderCommandKind.Read)
+            else if (CheckForOverlap.IsSet && !Release.IsSet &&
+                     command.Kind == ProviderCommandKind.Read && !command.IsProbe)
             {
                 Interlocked.Exchange(ref overlapped, 1);
             }
@@ -751,6 +754,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         {
             Release.Set();
             RetentionEntered.Dispose();
+            CheckForOverlap.Dispose();
             Release.Dispose();
         }
     }
