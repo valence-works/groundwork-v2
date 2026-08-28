@@ -283,6 +283,9 @@ internal static class RecordAggregationSelector
         protected override Expression VisitBinary(BinaryExpression node) =>
             throw Invalid(node, "Computed aggregation expressions are not portable; bind declared aliases directly.");
 
+        protected override Expression VisitUnary(UnaryExpression node) =>
+            throw Invalid(node, "Computed aggregation expressions are not portable; bind declared aliases directly.");
+
         protected override Expression VisitConditional(ConditionalExpression node) =>
             throw Invalid(node, "Conditional aggregation expressions are not portable; bind declared aliases directly.");
 

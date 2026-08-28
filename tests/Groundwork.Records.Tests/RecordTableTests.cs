@@ -382,6 +382,12 @@ public sealed class RecordTableTests
             row => 0));
         Assert.Contains("must bind at least one declared alias", constantResult.Message, StringComparison.Ordinal);
 
+        var computedResult = Assert.Throws<ArgumentException>(() => table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => -row.Get<long>("count")));
+        Assert.Contains("Computed aggregation expressions are not portable", computedResult.Message, StringComparison.Ordinal);
+
         var subsetResult = table.Aggregate(
             "by-name",
             row => row.Get<string>("name"),
