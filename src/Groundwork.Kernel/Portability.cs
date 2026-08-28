@@ -1,3 +1,6 @@
+using System.Collections;
+using System.Text.Json;
+
 namespace Groundwork.Kernel;
 
 /// <summary>A provider-neutral refusal emitted by the portability validator.</summary>
@@ -95,22 +98,51 @@ public static class PortabilityValidator
     private const int MinimumPortableDecimalPrecision = 1;
     private const int MaximumPortableDecimalPrecision = 38;
 
-    private static readonly IReadOnlyDictionary<PortableType, Type> PortableDefaultClrTypes =
-        new Dictionary<PortableType, Type>
+    private static readonly IReadOnlyList<Type> PortableJsonScalarTypes =
+    [
+        typeof(string),
+        typeof(bool),
+        typeof(byte),
+        typeof(sbyte),
+        typeof(short),
+        typeof(ushort),
+        typeof(int),
+        typeof(uint),
+        typeof(long),
+        typeof(ulong),
+        typeof(float),
+        typeof(double),
+        typeof(decimal),
+        typeof(char),
+        typeof(DateTime),
+        typeof(DateTimeOffset),
+        typeof(Guid),
+        typeof(byte[])
+    ];
+
+    private static readonly IReadOnlyDictionary<PortableType, IReadOnlyList<Type>> PortableDefaultClrTypes =
+        new Dictionary<PortableType, IReadOnlyList<Type>>
         {
-            [PortableType.String] = typeof(string),
-            [PortableType.Int32] = typeof(int),
-            [PortableType.Int64] = typeof(long),
-            [PortableType.Decimal] = typeof(decimal),
-            [PortableType.Boolean] = typeof(bool),
-            [PortableType.DateTimeOffset] = typeof(DateTimeOffset),
-            [PortableType.Guid] = typeof(Guid),
-            [PortableType.Binary] = typeof(byte[]),
-            // JSON is intentionally opaque and has no single CLR scalar type, so object keeps
-            // this generic exact-type rule from narrowing JSON-compatible scalar/object/array
-            // graphs.
-            [PortableType.Json] = typeof(object),
-            [PortableType.Double] = typeof(double)
+            [PortableType.String] = [typeof(string)],
+            [PortableType.Int32] = [typeof(int)],
+            [PortableType.Int64] = [typeof(long)],
+            [PortableType.Decimal] = [typeof(decimal)],
+            [PortableType.Boolean] = [typeof(bool)],
+            [PortableType.DateTimeOffset] = [typeof(DateTimeOffset)],
+            [PortableType.Guid] = [typeof(Guid)],
+            [PortableType.Binary] = [typeof(byte[])],
+            // JSON is intentionally opaque and has no single CLR scalar type. Its top-level
+            // CLR shapes are enumerated here, and IsPortableJsonValue validates the graph below
+            // each object/array rather than allowing an arbitrary object through as object.
+            [PortableType.Json] =
+            [
+                ..PortableJsonScalarTypes,
+                typeof(JsonDocument),
+                typeof(JsonElement),
+                typeof(IDictionary),
+                typeof(IEnumerable)
+            ],
+            [PortableType.Double] = [typeof(double)]
         };
 
     public static PortabilityValidationResult Validate(
@@ -636,17 +668,82 @@ public static class PortabilityValidator
         {
             var value = column.Default!.Value!;
             if (!PortableDefaultClrTypes.TryGetValue(column.Type, out var expected) ||
-                expected.IsInstanceOfType(value))
+                IsCompatiblePortableDefault(column.Type, value, expected))
             {
                 continue;
             }
 
+            var expectedDescription = column.Type == PortableType.Json
+                ? "a JSON-compatible scalar, object, or array"
+                : $"CLR type '{expected[0].Name}'";
             diagnostics.Add(new(
                 "GW-PORT-013",
                 $"Column '{column.Name}' declares portable type '{column.Type}' but its default " +
-                $"supplies CLR type '{value.GetType().Name}'; use a default of CLR type '{expected.Name}'.",
+                $"supplies CLR type '{value.GetType().Name}'; use {expectedDescription}.",
                 $"columns.{column.Name}.default"));
         }
+    }
+
+    private static bool IsCompatiblePortableDefault(
+        PortableType type,
+        object value,
+        IReadOnlyList<Type> expected) =>
+        expected.Any(candidate => candidate.IsInstanceOfType(value)) &&
+        (type != PortableType.Json ||
+         IsPortableJsonValue(value, new HashSet<object>()));
+
+    private static bool IsPortableJsonValue(object value, ISet<object> active)
+    {
+        if (value is float single)
+            return float.IsFinite(single);
+        if (value is double number)
+            return double.IsFinite(number);
+        if (value is JsonDocument document)
+            return document.RootElement.ValueKind != JsonValueKind.Undefined;
+        if (value is JsonElement element)
+            return element.ValueKind != JsonValueKind.Undefined;
+        if (PortableJsonScalarTypes.Contains(value.GetType()))
+            return true;
+
+        if (!active.Add(value))
+            return false;
+
+        try
+        {
+            if (value is IReadOnlyDictionary<string, object?> readOnlyDictionary)
+                return readOnlyDictionary.Values.All(item => item is null || IsPortableJsonValue(item, active));
+
+            if (value is IDictionary dictionary)
+            {
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    if (entry.Key is not string ||
+                        entry.Value is not null && !IsPortableJsonValue(entry.Value, active))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            if (value is IEnumerable sequence)
+            {
+                foreach (var item in sequence)
+                {
+                    if (item is not null && !IsPortableJsonValue(item, active))
+                        return false;
+                }
+
+                return true;
+            }
+        }
+        finally
+        {
+            active.Remove(value);
+        }
+
+        return false;
     }
 
     private static void ValidateBoundedIndexKeys(

@@ -48,6 +48,41 @@ public sealed class PortabilityTests
     };
 
     [Fact]
+    public void A_json_default_accepts_a_portable_scalar_object_and_array_graph()
+    {
+        var value = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["text"] = "pending",
+            ["count"] = 7,
+            ["items"] = new List<object?> { true, null, new Dictionary<string, object?> { ["active"] = false } }
+        };
+        var result = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with { Default = new PortableDefault(value) }
+        ], key: ["id"]));
+
+        Assert.DoesNotContain(result.Refusals, finding => finding.Code == "GW-PORT-013");
+    }
+
+    [Fact]
+    public void A_json_default_rejects_a_non_json_compatible_clr_value()
+    {
+        var result = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with
+            {
+                Default = new PortableDefault(new UnsupportedJsonDefault())
+            }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Equal("columns.payload.default", refusal.Path);
+        Assert.Contains("Json", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(UnsupportedJsonDefault), refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("JSON-compatible", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void An_int64_default_is_not_widened_from_an_int()
     {
         var result = Validate(Unit([
@@ -824,6 +859,8 @@ public sealed class PortabilityTests
         string Code,
         StorageUnit Unit,
         PortabilityValidationContext? Context = null);
+
+    private sealed class UnsupportedJsonDefault { }
 
     private static void AssertCode(PortabilityValidationResult result, string code, string detail)
     {
