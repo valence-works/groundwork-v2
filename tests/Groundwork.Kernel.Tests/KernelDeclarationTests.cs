@@ -42,7 +42,7 @@ public sealed class KernelDeclarationTests
             .Select((type, index) => new ColumnDefinition { Name = $"column{index}", Type = type })
             .ToArray();
 
-        Assert.Equal(9, columns.Length);
+        Assert.Equal(10, columns.Length);
         Assert.Equal(Enum.GetValues<PortableType>(), columns.Select(column => column.Type));
     }
 

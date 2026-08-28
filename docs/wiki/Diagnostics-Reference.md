@@ -42,6 +42,8 @@ Raised by `PortabilityValidator`, builders, and providers **before schema I/O**.
 | `GW-PORT-009` | Two indexes share a physical signature | Consolidate onto one index |
 | `GW-PORT-010` | Invalid physical identifier | ASCII letters/digits/underscores, starts with letter/underscore, ≤ 63 bytes, no `__groundwork_` prefix |
 | `GW-PORT-011` | Duplicate physical index name | Use unique names |
+| `GW-PORT-012` | A `Double` column used as a key, index, or aggregation group-by column | Declare `Decimal` or `Int64` for a value you compare; keep `Double` for one you only store |
+| `GW-PORT-013` | A `Double` column declares a default outside the **defaultable** domain — non-finite, negative zero, subnormal, or not a `double` at all | Use a finite, normal `double` default other than negative zero; a subnormal can still be written as a value |
 
 ---
 
@@ -58,7 +60,7 @@ Raised by `PortableQuerySemantics.Validate`. See **[Portable Semantics](Portable
 | `GW-SEM-TYPE-002` | Double membership |
 | `GW-SEM-TYPE-004` | Untyped or null constant reference |
 | `GW-SEM-TYPE-005` | Constant type must exactly match column/set type |
-| `GW-SEM-TYPE-006` | Binary floating point in a predicate or index |
+| `GW-SEM-TYPE-006` | Binary floating point in a predicate or index — `Double` is declarable and storable, only uncomparable |
 | `GW-SEM-TYPE-007` | Element set without an exact declared element type |
 | `GW-SEM-TEXT-001` | Non-portable text comparison policy |
 | `GW-SEM-TEXT-003` | Non-portable substring anchor |
@@ -149,6 +151,14 @@ missing column, and index drift are unaffected.
 | `GW-WRITE-CONCURRENCY-001` | `CreateOnly`/`IfVersion` on a `None` unit |
 | `GW-WRITE-CONCURRENCY-002` | Invalid operation/precondition pairing |
 | `GW-WRITE-CONCURRENCY-003` | Application supplied a system-owned token value |
+
+---
+
+## `GW-VALUE-*` — written value domains
+
+| Code | Meaning |
+| --- | --- |
+| `GW-VALUE-DOUBLE-001` | A `Double` write outside the storable domain: NaN, an infinity, or negative zero. SQL Server refuses NaN and both infinities at the wire protocol and SQLite refuses NaN, while SQLite and MongoDB both return positive zero for a stored negative zero — so the value a reader gets would depend on the provider. Write a finite value other than negative zero. |
 
 ---
 

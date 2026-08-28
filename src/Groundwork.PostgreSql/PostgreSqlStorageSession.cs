@@ -287,7 +287,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     private ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
         return Mutate(values, options, Mutation.Insert, mode);
     }
@@ -303,7 +303,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     private ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
         return Mutate(values, options, Mutation.Update, mode);
     }
@@ -319,7 +319,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
 
     private ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
         return Mutate(values, options, Mutation.Upsert, mode);
     }
@@ -339,7 +339,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         RelationalExecution mode)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         var outcome = await Execute(() => ConditionalUpsertCore(values, options, mode)).ConfigureAwait(false);
         if (outcome.Status == WriteOutcomeStatus.Inserted && Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
@@ -681,7 +681,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
         var execution = await ExecuteWrite(
             () => AppendCore(operationId, values, declaration, exactOutcomes: false, mode), mode).ConfigureAwait(false);
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
@@ -707,7 +707,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
         var outcome = await ExecuteWrite(async () => (await AppendCore(
             operationId, values, declaration, exactOutcomes: true, mode).ConfigureAwait(false)).ToReport(), mode)
             .ConfigureAwait(false);

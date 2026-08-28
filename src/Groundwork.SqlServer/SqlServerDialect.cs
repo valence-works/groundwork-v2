@@ -64,6 +64,10 @@ internal sealed class SqlServerDialect : RelationalDialect
         PortableType.DateTimeOffset => "datetimeoffset(7)",
         PortableType.Guid => "uniqueidentifier",
         PortableType.Binary => definition.MaxLength is { } binaryLength ? $"varbinary({binaryLength})" : "varbinary(max)",
+        // Bare "float" is float(53) — 8-byte IEEE-754 binary64. Spelling the precision would
+        // deploy the same column but read back from the catalog as "float", and the deployed
+        // type is compared to the declared one as text.
+        PortableType.Double => "float",
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
 

@@ -56,7 +56,8 @@ var committed = work.CommitWithOutcomes();
 
 The equality set is deliberately a dictionary of declared scalar or binary columns, not a
 general predicate. `PortableType.Json` is refused before provider I/O because JSON equality and
-property ordering differ across the supported stores. A nullable expected value represents the
+property ordering differ across the supported stores, and `PortableType.Double` because binary
+floating point has no comparison semantics that hold across them. A nullable expected value represents the
 logical null value; an omitted nullable field is normalized to that same value. Provider-owned
 scope, version, action, and derived search-key columns cannot be compared.
 

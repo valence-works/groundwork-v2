@@ -211,7 +211,7 @@ internal class MongoStoreSession(
     private void ValidateInsert(StorageValues values, WriteOptions? options)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
     }
 
@@ -234,7 +234,7 @@ internal class MongoStoreSession(
     private void ValidateUpdate(StorageValues values, WriteOptions? options)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
     }
 
@@ -257,7 +257,7 @@ internal class MongoStoreSession(
     private void ValidateUpsert(StorageValues values, WriteOptions? options)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
     }
 
@@ -281,7 +281,7 @@ internal class MongoStoreSession(
     private void ValidateConditionalUpsert(StorageValues values, WriteOptions? options)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
     }
 

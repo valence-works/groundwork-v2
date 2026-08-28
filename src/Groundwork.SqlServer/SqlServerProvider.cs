@@ -216,6 +216,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
             PortableType.DateTimeOffset => SqlDbType.DateTimeOffset,
             PortableType.Guid => SqlDbType.UniqueIdentifier,
             PortableType.Binary => SqlDbType.VarBinary,
+            PortableType.Double => SqlDbType.Float,
             _ => throw new ArgumentOutOfRangeException(nameof(definition), definition.Type, null)
         });
         parameter.Value = ToSqlServerValue(value, definition);
