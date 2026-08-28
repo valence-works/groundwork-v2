@@ -35,6 +35,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
     private readonly SqlServerSchemaCoordinator schemaCoordinator;
+    private volatile ISessionRegistrationObserver? activeRegistrationObserver;
     private volatile bool disposed;
 
     public SqlServerProviderConnection(string connectionString)
@@ -203,6 +204,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
 
     public void Dispose()
     {
+        activeRegistrationObserver?.OnProviderDisposalAttempted();
         using (EnterGate())
         {
             if (disposed)
@@ -223,8 +225,22 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
             if (disposed)
                 throw new ObjectDisposedException(nameof(SqlServerProviderConnection));
             if (observer is ISessionRegistrationObserver registrationObserver)
-                registrationObserver.OnSessionRegistrationEligibilityChecked();
-            sessionConnections.Add(connection);
+            {
+                activeRegistrationObserver = registrationObserver;
+                try
+                {
+                    registrationObserver.OnSessionRegistrationEligibilityChecked();
+                    sessionConnections.Add(connection);
+                }
+                finally
+                {
+                    activeRegistrationObserver = null;
+                }
+            }
+            else
+            {
+                sessionConnections.Add(connection);
+            }
         }
     }
 

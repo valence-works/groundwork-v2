@@ -34,6 +34,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     private readonly List<SqliteConnection> sessionConnections = [];
     private readonly bool isMemory;
     private readonly SqliteSchemaCoordinator schemaCoordinator;
+    private volatile ISessionRegistrationObserver? activeRegistrationObserver;
     private volatile bool disposed;
 
     public SqliteProviderConnection(string connectionString)
@@ -202,6 +203,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
 
     public void Dispose()
     {
+        activeRegistrationObserver?.OnProviderDisposalAttempted();
         lock (gate)
         {
             if (disposed)
@@ -223,9 +225,24 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         {
             ThrowIfDisposed();
             if (observer is ISessionRegistrationObserver registrationObserver)
-                registrationObserver.OnSessionRegistrationEligibilityChecked();
-            if (!isMemory)
+            {
+                activeRegistrationObserver = registrationObserver;
+                try
+                {
+                    registrationObserver.OnSessionRegistrationEligibilityChecked();
+                    ThrowIfDisposed();
+                    if (!isMemory)
+                        sessionConnections.Add(sessionConnection);
+                }
+                finally
+                {
+                    activeRegistrationObserver = null;
+                }
+            }
+            else if (!isMemory)
+            {
                 sessionConnections.Add(sessionConnection);
+            }
         }
     }
 

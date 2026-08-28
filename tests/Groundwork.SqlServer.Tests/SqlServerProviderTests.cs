@@ -89,13 +89,8 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 
         var opening = Task.Run(() => connection.OpenSession(unit, StorageAccess.Global, observer));
         Assert.True(observer.EligibilityChecked.Wait(TimeSpan.FromSeconds(5)), "Session registration did not reach the eligibility check.");
-        using var disposalStarted = new ManualResetEventSlim();
-        var disposing = Task.Run(() =>
-        {
-            disposalStarted.Set();
-            connection.Dispose();
-        });
-        Assert.True(disposalStarted.Wait(TimeSpan.FromSeconds(5)), "Provider disposal did not start.");
+        var disposing = Task.Run(connection.Dispose);
+        Assert.True(observer.DisposalAttempted.Wait(TimeSpan.FromSeconds(5)), "Provider disposal did not reach the registration boundary.");
 
         observer.Release.Set();
         var session = await opening;
@@ -785,6 +780,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     private sealed class RegistrationBarrierObserver : ISessionRegistrationObserver, IDisposable
     {
         internal ManualResetEventSlim EligibilityChecked { get; } = new();
+        internal ManualResetEventSlim DisposalAttempted { get; } = new();
         internal ManualResetEventSlim Release { get; } = new();
 
         public void Observe(ProviderCommandEvent command) { }
@@ -795,10 +791,13 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             Release.Wait(TimeSpan.FromSeconds(5));
         }
 
+        public void OnProviderDisposalAttempted() => DisposalAttempted.Set();
+
         public void Dispose()
         {
             Release.Set();
             EligibilityChecked.Dispose();
+            DisposalAttempted.Dispose();
             Release.Dispose();
         }
     }

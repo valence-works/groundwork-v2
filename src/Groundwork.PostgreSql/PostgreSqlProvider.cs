@@ -72,6 +72,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     }
     private readonly ConcurrentBag<NpgsqlConnection> ownedConnections = [];
     private readonly PostgreSqlSchemaCoordinator schemaCoordinator;
+    private volatile ISessionRegistrationObserver? activeRegistrationObserver;
     private volatile bool disposed;
 
     public PostgreSqlProviderConnection(string connectionString)
@@ -234,8 +235,24 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
                 throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
             }
             if (observer is ISessionRegistrationObserver registrationObserver)
-                registrationObserver.OnSessionRegistrationEligibilityChecked();
-            ownedConnections.Add(connection);
+            {
+                activeRegistrationObserver = registrationObserver;
+                try
+                {
+                    registrationObserver.OnSessionRegistrationEligibilityChecked();
+                    if (disposed)
+                        throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
+                    ownedConnections.Add(connection);
+                }
+                finally
+                {
+                    activeRegistrationObserver = null;
+                }
+            }
+            else
+            {
+                ownedConnections.Add(connection);
+            }
         }
     }
 
@@ -247,6 +264,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
 
     public void Dispose()
     {
+        activeRegistrationObserver?.OnProviderDisposalAttempted();
         List<NpgsqlConnection> connections = [];
         lock (connectionRegistryGate)
         {

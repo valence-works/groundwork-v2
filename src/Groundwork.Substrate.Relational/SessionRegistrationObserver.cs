@@ -8,4 +8,6 @@ namespace Groundwork.Substrate.Relational;
 internal interface ISessionRegistrationObserver : IProviderCommandObserver
 {
     void OnSessionRegistrationEligibilityChecked();
+
+    void OnProviderDisposalAttempted();
 }
