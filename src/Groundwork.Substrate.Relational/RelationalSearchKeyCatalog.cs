@@ -17,7 +17,7 @@ public static class RelationalSearchKeyCatalog
         ArgumentNullException.ThrowIfNull(transaction);
         ArgumentNullException.ThrowIfNull(definition);
         var (table, column) = Split(definition);
-        PortableSearchKeyAlgorithmIdentity.Parse(definition.CanonicalDefinition);
+        SearchKeyProjection.ValidateAlgorithmId(definition.CanonicalDefinition);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = upsertSql;

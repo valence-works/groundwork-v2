@@ -154,6 +154,42 @@ public sealed class SqlServerKeyBudgetTests
         Assert.DoesNotContain("__groundwork_search_name=1701*1", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Locale_physical_index_budget_uses_its_declared_expansion_factor()
+    {
+        var logical = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlserver-locale-budget"),
+            Name = "SqlServerLocaleBudget",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new()
+                {
+                    Name = "name",
+                    Type = PortableType.String,
+                    IsNullable = false,
+                    MaxLength = 142,
+                    LocaleSortKey = new LocaleSortKeyDefinition
+                    {
+                        CultureName = "sv-SE",
+                        MaximumExpansionFactor = 12
+                    }
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "by_name", Columns = [new IndexColumn("name")] }]
+        };
+
+        var physical = SqlServerSchemaCoordinator.Physicalize(logical);
+        var exception = Assert.Throws<SqlServerKeyBudgetException>(() =>
+            SqlServerIndexKeyBudgetValidator.Validate(physical));
+
+        Assert.Equal(1_704, exception.RequiredBytes);
+        Assert.Contains("name=142*12", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("__groundwork_search_name=1704*1", exception.Message, StringComparison.Ordinal);
+    }
+
     private static StorageUnit Unit(params object[] values)
     {
         var columns = values.OfType<ColumnDefinition>().ToArray();
