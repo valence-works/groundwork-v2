@@ -31,9 +31,11 @@ which `Validate` returns no refusals.
   `AsciiIgnoreCase` prefix matching require the schema's versioned persisted
   search-key mapping; the `ColumnRef` policy must match that mapping exactly or
   rendering fails with `GW-QUERY-031`. Culture, ICU, accent, and implicit
-  Unicode-normalization semantics are refused; malformed UTF-16 is rejected at
-  binding. Evaluating a refused folded policy remains deterministic and never
-  invokes runtime `OrdinalIgnoreCase` behavior.
+  Unicode-normalization predicate semantics are refused. Locale-aware ordering
+  is available only through a declared, versioned ICU sort-key projection; the
+  provider still compares its encoded text ordinally. Malformed UTF-16 is
+  rejected at binding. Evaluating a refused folded policy remains deterministic
+  and never invokes runtime `OrdinalIgnoreCase` behavior.
 - Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` values are portable
   for comparison. No numeric coercion or rounding is performed. Binary floating
   point is storable but not comparable: a `Double` column is declarable and

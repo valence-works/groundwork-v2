@@ -182,8 +182,10 @@ differ across providers, rather than delegating to each database's dialect:
 
 - Predicates are **two-valued**. There is no `UNKNOWN`. Missing is exactly `null`, and `Not(p)` is
   the exact complement of `p`.
-- Text accepted for provider planning is **`Ordinal`**. Culture, ICU, and accent-sensitive semantics
-  are refused. Case-insensitive prefix matching requires a declared, versioned persisted search key.
+- Text predicates accepted for provider planning are **`Ordinal`**. Culture, ICU, and accent-sensitive
+  predicates are refused. Case-insensitive prefix matching requires a declared, versioned persisted
+  search key. Locale ordering requires a declared, versioned ICU sort key; providers order its portable
+  text encoding ordinally.
 - Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` are portable for **comparison**. Binary
   floating point is **storable but not comparable**: a `Double` column can be declared, written, and
   read back bit-for-bit, and is refused in predicates, ordering, and indexes.

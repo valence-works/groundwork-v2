@@ -9,6 +9,82 @@ public sealed class Q9SearchKeyQueryTests
     private static readonly TableId Table = new("tickets");
     private static readonly ColumnRef Status = new(Table, "status", QueryType.String, true, 32, stringComparison: QueryStringComparisonPolicy.AsciiIgnoreCase);
 
+    [Fact]
+    public void Locale_mapping_retargets_order_and_continuation_to_the_hidden_text_key()
+    {
+        var name = new ColumnRef(Table, "name", QueryType.String, false, 32);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(name, OrderDirection.Descending, NullOrder.Last)],
+            Projection.ColumnsOnly(name),
+            Paging.OffsetLimit(0, 1));
+        var mapping = new QuerySearchKeyColumn(
+            "name",
+            "__groundwork_search_name",
+            QuerySearchKeyPolicy.Ordinal,
+            384,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn> { ["name"] = mapping }
+        };
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        var term = Assert.Single(rewritten.Order);
+        Assert.Equal("__groundwork_search_name", term.Column.Name);
+        Assert.Equal(OrderDirection.Descending, term.Direction);
+        Assert.Equal(NullOrder.Last, term.NullOrder);
+        var execution = QueryRequestExecution.ForPage(request, options);
+        Assert.Contains(execution.Projection.Columns, column => column.Name == "__groundwork_search_name");
+
+        var result = QueryResultMaterializer.Materialize(request, options,
+        [
+            new Dictionary<string, object?>
+            {
+                ["name"] = "Åke",
+                ["__groundwork_search_name"] = "|5D|77"
+            },
+            new Dictionary<string, object?>
+            {
+                ["name"] = "Ake",
+                ["__groundwork_search_name"] = "|2A|3E"
+            }
+        ]);
+
+        Assert.DoesNotContain("__groundwork_search_name", result.Rows.Single().Keys);
+        var cursor = QueryContinuationToken.Decode(result.NextContinuationToken!, rewritten, options);
+        Assert.Equal("|5D|77", cursor.Single().Value);
+    }
+
+    [Fact]
+    public void Locale_order_mapping_does_not_retarget_ordinal_prefix_predicates()
+    {
+        var name = new ColumnRef(Table, "name", QueryType.String, false, 32);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.StartsWith(name, "Ak"),
+            [],
+            Projection.All,
+            Paging.None);
+        var mapping = new QuerySearchKeyColumn(
+            "name",
+            "__groundwork_search_name",
+            QuerySearchKeyPolicy.Ordinal,
+            384,
+            orderByPhysicalColumn: true,
+            supportsPrefixPredicates: false);
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(request,
+            new Dictionary<string, QuerySearchKeyColumn> { ["name"] = mapping });
+
+        var range = Assert.IsType<Predicate.Range>(rewritten.Where);
+        Assert.Equal("name", range.Column.Name);
+        Assert.Equal("Ak", range.Lower!.Value.Value);
+        Assert.Equal("Al", range.Upper!.Value.Value);
+    }
+
     [Theory]
     [InlineData(QueryStringComparisonPolicy.Ordinal, QuerySearchKeyPolicy.AsciiIgnoreCase)]
     [InlineData(QueryStringComparisonPolicy.CurrentCulture, QuerySearchKeyPolicy.AsciiIgnoreCase)]

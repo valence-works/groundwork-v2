@@ -441,6 +441,60 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Locale_or_ICU_algorithm_identity_change_is_a_declared_backfill()
+    {
+        var logical = CreateUnit(includePriority: false) with
+        {
+            Columns = [.. CreateUnit(includePriority: false).Columns.Select(column =>
+                column.Name == "name"
+                    ? column with
+                    {
+                        LocaleSortKey = new LocaleSortKeyDefinition
+                        {
+                            CultureName = "sv-SE",
+                            MaximumExpansionFactor = 12
+                        }
+                    }
+                    : column)]
+        };
+        var initial = SearchKeyProjection.Expand(logical);
+        var executor = new FakeExecutor();
+        PhysicalSchemaApplication.Apply(
+            CreateTarget(initial),
+            executor,
+            PlannedAt.AddMinutes(1),
+            _ => PhysicalSchemaPlanAuthorization.Allow);
+        var localeDerived = Assert.Single(initial.DerivedColumns,
+            column => column.Projection == PortableProjection.LocaleSortKey);
+        var identity = PortableLocaleOrdering.ParseAlgorithmId(localeDerived.AlgorithmId);
+        var changedVersion = checked(identity.FullVersion + 1);
+        var changed = initial with
+        {
+            DerivedColumns = initial.DerivedColumns.Select(column =>
+                column.Projection == PortableProjection.LocaleSortKey
+                    ? column with
+                    {
+                        AlgorithmId = column.AlgorithmId!.Replace(
+                            $":{identity.FullVersion}:",
+                            $":{changedVersion}:",
+                            StringComparison.Ordinal)
+                    }
+                    : column).ToArray()
+        };
+
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            CreateTarget(changed),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            PlannedAt.AddMinutes(2));
+
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        var backfill = Assert.Single(plan.Operations.OfType<BackfillColumnOperation>(),
+            operation => operation.Derived?.Projection == PortableProjection.LocaleSortKey);
+        Assert.True(backfill.RequiresAuthorization);
+        Assert.Contains($":{changedVersion}:", backfill.Derived!.AlgorithmId, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Explicit_authorization_can_apply_a_destructive_plan()
     {
         var target = new PhysicalSchemaTarget(

@@ -40,7 +40,7 @@ supported provider is refused, loudly, with a stable diagnostic code and a named
 
 | Principle | What it means in practice |
 | --- | --- |
-| **Refuse, don't approximate** | `NULL` three-valued logic, culture-sensitive collation, `float` predicates, cross-table joins — all refused at declaration or query-build time, never silently degraded per provider. |
+| **Refuse, don't approximate** | `NULL` three-valued logic, native culture-sensitive collation, `float` predicates, cross-table joins — all refused rather than silently degraded per provider. Locale ordering requires a declared, versioned ICU sort-key projection. |
 | **Opt in to machinery** | No version column unless you declare `OptimisticConcurrency()`. No idempotency ledger unless you declare `AppendIdempotency(...)`. You never pay for what you didn't ask for. |
 | **Capabilities are advertised, not assumed** | A connection tells you what the *deployment* can do. Standalone MongoDB simply does not advertise compare-and-delete, and the call refuses before doing I/O. |
 | **Coverage is enforced** | A query that no declared index can serve is refused at build time (analyzer) *and* at runtime (gate) unless you explicitly accept a scan with an owner and expiry. |

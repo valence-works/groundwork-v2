@@ -405,6 +405,7 @@ public sealed class SchemaSubject
         Scale = source.Scale,
         Collation = source.Collation,
         LogicalCollation = source.LogicalCollation,
+        LocaleSortKey = source.LocaleSortKey is null ? null : source.LocaleSortKey with { },
         Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
         Generation = source.Generation,
         Id = source.Id
@@ -423,8 +424,18 @@ public sealed class SchemaSubject
             column.LogicalCollation?.ToString(),
             column.Generation.ToString(),
             column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type),
+            .. LocaleSortKeyIdentity(column),
             .. LogicalIdentity(column)
         ]);
+
+    internal static string?[] LocaleSortKeyIdentity(ColumnDefinition column) =>
+        column.LocaleSortKey is null
+            ? []
+            :
+            [
+                column.LocaleSortKey.CultureName,
+                column.LocaleSortKey.MaximumExpansionFactor.ToString(CultureInfo.InvariantCulture)
+            ];
 
     /// <summary>
     /// A column that has never been renamed is planned under its own name, so its logical id

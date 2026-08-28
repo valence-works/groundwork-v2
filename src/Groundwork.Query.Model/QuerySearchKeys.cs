@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace Groundwork.Query.Model;
 
 /// <summary>Pure, provider-neutral prefix-key encoding used by native renderers.</summary>
@@ -43,15 +45,40 @@ public static class QuerySearchKeyRewriter
         if (request == null) throw new ArgumentNullException(nameof(request));
         if (mappings == null) throw new ArgumentNullException(nameof(mappings));
         var where = RewritePredicate(request.Where, request.Table, mappings);
-        return ReferenceEquals(where, request.Where)
+        var order = RewriteOrder(request.Order, request.Table, mappings);
+        return ReferenceEquals(where, request.Where) && order.Equals(request.Order)
             ? request
-            : new QueryRequest(request.Table, where, request.Order, request.Projection, request.Paging,
+            : new QueryRequest(request.Table, where, order, request.Projection, request.Paging,
                 request.Result, request.LatestPerKey, request.AcceptedScan)
             {
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,
                 ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
             };
+    }
+
+    private static ImmutableArray<OrderTerm> RewriteOrder(
+        ImmutableArray<OrderTerm> order,
+        TableId table,
+        IReadOnlyDictionary<string, QuerySearchKeyColumn> mappings)
+    {
+        var changed = false;
+        var rewritten = order.Select(term =>
+        {
+            if (!mappings.TryGetValue(term.Column.Name, out var mapping) || !mapping.OrderByPhysicalColumn)
+                return term;
+            changed = true;
+            return new OrderTerm(
+                new ColumnRef(
+                    table,
+                    mapping.PhysicalColumn,
+                    QueryType.String,
+                    term.Column.IsNullable,
+                    mapping.MaxLength),
+                term.Direction,
+                term.NullOrder);
+        }).ToArray();
+        return changed ? rewritten.ToImmutableArray() : order;
     }
 
     private static Predicate RewritePredicate(
@@ -63,6 +90,16 @@ public static class QuerySearchKeyRewriter
         {
             case Predicate.StartsWith starts:
                 if (!mappings.TryGetValue(starts.Column.Name, out var mapping))
+                {
+                    if (starts.Column.StringComparison != QueryStringComparisonPolicy.Ordinal)
+                        return starts;
+                    mapping = new QuerySearchKeyColumn(
+                        starts.Column.Name,
+                        starts.Column.Name,
+                        QuerySearchKeyPolicy.Ordinal,
+                        starts.Column.MaxLength);
+                }
+                else if (!mapping.SupportsPrefixPredicates)
                 {
                     if (starts.Column.StringComparison != QueryStringComparisonPolicy.Ordinal)
                         return starts;

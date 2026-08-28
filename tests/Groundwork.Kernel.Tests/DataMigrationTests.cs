@@ -448,6 +448,42 @@ public sealed class DataMigrationTests
     }
 
     [Fact]
+    public void The_derived_column_transform_uses_the_same_locale_sort_key_as_writes()
+    {
+        var logical = Unit with
+        {
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition
+                {
+                    Name = "name",
+                    Type = PortableType.String,
+                    MaxLength = 64,
+                    LocaleSortKey = new LocaleSortKeyDefinition
+                    {
+                        CultureName = "sv-SE",
+                        MaximumExpansionFactor = 12
+                    }
+                }
+            ]
+        };
+        var physical = SearchKeyProjection.Expand(logical);
+        var derived = Assert.Single(physical.DerivedColumns,
+            column => column.Projection == PortableProjection.LocaleSortKey);
+        var transform = new DerivedColumnTransform(physical, [derived]);
+
+        var produced = transform.Transform(new DataMigrationRow(
+            new Dictionary<string, object?> { ["name"] = "Åke" }));
+        var written = SearchKeyProjection.Populate(
+            physical,
+            new Dictionary<string, object?> { ["name"] = "Åke" });
+
+        Assert.Equal(written[derived.Name], Assert.Single(produced.Values!).Value);
+        Assert.IsType<string>(written[derived.Name]);
+    }
+
+    [Fact]
     public void The_derived_column_transform_identity_changes_with_its_algorithm()
     {
         var unit = Unit with

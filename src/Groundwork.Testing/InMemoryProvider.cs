@@ -652,11 +652,15 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, SearchKeyQueryMappings.For(Unit));
+        var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
+        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns);
         var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns
             .Select(name => QueryColumn(name))
             .Where(column => column is not null)
-            .Select(column => column!));
+            .Select(column => column!)) with
+        {
+            SearchKeyColumns = searchKeyColumns
+        };
         var validation = PortableQuerySemantics.Validate(executionRequest);
         if (!validation.IsPortable)
         {
@@ -690,7 +694,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
                 IReadOnlyList<QueryConstant> cursor;
                 try
                 {
-                    cursor = QueryContinuationToken.Decode(token, request, renderOptions);
+                    cursor = QueryContinuationToken.Decode(token, executionRequest, renderOptions);
                 }
                 catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
                 {
@@ -733,7 +737,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
 
         var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, SearchKeyQueryMappings.For(Unit));
+        var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
+        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns);
         var table = new TableId(Unit.Name);
         var scopeToken = new ColumnRef(
             table,
@@ -747,7 +752,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
                     .Where(column => column is not null)
                     .Select(column => column!))) with
         {
-            LatestPartitionColumns = [scopeToken]
+            LatestPartitionColumns = [scopeToken],
+            SearchKeyColumns = searchKeyColumns
         };
         var validation = PortableQuerySemantics.Validate(executionRequest);
         if (!validation.IsPortable)

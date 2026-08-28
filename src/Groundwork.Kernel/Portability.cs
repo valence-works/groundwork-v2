@@ -126,6 +126,7 @@ public static class PortabilityValidator
         ValidateIndexBudget(indexes, byName, diagnostics);
         ValidateGeneration(unit, columns, diagnostics);
         ValidateCollation(columns, diagnostics);
+        ValidateLocaleSortKeys(columns, diagnostics);
         ValidateRetention(unit.Retention ?? context.Retention, byName, diagnostics);
         ValidateMongoKeyOrder(unit, context, diagnostics);
 
@@ -263,7 +264,7 @@ public static class PortabilityValidator
 
                 if (column.Type == PortableType.String && column.Name is { } sourceName &&
                     !string.IsNullOrWhiteSpace(sourceName) &&
-                    SearchKeyProjection.IsFolded(SearchKeyProjection.LogicalCollation(column)) &&
+                    SearchKeyProjection.IsProjected(column) &&
                     !declaredPhysicalNames.Contains(SearchKeyProjection.ColumnName(sourceName)))
                 {
                     var searchKey = SearchKeyProjection.ColumnName(sourceName);
@@ -783,6 +784,20 @@ public static class PortabilityValidator
                 "GW-PORT-006",
                 $"Column '{column.Name}' declares collation '{column.Collation}', outside the portable collation set.",
                 $"columns.{column.Name}"));
+        }
+    }
+
+    private static void ValidateLocaleSortKeys(
+        IReadOnlyList<ColumnDefinition> columns,
+        ICollection<PortabilityRefusal> diagnostics)
+    {
+        foreach (var column in columns.Where(column => column is not null && column.LocaleSortKey is not null))
+        {
+            var refusal = PortableLocaleOrdering.ValidateDeclaration(
+                column,
+                $"columns.{column.Name}.localeSortKey");
+            if (refusal is not null)
+                diagnostics.Add(refusal);
         }
     }
 
