@@ -47,7 +47,7 @@ internal static class QueryResolver
             "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync",
             "First", "FirstOrDefault", "Single", "SingleOrDefault",
             "FirstAsync", "FirstOrDefaultAsync", "SingleAsync", "SingleOrDefaultAsync",
-            "Sum", "Min", "Max");
+            "Sum", "Min", "Max", "SumAsync", "MinAsync", "MaxAsync");
 
     /// <summary>
     /// Gate that keeps LINQ-shaped terminals on unrelated types out of the analysis: the receiver
@@ -402,16 +402,19 @@ internal static class QueryResolver
                 pagingOverride = Paging.OffsetLimit(0, 2);
                 return true;
             case "Sum":
+            case "SumAsync":
                 return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
                     static column => new ResultShape.Sum(column),
                     static type => type is QueryType.Int32 or QueryType.Int64 or QueryType.Decimal,
                     "Int32, Int64, or Decimal", out result, out failure);
             case "Min":
+            case "MinAsync":
                 return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
                     static column => new ResultShape.Min(column),
                     IsOrderable,
                     "orderable", out result, out failure);
             case "Max":
+            case "MaxAsync":
                 return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
                     static column => new ResultShape.Max(column),
                     IsOrderable,
@@ -435,7 +438,13 @@ internal static class QueryResolver
     {
         result = ResultShape.Rows.Instance;
         failure = null;
-        var selector = terminal.ArgumentList.Arguments.LastOrDefault()?.Expression;
+        // The async convenience surface has executor before the selector and an optional
+        // cancellation token after it. Find the lambda rather than assuming the selector is the
+        // final argument so explicit cancellation tokens receive the same lowering and diagnostics
+        // as the synchronous terminal overloads.
+        var selector = terminal.ArgumentList.Arguments
+            .Select(argument => argument.Expression)
+            .FirstOrDefault(expression => expression is LambdaExpressionSyntax);
         if (selector is null || !TryParseColumnLambda(selector, model, table, out var column, cancellationToken))
         {
             failure = operation + " requires a mapped, portable " + supportedTypeDescription + " column selector.";
@@ -459,11 +468,12 @@ internal static class QueryResolver
 
     private static bool IsReductionTerminal(InvocationExpressionSyntax terminal) =>
         terminal.Expression is MemberAccessExpressionSyntax member &&
-        member.Name.Identifier.ValueText is "Sum" or "Min" or "Max";
+        member.Name.Identifier.ValueText is "Sum" or "Min" or "Max" or "SumAsync" or "MinAsync" or "MaxAsync";
 
     private static bool RequiresBoundedTake(InvocationExpressionSyntax terminal) =>
         terminal.Expression is MemberAccessExpressionSyntax member &&
-        member.Name.Identifier.ValueText is "ToList" or "ToListAsync" or "Sum" or "Min" or "Max";
+        member.Name.Identifier.ValueText is "ToList" or "ToListAsync" or "Sum" or "Min" or "Max" or
+        "SumAsync" or "MinAsync" or "MaxAsync";
 
     private static IEnumerable<QueryRequest> BuildRequests(
         QueryShapeState state,

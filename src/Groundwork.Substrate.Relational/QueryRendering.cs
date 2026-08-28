@@ -524,9 +524,10 @@ public abstract class RelationalQueryRenderer
             windowed = "SELECT * FROM (" + source + ") AS " + inputAlias;
         }
 
-        if (effectiveOrder.Count != 0)
+        var hasPaging = request.Paging.Offset is not null || request.Paging.Limit is not null;
+        if (hasPaging && effectiveOrder.Count != 0)
             windowed += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
-        else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
+        else if (hasPaging && RequiresOrderForOffset)
             windowed += " ORDER BY (SELECT 1)";
         windowed += RenderPaging(request.Paging, parameters, ref parameterIndex);
 

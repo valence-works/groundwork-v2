@@ -46,10 +46,40 @@ public sealed class QueryRendererTests
 
         var mongo = new MongoQueryRenderer().Render(request);
         Assert.NotEmpty(mongo.Pipeline);
-        Assert.Contains("$group", mongo.Pipeline.ToString(), StringComparison.Ordinal);
-        Assert.Contains("$facet", mongo.Pipeline.ToString(), StringComparison.Ordinal);
-        Assert.Contains("$sum", mongo.Pipeline.ToString(), StringComparison.Ordinal);
-        Assert.Contains("$limit", mongo.Pipeline.ToString(), StringComparison.Ordinal);
+        var mongoPipeline = string.Join("\n", mongo.Pipeline.Select(stage => stage.ToString()));
+        Assert.Contains("$group", mongoPipeline, StringComparison.Ordinal);
+        Assert.Contains("$facet", mongoPipeline, StringComparison.Ordinal);
+        Assert.Contains("$sum", mongoPipeline, StringComparison.Ordinal);
+        Assert.Contains("$limit", mongoPipeline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Sql_server_reductions_only_order_the_derived_input_when_paged()
+    {
+        var ordered = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Amount, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.None,
+            new ResultShape.Sum(Amount),
+            Projection.ColumnsOnly(Amount));
+        var paged = new QueryRequest(
+            ordered.Table,
+            ordered.Where,
+            ordered.Order,
+            ordered.Projection,
+            Paging.OffsetLimit(0, 2),
+            ordered.Result,
+            ordered.LatestPerKey,
+            ordered.AcceptedScan,
+            ordered.Distinct);
+
+        var unpagedCommand = new SqlServerQueryRenderer().Render(ordered);
+        var pagedCommand = new SqlServerQueryRenderer().Render(paged);
+
+        Assert.DoesNotContain("ORDER BY", unpagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ORDER BY", pagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("OFFSET", pagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("FETCH NEXT", pagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

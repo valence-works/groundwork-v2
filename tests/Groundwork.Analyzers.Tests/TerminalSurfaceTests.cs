@@ -25,6 +25,9 @@ public sealed class TerminalSurfaceTests
             .ToArray();
 
         Assert.NotEmpty(surface);
+        Assert.Contains("SumAsync", surface);
+        Assert.Contains("MinAsync", surface);
+        Assert.Contains("MaxAsync", surface);
         Assert.Equal(surface, QueryResolver.TerminalNames.OrderBy(name => name, StringComparer.Ordinal));
     }
 
@@ -54,8 +57,6 @@ public sealed class TerminalSurfaceTests
                 : typeof(Guid?);
             Assert.Equal(expectedType, method.ReturnType.GetGenericArguments()[0]);
         });
-        Assert.All(typeof(GwQueryAsyncExtensions).GetMethods(BindingFlags.Public | BindingFlags.Static), method =>
-            Assert.DoesNotContain(method.Name, new[] { "SumAsync", "MinAsync", "MaxAsync" }));
     }
 
     private static bool IsTerminalReturn(Type type) =>
