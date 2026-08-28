@@ -270,6 +270,20 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
 
     internal InMemoryPhysicalSchemaExecutor Executor { get; }
 
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
+    {
+        var physical = Prepare(desired);
+        lock (database.Gate)
+        {
+            var previous = database.Units.TryGetValue(physical.Id, out var state) ? state.Unit : null;
+            ValidateUnplannedChanges(previous, physical);
+            return GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                Executor, Target(physical), options);
+        }
+    }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
         var physical = Prepare(desired);
@@ -278,7 +292,10 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         var history = Executor.ReadHistory(target.Identity, lease);
         ValidateUnplannedChanges(history.AppliedState?.Snapshot.Subject.Definition, physical);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(Describe(plan.Operations, history.AppliedState?.Snapshot.Subject.Definition, physical));
+        return new SchemaDiff(SchemaChangeMapping.Describe(
+            plan.Operations,
+            plan.PreviousDefinition,
+            physical));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -291,7 +308,10 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
             ValidateUnplannedChanges(previous, physical);
             var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, Executor);
             return new SchemaApplyResult(
-                new SchemaDiff(Describe(result.Plan.Operations, previous, physical)),
+                new SchemaDiff(SchemaChangeMapping.Describe(
+                    result.Plan.Operations,
+                    result.Plan.PreviousDefinition,
+                    physical)),
                 result.Outcome == PhysicalSchemaApplicationOutcome.Applied);
         }
     }
@@ -357,32 +377,23 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         return unit.Key.Columns.Select(column => columns[column].LogicalId).ToArray();
     }
 
-    private static IReadOnlyList<SchemaChange> Describe(
-        IEnumerable<PhysicalSchemaOperation> operations,
-        StorageUnit? previous,
-        StorageUnit desired)
-    {
-        var changes = SchemaChangeMapping.Describe(operations).ToList();
-        var previousProfiles = previous?.AggregationProfiles
-            .ToDictionary(profile => profile.Name, StringComparer.Ordinal) ?? [];
-        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
-        changes.AddRange(desiredProfiles.Values
-            .Where(profile =>
-                !previousProfiles.TryGetValue(profile.Name, out var prior) ||
-                !string.Equals(
-                    AggregationProfileCanonicalization.Canonicalize(prior),
-                    AggregationProfileCanonicalization.Canonicalize(profile),
-                    StringComparison.Ordinal))
-            .Select(profile => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, profile.Name)));
-        changes.AddRange(previousProfiles.Keys
-            .Where(name => !desiredProfiles.ContainsKey(name))
-            .Select(name => new SchemaChange(SchemaChangeKind.UpdateAggregationProfile, name)));
-        return changes;
-    }
 }
 
-internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database) : IPhysicalSchemaExecutor
+internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database)
+    : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector
 {
+    public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        lock (database.Gate)
+        {
+            var history = database.SchemaHistory.TryGetValue(target.Identity, out var applied)
+                ? PhysicalSchemaHistoryState.FromApplied(applied)
+                : PhysicalSchemaHistoryState.Empty;
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+        }
+    }
+
     public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target)
     {
         Monitor.Enter(database.Gate);

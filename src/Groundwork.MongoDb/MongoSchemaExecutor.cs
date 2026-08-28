@@ -35,14 +35,12 @@ public sealed class MongoSchemaExecutor
 {
     internal const string MetadataCollection = "__groundwork_metadata";
     private const string HistoryPrefix = "history:";
-    private const string LockPrefix = "lock:";
-    private const string SchemaPrefix = "schema:";
     private const string ScopeCollectionSeparator = "__scope__";
 
     /// <summary>
-    /// How long an unrefreshed application lock stays held. A deployment that outruns it does not
-    /// corrupt the ledger: the fence is asserted inside the publish transaction, so a lease another
-    /// process has since taken loses the publish rather than overwriting it.
+    /// How long an unrefreshed application lock stays held. Lock ownership and applied state share
+    /// one per-target history document, so publication is one fenced compare-and-set even on a
+    /// standalone server: a stale owner cannot overwrite a newer declaration.
     /// </summary>
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(15);
 
@@ -62,7 +60,7 @@ public sealed class MongoSchemaExecutor
     public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target)
     {
         ArgumentNullException.ThrowIfNull(target);
-        var id = LockPrefix + target;
+        var id = HistoryPrefix + target;
         var owner = Guid.NewGuid().ToString("N");
         var deadline = DateTimeOffset.UtcNow + AcquisitionTimeout;
         while (true)
@@ -81,7 +79,7 @@ public sealed class MongoSchemaExecutor
             {
                 ["$set"] = new BsonDocument
                 {
-                    ["kind"] = "schema-lock",
+                    ["kind"] = "schema-history",
                     ["owner"] = owner,
                     ["expiresAt"] = Instant(now + LeaseDuration)
                 },
@@ -129,12 +127,57 @@ public sealed class MongoSchemaExecutor
         ArgumentNullException.ThrowIfNull(operation);
         var lease = RequireLock(target, applicationLock);
         lease.Verify();
+        EnsureStableDeclaration(target, DesiredDefinition(operation));
         Execute(operation);
         return new PhysicalSchemaOperationAcknowledgement(
             operation.Identity,
             operation.Fingerprint,
             DateTimeOffset.UtcNow);
     }
+
+    public IReadOnlyList<PhysicalSchemaOperationAcknowledgement> ApplyOperationBatch(
+        PhysicalSchemaTargetIdentity target,
+        IReadOnlyList<PhysicalSchemaOperation> operations,
+        IPhysicalSchemaApplicationLock applicationLock)
+    {
+        ArgumentNullException.ThrowIfNull(operations);
+        var lease = RequireLock(target, applicationLock);
+        lease.Verify();
+        if (operations.Select(DesiredDefinition).FirstOrDefault(definition => definition is not null) is { } desired)
+            EnsureStableDeclaration(target, desired);
+        return operations.Select(operation => ApplyOperation(target, operation, applicationLock)).ToArray();
+    }
+
+    private void EnsureStableDeclaration(
+        PhysicalSchemaTargetIdentity target,
+        StorageUnit? desired)
+    {
+        if (desired is null)
+            return;
+        var history = ReadHistory(target);
+        MongoDeclarationRules.ThrowIfStableDeclarationChanged(
+            history.AppliedState?.Snapshot.Subject.Definition,
+            desired);
+    }
+
+    private static StorageUnit? DesiredDefinition(PhysicalSchemaOperation operation) => operation switch
+    {
+        CreatePrimaryStorageOperation value => value.Subject.Definition,
+        AddColumnOperation value => value.Subject.Definition,
+        BackfillColumnOperation value => value.Subject.Definition,
+        FinalizeColumnOperation value => value.Subject.Definition,
+        CreatePhysicalIndexOperation value => value.Subject.Definition,
+        RebuildPhysicalIndexOperation value => value.Subject.Definition,
+        RenamePrimaryStorageOperation value => value.Subject.Definition,
+        RenameColumnOperation value => value.Subject.Definition,
+        AlterColumnOperation value => value.Subject.Definition,
+        DropColumnOperation value => value.Subject.Definition,
+        ColumnSupersessionOperation value => value.Subject.Definition,
+        DropPhysicalIndexOperation value => value.Subject.Definition,
+        DropPrimaryStorageOperation value => value.Subject.Definition,
+        ValidatePhysicalSchemaOperation value => value.Target.Subject.Definition,
+        _ => null
+    };
 
     public void PublishAppliedState(
         PhysicalSchemaAppliedState state,
@@ -143,83 +186,24 @@ public sealed class MongoSchemaExecutor
     {
         ArgumentNullException.ThrowIfNull(state);
         var lease = RequireLock(state.TargetIdentity, applicationLock);
-        var id = HistoryPrefix + state.TargetIdentity;
-        using var session = context.StartSession();
-        session.StartTransaction();
-        try
+        var update = new BsonDocument("$set", new BsonDocument
         {
-            lease.Assert(session);
-            var current = Metadata
-                .Find(session, new BsonDocument("_id", id))
-                .FirstOrDefault()?
-                .GetValue("targetFingerprint", BsonNull.Value);
-            var actual = current is null || current.IsBsonNull ? null : current.AsString;
-            if (!string.Equals(actual, expectedAppliedTargetFingerprint, StringComparison.Ordinal))
-                throw new InvalidOperationException($"MongoDB schema history CAS failed for '{state.TargetIdentity}'.");
-
-            Metadata.ReplaceOne(
-                session,
-                new BsonDocument("_id", id),
-                new BsonDocument
-                {
-                    ["_id"] = id,
-                    ["kind"] = "schema-history",
-                    ["subjectId"] = state.TargetIdentity.SubjectId.Value,
-                    ["providerName"] = state.TargetIdentity.ProviderName,
-                    ["targetFingerprint"] = state.TargetFingerprint,
-                    ["appliedAt"] = Instant(state.AppliedAt),
-                    ["stateJson"] = PhysicalSchemaAppliedStateSerializer.Serialize(state)
-                },
-                new ReplaceOptions { IsUpsert = true });
-            PublishProviderCatalog(session, state);
-            lease.Assert(session);
-            session.CommitTransaction();
-        }
-        catch
+            ["kind"] = "schema-history",
+            ["subjectId"] = state.TargetIdentity.SubjectId.Value,
+            ["providerName"] = state.TargetIdentity.ProviderName,
+            ["targetFingerprint"] = state.TargetFingerprint,
+            ["appliedAt"] = Instant(state.AppliedAt),
+            ["stateJson"] = PhysicalSchemaAppliedStateSerializer.Serialize(state)
+        });
+        var result = Metadata.UpdateOne(lease.PublicationFilter(expectedAppliedTargetFingerprint), update);
+        if (result.MatchedCount != 1)
         {
-            if (session.IsInTransaction)
-                session.AbortTransaction();
-            throw;
+            // Preserve the more actionable lost-lease error when ownership, not history CAS, made
+            // the single-document update match nothing.
+            lease.Verify();
+            throw new InvalidOperationException(
+                $"MongoDB schema history CAS failed for '{state.TargetIdentity}'.");
         }
-    }
-
-    /// <summary>
-    /// Rewrites the runtime provider's own <c>__groundwork_metadata</c> record for this subject, in
-    /// the same transaction that publishes the ledger. A collection the deployment tool applied is
-    /// therefore openable by <c>MongoProviderState.Resolve</c> without a second in-process apply:
-    /// the fingerprint the runtime compares against is the one the tool just deployed.
-    /// </summary>
-    private void PublishProviderCatalog(IClientSessionHandle session, PhysicalSchemaAppliedState state)
-    {
-        var unit = state.Snapshot.Subject.Definition;
-        var id = SchemaPrefix + unit.Id.Value;
-        if (state.Snapshot.Subject.Evolution.RetiresPrimaryStorage)
-        {
-            Metadata.DeleteOne(session, new BsonDocument("_id", id));
-            Metadata.DeleteMany(session, new BsonDocument
-            {
-                ["kind"] = "scope",
-                ["unit"] = unit.Id.Value
-            });
-            return;
-        }
-
-        Metadata.ReplaceOne(
-            session,
-            new BsonDocument("_id", id),
-            new BsonDocument
-            {
-                ["_id"] = id,
-                ["collection"] = unit.Name,
-                ["key"] = new BsonArray(unit.Key.Columns),
-                ["fingerprint"] = SchemaIdentity.Fingerprint(unit),
-                ["derived"] = new BsonArray(unit.DerivedColumns.Select(column => new BsonDocument
-                {
-                    ["name"] = column.Name,
-                    ["algorithmId"] = MongoSchemaCoordinator.ProjectionAlgorithmId(column)
-                }))
-            },
-            new ReplaceOptions { IsUpsert = true });
     }
 
     public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target)
@@ -233,7 +217,7 @@ public sealed class MongoSchemaExecutor
             applied.Snapshot.Subject,
             applied.Provider,
             applied.Snapshot.ProviderDefinitions);
-        return Compare(appliedTarget, history);
+        return Compare(appliedTarget, history, applied.Snapshot.ProviderDefinitions);
     }
 
     /// <summary>
@@ -253,10 +237,10 @@ public sealed class MongoSchemaExecutor
     private PhysicalSchemaHistoryState ReadHistory(PhysicalSchemaTargetIdentity target)
     {
         var document = Metadata.Find(new BsonDocument("_id", HistoryPrefix + target)).FirstOrDefault();
-        return document is null
+        return document is null || !document.TryGetValue("stateJson", out var stateJson) || !stateJson.IsString
             ? PhysicalSchemaHistoryState.Empty
             : PhysicalSchemaHistoryState.FromApplied(
-                PhysicalSchemaAppliedStateSerializer.Deserialize(document["stateJson"].AsString));
+                PhysicalSchemaAppliedStateSerializer.Deserialize(stateJson.AsString));
     }
 
     // ---- catalog comparison ------------------------------------------------------------------
@@ -275,7 +259,8 @@ public sealed class MongoSchemaExecutor
     /// </remarks>
     private PhysicalSchemaInspectionResult Compare(
         PhysicalSchemaTarget target,
-        PhysicalSchemaHistoryState history)
+        PhysicalSchemaHistoryState history,
+        IReadOnlyList<ProviderPhysicalSchemaDefinition>? providerDefinitionEvidence = null)
     {
         var subject = target.Subject;
         if (subject.Evolution.RetiresPrimaryStorage)
@@ -300,10 +285,13 @@ public sealed class MongoSchemaExecutor
             CompareDocuments(name, unit, columnDrift);
             CompareIndexes(name, unit, indexDrift);
         }
-        CompareSearchKeyAlgorithms(unit, columnDrift);
+        CompareSearchKeyAlgorithms(unit, providerDefinitionEvidence, columnDrift);
         return new PhysicalSchemaInspectionResult(
             history,
-            columnDrift.Count == 0 && indexDrift.Count == 0,
+            // Index drift is deliberately a degraded, serviceable state: dependent query shapes
+            // can refuse on their coverage gate while ordinary reads and writes remain admitted.
+            // Column drift is the part that makes the applied schema unsafe for the runtime.
+            columnDrift.Count == 0,
             [.. columnDrift],
             [.. indexDrift]);
     }
@@ -378,17 +366,21 @@ public sealed class MongoSchemaExecutor
     /// stores. A collection Groundwork never applied to therefore cannot show that its search-key
     /// contents were produced by the declared algorithm, and adoption refuses by name.
     /// </summary>
-    private void CompareSearchKeyAlgorithms(StorageUnit unit, List<SchemaRefusal> drift)
+    private void CompareSearchKeyAlgorithms(
+        StorageUnit unit,
+        IReadOnlyList<ProviderPhysicalSchemaDefinition>? providerDefinitionEvidence,
+        List<SchemaRefusal> drift)
     {
         if (unit.DerivedColumns.Count == 0)
             return;
-        var document = Metadata.Find(new BsonDocument("_id", SchemaPrefix + unit.Id.Value)).FirstOrDefault();
-        var persisted = document is not null && document.TryGetValue("derived", out var derived) && derived.IsBsonArray
-            ? derived.AsBsonArray.OfType<BsonDocument>().ToDictionary(
-                item => item["name"].AsString,
-                item => item["algorithmId"].AsString,
-                StringComparer.Ordinal)
-            : new Dictionary<string, string>(StringComparer.Ordinal);
+        var persisted = (providerDefinitionEvidence ?? [])
+            .Where(definition =>
+                string.Equals(definition.ProviderName, MongoSchemaTargets.Provider.Name, StringComparison.Ordinal) &&
+                string.Equals(definition.Kind, MongoSchemaTargets.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            .ToDictionary(
+                MongoSchemaTargets.DerivedColumnName,
+                definition => definition.CanonicalDefinition,
+                StringComparer.Ordinal);
         foreach (var expected in unit.DerivedColumns)
         {
             var algorithm = MongoSchemaCoordinator.ProjectionAlgorithmId(expected);
@@ -473,8 +465,9 @@ public sealed class MongoSchemaExecutor
                 foreach (var name in DeployedCollections(drop.Name))
                     context.Database.DropCollection(name);
                 break;
-            case ApplyProviderPhysicalSchemaDefinitionOperation apply:
-                ApplyProviderDefinition(apply.Definition);
+            // Provider definitions are durable facts in the final applied snapshot; MongoDB has
+            // no independent physical catalog capable of proving a search-key algorithm.
+            case ApplyProviderPhysicalSchemaDefinitionOperation:
                 break;
             // A supersession marker is a durable ledger fact, not physical work.
             case ColumnSupersessionOperation:
@@ -492,7 +485,7 @@ public sealed class MongoSchemaExecutor
 
     private void ValidateTarget(PhysicalSchemaTarget target)
     {
-        var inspection = Compare(target, PhysicalSchemaHistoryState.Empty);
+        var inspection = Compare(target, PhysicalSchemaHistoryState.Empty, target.ProviderDefinitions);
         if (!inspection.HasColumnDrift && !inspection.HasIndexDrift)
             return;
         var refusal = inspection.HasColumnDrift ? inspection.ColumnDrift[0] : inspection.IndexDrift[0];
@@ -679,8 +672,6 @@ public sealed class MongoSchemaExecutor
                 continue;
             context.Database.RenameCollection(from, to);
         }
-        foreach (var superseded in operation.SupersededProviderDefinitions)
-            DropProviderDefinition(superseded);
         // The scope registry names the collection each scope lives in, so a rename that left those
         // rows behind would make GW-ACCESS-006 fire on the next scoped session. The new name is
         // recomputed from the recorded scope value rather than parsed out of the old one, so it is
@@ -702,31 +693,6 @@ public sealed class MongoSchemaExecutor
         primary + ScopeCollectionSeparator +
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(scope)));
-
-    private void ApplyProviderDefinition(ProviderPhysicalSchemaDefinition definition)
-    {
-        var id = SchemaPrefix + definition.SubjectId.Value;
-        var column = MongoSchemaTargets.DerivedColumnName(definition);
-        Metadata.UpdateOne(
-            new BsonDocument("_id", id),
-            new BsonDocument("$pull", new BsonDocument("derived", new BsonDocument("name", column))),
-            new UpdateOptions { IsUpsert = true });
-        Metadata.UpdateOne(
-            new BsonDocument("_id", id),
-            new BsonDocument("$push", new BsonDocument("derived", new BsonDocument
-            {
-                ["name"] = column,
-                ["algorithmId"] = definition.CanonicalDefinition
-            })),
-            new UpdateOptions { IsUpsert = true });
-    }
-
-    private void DropProviderDefinition(ProviderPhysicalSchemaDefinition definition) =>
-        Metadata.UpdateOne(
-            new BsonDocument("_id", SchemaPrefix + definition.SubjectId.Value),
-            new BsonDocument("$pull", new BsonDocument(
-                "derived",
-                new BsonDocument("name", MongoSchemaTargets.DerivedColumnName(definition)))));
 
     // ---- catalog access -----------------------------------------------------------------------
 
@@ -793,10 +759,8 @@ public sealed class MongoSchemaExecutor
     }
 
     /// <summary>
-    /// One held MongoDB schema lease. <see cref="Verify"/> proves the lease is still this process's
-    /// before work runs; <see cref="Assert"/> proves it again inside the publish transaction, so a
-    /// lease that expired mid-deployment loses the publish rather than overwriting a ledger another
-    /// deployment has since written.
+    /// One held MongoDB schema lease. Ownership, its fence and applied state occupy the same target
+    /// document, allowing publication to update the ledger only while this exact lease is current.
     /// </summary>
     private sealed class MongoApplicationLock(
         MongoSchemaExecutor executor,
@@ -815,30 +779,38 @@ public sealed class MongoSchemaExecutor
         {
             if (released)
                 throw new InvalidOperationException($"The MongoDB schema application lock for '{Target}' was released.");
-            if (!Held(null))
+            if (!Held())
                 throw new InvalidOperationException(
                     $"The MongoDB schema application lock for '{Target}' is no longer held by this deployment.");
         }
 
-        internal void Assert(IClientSessionHandle session)
+        internal BsonDocument PublicationFilter(string? expectedAppliedTargetFingerprint)
         {
-            if (!Held(session))
-                throw new InvalidOperationException(
-                    $"The MongoDB schema application lock for '{Target}' is no longer held by this deployment.");
-        }
-
-        private bool Held(IClientSessionHandle? session)
-        {
-            var filter = new BsonDocument
+            var filter = HeldFilter();
+            if (expectedAppliedTargetFingerprint is null)
             {
-                ["_id"] = id,
-                ["owner"] = owner,
-                ["fence"] = fence
-            };
-            return session is null
-                ? Executor.Metadata.Find(filter).Limit(1).Any()
-                : Executor.Metadata.Find(session, filter).Limit(1).Any();
+                filter["$or"] = new BsonArray
+                {
+                    new BsonDocument("targetFingerprint", BsonNull.Value),
+                    new BsonDocument("targetFingerprint", new BsonDocument("$exists", false))
+                };
+            }
+            else
+            {
+                filter["targetFingerprint"] = expectedAppliedTargetFingerprint;
+            }
+            return filter;
         }
+
+        private BsonDocument HeldFilter() => new()
+        {
+            ["_id"] = id,
+            ["owner"] = owner,
+            ["fence"] = fence,
+            ["expiresAt"] = new BsonDocument("$gt", Instant(DateTimeOffset.UtcNow))
+        };
+
+        private bool Held() => Executor.Metadata.Find(HeldFilter()).Limit(1).Any();
 
         public void Dispose()
         {

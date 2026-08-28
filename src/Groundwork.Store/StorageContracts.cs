@@ -4,6 +4,7 @@ using System.Collections;
 using System.Text.Json.Nodes;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 
 namespace Groundwork.Store;
@@ -728,6 +729,14 @@ public interface IProviderCatalog
 
 public interface ISchemaCoordinator
 {
+    /// <summary>
+    /// Inspects whether the deployed physical schema can serve <paramref name="desired"/>, using the
+    /// same kernel admission rule provider sessions enforce. Safe startup application is opt-in.
+    /// </summary>
+    GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null);
+
     SchemaDiff Diff(StorageUnit desired);
 
     SchemaApplyResult Apply(StorageUnit desired);

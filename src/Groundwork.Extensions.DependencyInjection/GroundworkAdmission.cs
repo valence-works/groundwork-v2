@@ -7,9 +7,10 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// </summary>
 /// <remarks>
 /// The split mirrors the runtime admission contract: a missing unit, column, or derived column
-/// means data cannot be read or written correctly and is <see cref="Blocked"/> (GW-RUNTIME-001),
-/// while a missing or changed index only makes dependent query shapes refuse and is
-/// <see cref="Degraded"/> (GW-RUNTIME-002).
+/// means data cannot be read or written correctly and is <see cref="Blocked"/> (GW-RUNTIME-001).
+/// Physical index drift against an otherwise matching applied target only makes dependent query
+/// shapes refuse and is <see cref="Degraded"/> (GW-RUNTIME-002); a changed declaration is blocked
+/// until that target is applied.
 /// </remarks>
 public enum GroundworkAdmissionStatus
 {

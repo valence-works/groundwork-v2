@@ -853,7 +853,11 @@ public sealed class PostgreSqlDialectTests
 
         public void Observe(ProviderCommandEvent command)
         {
-            if (command.Operation == "postgresql.conditional-upsert")
+            // CreateOnly selects the row-wise batch fallback, but it remains an Upsert operation;
+            // the provider therefore reports `postgresql.upsert`, not `conditional-upsert`.
+            // Block the first write command rather than coupling this serialization proof to that
+            // internal operation label.
+            if (command.Kind == ProviderCommandKind.Write)
             {
                 FallbackEntered.Set();
                 Release.Wait(TimeSpan.FromSeconds(5));

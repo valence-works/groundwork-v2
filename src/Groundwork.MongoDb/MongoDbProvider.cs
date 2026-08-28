@@ -162,31 +162,38 @@ internal sealed class MongoProviderState
         declaration = SearchKeyProjection.Expand(declaration);
         AggregationProfileValidator.ValidateUnit(declaration);
         ValidateScope(declaration, access);
-        lock (gate)
-        {
-            if (units.TryGetValue(declaration.Id, out var existing))
-            {
-                EnsureSameDeclaration(existing.Declaration, declaration);
-                return existing;
-            }
-        }
 
-        var applied = new MongoAppliedUnit(MongoDeclarationSnapshot.Clone(declaration), declaration.Name);
-        _ = MongoSchemaCoordinator.CollectionName(applied, access);
-        if (!CollectionExists(declaration.Name))
+        // The kernel history is the durable authority for both schema admission and session
+        // resolution. The provider catalog is a derived compatibility record; trusting it here
+        // would open a session if a standalone deployment crashed after publishing that record
+        // but before publishing history.
+        var appliedState = ReadAppliedState(declaration.Id);
+        if (appliedState is null)
         {
             throw new InvalidOperationException(
-                $"Storage unit '{declaration.Id.Value}' has not been applied to this provider.");
+                $"Storage unit '{declaration.Id}' has not been applied to this provider.");
+        }
+        if (appliedState.Snapshot.Subject.Evolution.RetiresPrimaryStorage)
+        {
+            throw new InvalidOperationException(
+                $"Storage unit '{declaration.Id}' is retired on this provider and cannot be opened.");
         }
 
-        var persisted = Metadata.Find(new BsonDocument("_id", "schema:" + declaration.Id.Value))
-            .FirstOrDefault();
-        if (persisted is not null && persisted.TryGetValue("fingerprint", out var fingerprint) &&
-            !string.Equals(fingerprint.AsString, SchemaIdentity.Fingerprint(declaration), StringComparison.Ordinal))
+        var applied = new MongoAppliedUnit(
+            MongoDeclarationSnapshot.Clone(appliedState.Snapshot.Subject.Definition),
+            appliedState.Snapshot.Subject.Name);
+        // Privileged access intentionally has no single scope. Its query path fans out across the
+        // registered per-scope collections, while ordinary scoped sessions validate one concrete
+        // scope-to-collection route here.
+        if (!access.IsPrivilegedAcrossScopes)
+            _ = MongoSchemaCoordinator.CollectionName(applied, access);
+        if (!CollectionExists(applied.CollectionName))
         {
-            throw new MongoSchemaConflictException(
-                $"Storage unit '{declaration.Name}' differs from the applied MongoDB schema, including its folded search-key algorithm identity. Apply the exact schema and rebuild the derived search-key column before opening a session.");
+            throw new InvalidOperationException(
+                $"Storage unit '{declaration.Id}' has not been applied to this provider.");
         }
+
+        EnsureSameDeclaration(appliedState.Snapshot.Subject.Definition, declaration);
 
         lock (gate)
         {
@@ -222,6 +229,25 @@ internal sealed class MongoProviderState
     {
         lock (gate)
             return units.TryGetValue(id, out applied!);
+    }
+
+    internal PhysicalSchemaAppliedState? ReadAppliedState(StorageUnitId id)
+    {
+        var target = new PhysicalSchemaTargetIdentity(id, MongoSchemaTargets.Provider.Name);
+        var historyId = "history:" + target;
+        var document = Metadata.Find(new BsonDocument("_id", historyId)).FirstOrDefault();
+        if (document is null || !document.TryGetValue("stateJson", out var stateJson) || !stateJson.IsString)
+            return null;
+
+        var applied = PhysicalSchemaAppliedStateSerializer.Deserialize(stateJson.AsString);
+        if (applied.TargetIdentity != target ||
+            !string.Equals(applied.Provider.Name, MongoSchemaTargets.Provider.Name, StringComparison.Ordinal))
+        {
+            throw new MongoSchemaConflictException(
+                $"Applied MongoDB schema history for '{id.Value}' belongs to '{applied.TargetIdentity}'.");
+        }
+
+        return applied;
     }
 
     internal bool CollectionExists(string name) => Context.Database.ListCollectionNames(
@@ -297,11 +323,10 @@ internal sealed class MongoProviderCatalog(MongoProviderState state) : IMongoPro
 {
     public IReadOnlyList<MongoProviderIndex> ReadIndexes(StorageUnitId storageUnitId)
     {
-        state.TryGet(storageUnitId, out var applied);
-        var collectionName = applied?.CollectionName ??
-            state.Metadata.Find(new BsonDocument("_id", "schema:" + storageUnitId.Value))
-                .FirstOrDefault()?.GetValue("collection", storageUnitId.Value).AsString ?? storageUnitId.Value;
-        return ReadIndexes(collectionName, applied?.Declaration.Indexes);
+        var persisted = state.ReadAppliedState(storageUnitId);
+        var collectionName = persisted?.Snapshot.Subject.Name ?? storageUnitId.Value;
+        var expected = persisted?.Snapshot.Subject.Indexes;
+        return ReadIndexes(collectionName, expected);
     }
 
     internal IReadOnlyList<MongoProviderIndex> ReadIndexes(
@@ -339,123 +364,84 @@ internal sealed class MongoProviderCatalog(MongoProviderState state) : IMongoPro
 
 internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoSchemaCoordinator
 {
-    public MongoSchemaDiff Diff(StorageUnit desired)
-    {
-        PortabilityValidator.EnsurePortableDefaults(desired);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
-        desired = SearchKeyProjection.Expand(desired);
-        AggregationProfileValidator.ValidateUnit(desired);
-        ValidateDeclaration(desired);
-        state.TryGet(desired.Id, out var current);
-        var previousKeyOrder = current?.Declaration.Key.Columns ?? ReadSchemaKeyOrder(desired.Id);
-        ValidateCompositeKeyOrder(desired, previousKeyOrder);
-        if (current is null && !state.CollectionExists(desired.Name))
-        {
-            return new MongoSchemaDiff([
-                new MongoSchemaChange(MongoSchemaChangeKind.CreateStorageUnit, desired.Name),
-                .. desired.Columns.Select(column => new MongoSchemaChange(MongoSchemaChangeKind.AddColumn, column.Name)),
-                .. desired.DerivedColumns.Select(column => new MongoSchemaChange(MongoSchemaChangeKind.AddDerivedColumn, column.Name)),
-                .. desired.Indexes.Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
-            ]);
-        }
+    private readonly MongoSchemaExecutor executor = new(state.Context);
 
-        current ??= new MongoAppliedUnit(desired, desired.Name);
-        return new MongoSchemaDiff(BuildChanges(desired, current.Declaration,
-            new MongoProviderCatalog(state).ReadIndexes(desired.Name, desired.Indexes)));
-    }
-
-    public MongoSchemaApplyResult Apply(StorageUnit desired)
-    {
-        PortabilityValidator.EnsurePortableDefaults(desired);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
-        desired = SearchKeyProjection.Expand(desired);
-        AggregationProfileValidator.ValidateUnit(desired);
-        ValidateDeclaration(desired);
-        var portability = PortabilityValidator.Validate(desired, new PortabilityValidationContext(["mongodb"]));
-        if (!portability.IsPortable)
-        {
-            throw new InvalidOperationException(string.Join(Environment.NewLine,
-                portability.Refusals.Select(refusal =>
-                    $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
-        }
-
-        state.TryGet(desired.Id, out var current);
-        var previousKeyOrder = current?.Declaration.Key.Columns ?? ReadSchemaKeyOrder(desired.Id);
-        ValidateCompositeKeyOrder(desired, previousKeyOrder);
-
-        if (HasProviderSequence(desired))
-            state.Context.RequireTransactions("ProviderSequence");
-
-        var exists = state.CollectionExists(desired.Name);
-        if (!exists)
-        {
-            state.Context.Database.CreateCollection(desired.Name);
-            current = null;
-        }
-
-        var actual = new MongoProviderCatalog(state).ReadIndexes(desired.Name, desired.Indexes);
-
-        var collection = state.Context.Database.GetCollection<BsonDocument>(desired.Name);
-        var changes = DiffForApply(desired, current?.Declaration, actual, !exists);
-        BackfillSearchKeys(collection, desired, current?.Declaration);
-        // A new unique folded index must see the fully backfilled key values. Creating it
-        // before projection would treat every legacy document as null and either admit an
-        // invalid index or fail before the actual duplicate-fold collision is observable.
-        CreateIndexes(collection, desired, actual, changes);
-        PersistSchemaMetadata(desired);
-        state.Remember(desired);
-        return new MongoSchemaApplyResult(new MongoSchemaDiff(changes), changes.Count != 0);
-    }
-
-    /// <summary>
-    /// Rows per bulk write. MongoDB has no multi-document update that carries a different value per
-    /// document, so a batch is one <c>bulkWrite</c> command rather than one command per document.
-    /// </summary>
-    private const int SearchKeyBackfillBatchSize = 512;
-
-    private static void BackfillSearchKeys(
-        IMongoCollection<BsonDocument> collection,
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
         StorageUnit desired,
-        StorageUnit? previous)
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
-        var previousDerived = previous?.DerivedColumns.ToDictionary(column => column.Name, StringComparer.Ordinal) ?? [];
-        var pending = desired.DerivedColumns.Where(column =>
-            !previousDerived.TryGetValue(column.Name, out var prior) || prior != column).ToArray();
-        if (pending.Length == 0)
-            return;
-
-        // The same host-process transform the chunked data-migration runner drives, so a search key
-        // written by a schema apply and one written by a resumable migration are one definition.
-        var transform = new DerivedColumnTransform(desired, pending);
-        var columns = desired.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
-        var batch = new List<WriteModel<BsonDocument>>(SearchKeyBackfillBatchSize);
-        foreach (var document in collection.Find(new BsonDocument()).ToEnumerable())
+        ArgumentNullException.ThrowIfNull(desired);
+        var target = MongoSchemaTargets.Compile(desired);
+        var inspection = executor.InspectHistory(target);
+        var stableRefusal = MongoDeclarationRules.StableDeclarationRefusals(
+            inspection.History.AppliedState?.Snapshot.Subject.Definition,
+            target.Subject.Definition).FirstOrDefault();
+        if (stableRefusal is not null)
         {
-            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var source in transform.SourceColumns)
-            {
-                row[source] = document.TryGetValue(source, out var stored) && !stored.IsBsonNull
-                    ? MongoValueCodec.Decode(stored, columns[source])
-                    : null;
-            }
-
-            var produced = transform.Transform(new DataMigrationRow(row));
-            if (!produced.HasValues)
-                continue;
-            var updates = new BsonDocument();
-            foreach (var pair in produced.Values!)
-                updates[pair.Key] = MongoValueCodec.Encode(pair.Value, columns[pair.Key]);
-            batch.Add(new UpdateOneModel<BsonDocument>(
-                BuildBackfillFilter(document, pending),
-                new BsonDocument("$set", updates)));
-            if (batch.Count < SearchKeyBackfillBatchSize)
-                continue;
-            collection.BulkWrite(batch, new BulkWriteOptions { IsOrdered = false });
-            batch.Clear();
+            return new GroundworkRuntimeSchemaAdmissionResult(
+                inspection,
+                PhysicalSchemaDiffPlan.Invalid(target, DateTimeOffset.UtcNow, [stableRefusal]));
         }
 
-        if (batch.Count != 0)
-            collection.BulkWrite(batch, new BulkWriteOptions { IsOrdered = false });
+        GroundworkRuntimeSchemaAdmissionResult result;
+        try
+        {
+            result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                executor,
+                target,
+                options,
+                inspected: inspection,
+                inspectAfterApplication: () => executor.InspectHistory(target));
+        }
+        catch (MongoSchemaConflictException exception) when (exception.Refusal is { } refusal)
+        {
+            // An external history edit cannot normally pass the lease fence, but if the executor
+            // observes one between inspection and apply, return the same unit-level Blocked
+            // verdict rather than turning a provider guard into a hosting failure.
+            var current = executor.InspectHistory(target);
+            return new GroundworkRuntimeSchemaAdmissionResult(
+                current,
+                PhysicalSchemaDiffPlan.Invalid(target, DateTimeOffset.UtcNow, [refusal]));
+        }
+
+        if (result.AppliedOperationCount != 0)
+            state.Remember(MongoSchemaTargets.Physicalize(desired));
+        return result;
+    }
+
+    public SchemaDiff Diff(StorageUnit desired)
+    {
+        var target = MongoSchemaTargets.Compile(desired);
+        using var applicationLock = executor.AcquireApplicationLock(target.Identity);
+        var history = executor.ReadHistory(target.Identity, applicationLock);
+        MongoDeclarationRules.ThrowIfStableDeclarationChanged(
+            history.AppliedState?.Snapshot.Subject.Definition,
+            target.Subject.Definition);
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
+        return new SchemaDiff(SchemaChangeMapping.Describe(
+            plan.Operations,
+            plan.PreviousDefinition,
+            target.Subject.Definition));
+    }
+
+    public SchemaApplyResult Apply(StorageUnit desired)
+    {
+        var target = MongoSchemaTargets.Compile(desired);
+        if (target.Subject.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+            state.Context.RequireTransactions("ProviderSequence");
+        var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
+        if (result.Outcome == PhysicalSchemaApplicationOutcome.Rejected)
+            MongoDeclarationRules.ThrowIfStableDeclarationChanged(
+                result.Plan.PreviousDefinition,
+                target.Subject.Definition);
+        if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
+            state.Remember(target.Subject.Definition);
+        return new SchemaApplyResult(
+            new SchemaDiff(SchemaChangeMapping.Describe(
+                result.Plan.Operations,
+                result.Plan.PreviousDefinition,
+                target.Subject.Definition)),
+            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
     }
 
     internal static BsonDocument BuildBackfillFilter(
@@ -567,18 +553,11 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             }
         }
 
-        var metadata = state.Metadata.Find(new BsonDocument("_id", "schema:" + applied.Declaration.Id.Value))
-            .FirstOrDefault();
         if (applied.Declaration.DerivedColumns.Count != 0)
         {
-            var persisted = metadata is not null &&
-                metadata.TryGetValue("derived", out var derived) && derived.IsBsonArray
-                ? derived.AsBsonArray
-                .OfType<BsonDocument>()
-                .ToDictionary(item => item["name"].AsString,
-                    item => item["algorithmId"].AsString,
-                    StringComparer.Ordinal)
-                : new Dictionary<string, string>(StringComparer.Ordinal);
+            var persisted = state.ReadAppliedState(applied.Declaration.Id)?.Snapshot.Subject.DerivedColumns
+                .ToDictionary(column => column.Name, column => column.AlgorithmId ?? string.Empty, StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var expected in applied.Declaration.DerivedColumns)
             {
                 var algorithm = ProjectionAlgorithmId(expected);
@@ -641,7 +620,32 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         if (!state.CollectionExists(name))
         {
             state.Context.Database.CreateCollection(name);
-            CreateIndexes(state.Context.Database.GetCollection<BsonDocument>(name), applied.Declaration, []);
+            CreateDeclaredIndexes(state.Context.Database.GetCollection<BsonDocument>(name), applied.Declaration);
+        }
+    }
+
+    /// <summary>
+    /// A scoped collection is materialized lazily when its first session opens. Give it the same
+    /// declared indexes as the primary collection so a later scope is covered from its first read.
+    /// This is runtime materialization, not schema diff/apply logic; planned index evolution still
+    /// belongs to <see cref="MongoSchemaExecutor"/>.
+    /// </summary>
+    private static void CreateDeclaredIndexes(
+        IMongoCollection<BsonDocument> collection,
+        StorageUnit unit)
+    {
+        foreach (var index in unit.Indexes)
+        {
+            var specification = new MongoIndexSpecification(index, unit.Columns);
+            var keys = new BsonDocument(specification.Terms.Select(term =>
+                new BsonElement(term.Column, term.Direction == KernelSortDirection.Ascending ? 1 : -1)));
+            collection.Indexes.CreateOne(new CreateIndexModel<BsonDocument>(keys,
+                new CreateIndexOptions<BsonDocument>
+                {
+                    Name = specification.Name,
+                    Unique = specification.IsUnique,
+                    PartialFilterExpression = specification.PartialFilter
+                }));
         }
     }
 
@@ -654,37 +658,6 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         ledger.Indexes.CreateOne(new CreateIndexModel<BsonDocument>(
             Builders<BsonDocument>.IndexKeys.Ascending("unit").Ascending("committed_at"),
             new CreateIndexOptions { Name = "__groundwork_ledger_cleanup" }));
-    }
-
-    private static void CreateIndexes(
-        IMongoCollection<BsonDocument> collection,
-        StorageUnit unit,
-        IReadOnlyList<MongoProviderIndex> actual,
-        IReadOnlyList<MongoSchemaChange>? changes = null)
-    {
-        var rebuilds = (changes ?? [])
-            .Where(change => change.Kind == MongoSchemaChangeKind.RebuildIndex)
-            .Select(change => change.Identity)
-            .ToHashSet(StringComparer.Ordinal);
-        foreach (var index in actual.Where(index => rebuilds.Contains(index.Name)))
-            collection.Indexes.DropOne(index.Name);
-
-        foreach (var index in unit.Indexes)
-        {
-            if (!rebuilds.Contains(index.Name) &&
-                actual.Any(existing => string.Equals(existing.Name, index.Name, StringComparison.Ordinal)))
-                continue;
-            var specification = new MongoIndexSpecification(index, unit.Columns);
-            var keys = new BsonDocument(specification.Terms.Select(term =>
-                new BsonElement(term.Column, term.Direction == KernelSortDirection.Ascending ? 1 : -1)));
-            collection.Indexes.CreateOne(new CreateIndexModel<BsonDocument>(keys,
-                new CreateIndexOptions<BsonDocument>
-                {
-                    Name = specification.Name,
-                    Unique = specification.IsUnique,
-                    PartialFilterExpression = specification.PartialFilter
-                }));
-        }
     }
 
     internal static string CollectionName(MongoAppliedUnit applied, MongoStorageAccess access)
@@ -701,214 +674,6 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             maximumByteLength: 255);
         return collectionName;
     }
-
-    private static IReadOnlyList<MongoSchemaChange> BuildChanges(
-        StorageUnit desired,
-        StorageUnit? current,
-        IReadOnlyList<MongoProviderIndex> actual)
-    {
-        if (current is not null)
-        {
-            if (!string.Equals(current.Name, desired.Name, StringComparison.Ordinal))
-                throw new MongoSchemaConflictException($"Storage unit '{desired.Id.Value}' cannot change its name.");
-            if (!current.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
-                throw new MongoSchemaConflictException($"Storage unit '{desired.Name}' cannot change its key non-additively.");
-            if (!SchemaIdentity.RetentionEquals(current.Retention, desired.Retention))
-                throw new MongoSchemaConflictException(
-                    $"Storage unit '{desired.Name}' changed its retention declaration non-additively.");
-            if (!SchemaIdentity.RetentionIdempotencyEquals(current.RetentionIdempotency, desired.RetentionIdempotency))
-                throw new MongoSchemaConflictException(
-                    $"Storage unit '{desired.Name}' changed its retention idempotency declaration non-additively.");
-            if (current.Scope != desired.Scope || current.Concurrency != desired.Concurrency ||
-                current.Timestamps != desired.Timestamps || current.SchemaVersion != desired.SchemaVersion ||
-                !SchemaIdentity.IdempotencyEquals(current.AppendIdempotency, desired.AppendIdempotency))
-            {
-                throw new MongoSchemaConflictException($"Storage unit '{desired.Name}' changed non-additive storage metadata.");
-            }
-        }
-
-        if (current is null)
-            return [
-                new MongoSchemaChange(MongoSchemaChangeKind.CreateStorageUnit, desired.Name),
-                .. desired.Columns.Select(column => new MongoSchemaChange(MongoSchemaChangeKind.AddColumn, column.Name)),
-                .. desired.DerivedColumns.Select(column => new MongoSchemaChange(MongoSchemaChangeKind.AddDerivedColumn, column.Name)),
-                .. desired.Indexes.Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
-            ];
-
-        var changes = new List<MongoSchemaChange>();
-        foreach (var column in desired.Columns)
-        {
-            var previous = current.Columns.FirstOrDefault(item => item.Name == column.Name);
-            if (previous is null)
-                changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.AddColumn, column.Name));
-            else if (!SchemaIdentity.ColumnEquals(previous, column))
-                throw new MongoSchemaConflictException($"Column '{column.Name}' changed non-additively.");
-        }
-        foreach (var previous in current.Columns)
-            if (!desired.Columns.Any(column => column.Name == previous.Name))
-                throw new MongoSchemaConflictException($"Column '{previous.Name}' was removed non-additively.");
-
-        foreach (var derived in desired.DerivedColumns)
-        {
-            var previous = current.DerivedColumns.FirstOrDefault(item => item.Name == derived.Name);
-            if (previous is null)
-                changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.AddDerivedColumn, derived.Name));
-            else if (previous != derived)
-                throw new MongoSchemaConflictException($"Derived column '{derived.Name}' changed non-additively.");
-        }
-
-        foreach (var index in desired.Indexes)
-        {
-            var previous = current.Indexes.FirstOrDefault(item => item.Name == index.Name);
-            var native = actual.FirstOrDefault(item => item.Name == index.Name);
-            if (previous is null && native is null)
-                changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name));
-            else if (previous is not null && !SchemaIdentity.IndexEquals(previous, index))
-            {
-                if (SearchKeyProjection.IsIndexRetarget(previous, index, desired.DerivedColumns))
-                    changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.RebuildIndex, index.Name));
-                else
-                    throw new MongoSchemaConflictException($"Index '{index.Name}' changed non-additively.");
-            }
-        }
-        foreach (var previous in current.Indexes)
-            if (!desired.Indexes.Any(index => index.Name == previous.Name))
-                throw new MongoSchemaConflictException($"Index '{previous.Name}' was removed non-additively.");
-
-        var previousProfiles = current.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
-        var desiredProfiles = desired.AggregationProfiles.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
-        foreach (var profile in desiredProfiles.Values)
-        {
-            if (!previousProfiles.TryGetValue(profile.Name, out var previous) ||
-                !string.Equals(
-                    AggregationProfileCanonicalization.Canonicalize(previous),
-                    AggregationProfileCanonicalization.Canonicalize(profile),
-                    StringComparison.Ordinal))
-            {
-                changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.UpdateAggregationProfile, profile.Name));
-            }
-        }
-        foreach (var previous in previousProfiles.Values)
-        {
-            if (!desiredProfiles.ContainsKey(previous.Name))
-                changes.Add(new MongoSchemaChange(MongoSchemaChangeKind.UpdateAggregationProfile, previous.Name));
-        }
-
-        return changes;
-    }
-
-    private static IReadOnlyList<MongoSchemaChange> DiffForApply(
-        StorageUnit desired,
-        StorageUnit? current,
-        IReadOnlyList<MongoProviderIndex> actual,
-        bool collectionWasCreated)
-    {
-        if (collectionWasCreated)
-            return [
-                new MongoSchemaChange(MongoSchemaChangeKind.CreateStorageUnit, desired.Name),
-                .. desired.Columns.Select(column => new MongoSchemaChange(MongoSchemaChangeKind.AddColumn, column.Name)),
-                .. desired.DerivedColumns.Select(column => new MongoSchemaChange(MongoSchemaChangeKind.AddDerivedColumn, column.Name)),
-                .. desired.Indexes.Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
-            ];
-        return current is null
-            ? [
-                .. desired.Indexes
-                    .Where(index => actual.Any(native => native.Name == index.Name &&
-                        IsIndexRetarget(native, index, desired.DerivedColumns)))
-                    .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.RebuildIndex, index.Name)),
-                .. desired.Indexes
-                    .Where(index => actual.All(native => native.Name != index.Name))
-                    .Select(index => new MongoSchemaChange(MongoSchemaChangeKind.CreateIndex, index.Name))
-            ]
-            : BuildChanges(desired, current, actual);
-    }
-
-    private static bool IsIndexRetarget(
-        MongoProviderIndex actual,
-        IndexDefinition desired,
-        IReadOnlyList<DerivedColumnDefinition> derived)
-    {
-        var previous = new IndexDefinition
-        {
-            Name = actual.Name,
-            Columns = actual.Columns
-                .Select(column => new IndexColumn(column.Column, column.Direction))
-                .ToArray(),
-            IsUnique = actual.IsUnique,
-            MissingValues = actual.MissingValues,
-            SchemaVersion = actual.SchemaVersion
-        };
-        return SearchKeyProjection.IsIndexRetarget(previous, desired, derived);
-    }
-
-    private IReadOnlyList<string>? ReadSchemaKeyOrder(StorageUnitId id)
-    {
-        var document = state.Metadata.Find(new BsonDocument("_id", SchemaMetadataId(id))).FirstOrDefault();
-        if (document is null)
-            return null;
-        return document.GetValue("key", new BsonArray()).AsBsonArray
-            .Select(value => value.AsString)
-            .ToArray();
-    }
-
-    private void PersistSchemaMetadata(StorageUnit unit)
-    {
-        var document = new BsonDocument
-        {
-            ["_id"] = SchemaMetadataId(unit.Id),
-            ["collection"] = unit.Name,
-            ["key"] = new BsonArray(unit.Key.Columns),
-            ["fingerprint"] = SchemaIdentity.Fingerprint(unit),
-            ["derived"] = new BsonArray(unit.DerivedColumns.Select(column => new BsonDocument
-            {
-                ["name"] = column.Name,
-                ["algorithmId"] = ProjectionAlgorithmId(column)
-            }))
-        };
-        state.Metadata.ReplaceOne(
-            new BsonDocument("_id", SchemaMetadataId(unit.Id)),
-            document,
-            new ReplaceOptions { IsUpsert = true });
-    }
-
-    private static string SchemaMetadataId(StorageUnitId id) => "schema:" + id.Value;
-
-    private static void ValidateCompositeKeyOrder(StorageUnit unit, IReadOnlyList<string>? previous)
-    {
-        if (previous is null || previous.Count < 2 || unit.Key.Columns.SequenceEqual(previous, StringComparer.Ordinal))
-            return;
-        throw new InvalidOperationException(
-            $"GW-PORT-008 at key.columns: Mongo composite key column order changed from " +
-            $"[{string.Join(", ", previous)}] to [{string.Join(", ", unit.Key.Columns)}]. " +
-            "The native _id field order is part of the route and cannot be reordered.");
-    }
-
-    /// <summary>
-    /// The declaration rules this in-process coordinator adds to the shared ones. The rename
-    /// refusal is the only one that is specific to this path: it plans from the fingerprint in
-    /// <c>__groundwork_metadata</c> rather than from the applied schema ledger, so it still cannot
-    /// tell a renamed field from a new one.
-    /// </summary>
-    private static void ValidateDeclaration(StorageUnit unit)
-    {
-        MongoDeclarationRules.Validate(unit);
-        // The deployment tool reads the applied schema ledger and plans a RenameColumn against it;
-        // this path has no ledger to read, so declaring a diverged logical id here would read
-        // documents that still store the old field as null. Deploy the rename with
-        // 'groundwork apply', which carries the logical id across the rename.
-        if (unit.Columns.FirstOrDefault(column =>
-                !string.Equals(column.LogicalId, column.Name, StringComparison.Ordinal)) is { } renamed)
-        {
-            throw new InvalidOperationException(
-                $"GW-SCHEMA-009 at schema.columns.{renamed.Name}.id: this in-process MongoDB schema apply does " +
-                $"not read the applied schema ledger, so declaring '{renamed.Name}' under logical id " +
-                $"'{renamed.LogicalId}' would read documents that still store the old field as null. Deploy the " +
-                "rename with 'groundwork apply', which plans it against that ledger, or keep the physical name.");
-        }
-    }
-
-    private static bool HasProviderSequence(StorageUnit unit) =>
-        unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence);
 
     private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
@@ -964,6 +729,65 @@ internal static class MongoDeclarationRules
             if (column.Precision is not (>= 1 and <= 34) || column.Scale is not (>= 0) || column.Scale > column.Precision)
                 throw new ArgumentException($"MongoDB Decimal128 requires Decimal column '{column.Name}' to declare Precision 1..34 and Scale 0..Precision.", nameof(unit));
     }
+
+    internal static ImmutableArray<SchemaRefusal> StableDeclarationRefusals(
+        StorageUnit? previous,
+        StorageUnit desired)
+    {
+        if (previous is null)
+            return [];
+        if (!previous.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
+            return
+            [
+                new SchemaRefusal(
+                    "GW-PORT-008",
+                    $"GW-PORT-008 at key.columns: Mongo composite key column order changed from " +
+                    $"[{string.Join(", ", previous.Key.Columns)}] to [{string.Join(", ", desired.Key.Columns)}]. " +
+                    "The native _id field order is part of the route and cannot be reordered.",
+                    "key.columns")
+            ];
+        if (!SchemaIdentity.RetentionEquals(previous.Retention, desired.Retention))
+            return
+            [
+                new SchemaRefusal(
+                    "GW-MONGO-001",
+                    $"GW-MONGO-001 at retention: Storage unit '{desired.Name}' changed its retention declaration non-additively.",
+                    "retention")
+            ];
+        if (!SchemaIdentity.RetentionIdempotencyEquals(previous.RetentionIdempotency, desired.RetentionIdempotency))
+            return
+            [
+                new SchemaRefusal(
+                    "GW-MONGO-002",
+                    $"GW-MONGO-002 at retentionIdempotency: Storage unit '{desired.Name}' changed its retention idempotency declaration non-additively.",
+                    "retentionIdempotency")
+            ];
+        if (previous.Scope != desired.Scope || previous.Concurrency != desired.Concurrency ||
+            previous.Timestamps != desired.Timestamps || previous.SchemaVersion != desired.SchemaVersion ||
+            !SchemaIdentity.IdempotencyEquals(previous.AppendIdempotency, desired.AppendIdempotency))
+        {
+            return
+            [
+                new SchemaRefusal(
+                    "GW-MONGO-003",
+                    $"GW-MONGO-003 at storageMetadata: Storage unit '{desired.Name}' changed non-additive storage metadata.",
+                    "storageMetadata")
+            ];
+        }
+
+        return [];
+    }
+
+    internal static void ThrowIfStableDeclarationChanged(StorageUnit? previous, StorageUnit desired)
+    {
+        var refusal = StableDeclarationRefusals(previous, desired).FirstOrDefault();
+        if (refusal is null)
+            return;
+        ThrowStableDeclarationRefusal(refusal);
+    }
+
+    internal static void ThrowStableDeclarationRefusal(SchemaRefusal refusal)
+        => throw new MongoSchemaConflictException(refusal);
 }
 
 internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, ISetMutationStorageSession

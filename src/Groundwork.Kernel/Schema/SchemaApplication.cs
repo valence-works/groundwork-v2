@@ -375,6 +375,19 @@ public sealed record GroundworkRuntimeSchemaAdmissionLogEntry(
     GroundworkRuntimeSchemaAdmissionLogLevel Level,
     string Message);
 
+/// <summary>Whether a runtime schema can serve the declared storage unit.</summary>
+public enum GroundworkRuntimeSchemaAdmissionStatus
+{
+    /// <summary>The declaration is serviceable as deployed.</summary>
+    Ready,
+
+    /// <summary>The application can serve, but one or more dependent shapes may be unavailable.</summary>
+    Degraded,
+
+    /// <summary>The declaration cannot safely serve until physical schema work is completed.</summary>
+    Blocked
+}
+
 public sealed record GroundworkRuntimeSchemaAdmissionResult(
     PhysicalSchemaInspectionResult Inspection,
     PhysicalSchemaDiffPlan Plan,
@@ -407,6 +420,25 @@ public sealed record GroundworkRuntimeSchemaAdmissionResult(
         Application?.Outcome == PhysicalSchemaApplicationOutcome.Applied
             ? Application.Plan.Operations.Count(operation => operation.Kind != PhysicalSchemaOperationKind.PublishAppliedState)
             : 0;
+
+    /// <summary>
+    /// The kernel's hosting-neutral serviceability verdict. Unrepaired physical index drift is
+    /// degrading because dependent query shapes can refuse while the rest of the application serves; any
+    /// result that is not runtime-ready is blocked. Safe auto-apply can turn a previously pending
+    /// plan back into <see cref="GroundworkRuntimeSchemaAdmissionStatus.Ready"/>.
+    /// </summary>
+    public GroundworkRuntimeSchemaAdmissionStatus Status
+    {
+        get
+        {
+            if (IsReady)
+                return Inspection.HasIndexDrift
+                    ? GroundworkRuntimeSchemaAdmissionStatus.Degraded
+                    : GroundworkRuntimeSchemaAdmissionStatus.Ready;
+
+            return GroundworkRuntimeSchemaAdmissionStatus.Blocked;
+        }
+    }
 
     public GroundworkRuntimeSchemaAdmissionResult EnsureReady()
     {
@@ -446,7 +478,9 @@ public static class GroundworkRuntimeSchemaAdmission
         PhysicalSchemaTarget target,
         GroundworkRuntimeSchemaAdmissionOptions? options = null,
         Action<GroundworkRuntimeSchemaAdmissionLogEntry>? log = null,
-        Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? authorization = null)
+        Func<PhysicalSchemaDiffPlan, PhysicalSchemaPlanAuthorization>? authorization = null,
+        PhysicalSchemaInspectionResult? inspected = null,
+        Func<PhysicalSchemaInspectionResult>? inspectAfterApplication = null)
     {
         ArgumentNullException.ThrowIfNull(executor);
         ArgumentNullException.ThrowIfNull(target);
@@ -458,12 +492,12 @@ public static class GroundworkRuntimeSchemaAdmission
             else
                 Trace.TraceWarning("{0}", entry.Message);
         };
-        if (executor is not IPhysicalSchemaHistoryInspector inspector)
+        if (inspected is null && executor is not IPhysicalSchemaHistoryInspector)
             throw new ArgumentException(
                 "Runtime schema admission requires a non-mutating history inspector.",
                 nameof(executor));
 
-        var inspection = inspector.InspectHistory(target);
+        var inspection = inspected ?? ((IPhysicalSchemaHistoryInspector)executor).InspectHistory(target);
         foreach (var tolerated in inspection.HasToleratedDrift ? inspection.ToleratedDrift : [])
         {
             log(new GroundworkRuntimeSchemaAdmissionLogEntry(
@@ -506,6 +540,12 @@ public static class GroundworkRuntimeSchemaAdmission
         };
 
         var application = PhysicalSchemaApplication.Apply(target, executor, planAuthorization: safeAuthorization);
-        return new GroundworkRuntimeSchemaAdmissionResult(inspection, application.Plan, application);
+        if (application.Outcome is not (PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges))
+            return new GroundworkRuntimeSchemaAdmissionResult(inspection, application.Plan, application);
+
+        var finalInspection = inspectAfterApplication?.Invoke() ??
+            (executor as IPhysicalSchemaHistoryInspector)?.InspectHistory(target) ?? inspection;
+        var finalPlan = PhysicalSchemaDiffPlanner.Plan(target, finalInspection.History, DateTimeOffset.UtcNow);
+        return new GroundworkRuntimeSchemaAdmissionResult(finalInspection, finalPlan, application);
     }
 }

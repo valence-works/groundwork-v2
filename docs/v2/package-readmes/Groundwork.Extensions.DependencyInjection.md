@@ -12,16 +12,20 @@ startup and makes the outcome explicit:
 | Status | Meaning |
 | --- | --- |
 | `Ready` | The deployed catalog matches the compiled target. |
-| `Degraded` | Index-level work is pending. Dependent query shapes refuse; the application serves. |
-| `Blocked` | Unit- or column-level work is pending. The application must not serve. |
+| `Degraded` | Physical index drift is present against an otherwise matching target. Dependent query shapes refuse; the application serves. |
+| `Blocked` | Unit-, column-, or declaration-level work is pending. The application must not serve. |
 | `Failed` | Admission itself could not run — the connection or the catalog read failed. |
 
 The split is the runtime admission contract, not a new one: a missing unit, column, or derived
-column means data cannot be read or written correctly (`GW-RUNTIME-001`), while a missing or
-changed index only makes the query shapes that depend on it refuse (`GW-RUNTIME-002`).
+column means data cannot be read or written correctly (`GW-RUNTIME-001`). Physical index drift
+against an otherwise matching applied target only makes dependent query shapes refuse
+(`GW-RUNTIME-002`); changing the declaration, including adding or changing an index, changes the
+target fingerprint and blocks startup until it is applied.
 
-Admission **inspects**; it does not apply. Schema is applied deliberately, at deployment time, with
-the `groundwork` CLI — see [`Groundwork.Tool`](https://www.nuget.org/packages/Groundwork.Tool).
+Admission inspects by default. `AutoApplyOnStartup` is an explicit development opt-in: it may apply
+only plans the kernel's schema protection rules deem safe, while destructive or semantic work still
+requires authorization. For production, apply schema deliberately at deployment time with the
+`groundwork` CLI — see [`Groundwork.Tool`](https://www.nuget.org/packages/Groundwork.Tool).
 
 The health check reports the same status, so a `Degraded` catalog is visible to your orchestrator
 rather than showing up as scattered query refusals.

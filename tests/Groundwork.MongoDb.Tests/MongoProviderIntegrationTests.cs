@@ -1,9 +1,13 @@
+using Groundwork.Extensions.DependencyInjection;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
 using Groundwork.Store;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using Xunit;
@@ -56,6 +60,149 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Runtime_resolution_uses_kernel_history_not_the_legacy_schema_cache()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoDbProviderFactory().Create(connectionString!);
+        var unit = RuntimeAdmissionUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var metadata = Assert.IsType<MongoDbProviderConnection>(connection).Database
+            .GetCollection<BsonDocument>("__groundwork_metadata");
+        var schemaId = "schema:" + unit.Id.Value;
+        Assert.Equal(0, metadata.CountDocuments(new BsonDocument("_id", schemaId)));
+
+        using (var historyOnly = new MongoDbProviderFactory().Create(connectionString!))
+        {
+            var session = historyOnly.OpenSession(unit, MongoStorageAccess.Global);
+            Assert.Equal(unit.Name, session.Unit.Name);
+        }
+
+        // A plausible legacy cache must not become an alternate declaration authority.
+        metadata.ReplaceOne(
+            new BsonDocument("_id", schemaId),
+            new BsonDocument
+            {
+                ["_id"] = schemaId,
+                ["collection"] = unit.Name,
+                ["fingerprint"] = SchemaIdentity.Fingerprint(unit),
+                ["key"] = new BsonArray(unit.Key.Columns)
+            },
+            new ReplaceOptions { IsUpsert = true });
+        using (var retainedHistory = new MongoDbProviderFactory().Create(connectionString!))
+        {
+            var session = retainedHistory.OpenSession(unit, MongoStorageAccess.Global);
+            Assert.Equal(unit.Name, session.Unit.Name);
+        }
+
+        metadata.DeleteOne(new BsonDocument(
+            "_id",
+            "history:" + new PhysicalSchemaTargetIdentity(unit.Id, MongoSchemaTargets.Provider.Name)));
+        using var noHistory = new MongoDbProviderFactory().Create(connectionString!);
+        var refused = Assert.Throws<InvalidOperationException>(() =>
+            noHistory.OpenSession(unit, MongoStorageAccess.Global));
+        Assert.Contains("has not been applied", refused.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public async Task Schema_apply_publishes_kernel_history_and_host_uses_the_same_ready_verdict()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        var unit = RuntimeAdmissionUnit();
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var runtime = connection.Schema.InspectRuntimeAdmission(unit);
+        Assert.True(runtime.IsReady);
+        Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Ready, runtime.Status);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(unit.Name, session.Unit.Name);
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(new MongoProviderFactory(), connectionString!)
+            .AddUnits(unit));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+        foreach (var hosted in provider.GetServices<IHostedService>())
+            await hosted.StartAsync(CancellationToken.None);
+
+        var hostedUnit = Assert.Single(Assert.Single(
+            provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Connections).Units);
+        Assert.Equal(GroundworkAdmissionStatus.Ready, hostedUnit.Status);
+    }
+
+    [SkippableFact]
+    public async Task Mongo_host_and_store_admission_agree_on_physical_index_drift()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        var unit = RuntimeAdmissionUnit();
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using (var native = new MongoDbProviderFactory().Create(connectionString!))
+            Assert.IsType<MongoDbProviderConnection>(native).Database
+                .GetCollection<BsonDocument>(unit.Name).Indexes.DropOne("by_payload");
+
+        var runtime = connection.Schema.InspectRuntimeAdmission(unit);
+        Assert.True(runtime.IsReady);
+        Assert.True(runtime.Inspection.HasIndexDrift);
+        Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Degraded, runtime.Status);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(unit.Name, session.Unit.Name);
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(new MongoProviderFactory(), connectionString!)
+            .AddUnits(unit));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+        foreach (var hosted in provider.GetServices<IHostedService>())
+            await hosted.StartAsync(CancellationToken.None);
+
+        var hostedUnit = Assert.Single(Assert.Single(
+            provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Connections).Units);
+        Assert.Equal(GroundworkAdmissionStatus.Degraded, hostedUnit.Status);
+    }
+
+    [SkippableFact]
+    public void A_later_scoped_collection_receives_the_declared_indexes()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("issue201-mongo-scoped-" + Guid.NewGuid().ToString("N")),
+            Name = "issue201_mongo_scoped_" + Guid.NewGuid().ToString("N"),
+            Scope = ScopePolicy.Scoped,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "by_payload", Columns = [new IndexColumn("payload")] }]
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var access = MongoStorageAccess.Scoped(new StorageScope("later-scope"));
+        connection.OpenSession(unit, access);
+        var collectionName = MongoSchemaCoordinator.CollectionName(
+            new MongoAppliedUnit(unit, unit.Name), access);
+        var indexNames = Assert.IsType<MongoDbProviderConnection>(connection).Database
+            .GetCollection<BsonDocument>(collectionName).Indexes.List().ToList()
+            .Select(index => index["name"].AsString)
+            .ToArray();
+
+        Assert.Contains("by_payload", indexNames);
+    }
+
+    [SkippableFact]
     public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
     {
         using var connection = OpenConnection();
@@ -76,13 +223,8 @@ public sealed class MongoProviderIntegrationTests
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
 
-    /// <summary>
-    /// MongoDB has no applied schema ledger, so it cannot distinguish a renamed field from a new
-    /// one. It refuses the declaration by name rather than quietly reading nulls out of documents
-    /// that still carry the old field; the executor that makes this work is #86.
-    /// </summary>
     [SkippableFact]
-    public void Schema_admission_refuses_a_column_whose_logical_id_has_diverged()
+    public void Schema_apply_plans_and_applies_a_column_rename_from_the_applied_ledger()
     {
         using var connection = OpenConnection();
         var unit = new StorageUnit
@@ -92,15 +234,24 @@ public sealed class MongoProviderIntegrationTests
             Columns =
             [
                 new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
-                new ColumnDefinition { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
+                new ColumnDefinition { Name = "customer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
             ],
             Key = new KeyDefinition { Columns = ["id"] }
         };
 
-        var failure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var renamed = unit with
+        {
+            Columns =
+            [
+                unit.Columns[0],
+                unit.Columns[1] with { Name = "buyer", Id = "customer" }
+            ]
+        };
 
-        Assert.Contains("GW-SCHEMA-009", failure.Message, StringComparison.Ordinal);
-        Assert.Contains("buyer", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(connection.Schema.Diff(renamed).Changes,
+            change => change.Kind == SchemaChangeKind.RenameColumn && change.Identity == "buyer");
+        Assert.True(connection.Schema.Apply(renamed).Applied);
     }
 
     [SkippableFact]
@@ -386,7 +537,7 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
-    public void Profile_only_reducer_alias_and_budget_changes_are_reported_and_applied()
+    public void Profile_only_reducer_alias_and_budget_changes_are_applied()
     {
         using var connection = OpenConnection();
         var unit = new StorageUnit
@@ -434,12 +585,17 @@ public sealed class MongoProviderIntegrationTests
         foreach (var changed in new[] { aliasChanged, reducerChanged, budgetChanged })
         {
             var diff = connection.Schema.Diff(changed);
-            Assert.Contains(diff.Changes, change =>
-                change.Kind == MongoSchemaChangeKind.UpdateAggregationProfile && change.Identity == "summary");
-            Assert.True(connection.Schema.Apply(changed).Applied);
+            var change = Assert.Single(diff.Changes);
+            Assert.Equal(SchemaChangeKind.UpdateAggregationProfile, change.Kind);
+            Assert.Equal("summary", change.Identity);
+            var applied = connection.Schema.Apply(changed);
+            Assert.True(applied.Applied);
+            Assert.Equal(change, Assert.Single(applied.Diff.Changes));
         }
 
-        Assert.False(connection.Schema.Apply(budgetChanged).Applied);
+        var noOp = connection.Schema.Apply(budgetChanged);
+        Assert.True(noOp.Applied);
+        Assert.True(noOp.IsNoOp);
     }
 
     [SkippableFact]
@@ -686,7 +842,7 @@ public sealed class MongoProviderIntegrationTests
 
         var reordered = unit with { Key = new KeyDefinition { Columns = ["customerNo", "region"] } };
         using var reopened = new MongoDbProviderFactory().Create(connectionString!);
-        var refusal = Assert.Throws<InvalidOperationException>(() => reopened.Schema.Apply(reordered));
+        var refusal = Assert.ThrowsAny<InvalidOperationException>(() => reopened.Schema.Apply(reordered));
 
         Assert.Contains("GW-PORT-008", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("native _id field order", refusal.Message, StringComparison.Ordinal);
@@ -815,7 +971,7 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
-    public void Folded_algorithm_id_drift_is_refused_before_mongo_session_open()
+    public void Legacy_folded_algorithm_cache_drift_is_ignored_when_history_is_authoritative()
     {
         using var connection = OpenConnection();
         var unit = new StorageUnit
@@ -832,15 +988,32 @@ public sealed class MongoProviderIntegrationTests
         connection.Schema.Apply(unit);
         var metadata = Assert.IsType<MongoDbProviderConnection>(connection).Database
             .GetCollection<BsonDocument>("__groundwork_metadata");
-        metadata.UpdateOne(
+        Assert.Equal(0, metadata.CountDocuments(new BsonDocument("_id", "schema:" + unit.Id.Value)));
+        var derivedName = SearchKeyProjection.ColumnName("status");
+        metadata.ReplaceOne(
             new BsonDocument("_id", "schema:" + unit.Id.Value),
-            new BsonDocument("$set", new BsonDocument("derived.0.algorithmId", "stale-search-key-v0")));
+            new BsonDocument
+            {
+                ["_id"] = "schema:" + unit.Id.Value,
+                ["collection"] = unit.Name,
+                ["fingerprint"] = SchemaIdentity.Fingerprint(unit),
+                ["derived"] = new BsonArray
+                {
+                    new BsonDocument
+                    {
+                        ["name"] = derivedName,
+                        ["algorithmId"] = "stale-search-key-v0"
+                    }
+                }
+            },
+            new ReplaceOptions { IsUpsert = true });
+        Assert.Equal("stale-search-key-v0", metadata.Find(new BsonDocument("_id", "schema:" + unit.Id.Value))
+            .First()["derived"][0]["algorithmId"].AsString);
 
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            connection.OpenSession(unit, MongoStorageAccess.Global));
-        Assert.Contains("rebuild", exception.Message, StringComparison.OrdinalIgnoreCase);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+        Assert.Equal(unit.Name, session.Unit.Name);
         var report = connection.InspectSchema(unit, MongoStorageAccess.Global);
-        Assert.Contains(report.ColumnDrift, refusal => refusal.Path.EndsWith("searchKeyAlgorithm", StringComparison.Ordinal));
+        Assert.DoesNotContain(report.ColumnDrift, refusal => refusal.Path.EndsWith("searchKeyAlgorithm", StringComparison.Ordinal));
     }
 
     [SkippableFact]
@@ -1577,6 +1750,19 @@ public sealed class MongoProviderIntegrationTests
 
         Assert.Equal(0L, counted.TotalCount);
     }
+
+    private static StorageUnit RuntimeAdmissionUnit() => new()
+    {
+        Id = new StorageUnitId("issue201-mongo-" + Guid.NewGuid().ToString("N")),
+        Name = "issue201_mongo_" + Guid.NewGuid().ToString("N"),
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+            new() { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by_payload", Columns = [new IndexColumn("payload")] }]
+    };
 
     private static IMongoProviderConnection OpenConnection()
     {

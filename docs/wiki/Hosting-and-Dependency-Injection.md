@@ -149,20 +149,24 @@ is no second registration mechanism to also implement. An architecture test enfo
 ## Startup admission
 
 `AddGroundwork()` registers a hosted service that runs admission for every declared unit on every
-registered connection, before the host serves anything. Admission is inspect-only and real: it asks
-each connection for the difference between the deployed catalog and the compiled declaration, and it
+registered connection, before the host serves anything. Admission is inspect-only by default and real:
+it asks each connection for the kernel runtime-admission result for the compiled declaration, and it
 checks the required capabilities against what the deployed database advertises.
 
 | Finding | Status | Effect |
 | --- | --- | --- |
 | Deployed catalog matches the declaration | `Ready` | Host starts |
-| A declared **index** is missing | `Degraded` | Host starts; dependent query shapes refuse (`GW-RUNTIME-002`) |
+| Physical **index drift** against an otherwise matching applied target | `Degraded` | Host starts; dependent query shapes refuse (`GW-RUNTIME-002`) |
+| The declaration differs from the applied target (including a changed or newly declared index) | `Blocked` | Startup refuses with `GW-HOST-005` |
 | A unit, **column**, or derived column is missing | `Blocked` | Startup refuses with `GW-HOST-005` |
 | A required capability is not advertised | `Blocked` | Startup refuses with `GW-HOST-006` |
 | Admission could not run at all | `Failed` | Startup refuses with `GW-HOST-005` |
 
-The split is the same one [Schema Management](Schema-Management) documents: a missing column means
-data cannot be read correctly, a missing index means *some queries* are no longer safe.
+The split is the same one [Schema Management](Schema-Management) documents: a column mismatch means
+data cannot be read correctly, while physical index drift against an otherwise matching applied
+target means *some queries* are no longer safe. A declaration change, including adding or changing
+an index, changes the target fingerprint and must be applied before startup. The hosting layer
+reports the provider seam's result; it does not reclassify the public `SchemaDiff`.
 
 A blocked refusal names the units and the command that fixes them:
 
@@ -173,13 +177,9 @@ Apply it from the deployment step with `groundwork apply --schema groundwork.sch
 --provider <alias> --safe`; runtime is inspect-only by default.
 ```
 
-> **The classification here is a temporary duplicate.** Provider schema executors decide column
-> drift versus index drift from their native catalogs, and `PhysicalSchemaPlanProtection` decides
-> what an auto-apply may execute. Neither is reachable through `IStorageProviderConnection` yet, so
-> this package maps the public `SchemaDiff` onto the same intent by hand. It can therefore disagree
-> with what the provider's own admission would do at the first session open, in either direction.
-> [#201](https://github.com/valence-works/groundwork-v2/issues/201) removes the duplicate by exposing
-> runtime admission on the Store contract.
+The public `ISchemaCoordinator.InspectRuntimeAdmission` method exposes this same kernel result to
+consumers that hold only an `IStorageProviderConnection`, including the result of safe-plan
+authorization when auto-apply is enabled.
 
 ### Development auto-apply
 
@@ -187,14 +187,11 @@ Apply it from the deployment step with `groundwork apply --schema groundwork.sch
 options.AutoApplyOnStartup = builder.Environment.IsDevelopment() && configuration.GetValue<bool>("DevelopmentApplySchema");
 ```
 
-Off by default. When on, additive plans — create unit, add column, add derived column, create index —
-are applied at startup and logged at warning level; anything else still refuses. A change to a
-declared **aggregation profile** is deliberately not in that list: providers emit the same change kind
-for a redefined profile as for a new one, so applying it can alter how an aggregation behaves against
-stored data. That is a semantic migration, and it needs the CLI's explicit authorization rather than a
-startup switch. It exists so
-`dotnet run` and integration tests can stand a database up. **Production physical schema belongs to
-the `groundwork` CLI**, which requires explicit authorization for destructive and semantic work.
+Off by default. When on, the provider delegates to the kernel's `PhysicalSchemaPlanProtection`; only
+plans the kernel considers safe are applied at startup. Destructive or semantic work is refused with
+its authorization details and belongs to the `groundwork` CLI. This exists so `dotnet run` and
+integration tests can stand a database up. **Production physical schema belongs to the `groundwork`
+CLI**, which requires explicit authorization for destructive and semantic work.
 
 ---
 

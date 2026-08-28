@@ -293,6 +293,40 @@ public sealed class MongoSchemaExecutorTests : IDisposable
         Assert.Contains("plans that as a rebuild", refused.Message, StringComparison.Ordinal);
     }
 
+    [SkippableFact]
+    public void A_legacy_schema_cache_cannot_supply_unverifiable_algorithm_evidence_for_adoption()
+    {
+        var context = Context();
+        var executor = new MongoSchemaExecutor(context);
+        var logical = Folded(Table());
+        var target = MongoSchemaTargets.Compile(logical);
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.Applied,
+            PhysicalSchemaApplication.Apply(target, executor).Outcome);
+
+        var metadata = context.Database.GetCollection<BsonDocument>("__groundwork_metadata");
+        var schemaId = "schema:" + logical.Id.Value;
+        Assert.Equal(0, metadata.CountDocuments(new BsonDocument("_id", schemaId)));
+        metadata.ReplaceOne(
+            new BsonDocument("_id", schemaId),
+            new BsonDocument
+            {
+                ["_id"] = schemaId,
+                ["derived"] = new BsonArray(target.ProviderDefinitions.Select(definition => new BsonDocument
+                {
+                    ["name"] = MongoSchemaTargets.DerivedColumnName(definition),
+                    ["algorithmId"] = definition.CanonicalDefinition
+                }))
+            },
+            new ReplaceOptions { IsUpsert = true });
+
+        using var applicationLock = executor.AcquireApplicationLock(target.Identity);
+        var inspection = executor.InspectDeployedCatalog(target, applicationLock);
+
+        Assert.Contains(inspection.ColumnDrift, refusal =>
+            refusal.Path.EndsWith(".searchKeyAlgorithm", StringComparison.Ordinal));
+    }
+
     // ------------------------------------------------------------------ fixtures
 
     private static readonly ColumnDefinition TotalColumn = new()
@@ -400,12 +434,32 @@ public sealed class MongoSchemaExecutorTests : IDisposable
         Key = new KeyDefinition { Columns = ["id"] }
     };
 
+    private static StorageUnit Folded(string table) => new()
+    {
+        Id = new StorageUnitId(table),
+        Name = table,
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new ColumnDefinition
+            {
+                Name = "status",
+                Type = PortableType.String,
+                MaxLength = 32,
+                IsNullable = false,
+                Collation = PortableCollation.OrdinalIgnoreCase
+            }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
+    };
+
     private static PhysicalSchemaTarget Target(StorageUnit unit, SchemaEvolutionMetadata? evolution = null) =>
         new(new SchemaSubject(MongoSchemaTargets.Physicalize(unit), evolution), MongoSchemaTargets.Provider);
 
     private static void Expire(MongoClientContext context, PhysicalSchemaTargetIdentity target) =>
         context.Database.GetCollection<BsonDocument>("__groundwork_metadata").UpdateOne(
-            new BsonDocument("_id", "lock:" + target),
+            new BsonDocument("_id", "history:" + target),
             new BsonDocument("$set", new BsonDocument("expiresAt", "0001-01-01T00:00:00.0000000+00:00")));
 
     private static IMongoCollection<BsonDocument> Collection(MongoClientContext context, string name) =>

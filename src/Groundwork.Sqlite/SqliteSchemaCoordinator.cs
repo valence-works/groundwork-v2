@@ -56,6 +56,28 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
             : executor.InspectDeployedHistory(target, connection);
     }
 
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(desired);
+        var physical = Physicalize(desired);
+        Remember(desired, physical);
+        var target = Target(physical);
+        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+            executor,
+            target,
+            options,
+            inspected: InspectDeployed(target, null),
+            inspectAfterApplication: () => InspectDeployed(target, null));
+        if (result.AppliedOperationCount != 0)
+        {
+            owner.RefreshSchema();
+            admission.Invalidate(desired.Id);
+        }
+        return result;
+    }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
@@ -65,7 +87,10 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         using var lease = executor.AcquireApplicationLock(target.Identity);
         var history = executor.ReadHistory(target.Identity, lease);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(SchemaChangeMapping.Describe(plan.Operations));
+        return new SchemaDiff(SchemaChangeMapping.Describe(
+            plan.Operations,
+            plan.PreviousDefinition,
+            physical));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -78,7 +103,10 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         {
             var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
             owner.RefreshSchema();
-            return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(result.Plan.Operations)),
+            return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(
+                    result.Plan.Operations,
+                    result.Plan.PreviousDefinition,
+                    physical)),
                 result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
         }
         finally

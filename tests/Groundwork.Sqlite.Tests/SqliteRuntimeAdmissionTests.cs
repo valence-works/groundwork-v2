@@ -114,6 +114,29 @@ public sealed class SqliteRuntimeAdmissionTests
     }
 
     [Fact]
+    public void Safe_auto_apply_of_an_added_index_returns_ready_without_stale_refusal()
+    {
+        using var store = TemporaryStore.Create();
+        var original = PlainUnit("admission-auto-index");
+        var desired = IndexedUnit("admission-auto-index");
+        var factory = new SqliteProviderFactory();
+
+        using (var deployed = factory.Create(store.ConnectionString))
+            Assert.True(deployed.Schema.Apply(original).Applied);
+
+        using var connection = factory.Create(store.ConnectionString);
+        var result = connection.Schema.InspectRuntimeAdmission(
+            desired,
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Application?.Outcome);
+        Assert.True(result.IsReady);
+        Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Ready, result.Status);
+        Assert.DoesNotContain(result.Refusals, refusal => refusal.Code == "GW-RUNTIME-002");
+        Assert.True(connection.Schema.Diff(desired).IsEmpty);
+    }
+
+    [Fact]
     public void Admission_inspects_once_per_unit_per_connection()
     {
         using var store = TemporaryStore.Create();
