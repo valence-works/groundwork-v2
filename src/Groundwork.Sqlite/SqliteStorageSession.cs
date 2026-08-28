@@ -1703,7 +1703,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             // failed rollback can leave the native transaction active, so this session must not
             // attempt another write against that handle before it is retired.
             closed = true;
-            connection.Close();
+            if (owner.UsesSharedSessionConnection)
+                owner.Dispose();
+            else
+                connection.Close();
             throw;
         }
     }

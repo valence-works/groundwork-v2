@@ -160,19 +160,11 @@ public sealed class SqliteTransactionCleanupTests
 
         // SQLite authorizers run inside the native engine, so this rejects the real ROLLBACK
         // statement rather than throwing from the managed helper before the provider is reached.
-        SQLitePCL.strdelegate_authorizer denyRollback =
-            (_, actionCode, param0, _, _, _) => actionCode == SQLitePCL.raw.SQLITE_TRANSACTION &&
-                string.Equals(param0, "ROLLBACK", StringComparison.OrdinalIgnoreCase)
-                    ? SQLitePCL.raw.SQLITE_DENY
-                    : SQLitePCL.raw.SQLITE_OK;
+        var denyRollback = DenyRollbackAuthorizer();
         Assert.Equal(SQLitePCL.raw.SQLITE_OK,
             SQLitePCL.raw.sqlite3_set_authorizer(sessionConnection.Handle, denyRollback, null));
 
-        var values = new StorageValues(new Dictionary<string, object?>
-        {
-            ["id"] = "row-1",
-            ["value"] = "value-1"
-        });
+        var values = Values();
 
         var original = Assert.Throws<InvalidOperationException>(() => session.Insert(values));
         Assert.Equal(ThrowOnWrite.Message, original.Message);
@@ -186,6 +178,41 @@ public sealed class SqliteTransactionCleanupTests
         AssertMarkerMissing(store.ConnectionString);
     }
 
+    /// <summary>
+    /// In-memory SQLite sessions share the provider's primary connection. A native rollback denial
+    /// therefore retires the whole provider, so sibling sessions cannot appear usable while holding
+    /// a closed shared connection.
+    /// </summary>
+    [Fact]
+    public void SqliteStorageSession_native_rollback_failure_retires_shared_memory_provider()
+    {
+        var connectionString = $"Data Source=groundwork-cleanup-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        var unit = Unit();
+        var observer = new ThrowOnWrite();
+
+        using var providerConnection = new SqliteProviderConnection(connectionString);
+        providerConnection.Schema.Apply(unit);
+
+        var session = providerConnection.OpenSession(unit, StorageAccess.Global, observer);
+        var sibling = providerConnection.OpenSession(unit, StorageAccess.Global);
+        var sessionConnection = PrivateField<SqliteConnection>(session, "connection");
+
+        var denyRollback = DenyRollbackAuthorizer();
+        Assert.Equal(SQLitePCL.raw.SQLITE_OK,
+            SQLitePCL.raw.sqlite3_set_authorizer(sessionConnection.Handle, denyRollback, null));
+
+        var values = Values();
+
+        var original = Assert.Throws<InvalidOperationException>(() => session.Insert(values));
+        Assert.Equal(ThrowOnWrite.Message, original.Message);
+        Assert.IsType<string>(original.Data[WriteFailureCleanup.CleanupFailureKey]);
+        Assert.Throws<ObjectDisposedException>(() => session.Insert(values));
+
+        var siblingFailure = Assert.Throws<ObjectDisposedException>(() => sibling.Insert(values));
+        Assert.Equal("SqliteProviderConnection", siblingFailure.ObjectName);
+        Assert.Throws<ObjectDisposedException>(() => providerConnection.OpenSession(unit, StorageAccess.Global));
+    }
+
     private static void CreateMarker(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
         using var command = connection.CreateCommand();
@@ -193,6 +220,18 @@ public sealed class SqliteTransactionCleanupTests
         command.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
         command.ExecuteNonQuery();
     }
+
+    private static StorageValues Values() => new(new Dictionary<string, object?>
+    {
+        ["id"] = "row-1",
+        ["value"] = "value-1"
+    });
+
+    private static SQLitePCL.strdelegate_authorizer DenyRollbackAuthorizer() =>
+        (_, actionCode, param0, _, _, _) => actionCode == SQLitePCL.raw.SQLITE_TRANSACTION &&
+            string.Equals(param0, "ROLLBACK", StringComparison.OrdinalIgnoreCase)
+                ? SQLitePCL.raw.SQLITE_DENY
+                : SQLitePCL.raw.SQLITE_OK;
 
     private static T PrivateField<T>(object instance, string name) =>
         (T)(instance.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(instance)
