@@ -26,6 +26,25 @@ and intentionally partial same-type constructors/member initializers, so omitted
 read. `RecordQueryOptions.UsingIndex(name)` carries a declared logical index to the provider for
 native selection/plan verification.
 
+## Typed declared aggregations
+
+`RecordTable<T>.Aggregate` binds expressions over `AggregationRow` to one profile declared by the
+typed table. `row.Get<T>(alias)` is checked against the profile's fixed group or reducer aliases
+when the binding is created; it cannot introduce an ad-hoc grouping, reducer, page size, or budget:
+
+```csharp
+var byName = table.Aggregate(
+    "by-name",
+    row => row.Get<string>("name"),
+    row => new NameSummary(row.Get<long>("count"), row.Get<long>("total")));
+var result = records.Aggregate(byName);
+```
+
+`RecordTableSession<T>.Aggregate` and `AggregateAsync` forward the named query through
+`IRecordAggregationStore`, which the `Groundwork.Records.Store` adapter implements by calling the
+existing provider aggregation session. A custom `IRecordStore` must opt into that capability to
+execute bindings; otherwise it fails before provider work.
+
 ## Execution boundary
 
 `IRecordStore` is the provider-neutral adapter seam. It accepts a kernel declaration, `RowValues`,

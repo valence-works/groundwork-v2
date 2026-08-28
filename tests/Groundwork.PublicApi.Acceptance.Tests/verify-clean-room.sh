@@ -41,7 +41,7 @@ fi
 while IFS= read -r approved; do
   test -z "$approved" && continue
   symbol="${approved##*.}"
-  grep -Eq "typeof\(([^)]*\.)?$symbol(<>)?\)" "$consumer_root/PublicApiApprovalFixture.cs" || {
+  grep -Eq "typeof\(([^)]*\.)?$symbol(<[^)]*>)?\)" "$consumer_root/PublicApiApprovalFixture.cs" || {
     echo "Approved public API symbol '$approved' is absent from the compile-time fixture." >&2
     exit 1
   }

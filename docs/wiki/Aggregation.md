@@ -54,6 +54,23 @@ Or fluently:
     .FirstBy("firstMessage", "message", orderBy: "seq"))
 ```
 
+Typed Records callers can bind a profile to group and reducer result types without constructing an
+`AggregationQuery`. The binding reads only the aliases declared by the selected profile, while the
+profile retains its grouping, reducer, and budget semantics:
+
+```csharp
+var byName = table.Aggregate(
+    "by-name",
+    row => row.Get<string>("name"),
+    row => new NameSummary(row.Get<long>("count"), row.Get<long>("total")));
+var summaries = records.Aggregate(byName);
+```
+
+`row.Get<T>(alias)` is checked against the profile when the binding is created. A missing profile,
+group alias, reducer alias, or incompatible type is refused before provider work. The production
+`Groundwork.Records.Store` adapter forwards the binding to the existing `IStorageSession.Aggregate`
+contract; no provider rendering or reduction is reimplemented by the typed surface.
+
 ## Executing
 
 ```csharp

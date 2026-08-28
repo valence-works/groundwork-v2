@@ -18,6 +18,11 @@ Groundwork.Kernel.AggregationTimeRange
 Groundwork.Kernel.AggregationTimeBucketCalculator
 Groundwork.Kernel.AggregationBuilder
 Groundwork.Kernel.Aggregate.Count
+Groundwork.Kernel.AggregationProfile
+Groundwork.Records.RecordAggregationBinding
+Groundwork.Records.RecordAggregationResult
+Groundwork.Records.AggregationRowExtensions
+Groundwork.Records.IRecordAggregationStore
 Groundwork.Query.Model.QueryRequest
 Groundwork.Query.Planning.QueryCoverageException
 Groundwork.Records.RecordTable

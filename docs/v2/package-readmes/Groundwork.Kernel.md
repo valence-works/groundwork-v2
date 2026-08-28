@@ -5,6 +5,10 @@ The declaration layer. `StorageUnit`, `ColumnDefinition`, `PortableType`, `KeyDe
 `PortabilityValidator`, the capability registry, and the schema subject and fingerprint model that
 startup admission compares against.
 
+Typed contract-family packages can create a closed profile with
+`AggregationProfile.Create(name, configure)`; the resulting declaration still goes through the
+same provider-neutral validation and snapshot path as profiles authored by a storage builder.
+
 Runtime-composed aggregation uses the same closed `AggregationGroup`/`Aggregate` vocabulary and
 requires an expiring `AggregationAcceptance` with explicit `MaxGroups` and `MaxInputRows` budgets.
 

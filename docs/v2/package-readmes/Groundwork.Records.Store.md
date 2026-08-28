@@ -2,7 +2,7 @@
 
 The production bridge between typed rows and a real database. Adds `table.Open(connection)` and the
 `IRecordStore` implementation over `Groundwork.Store`, so a `RecordTable<T>` becomes something you
-can insert into, read from, and query.
+can insert into, read from, query, and execute typed declared aggregation bindings against.
 
 **This is the records package an application references**, not `Groundwork.Records` — that one has
 no provider dependency by design and therefore cannot open anything. It comes along transitively.
