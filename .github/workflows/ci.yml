@@ -24,6 +24,8 @@ jobs:
             10.0.x
       - run: dotnet restore Groundwork.slnx
       - run: dotnet test tests/Groundwork.Architecture.Tests/Groundwork.Architecture.Tests.csproj --no-restore --configuration Release
+      - name: Run project board sync unit tests without credentials
+        run: python3 -m unittest discover -s tests/project_board_sync -p 'test_*.py'
 
   build-and-test:
     runs-on: ubuntu-latest

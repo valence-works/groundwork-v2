@@ -1,20 +1,54 @@
-name: Notify v2 board
+name: Reconcile v2 project board
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, closed]
+  issues:
+    types: [assigned, unassigned, opened, closed, reopened, labeled, unlabeled, edited]
+  pull_request_target:
+    types: [opened, reopened, synchronize, closed, edited, ready_for_review, converted_to_draft]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the reconciliation plan without changing project #6"
+        required: false
+        default: false
+        type: boolean
+
+# Every invocation reads the complete repository state.  Serializing runs
+# prevents two event payloads from racing while adding an item or changing its
+# status; cancel-in-progress is intentionally false so a backstop run cannot
+# be cancelled halfway through its projection.
+concurrency:
+  group: groundwork-v2-project-6-reconciliation
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  notify:
+  reconcile:
     runs-on: ubuntu-latest
     steps:
-      - name: Request authoritative board sync
+      # pull_request_target is used for link events, but this checkout is
+      # explicitly pinned to the trusted default branch.  Never checkout or
+      # execute the pull request head while PROJECT_TOKEN is in scope.
+      - name: Checkout trusted main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Run board sync unit tests before reconciliation
+        run: python3 -m unittest discover -s tests/project_board_sync -p 'test_*.py'
+
+      - name: Reconcile organization project #6
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-        run: >-
-          gh api --method POST
-          repos/valence-works/Groundwork/dispatches
-          -f event_type=v2-board-sync
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          BOARD_SYNC_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          if [[ "$BOARD_SYNC_DRY_RUN" == "true" ]]; then
+            python3 eng/project_board_sync.py --dry-run
+          else
+            python3 eng/project_board_sync.py
+          fi
