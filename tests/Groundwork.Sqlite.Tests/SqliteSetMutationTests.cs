@@ -99,6 +99,12 @@ public sealed class SqliteSetMutationTests
 
         Assert.Empty(ByNamePrefix(session, unit, "alph"));
         Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "omeg"))["id"]);
+
+        Assert.Equal(1L, session.UpdateWhere(
+            NamePrefix(unit, "omeg"),
+            new Dictionary<string, object?> { ["name"] = "Final" }).MatchedRows);
+        Assert.Empty(ByNamePrefix(session, unit, "omeg"));
+        Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "fina"))["id"]);
     }
 
     [Fact]
@@ -135,15 +141,20 @@ public sealed class SqliteSetMutationTests
         StorageUnit unit,
         string prefix)
     {
-        var column = new ColumnRef(
-            new TableId(unit.Name), "name", QueryType.String, isNullable: false, maxLength: 32,
-            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
         return session.Query(new QueryRequest(
             new TableId(unit.Name),
-            new Predicate.StartsWith(column, prefix),
+            NamePrefix(unit, prefix),
             [],
             Projection.All,
             Paging.None)).Rows;
+    }
+
+    private static Predicate NamePrefix(StorageUnit unit, string prefix)
+    {
+        var column = new ColumnRef(
+            new TableId(unit.Name), "name", QueryType.String, isNullable: false, maxLength: 32,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        return new Predicate.StartsWith(column, prefix);
     }
 
     private static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
@@ -202,6 +213,10 @@ public sealed class SqliteSetMutationTests
             }
         ],
         Key = new KeyDefinition { Columns = ["id"] },
-        Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
+        Indexes =
+        [
+            new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] },
+            new IndexDefinition { Name = "by_name", Columns = [new IndexColumn("name")] }
+        ]
     };
 }

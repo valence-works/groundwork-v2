@@ -194,7 +194,8 @@ public static class StorageUnitCoverage
             {
                 var columns = index.Columns
                     .Where(column => !stripProviderOwnedColumns ||
-                                     !column.Column.StartsWith("__groundwork_", StringComparison.Ordinal))
+                                     !column.Column.StartsWith("__groundwork_", StringComparison.Ordinal) ||
+                                     logicalByPhysical.ContainsKey(column.Column))
                     .Select(column =>
                     {
                         var logical = logicalByPhysical.TryGetValue(column.Column, out var source)
