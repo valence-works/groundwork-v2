@@ -560,6 +560,89 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void In_memory_schema_executor_retires_primary_storage_under_authorization()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-retire");
+        var initial = EvolutionUnit("schema-retire", includeLegacy: true);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial, legacy: "discarded");
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var physical = InMemorySchemaCoordinator.Prepare(initial);
+        var target = new PhysicalSchemaTarget(
+            new SchemaSubject(physical, new SchemaEvolutionMetadata(retiresPrimaryStorage: true)),
+            InMemorySchemaCoordinator.Identity);
+
+        var retired = PhysicalSchemaApplication.Apply(
+            target,
+            coordinator.Executor,
+            new DateTimeOffset(2026, 8, 28, 13, 0, 0, TimeSpan.Zero),
+            _ => PhysicalSchemaPlanAuthorization.Allow);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, retired.Outcome);
+        Assert.Empty(retired.AppliedState!.Snapshot.SemanticOperations);
+        Assert.Empty(connection.Catalog.ReadIndexes(initial.Id));
+        Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
+            target,
+            PhysicalSchemaHistoryState.FromApplied(retired.AppliedState),
+            new DateTimeOffset(2026, 8, 28, 13, 1, 0, TimeSpan.Zero)).Operations);
+    }
+
+    [Fact]
+    public void In_memory_schema_validation_refuses_present_retired_storage()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-retire-validation");
+        var unit = EvolutionUnit("schema-retire-validation");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var physical = InMemorySchemaCoordinator.Prepare(unit);
+        var target = new PhysicalSchemaTarget(
+            new SchemaSubject(physical, new SchemaEvolutionMetadata(retiresPrimaryStorage: true)),
+            InMemorySchemaCoordinator.Identity);
+
+        using var lease = coordinator.Executor.AcquireApplicationLock(target.Identity);
+        var history = coordinator.Executor.ReadHistory(target.Identity, lease);
+        var validation = Assert.Single(PhysicalSchemaDiffPlanner.Plan(
+            target,
+            history,
+            new DateTimeOffset(2026, 8, 28, 13, 2, 0, TimeSpan.Zero)).Operations
+            .OfType<ValidatePhysicalSchemaOperation>());
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.Executor.ApplyOperation(
+                target.Identity,
+                validation,
+                lease));
+
+        Assert.Equal(
+            "In-memory schema validation expected retired storage 'schema_retire_validation' to be absent.",
+            refusal.Message);
+    }
+
+    [Fact]
+    public void In_memory_schema_validation_refuses_missing_active_storage()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-active-validation");
+        var unit = EvolutionUnit("schema-active-validation");
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var target = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(unit));
+
+        using var lease = coordinator.Executor.AcquireApplicationLock(target.Identity);
+        var validation = Assert.Single(PhysicalSchemaDiffPlanner.Plan(
+            target,
+            PhysicalSchemaHistoryState.Empty,
+            new DateTimeOffset(2026, 8, 28, 13, 3, 0, TimeSpan.Zero)).Operations
+            .OfType<ValidatePhysicalSchemaOperation>());
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.Executor.ApplyOperation(
+                target.Identity,
+                validation,
+                lease));
+
+        Assert.Equal(
+            "In-memory schema validation expected active storage 'schema_active_validation' to exist.",
+            refusal.Message);
+    }
+
+    [Fact]
     public void Schema_apply_refuses_retention_partition_layout_drift()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://retention-partition-drift");

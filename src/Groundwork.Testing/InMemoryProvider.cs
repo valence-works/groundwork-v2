@@ -485,8 +485,16 @@ internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database) 
             case DropPrimaryStorageOperation:
                 state = null;
                 break;
+            case ValidatePhysicalSchemaOperation validate when validate.Subject.Evolution.RetiresPrimaryStorage:
+                if (state is not null)
+                    throw new InvalidOperationException(
+                        $"In-memory schema validation expected retired storage '{validate.Subject.Name}' to be absent.");
+                break;
             case ValidatePhysicalSchemaOperation validate:
-                state!.ReplaceDeclaration(validate.Subject.Definition);
+                if (state is null)
+                    throw new InvalidOperationException(
+                        $"In-memory schema validation expected active storage '{validate.Subject.Name}' to exist.");
+                state.ReplaceDeclaration(validate.Subject.Definition);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(operation), operation.Kind, null);
