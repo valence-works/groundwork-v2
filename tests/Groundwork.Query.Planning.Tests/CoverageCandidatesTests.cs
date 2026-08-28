@@ -77,65 +77,67 @@ public sealed class CoverageCandidatesTests
 
     /// <summary>
     /// A disjunction over the key's columns is not a point read — one key lookup cannot preserve an
-    /// Or — so it keeps the ordinary index suggestion rather than being handed a remedy that cannot
-    /// be followed.
+    /// Or — and no ordered index can make the cross-column disjunction portable.
     /// </summary>
     [Fact]
-    public void A_disjunction_over_key_columns_keeps_the_index_suggestion()
+    public void A_disjunction_over_key_columns_does_not_suggest_an_index()
     {
         var result = Check(["tenant", "id"], [], new Predicate.Or([
             new Predicate.Equal(Tenant, QueryConstant.Of(Tenant, "t1")),
             new Predicate.Equal(Id, QueryConstant.Of(Id, "a"))]));
 
         Assert.False(result.IsCovered);
-        // Or canonicalizes its terms, so the composed suggestion is in canonical column order
-        // rather than the order the disjunction was written in.
-        Assert.Equal("[GwIndex(\"ix_tickets\", \"id ASC, tenant ASC\")]", result.Refusal!.SuggestedDeclaration);
-        Assert.DoesNotContain("session.Read(key)", result.Refusal.Message, StringComparison.Ordinal);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Null(result.Refusal.SuggestedIndex);
+        Assert.DoesNotContain("Add: [GwIndex(", result.Refusal.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// A range over the key is not a point read either: it can match many rows, so a key lookup is
-    /// not the remedy and the suggestion stands.
+    /// A range over the key is not a point read either: it can match many rows. The residual
+    /// unsupported predicate makes this a nonportable shape, so no ordered index is the remedy.
     /// </summary>
     [Fact]
-    public void A_range_over_the_key_keeps_the_index_suggestion()
+    public void A_range_over_the_key_does_not_suggest_an_index_for_a_nonportable_shape()
     {
         var result = Check(["id"], [], new Predicate.And([
             new Predicate.Range(Id, Bound.Inclusive(QueryConstant.Of(Id, "a")), null),
             new Predicate.Substring(Status, "pen", Anchor.Contains)]));
 
         Assert.False(result.IsCovered);
-        Assert.Equal("[GwIndex(\"ix_tickets\", \"id ASC, status ASC\")]", result.Refusal!.SuggestedDeclaration);
-        Assert.DoesNotContain("session.Read(key)", result.Refusal.Message, StringComparison.Ordinal);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Null(result.Refusal.SuggestedIndex);
+        Assert.DoesNotContain("Add: [GwIndex(", result.Refusal.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// An equality over only part of a composite key leaves more than one row reachable, so it is
-    /// not a point read and keeps its suggestion.
+    /// An equality over only part of a composite key leaves more than one row reachable. The
+    /// residual unsupported predicate makes this a nonportable shape, so no index is the remedy.
     /// </summary>
     [Fact]
-    public void A_partial_key_equality_keeps_the_index_suggestion()
+    public void A_partial_key_equality_does_not_suggest_an_index_for_a_nonportable_shape()
     {
         var result = Check(["tenant", "id"], [], new Predicate.And([
             new Predicate.Equal(Tenant, QueryConstant.Of(Tenant, "t1")),
             new Predicate.Substring(Status, "pen", Anchor.Contains)]));
 
         Assert.False(result.IsCovered);
-        Assert.Equal("[GwIndex(\"ix_tickets\", \"tenant ASC, status ASC\")]", result.Refusal!.SuggestedDeclaration);
-        Assert.DoesNotContain("session.Read(key)", result.Refusal.Message, StringComparison.Ordinal);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Null(result.Refusal.SuggestedIndex);
+        Assert.DoesNotContain("Add: [GwIndex(", result.Refusal.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>A suggestion over columns the key does not mention is still offered.</summary>
+    /// <summary>A cross-column disjunction has no ordered-index suggestion.</summary>
     [Fact]
-    public void A_refusal_over_non_key_columns_still_suggests_an_index()
+    public void A_refusal_over_non_key_columns_does_not_suggest_an_index()
     {
         var result = Check(["id"], [], new Predicate.Or([
             new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
             new Predicate.Equal(Tenant, QueryConstant.Of(Tenant, "t1"))]));
 
         Assert.False(result.IsCovered);
-        Assert.Equal("[GwIndex(\"ix_tickets\", \"status ASC, tenant ASC\")]", result.Refusal!.SuggestedDeclaration);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Null(result.Refusal.SuggestedIndex);
+        Assert.DoesNotContain("Add: [GwIndex(", result.Refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
