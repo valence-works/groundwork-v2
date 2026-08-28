@@ -441,6 +441,14 @@ internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database) 
             case BackfillColumnOperation { Derived: not null } backfill:
                 RewriteRows(state!, values => SearchKeyProjection.Populate(backfill.Subject.Definition, values));
                 break;
+            case BackfillColumnOperation { Column.Default: not null } backfill:
+                RewriteRows(state!, values =>
+                {
+                    var next = new Dictionary<string, object?>(values, StringComparer.Ordinal);
+                    next[backfill.Column.Name] = StorageValues.CloneValue(backfill.Column.Default.Value);
+                    return next;
+                });
+                break;
             case BackfillColumnOperation:
                 break;
             case CreatePhysicalIndexOperation createIndex:

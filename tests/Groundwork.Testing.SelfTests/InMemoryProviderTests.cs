@@ -396,6 +396,39 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Schema_apply_backfills_a_new_required_column_from_its_portable_default()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-default-backfill");
+        var initial = EvolutionUnit("schema-default-backfill");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var changed = initial with
+        {
+            Columns =
+            [
+                .. initial.Columns,
+                new ColumnDefinition
+                {
+                    Name = "status",
+                    Type = PortableType.String,
+                    MaxLength = 16,
+                    IsNullable = false,
+                    Default = new PortableDefault("active")
+                }
+            ]
+        };
+
+        var change = Assert.Single(connection.Schema.Diff(changed).Changes);
+        Assert.Equal(SchemaChangeKind.AddColumn, change.Kind);
+        Assert.Equal("status", change.Identity);
+        Assert.True(connection.Schema.Apply(changed).Applied);
+
+        var stored = ReadEvolutionRow(connection, changed);
+        Assert.Equal("active", stored.Values.Values["status"]);
+        Assert.True(connection.Schema.Diff(changed).IsEmpty);
+    }
+
+    [Fact]
     public void Schema_drop_requires_authorization_and_an_authorized_apply_removes_column_and_index()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://schema-drop");
