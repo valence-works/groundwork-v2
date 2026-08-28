@@ -20,6 +20,8 @@ internal static class PublicApiApprovalFixture
         _ = typeof(DocumentUnit);
         _ = typeof(DocumentReadResult<>);
         _ = typeof(PortableType);
+        _ = typeof(LocaleSortKeyDefinition);
+        _ = typeof(PortableLocaleOrdering);
         _ = typeof(MissingValueBehavior);
         _ = typeof(IndexBuilder);
         _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
@@ -75,6 +77,7 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
+        _ = new Func<ColumnBuilder, ColumnBuilder>(column => column.LocaleOrder("sv-SE", 12));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Aggregate("summary", aggregation => aggregation.GroupBy("group").Count("count")));

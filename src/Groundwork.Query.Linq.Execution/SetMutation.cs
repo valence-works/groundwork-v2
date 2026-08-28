@@ -169,18 +169,7 @@ public static class StorageUnitCoverage
     public static ImmutableArray<CoverageIndex> PortableIndexes(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
-        var indexes = DeclaredIndexes(unit with
-        {
-            Indexes = unit.Indexes
-                .Select(index => index with
-                {
-                    Columns = index.Columns
-                        .Where(column => !column.Column.StartsWith("__groundwork_", StringComparison.Ordinal))
-                        .ToArray()
-                })
-                .Where(index => index.Columns.Count != 0)
-                .ToArray()
-        });
+        var indexes = DeclaredIndexes(unit, stripProviderOwnedColumns: true);
         var key = unit.Key.Columns
             .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal));
         return CoverageCandidates.Derive(key, indexes);
@@ -189,17 +178,43 @@ public static class StorageUnitCoverage
     public static ImmutableArray<CoverageIndex> DeclaredIndexes(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
+        return DeclaredIndexes(unit, stripProviderOwnedColumns: false);
+    }
+
+    private static ImmutableArray<CoverageIndex> DeclaredIndexes(
+        StorageUnit unit,
+        bool stripProviderOwnedColumns)
+    {
         var nullable = unit.Columns.ToDictionary(column => column.Name, column => column.IsNullable, StringComparer.Ordinal);
+        var logicalByPhysical = unit.DerivedColumns
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
+            .ToDictionary(column => column.Name, column => column.SourceColumn, StringComparer.Ordinal);
         return unit.Indexes
-            .Select(index => new CoverageIndex(
-                index.Name,
-                index.Columns.Select(column => new CoverageIndexColumn(
-                    column.Column,
-                    column.Direction == SortDirection.Descending ? OrderDirection.Descending : OrderDirection.Ascending,
-                    !nullable.TryGetValue(column.Column, out var isNullable) || isNullable)),
-                index.MissingValues == MissingValueBehavior.Excluded
-                    ? IndexMissingValueBehavior.Excluded
-                    : IndexMissingValueBehavior.Included))
+            .Select(index =>
+            {
+                var columns = index.Columns
+                    .Where(column => !stripProviderOwnedColumns ||
+                                     !column.Column.StartsWith("__groundwork_", StringComparison.Ordinal))
+                    .Select(column =>
+                    {
+                        var logical = logicalByPhysical.TryGetValue(column.Column, out var source)
+                            ? source
+                            : column.Column;
+                        return new CoverageIndexColumn(
+                            logical,
+                            column.Direction == SortDirection.Descending
+                                ? OrderDirection.Descending
+                                : OrderDirection.Ascending,
+                            !nullable.TryGetValue(logical, out var isNullable) || isNullable);
+                    });
+                return new CoverageIndex(
+                    index.Name,
+                    columns,
+                    index.MissingValues == MissingValueBehavior.Excluded
+                        ? IndexMissingValueBehavior.Excluded
+                        : IndexMissingValueBehavior.Included);
+            })
+            .Where(index => index.Columns.Any())
             .ToImmutableArray();
     }
 }

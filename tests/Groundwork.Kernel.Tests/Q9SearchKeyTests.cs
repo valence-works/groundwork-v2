@@ -6,6 +6,148 @@ namespace Groundwork.Kernel.Tests;
 public sealed class Q9SearchKeyTests
 {
     [Fact]
+    public void Locale_sort_key_expansion_reuses_the_provider_owned_projection_and_index_retarget()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("people"),
+            Name = "people",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition
+                {
+                    Name = "name",
+                    Type = PortableType.String,
+                    MaxLength = 32,
+                    LocaleSortKey = new LocaleSortKeyDefinition
+                    {
+                        CultureName = "sv-SE",
+                        MaximumExpansionFactor = 12
+                    }
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "ix_name", Columns = [new IndexColumn("name")] }]
+        };
+
+        var physical = SearchKeyProjection.Expand(unit);
+
+        var sortKey = Assert.Single(physical.Columns, column => column.Name == "__groundwork_search_name");
+        Assert.Equal(384, sortKey.MaxLength);
+        Assert.Equal(PortableCollation.Ordinal, sortKey.Collation);
+        Assert.Equal("__groundwork_search_name", physical.Indexes.Single().Columns.Single().Column);
+        var derived = Assert.Single(physical.DerivedColumns);
+        Assert.Equal(PortableProjection.LocaleSortKey, derived.Projection);
+        Assert.Contains("sv-SE", derived.AlgorithmId, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("sv-SE", new[] { "Ake", "Zebra", "Åke", "Äke", "Öke" })]
+    [InlineData("de-DE-u-co-phonebk", new[] { "Äke", "Ake", "Åke", "Öke", "Zebra" })]
+    public void Persisted_locale_sort_keys_have_literal_non_ordinal_locale_order(
+        string cultureName,
+        string[] expected)
+    {
+        var unit = SearchKeyProjection.Expand(LocaleUnit(cultureName));
+
+        var actual = new[] { "Ake", "Åke", "Äke", "Öke", "Zebra" }
+            .Select(value => new
+            {
+                Value = value,
+                Key = Assert.IsType<string>(SearchKeyProjection.Populate(
+                    unit,
+                    new Dictionary<string, object?> { ["id"] = 1, ["name"] = value })["__groundwork_search_name"])
+            })
+            .OrderBy(item => item.Key, StringComparer.Ordinal)
+            .Select(item => item.Value)
+            .ToArray();
+
+        Assert.Equal(expected, actual);
+        Assert.All(new[] { "Ake", "Åke", "Äke", "Öke", "Zebra" }, value =>
+            Assert.IsType<string>(SearchKeyProjection.Populate(
+                unit,
+                new Dictionary<string, object?> { ["id"] = 1, ["name"] = value })["__groundwork_search_name"]));
+    }
+
+    [Theory]
+    [InlineData(true, false, false, "InvariantGlobalization=true")]
+    [InlineData(false, true, true, "System.Globalization.UseNls=true")]
+    public void Locale_sort_key_declarations_refuse_non_ICU_runtime_configuration(
+        bool invariant,
+        bool windows,
+        bool nls,
+        string expectedReason)
+    {
+        var refusal = PortableLocaleOrdering.ValidateRuntimeConfiguration(
+            invariant,
+            windows,
+            nls,
+            "sv-SE",
+            "columns.name.localeSortKey");
+
+        Assert.NotNull(refusal);
+        Assert.Equal("GW-PORT-014", refusal.Code);
+        Assert.Contains(expectedReason, refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fluent_locale_order_requires_an_enforceable_bound()
+    {
+        var failure = Assert.Throws<DeclarationBuildException>(() => StorageUnit
+            .Declare("people", "people")
+            .Int32("id", column => column.Required())
+            .String("name", 32, column => column.LocaleOrder("sv-SE", 0))
+            .Key("id")
+            .Build());
+
+        Assert.Contains(failure.Findings, finding => finding.Code == "GW-PORT-014" &&
+            finding.Path == "columns.name.localeSortKey");
+    }
+
+    [Fact]
+    public void Writes_refuse_a_locale_key_that_exceeds_the_declared_expansion_bound()
+    {
+        var unit = SearchKeyProjection.Expand(new StorageUnit
+        {
+            Id = new StorageUnitId("bounded-locale"),
+            Name = "bounded_locale",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition
+                {
+                    Name = "name",
+                    Type = PortableType.String,
+                    MaxLength = 1,
+                    LocaleSortKey = new LocaleSortKeyDefinition
+                    {
+                        CultureName = "sv-SE",
+                        MaximumExpansionFactor = 1
+                    }
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        });
+
+        var failure = Assert.Throws<InvalidOperationException>(() => SearchKeyProjection.Populate(
+            unit,
+            new Dictionary<string, object?> { ["id"] = 1, ["name"] = "ä" }));
+
+        Assert.Contains("MaximumExpansionFactor", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("rebuild", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Locale_sort_keys_refuse_malformed_UTF16_before_ICU()
+    {
+        var failure = Assert.Throws<ArgumentException>(() =>
+            PortableLocaleOrdering.CreateSortKey("\uD800", "sv-SE"));
+
+        Assert.Contains("well-formed UTF-16", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Folded_physical_expansion_adds_one_key_and_retargets_logical_indexes()
     {
         var unit = new StorageUnit
@@ -118,4 +260,26 @@ public sealed class Q9SearchKeyTests
         Assert.Contains("algorithm", failure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("rebuild", failure.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static StorageUnit LocaleUnit(string cultureName) => new()
+    {
+        Id = new StorageUnitId("people"),
+        Name = "people",
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+            new ColumnDefinition
+            {
+                Name = "name",
+                Type = PortableType.String,
+                MaxLength = 32,
+                LocaleSortKey = new LocaleSortKeyDefinition
+                {
+                    CultureName = cultureName,
+                    MaximumExpansionFactor = 12
+                }
+            }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
 }

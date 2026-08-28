@@ -67,6 +67,7 @@ public enum PortableProjection
 {
     UnicodeFold,
     BoundarySearchKey,
+    LocaleSortKey,
     Sha256
 }
 
@@ -293,6 +294,17 @@ public readonly record struct StorageUnitId(string Value);
 
 public sealed record PortableDefault(object? Value);
 
+/// <summary>
+/// Declares a persisted ICU sort key for locale-aware ordering. The maximum expansion factor is
+/// an enforced storage bound, not an estimate: writes and backfills refuse keys that exceed it.
+/// </summary>
+public sealed record LocaleSortKeyDefinition
+{
+    public required string CultureName { get; init; }
+
+    public required int MaximumExpansionFactor { get; init; }
+}
+
 public sealed record ColumnDefinition
 {
     public required string Name { get; init; }
@@ -304,6 +316,8 @@ public sealed record ColumnDefinition
     public PortableCollation? Collation { get; init; }
     /// <summary>The logical collation retained when physical expansion uses ordinal storage.</summary>
     public PortableCollation? LogicalCollation { get; init; }
+    /// <summary>Optional locale-aware ordering implemented by a provider-owned ICU sort key.</summary>
+    public LocaleSortKeyDefinition? LocaleSortKey { get; init; }
     public PortableDefault? Default { get; init; }
     public ColumnGeneration Generation { get; init; } = ColumnGeneration.Supplied;
 

@@ -3,7 +3,7 @@ using System.Collections.Immutable;
 namespace Groundwork.Kernel.Schema;
 
 /// <summary>
-/// The row transform behind a folded search-key backfill, expressed as an ordinary data-migration
+/// The row transform behind a derived search/sort-key backfill, expressed as an ordinary data-migration
 /// transform. Both the in-transaction derived-column backfill run by a schema apply and the chunked
 /// data-migration runner drive this one implementation, so there is a single definition of what a
 /// search-key value is rather than one per provider.

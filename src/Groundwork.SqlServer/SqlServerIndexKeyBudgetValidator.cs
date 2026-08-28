@@ -7,7 +7,8 @@ namespace Groundwork.SqlServer;
 internal enum SqlServerSearchKeyExpansionPolicy
 {
     AsciiFold,
-    UnicodeFold
+    UnicodeFold,
+    Locale
 }
 
 /// <summary>Raised when SQL Server cannot represent a declared physical key.</summary>
@@ -57,7 +58,7 @@ internal static class SqlServerIndexKeyBudgetValidator
         var columns = (unit.Columns ?? throw new ArgumentException("A storage unit requires columns.", nameof(unit)))
             .ToDictionary(column => column.Name, StringComparer.Ordinal);
         var derived = (unit.DerivedColumns ?? [])
-            .Where(column => column.Projection == PortableProjection.BoundarySearchKey)
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
             .ToDictionary(column => column.Name, StringComparer.Ordinal);
 
         ValidateIndex(
@@ -74,13 +75,17 @@ internal static class SqlServerIndexKeyBudgetValidator
             ValidateIndex(index, columns, derived, searchKeyPolicies);
     }
 
-    internal static int EstimateSearchKeyBytes(int sourceLength, SqlServerSearchKeyExpansionPolicy policy)
+    internal static int EstimateSearchKeyBytes(
+        int sourceLength,
+        SqlServerSearchKeyExpansionPolicy policy,
+        int? localeExpansionFactor = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sourceLength);
         var factor = policy switch
         {
             SqlServerSearchKeyExpansionPolicy.AsciiFold => 5,
             SqlServerSearchKeyExpansionPolicy.UnicodeFold => 7,
+            SqlServerSearchKeyExpansionPolicy.Locale when localeExpansionFactor is > 0 => localeExpansionFactor.Value,
             _ => throw new ArgumentOutOfRangeException(nameof(policy), policy, null)
         };
         return checked(sourceLength * factor);
@@ -155,8 +160,16 @@ internal static class SqlServerIndexKeyBudgetValidator
                 $"SQL Server physical index '{indexName}' requires a positive MaxLength for search-key column '{column.Name}'.");
         }
 
-        var width = EstimateSearchKeyBytes(column.MaxLength.Value, policy);
-        var factor = policy == SqlServerSearchKeyExpansionPolicy.AsciiFold ? 5 : 7;
+        var factor = policy switch
+        {
+            SqlServerSearchKeyExpansionPolicy.AsciiFold => 5,
+            SqlServerSearchKeyExpansionPolicy.UnicodeFold => 7,
+            SqlServerSearchKeyExpansionPolicy.Locale when column.LocaleSortKey?.MaximumExpansionFactor is > 0
+                => column.LocaleSortKey.MaximumExpansionFactor,
+            _ => throw new InvalidOperationException(
+                $"SQL Server locale search-key column '{column.Name}' is missing its expansion factor.")
+        };
+        var width = EstimateSearchKeyBytes(column.MaxLength.Value, policy, factor);
         terms.Add($"{displayName ?? column.Name}={column.MaxLength.Value}*{factor}");
         return width;
     }
@@ -168,13 +181,17 @@ internal static class SqlServerIndexKeyBudgetValidator
     {
         if (!derived.TryGetValue(columnName, out var projection))
             return null;
-        if (!columns.TryGetValue(projection.SourceColumn, out var source) ||
-            source.Type != PortableType.String ||
-            !SearchKeyProjection.IsFolded(SearchKeyProjection.LogicalCollation(source)))
+        if (!columns.TryGetValue(projection.SourceColumn, out var source) || source.Type != PortableType.String)
         {
             throw new InvalidOperationException(
-                $"SQL Server derived search-key column '{columnName}' does not resolve to a folded String source.");
+                $"SQL Server derived search-key column '{columnName}' does not resolve to a String source.");
         }
+
+        if (projection.Projection == PortableProjection.LocaleSortKey && source.LocaleSortKey is not null)
+            return SqlServerSearchKeyExpansionPolicy.Locale;
+        if (!SearchKeyProjection.IsFolded(SearchKeyProjection.LogicalCollation(source)))
+            throw new InvalidOperationException(
+                $"SQL Server derived search-key column '{columnName}' does not resolve to a folded or locale-ordered String source.");
 
         return SearchKeyProjection.LogicalCollation(source) switch
         {
