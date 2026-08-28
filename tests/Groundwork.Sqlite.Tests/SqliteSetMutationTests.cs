@@ -246,6 +246,29 @@ public sealed class SqliteSetMutationTests
     }
 
     [Fact]
+    public void Exact_update_keeps_composite_key_outcomes_in_deterministic_logical_order()
+    {
+        using var connection = Open();
+        var unit = CompositeUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(CompositeRow("z", "b"));
+        session.Insert(CompositeRow("a", "c"));
+        session.Insert(CompositeRow("a", "a"));
+
+        var result = session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact);
+
+        Assert.Equal(3L, result.MatchedRows);
+        Assert.Equal(
+            new[] { ("a", "a"), ("a", "c"), ("z", "b") },
+            result.Outcomes.Select(outcome =>
+                (Assert.IsType<string>(outcome.Key.Values["tenant"]), Assert.IsType<string>(outcome.Key.Values["id"]))).ToArray());
+    }
+
+    [Fact]
     public void Exact_update_uses_the_logical_predicate_for_folded_search_keys()
     {
         using var connection = Open();
@@ -287,6 +310,47 @@ public sealed class SqliteSetMutationTests
         Assert.Equal(WriteOutcomeStatus.Updated, outcome.Status);
         Assert.Equal(2L, outcome.Version);
         Assert.Equal(2L, session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" }))!.Version);
+    }
+
+    [Fact]
+    public void Exact_scoped_update_orders_logical_keys_without_the_scope_discriminator()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Scope = ScopePolicy.Scoped };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+        first.Insert(Row("a", "open", "first"));
+        second.Insert(Row("a", "open", "second"));
+
+        var result = first.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact);
+
+        Assert.Equal(1L, result.MatchedRows);
+        Assert.Equal("a", Assert.Single(result.Outcomes).Key.Values["id"]);
+        Assert.Equal("updated", first.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" }))!.Values.Values["label"]);
+        Assert.Equal("second", second.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" }))!.Values.Values["label"]);
+    }
+
+    [Fact]
+    public async Task Exact_scoped_delete_async_orders_logical_keys_without_the_scope_discriminator()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Scope = ScopePolicy.Scoped };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+        first.Insert(Row("a", "gone", "first"));
+        second.Insert(Row("a", "gone", "second"));
+
+        var result = await first.DeleteWhereAsync(Status(unit, "gone"), SetMutationOptions.Exact);
+
+        Assert.Equal(1L, result.MatchedRows);
+        Assert.Equal("a", Assert.Single(result.Outcomes).Key.Values["id"]);
+        Assert.Null(first.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
+        Assert.NotNull(second.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
     }
 
     [Fact]
@@ -394,6 +458,17 @@ public sealed class SqliteSetMutationTests
             ["amount"] = null
         });
 
+    private static StorageValues CompositeRow(string tenant, string id) =>
+        new(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["tenant"] = tenant,
+            ["id"] = id,
+            ["status"] = "open",
+            ["label"] = "before",
+            ["document"] = null,
+            ["amount"] = null
+        });
+
     private static StorageUnit Unit() => new()
     {
         Id = new StorageUnitId("p43_admission"),
@@ -415,6 +490,24 @@ public sealed class SqliteSetMutationTests
             new IndexDefinition { Name = "by_amount", Columns = [new IndexColumn("amount")] }
         ]
     };
+
+    private static StorageUnit CompositeUnit()
+    {
+        var unit = Unit();
+        return unit with
+        {
+            Id = new StorageUnitId("p43_composite"),
+            Name = "p43_composite",
+            Columns = unit.Columns.Append(new ColumnDefinition
+            {
+                Name = "tenant",
+                Type = PortableType.String,
+                IsNullable = false,
+                MaxLength = 64
+            }).ToArray(),
+            Key = new KeyDefinition { Columns = ["tenant", "id"] }
+        };
+    }
 
     private static StorageUnit FoldedUnit() => new()
     {

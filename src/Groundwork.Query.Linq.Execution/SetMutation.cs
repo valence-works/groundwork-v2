@@ -173,10 +173,18 @@ public static class SetMutationSessionExtensions
 
     private static IReadOnlyList<StorageKey> OrderedKeys(
         StorageUnit unit,
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows) =>
-        rows.Select(row => KeyFromRow(unit, row))
-            .OrderBy(key => RowWrite.IdentityFor(unit, key.Values), StringComparer.Ordinal)
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        var logicalUnit = LogicalKeyUnit(unit);
+        return rows.Select(row => KeyFromRow(unit, row))
+            .OrderBy(key => RowWrite.IdentityFor(logicalUnit, key.Values), StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private static StorageUnit LogicalKeyUnit(StorageUnit unit) => unit with
+    {
+        Key = new KeyDefinition { Columns = LogicalKeyColumns(unit) }
+    };
 
     private static QueryRequest KeyRequest(
         StorageUnit unit,
@@ -214,8 +222,10 @@ public static class SetMutationSessionExtensions
                         $"The exact set-mutation key projection did not return '{column}'."),
                 StringComparer.Ordinal));
 
-    private static IEnumerable<string> LogicalKeyColumns(StorageUnit unit) =>
-        unit.Key.Columns.Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal));
+    private static IReadOnlyList<string> LogicalKeyColumns(StorageUnit unit) =>
+        unit.Key.Columns
+            .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal))
+            .ToArray();
 
     private static StorageValues ValuesFor(
         StorageKey key,
