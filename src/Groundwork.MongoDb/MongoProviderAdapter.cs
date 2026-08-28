@@ -78,8 +78,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
     {
         var session = inner.OpenSession(unit, ToNative(access), observer);
         return inner.ProviderSequenceFit is ProviderFit.Supported
-            ? new MongoExactStoreSession(session, commandObserver: observer, providerConnection: this)
-            : new MongoStoreSession(session, commandObserver: observer, providerConnection: this);
+            ? new OwnedMongoExactStoreSession(session, commandObserver: observer, providerConnection: this)
+            : new OwnedMongoStoreSession(session, commandObserver: observer, providerConnection: this);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
@@ -149,7 +149,7 @@ internal class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null,
     IProviderCommandObserver? commandObserver = null,
-    IStorageProviderConnection? providerConnection = null) : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+    IStorageProviderConnection? providerConnection = null) : IStorageSession, IProviderBoundStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private bool released;
 
@@ -544,7 +544,7 @@ internal class MongoStoreSession(
     }
 }
 
-internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, ICompareAndDeleteStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal class MongoExactStoreSession : MongoStoreSession, IExactAppendStorageSession, ICompareAndDeleteStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     private readonly IMongoStorageSession exactInner;
 
@@ -650,6 +650,29 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
         StorageAccessValidation.EnsurePointOperation(Access, "retention");
         return exactInner as IExactRetentionStorageSession ?? throw new NotSupportedException(
             "GW-RETENTION-003: this provider session does not advertise exact retention operations.");
+    }
+}
+
+internal sealed class OwnedMongoStoreSession : MongoStoreSession, IOwnedStorageSession
+{
+    internal OwnedMongoStoreSession(
+        IMongoStorageSession inner,
+        Action<StorageKey>? beforeRead = null,
+        IProviderCommandObserver? commandObserver = null,
+        IStorageProviderConnection? providerConnection = null)
+        : base(inner, beforeRead, commandObserver, providerConnection)
+    {
+    }
+}
+
+internal sealed class OwnedMongoExactStoreSession : MongoExactStoreSession, IOwnedStorageSession
+{
+    internal OwnedMongoExactStoreSession(
+        IMongoStorageSession inner,
+        IProviderCommandObserver? commandObserver = null,
+        IStorageProviderConnection? providerConnection = null)
+        : base(inner, commandObserver, providerConnection)
+    {
     }
 }
 

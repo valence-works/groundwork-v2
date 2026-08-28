@@ -13,6 +13,59 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [SkippableFact]
+    public void Owned_session_marker_matches_the_opening_path()
+    {
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
+        var name = "sql_session_ownership_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Assert.False(connection.OpenSession(unit, StorageAccess.Global) is IOwnedStorageSession);
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+            Assert.False(work.OpenSession(unit) is IOwnedStorageSession);
+
+        var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+    }
+
+    [SkippableFact]
+    public void Owned_sessions_return_each_connection_to_a_bounded_pool()
+    {
+        var source = fixture.Reset();
+        var builder = new SqlConnectionStringBuilder(source)
+        {
+            MaxPoolSize = 1,
+            ConnectTimeout = 2
+        };
+        using var connection = new SqlServerProviderFactory().Create(builder.ConnectionString);
+        var name = "sql_session_pool_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        for (var index = 0; index < 8; index++)
+        {
+            using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+            Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        }
+    }
+
+    [SkippableFact]
     public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
     {
         var connectionString = fixture.Reset();
@@ -63,6 +116,85 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var outcomes = await batched.ApplyBatchAsync([write], exactOutcomes: true, timeout.Token);
         Assert.Equal(WriteOutcomeStatus.Upserted, outcomes.Single().Outcome.Status);
+    }
+
+    [SkippableFact]
+    public async Task Shared_session_serializes_reads_while_on_append_retention_runs()
+    {
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
+        var name = "on_append_gate_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "payload", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Retention = new RetentionDeclaration
+            {
+                KeepNewest = 1,
+                OrderColumn = "id",
+                Trigger = RetentionTrigger.OnAppend
+            }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using var observer = new BlockingRetentionObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var first = Task.Run(() => session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "first", ["payload"] = "payload"
+        })));
+        Assert.True(observer.RetentionEntered.Wait(TimeSpan.FromSeconds(5)),
+            "On-append retention did not start in time.");
+
+        var second = Task.Run(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "missing" })));
+        await Task.Delay(TimeSpan.FromMilliseconds(150));
+        Assert.False(observer.Overlapped,
+            "A shared-session read reached SQL Server while retention held the session gate.");
+
+        observer.Release.Set();
+        Assert.True((await first).Succeeded);
+        Assert.Null(await second);
+    }
+
+    [SkippableFact]
+    public async Task Queued_async_read_honors_cancellation_while_shared_session_gate_is_held()
+    {
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
+        var name = "sql_read_cancel_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using var observer = new BlockingReadObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var first = Task.Run(async () => await session.ReadAsync(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "first" })));
+        Assert.True(observer.ReadEntered.Wait(TimeSpan.FromSeconds(5)),
+            "The first read did not reach the provider command in time.");
+
+        using var cancellation = new CancellationTokenSource();
+        var queued = session.ReadAsync(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "queued" }), cancellation.Token).AsTask();
+        cancellation.Cancel();
+        var completed = await Task.WhenAny(queued, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(queued, completed);
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await queued);
+
+        observer.Release.Set();
+        Assert.Null(await first);
     }
 
     [SkippableFact]
@@ -514,6 +646,57 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         string.Join(Environment.NewLine, report.Scenarios.SelectMany(scenario =>
             scenario.Invariants.Select(invariant =>
                 $"seed={scenario.Seed} {invariant.Name}: {invariant.Passed} ({invariant.Detail})")));
+
+    private sealed class BlockingRetentionObserver : IProviderCommandObserver, IDisposable
+    {
+        private int overlapped;
+
+        internal ManualResetEventSlim RetentionEntered { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+        internal bool Overlapped => Volatile.Read(ref overlapped) != 0;
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase))
+            {
+                RetentionEntered.Set();
+                Release.Wait(TimeSpan.FromSeconds(5));
+            }
+            else if (!Release.IsSet && command.Kind == ProviderCommandKind.Read)
+            {
+                Interlocked.Exchange(ref overlapped, 1);
+            }
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            RetentionEntered.Dispose();
+            Release.Dispose();
+        }
+    }
+
+    private sealed class BlockingReadObserver : IProviderCommandObserver, IDisposable
+    {
+        internal ManualResetEventSlim ReadEntered { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Operation == "sqlserver.read")
+            {
+                ReadEntered.Set();
+                Release.Wait(TimeSpan.FromSeconds(5));
+            }
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            ReadEntered.Dispose();
+            Release.Dispose();
+        }
+    }
 
 }
 

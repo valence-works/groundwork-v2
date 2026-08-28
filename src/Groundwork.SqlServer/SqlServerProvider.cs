@@ -147,8 +147,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
             throw;
         }
         // Deliberately not added to sessionConnections: the caller releases it on disposal.
-        return new SqlServerStorageSession(
-            this, physicalUnit, access, connection, null, observer, ownsConnection: true);
+        return new OwnedSqlServerStorageSession(this, physicalUnit, access, connection, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

@@ -146,9 +146,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         // Shared in-memory mode is the one place ownership cannot transfer: that connection IS the database,
         // so releasing it would drop every table. Disposal there closes the session only. SQLite serializes
         // internally, so the concurrency this seam buys elsewhere costs nothing to forgo here.
-        return new SqliteStorageSession(
-            this, physicalUnit, access, sessionConnection, null, observer,
-            ownsConnection: !isMemory);
+        return new OwnedSqliteStorageSession(this, physicalUnit, access, sessionConnection, observer, !isMemory);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

@@ -155,8 +155,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         }
         // Deliberately NOT OwnConnection: the caller releases it, which is the whole point — a per-caller
         // session that neither leaks a connection nor queues behind unrelated callers on a shared one.
-        return new PostgreSqlStorageSession(
-            this, physicalUnit, access, connection, null, observer, ownsConnection: true);
+        return new OwnedPostgreSqlStorageSession(this, physicalUnit, access, connection, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)

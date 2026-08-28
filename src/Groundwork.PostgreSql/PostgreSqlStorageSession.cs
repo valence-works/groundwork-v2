@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -115,7 +115,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true,
             sourceIncludesDistinct: true);
-    });
+    }, mode);
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
@@ -194,7 +194,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
             materialized,
             rows,
             PostgreSqlSchemaCoordinator.ScopeColumn);
-    });
+    }, mode);
 
     public AggregationResult Aggregate(AggregationQuery query) =>
         AggregateCore(query, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -239,7 +239,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
             mode,
             commandObserver,
             "postgresql.aggregate")).ConfigureAwait(false);
-    });
+    }, mode);
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {
@@ -272,7 +272,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
         return Execute(async () => PublicEntry(await ReadCore(
-            key, mode, observerOperation: "postgresql.read", isProbe: false).ConfigureAwait(false)));
+            key, mode, observerOperation: "postgresql.read", isProbe: false).ConfigureAwait(false)), mode);
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -359,7 +359,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        var outcome = await Execute(() => ConditionalUpsertCore(values, options, mode)).ConfigureAwait(false);
+        var outcome = await Execute(() => ConditionalUpsertCore(values, options, mode), mode).ConfigureAwait(false);
         if (outcome.Status == WriteOutcomeStatus.Inserted && Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
             await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return outcome;
@@ -639,7 +639,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
         return value is null or DBNull
             ? new StorageInspection(null)
             : new StorageInspection(Convert.ToInt64(value, CultureInfo.InvariantCulture));
-    });
+    }, mode);
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null) =>
         ApplyRetention(operationId, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -1225,6 +1225,10 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
 
     private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchFallback(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
+        // #207's captured 23-hour dump (PID 25945) showed ApplyBatchAsync -> ExecuteWrite holding
+        // the PostgreSQL connection SemaphoreSlim while ApplyBatchFallback -> ConditionalUpsertAsync
+        // -> Execute tried to acquire that same non-reentrant gate. Keep the fallback in an operation-
+        // local scope so it reuses the active transaction instead of waiting on itself.
         var outcomes = new List<RowWriteOutcome>(writes.Count);
         var previousScope = batchFallbackScope.Value;
         batchFallbackScope.Value = true;
@@ -1717,7 +1721,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
             throw new ConcurrencyConflictException(existing?.Version);
     }
 
-    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation)
+    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
     {
         // Serialized for the whole operation: a cached session is shared by concurrent callers and Npgsql
         // refuses concurrent commands on one connection. Reads need this as much as writes — a colliding
@@ -1726,7 +1730,7 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
         // may wait for this session's non-reentrant gate a second time.
         using var lease = ownsConnection || batchFallbackScope.Value
             ? null
-            : await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false);
+            : await owner.EnterGate(mode).ConfigureAwait(false);
         try
         {
             ThrowIfClosed();
@@ -1870,5 +1874,18 @@ internal sealed class PostgreSqlStorageSession : IOwnedStorageSession, IStorageS
     private sealed class ConcurrencyConflictException(long? version = null) : Exception
     {
         public long? Version { get; } = version;
+    }
+}
+
+internal sealed class OwnedPostgreSqlStorageSession : PostgreSqlStorageSession, IOwnedStorageSession
+{
+    internal OwnedPostgreSqlStorageSession(
+        PostgreSqlProviderConnection owner,
+        StorageUnit unit,
+        StorageAccess access,
+        NpgsqlConnection connection,
+        IProviderCommandObserver? observer = null)
+        : base(owner, unit, access, connection, null, observer, ownsConnection: true)
+    {
     }
 }

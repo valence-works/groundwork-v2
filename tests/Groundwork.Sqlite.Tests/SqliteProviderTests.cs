@@ -17,6 +17,56 @@ namespace Groundwork.Sqlite.Tests;
 public sealed class SqliteProviderTests
 {
     [Fact]
+    public void Owned_session_marker_matches_the_opening_path()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("session-ownership"),
+            Name = "session_ownership",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var legacy = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.False(legacy is IOwnedStorageSession);
+
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+            Assert.False(work.OpenSession(unit) is IOwnedStorageSession);
+
+        var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+    }
+
+    [Fact]
+    public void Owned_file_sessions_release_their_physical_handles()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("session-pool"),
+            Name = "session_pool",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        for (var index = 0; index < 8; index++)
+        {
+            var owned = Assert.IsType<OwnedSqliteStorageSession>(connection.OpenOwnedSession(unit, StorageAccess.Global));
+            Assert.True(owned.IsConnectionOpen);
+            owned.Dispose();
+            Assert.False(owned.IsConnectionOpen);
+        }
+    }
+
+    [Fact]
     public void Provider_composed_index_names_are_injective_for_underscore_components()
     {
         var left = SqliteDialect.PhysicalIndexName("a_", "b");

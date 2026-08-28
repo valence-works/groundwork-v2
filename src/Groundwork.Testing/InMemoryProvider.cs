@@ -84,7 +84,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
-        return new InMemoryStorageSession(database, state, access, liveState: true, providerConnection: this, observer: observer);
+        return new OwnedInMemoryStorageSession(database, state, access, this, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -575,7 +575,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -1573,6 +1573,19 @@ internal sealed class InMemoryStorageSession : IOwnedStorageSession, IStorageSes
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(InMemoryStorageSession));
+    }
+}
+
+internal sealed class OwnedInMemoryStorageSession : InMemoryStorageSession, IOwnedStorageSession
+{
+    internal OwnedInMemoryStorageSession(
+        InMemoryDatabase database,
+        InMemoryUnitState state,
+        StorageAccess access,
+        IStorageProviderConnection providerConnection,
+        IProviderCommandObserver? observer = null)
+        : base(database, state, access, liveState: true, providerConnection: providerConnection, observer: observer)
+    {
     }
 }
 

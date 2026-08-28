@@ -16,6 +16,59 @@ public sealed class PostgreSqlDialectTests
 {
     private readonly PostgreSqlDialect dialect = new();
 
+    [SkippableFact]
+    public void Owned_session_marker_matches_the_opening_path()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_session_ownership_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Assert.False(connection.OpenSession(unit, StorageAccess.Global) is IOwnedStorageSession);
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+            Assert.False(work.OpenSession(unit) is IOwnedStorageSession);
+
+        var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+    }
+
+    [SkippableFact]
+    public void Owned_sessions_return_each_connection_to_a_bounded_pool()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var pool = new NpgsqlConnectionStringBuilder(database.ConnectionString)
+        {
+            MaxPoolSize = 1,
+            Timeout = 2
+        };
+        using var connection = new PostgreSqlProviderFactory().Create(pool.ConnectionString);
+        var name = "pg_session_pool_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        for (var index = 0; index < 8; index++)
+        {
+            using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+            Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        }
+    }
+
     [Fact]
     public void Physicalization_refuses_an_invalid_raw_json_string_default_before_provider_work()
     {
@@ -748,6 +801,40 @@ public sealed class PostgreSqlDialectTests
         Assert.Null(await second);
     }
 
+    [SkippableFact]
+    public async Task Queued_async_read_honors_cancellation_while_shared_session_gate_is_held()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_read_cancel_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using var observer = new BlockingReadObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var first = Task.Run(async () => await session.ReadAsync(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "first" })));
+        Assert.True(observer.ReadEntered.Wait(TimeSpan.FromSeconds(5)),
+            "The first read did not reach the provider command in time.");
+
+        using var cancellation = new CancellationTokenSource();
+        var queued = session.ReadAsync(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "queued" }), cancellation.Token).AsTask();
+        cancellation.Cancel();
+        var completed = await Task.WhenAny(queued, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(queued, completed);
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await queued);
+
+        observer.Release.Set();
+        Assert.Null(await first);
+    }
+
     private sealed class BlockingFallbackObserver : IProviderCommandObserver
     {
         internal ManualResetEventSlim FallbackEntered { get; } = new();
@@ -766,6 +853,28 @@ public sealed class PostgreSqlDialectTests
 
             if (!Release.IsSet && command.Kind == ProviderCommandKind.Read)
                 Interlocked.Exchange(ref overlapped, 1);
+        }
+    }
+
+    private sealed class BlockingReadObserver : IProviderCommandObserver, IDisposable
+    {
+        internal ManualResetEventSlim ReadEntered { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Operation == "postgresql.read")
+            {
+                ReadEntered.Set();
+                Release.Wait(TimeSpan.FromSeconds(5));
+            }
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            ReadEntered.Dispose();
+            Release.Dispose();
         }
     }
 

@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -54,6 +54,10 @@ internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSessi
 
     public StorageUnit Unit { get; }
     public StorageAccess Access { get; }
+
+    // Test-only visibility lets the provider integration suite prove that an owned file-backed session
+    // returns its physical handle, rather than merely becoming unusable at the public surface.
+    internal bool IsConnectionOpen => connection.State == ConnectionState.Open;
 
     IStorageProviderConnection IProviderBoundStorageSession.ProviderConnection => owner;
 
@@ -1884,4 +1888,18 @@ internal sealed class SqliteStorageSession : IOwnedStorageSession, IStorageSessi
             new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
     }
     private sealed class ConcurrencyConflictException(long? version = null) : Exception { public long? Version { get; } = version; }
+}
+
+internal sealed class OwnedSqliteStorageSession : SqliteStorageSession, IOwnedStorageSession
+{
+    internal OwnedSqliteStorageSession(
+        SqliteProviderConnection owner,
+        StorageUnit unit,
+        StorageAccess access,
+        SqliteConnection connection,
+        IProviderCommandObserver? observer = null,
+        bool ownsConnection = true)
+        : base(owner, unit, access, connection, null, observer, ownsConnection)
+    {
+    }
 }

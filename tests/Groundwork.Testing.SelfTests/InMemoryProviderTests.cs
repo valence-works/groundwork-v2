@@ -10,6 +10,30 @@ namespace Groundwork.Testing.SelfTests;
 public sealed class InMemoryProviderTests
 {
     [Fact]
+    public void Owned_session_marker_matches_the_opening_path()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://session-ownership");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("session-ownership"),
+            Name = "session_ownership",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Assert.False(connection.OpenSession(unit, StorageAccess.Global) is IOwnedStorageSession);
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+            Assert.False(work.OpenSession(unit) is IOwnedStorageSession);
+
+        var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+    }
+
+    [Fact]
     public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://physical-name-boundary");

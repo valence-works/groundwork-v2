@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -105,7 +105,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
             sourceIncludesRequestedOffset: true,
             sourceIncludesContinuation: true,
             sourceIncludesDistinct: true);
-    });
+    }, mode);
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
@@ -184,7 +184,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
             materialized,
             rows,
             SqlServerSchemaCoordinator.ScopeColumn);
-    });
+    }, mode);
 
     public AggregationResult Aggregate(AggregationQuery query) =>
         AggregateCore(query, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -229,7 +229,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
             mode,
             commandObserver,
             "sqlserver.aggregate")).ConfigureAwait(false);
-    });
+    }, mode);
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {
@@ -294,7 +294,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
         return Execute(async () => PublicEntry(await ReadCore(
-            key, mode, observerOperation: "sqlserver.read", isProbe: false).ConfigureAwait(false)));
+            key, mode, observerOperation: "sqlserver.read", isProbe: false).ConfigureAwait(false)), mode);
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -385,7 +385,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
         WriteOutcome outcome;
         try
         {
-            outcome = await Execute(() => ConditionalUpsertCore(values, options, mode)).ConfigureAwait(false);
+            outcome = await Execute(() => ConditionalUpsertCore(values, options, mode), mode).ConfigureAwait(false);
         }
         catch
         {
@@ -700,7 +700,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
         return value is null or DBNull
             ? new StorageInspection(null)
             : new StorageInspection(Convert.ToInt64(value, CultureInfo.InvariantCulture));
-    });
+    }, mode);
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null) =>
         ApplyRetention(operationId, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -1480,7 +1480,17 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
         async ValueTask Cleanup()
         {
             owner.ThrowIfDisposed();
-            await ApplyRetentionCore(new RetentionExecutionOptions(), mode).ConfigureAwait(false);
+            if (transaction is not null)
+            {
+                await ApplyRetentionCore(new RetentionExecutionOptions(), mode).ConfigureAwait(false);
+                return;
+            }
+
+            // On-append cleanup runs after the append transaction has released the gate. Re-enter
+            // through ExecuteWrite so a concurrent caller cannot issue a command on this shared session
+            // while the retention scan/delete is in flight.
+            await ExecuteWrite(
+                () => ApplyRetentionCore(new RetentionExecutionOptions(), mode), mode).ConfigureAwait(false);
         }
         if (registration is not null)
             return registration.Complete(cleanupRequired, Cleanup);
@@ -1948,7 +1958,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
         foreach (var pair in parameters) SqlServerProviderConnection.AddParameter(command, pair.Key, pair.Value.Value, pair.Value.Definition);
     }
 
-    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation)
+    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
     {
         // Reads take the connection gate for the same reason writes do: a cached session is shared by
         // concurrent callers, and a colliding read is what SqlClient reports as "already an open
@@ -1956,7 +1966,7 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
         // owned session has an independent connection, and a batch fallback marks its own logical scope.
         using var lease = ownsConnection || transaction is not null || batchFallbackScope.Value
             ? null
-            : await owner.EnterGate(RelationalExecution.Asynchronous(CancellationToken.None)).ConfigureAwait(false);
+            : await owner.EnterGate(mode).ConfigureAwait(false);
         try
         {
             if (transaction is not null || batchFallbackScope.Value) return await operation().ConfigureAwait(false);
@@ -2048,5 +2058,18 @@ internal sealed class SqlServerStorageSession : IOwnedStorageSession, IStorageSe
     {
         internal AppendOutcomeReport ToReport() =>
             new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
+    }
+}
+
+internal sealed class OwnedSqlServerStorageSession : SqlServerStorageSession, IOwnedStorageSession
+{
+    internal OwnedSqlServerStorageSession(
+        SqlServerProviderConnection owner,
+        StorageUnit unit,
+        StorageAccess access,
+        SqlConnection connection,
+        IProviderCommandObserver? observer = null)
+        : base(owner, unit, access, connection, null, observer, ownsConnection: true)
+    {
     }
 }

@@ -13,6 +13,34 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
+    public void Owned_session_marker_matches_the_opening_path()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var name = "mongo_session_ownership_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Assert.False(connection.OpenSession(unit, StorageAccess.Global) is IOwnedStorageSession);
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+            Assert.False(work.OpenSession(unit) is IOwnedStorageSession);
+
+        var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+    }
+
+    [SkippableFact]
     public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
     {
         using var connection = OpenConnection();
