@@ -207,6 +207,7 @@ public sealed class ColumnBuilder
     private int? precision;
     private int? scale;
     private PortableCollation? collation;
+    private LocaleSortKeyDefinition? localeSortKey;
     private object? defaultValue;
     private bool hasDefault;
     private ColumnGeneration generation = ColumnGeneration.Supplied;
@@ -226,6 +227,20 @@ public sealed class ColumnBuilder
     }
 
     public ColumnBuilder Collation(PortableCollation value) { collation = value; return this; }
+
+    /// <summary>
+    /// Orders this string through a persisted ICU sort key. The expansion factor is the maximum
+    /// encoded key length per source UTF-16 code unit and is enforced during writes and backfills.
+    /// </summary>
+    public ColumnBuilder LocaleOrder(string cultureName, int maximumExpansionFactor)
+    {
+        localeSortKey = new LocaleSortKeyDefinition
+        {
+            CultureName = cultureName,
+            MaximumExpansionFactor = maximumExpansionFactor
+        };
+        return this;
+    }
 
     public ColumnBuilder Default(object? value)
     {
@@ -258,6 +273,7 @@ public sealed class ColumnBuilder
         Precision = precision,
         Scale = scale,
         Collation = collation,
+        LocaleSortKey = localeSortKey,
         Default = hasDefault ? new PortableDefault(DefaultValueSnapshot.Create(defaultValue, type)) : null,
         Generation = generation,
         Id = logicalId

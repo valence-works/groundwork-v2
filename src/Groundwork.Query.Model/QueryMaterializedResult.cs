@@ -64,6 +64,7 @@ public static class QueryResultMaterializer
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (source is null) throw new ArgumentNullException(nameof(source));
+        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
 
         var totalCount = request.Result.IncludesTotalCount &&
             source.FirstOrDefault(row => row.TryGetValue("__groundwork_total_count", out var value) && value is not null) is { } counted &&
@@ -78,20 +79,20 @@ public static class QueryResultMaterializer
             IReadOnlyList<QueryConstant> cursor;
             try
             {
-                cursor = QueryContinuationToken.Decode(token, request, options);
+                cursor = QueryContinuationToken.Decode(token, executionRequest, options);
             }
             catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
             {
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
-            var order = options.GetEffectiveOrder(request);
+            var order = options.GetEffectiveOrder(executionRequest);
             effectiveSource = source.Where(row => IsAfter(row, order, cursor)).ToArray();
         }
         var offset = sourceIncludesRequestedOffset ? 0 : request.Paging.Offset ?? 0;
         var limit = request.Paging.Limit;
         var hasMore = limit is int pageSize && effectiveSource.Count() > checked(offset + pageSize);
         var visible = effectiveSource.Skip(offset).Take(limit ?? int.MaxValue).ToArray();
-        var effectiveOrder = options.GetEffectiveOrder(request);
+        var effectiveOrder = options.GetEffectiveOrder(executionRequest);
         string? nextToken = null;
         if (hasMore && effectiveOrder.Length != 0 && visible.Length != 0)
         {
@@ -107,7 +108,7 @@ public static class QueryResultMaterializer
                 values.Add(QueryConstant.Of(term.Column, value));
             }
             if (values.Count == effectiveOrder.Length)
-                nextToken = QueryContinuationToken.Encode(request, options, values);
+                nextToken = QueryContinuationToken.Encode(executionRequest, options, values);
         }
 
         var rows = visible.Select(row =>
@@ -267,6 +268,7 @@ public static class QueryRequestExecution
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
+        request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
         var order = options.GetEffectiveOrder(request);
         var projection = request.Projection;
         if (!projection.AllColumns)
