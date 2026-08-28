@@ -157,8 +157,8 @@ internal sealed class MongoProviderState
     internal MongoAppliedUnit Resolve(StorageUnit declaration, MongoStorageAccess access)
     {
         ArgumentNullException.ThrowIfNull(declaration);
-        PortabilityValidator.EnsurePhysicalIdentifiers(declaration);
         ProviderOwnedColumns.ValidateLogicalDeclaration(declaration);
+        PortabilityValidator.EnsurePhysicalIdentifiers(declaration);
         declaration = SearchKeyProjection.Expand(declaration);
         AggregationProfileValidator.ValidateUnit(declaration);
         ValidateScope(declaration, access);

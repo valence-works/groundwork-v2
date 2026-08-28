@@ -636,7 +636,16 @@ public sealed class ProviderCommandTests
             (Unit("duplicate_index", indexes: [Index("by_id", "id", "id")]),
                 "GW-DECL-INDEX-002", "indexes.by_id.columns"),
             (Unit("json_index", indexes: [Index("by_payload", "payload")], includeJson: true),
-                "GW-DECL-INDEX-003", "indexes.by_payload.columns[0]")
+                "GW-DECL-INDEX-003", "indexes.by_payload.columns[0]"),
+            (Unit("compound_invalid", key: ["missing"]) with
+                {
+                    Columns =
+                    [
+                        new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                        new ColumnDefinition { Name = ProviderOwnedColumns.Scope, Type = PortableType.String }
+                    ]
+                },
+                "GW-DECL-KEY-002", "key.columns[0]")
         };
 
         foreach (var (unit, code, path) in cases)
