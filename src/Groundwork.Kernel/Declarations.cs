@@ -36,7 +36,18 @@ public enum PortableType
     DateTimeOffset,
     Guid,
     Binary,
-    Json
+    Json,
+
+    /// <summary>
+    /// IEEE-754 binary64, storage only. A <see cref="Double"/> column can be written and read
+    /// back bit-for-bit, but it never becomes a query column: predicates, ordering, index
+    /// membership, key membership, and grouping are refused, because binary floating point has
+    /// no comparison semantics that hold across the supported stores. Declare
+    /// <see cref="Decimal"/> or <see cref="Int64"/> for values that are compared.
+    /// The member is appended so that the names already written into schema documents and
+    /// fingerprints keep their meaning.
+    /// </summary>
+    Double
 }
 
 public enum ColumnGeneration

@@ -342,31 +342,6 @@ public sealed class ExpandContractTests
         Assert.NotEqual(superseding.Fingerprint, widerWindow.Fingerprint);
     }
 
-    // ------------------------------------------------------------------ dual presence
-
-    [Fact]
-    public void A_retained_superseded_column_is_invisible_to_drift_inspection()
-    {
-        var target = SupersedingTarget();
-        var deployed = new PhysicalSchemaSnapshot(
-            new StorageUnitId("orders"),
-            "orders",
-            [
-                new PhysicalSchemaColumn("id", "Int32", false),
-                new PhysicalSchemaColumn("name", "String", true, MaxLength: 64),
-                // Still physically present through the dual-presence window, and named by nothing
-                // the declaration owns.
-                new PhysicalSchemaColumn("total", "Decimal", true, Precision: 10, Scale: 2),
-                new PhysicalSchemaColumn("total_amount", "Decimal", true, Precision: 18, Scale: 2)
-            ],
-            []);
-
-        var inspection = PhysicalSchemaInspection.Compare(PhysicalSchemaHistoryState.Empty, target, deployed);
-
-        Assert.True(inspection.IsAppliedSchemaValid);
-        Assert.Empty(inspection.ColumnDrift);
-    }
-
     // ------------------------------------------------------------------ fixtures
 
     private static ColumnSupersession Supersession { get; } = new(

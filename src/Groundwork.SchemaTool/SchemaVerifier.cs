@@ -137,13 +137,15 @@ public static class SchemaVerifier
     private static IReadOnlyList<CoverageIndex> CreateIndexes(SchemaTable table)
     {
         var columns = table.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
-        return table.Indexes.Select(index => new CoverageIndex(
-            index.Name,
-            index.Columns.Select(term => new CoverageIndexColumn(
-                term.Name,
-                term.Descending ? OrderDirection.Descending : OrderDirection.Ascending,
-                columns[term.Name].IsNullable)),
-            index.IncludeNulls ? IndexMissingValueBehavior.Included : IndexMissingValueBehavior.Excluded)).ToArray();
+        return CoverageCandidates.Derive(
+            table.Key,
+            table.Indexes.Select(index => new CoverageIndex(
+                index.Name,
+                index.Columns.Select(term => new CoverageIndexColumn(
+                    term.Name,
+                    term.Descending ? OrderDirection.Descending : OrderDirection.Ascending,
+                    columns[term.Name].IsNullable)),
+                index.IncludeNulls ? IndexMissingValueBehavior.Included : IndexMissingValueBehavior.Excluded)));
     }
 
     private static ColumnRef CreateColumn(TableId table, SchemaColumn column) => new(

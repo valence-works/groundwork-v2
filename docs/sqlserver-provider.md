@@ -22,9 +22,9 @@ one provider connection is a `SemaphoreSlim` rather than a monitor, because the 
 path holds it across an await.
 
 The provider uses `sp_getapplock` plus a durable fence/history pair for schema coordination and
-serializable write transactions for optimistic concurrency. The conformance test can run against
-an existing server by setting `GROUNDWORK_SQLSERVER_CONNECTION`; otherwise its fixture starts the
-SQL Server 2022 CU21 container used by CI.
+serializable write transactions for optimistic concurrency. The conformance suite runs against the
+server named by `GROUNDWORK_SQLSERVER_CONNECTION` and skips without one, like every other live
+suite: CI proves it in the jobs that provision a SQL Server, not in the ones that do not.
 
 Folded prefix indexes target provider-owned ASCII search-key columns. SQL Server validates their
 physical key budget against the logical source width using the declared expansion factor: `5x`

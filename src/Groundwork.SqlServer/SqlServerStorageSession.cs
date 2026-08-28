@@ -311,7 +311,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     private ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
         return Mutate(values, options, Mutation.Insert, mode);
     }
@@ -327,7 +327,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     private ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
         return Mutate(values, options, Mutation.Update, mode);
     }
@@ -343,7 +343,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     private ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
         return Mutate(values, options, Mutation.Upsert, mode);
     }
@@ -362,7 +362,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         WriteOptions? options,
         RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
@@ -806,7 +806,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
         AppendExecution execution;
@@ -844,7 +844,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
         AppendOutcomeReport outcome;
@@ -1341,6 +1341,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
         PortableType.DateTimeOffset => typeof(DateTimeOffset),
         PortableType.Guid => typeof(Guid),
         PortableType.Binary => typeof(byte[]),
+        PortableType.Double => typeof(double),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 

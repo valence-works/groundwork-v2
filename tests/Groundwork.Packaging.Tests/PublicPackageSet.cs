@@ -72,8 +72,9 @@ public sealed class PublicPackageSet
         // Otherwise pack into a directory of this suite's own, every time. Reusing what a previous
         // run left there would assert against artifacts that no longer match the working tree — the
         // shape of false signal these tests exist to remove. eng/pack-public-packages.sh clears its
-        // output first, and Groundwork.PublicApi.Acceptance.Tests packs into artifacts/packages, so
-        // a shared directory would also let either suite delete the other's artifacts mid-run.
+        // output first, and Groundwork.PublicApi.Acceptance.Tests packs into its own
+        // artifacts/acceptance-packages directory rather than this one, so neither suite can delete
+        // or silently reuse the other's artifacts mid-run.
         var own = Path.Combine(Root, "artifacts", "packaging-tests");
         Run("dotnet", "restore Groundwork.slnx --nologo -m:1 -nodeReuse:false");
         Run("/bin/bash", $"eng/pack-public-packages.sh {own}");

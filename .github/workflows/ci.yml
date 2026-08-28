@@ -61,7 +61,7 @@ jobs:
       - name: Restore the full solution
         run: dotnet restore Groundwork.slnx --nologo
       - name: Pack the public artifacts used by the acceptance consumer
-        run: eng/pack-public-packages.sh artifacts/packages
+        run: eng/pack-public-packages.sh artifacts/acceptance-packages
       - name: Run the clean-room public API journey twice from packed artifacts
         run: dotnet test tests/Groundwork.PublicApi.Acceptance.Tests/Groundwork.PublicApi.Acceptance.Tests.csproj --configuration Release
 

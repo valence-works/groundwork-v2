@@ -22,6 +22,41 @@ Groundwork makes the scan an explicit, attributed, expiring decision instead.
 They share **one** provider-neutral implementation: `QueryCoverageChecker`. There is no second
 approximation that could disagree with the first.
 
+## What counts as a covering index
+
+Two things: a **declared index**, and the **declared key**.
+
+The key counts because it is already an index. Every relational coordinator emits it as the table's
+`PRIMARY KEY`, and PostgreSQL, SQL Server, and SQLite each back that with a unique index the planner
+seeks on. So this needs no `[GwIndex]`:
+
+```csharp
+await db.Table<Customer>().Query.Where(c => c.Id == id).ToListAsync(executor);
+```
+
+Both kinds of candidate come from one derivation, `CoverageCandidates.Derive`, which all three gates
+call — so there is no place for the analyzer, the build gate, and the runtime gate to disagree about
+what a unit offers.
+
+Three details worth knowing:
+
+- **The key is ordered, like any compound index.** A key of `(tenant, id)` covers a filter on
+  `tenant`, and one on `tenant` and `id` together. It does **not** cover a filter on `id` alone —
+  that is a trailing column, not a leading one, and it needs its own index.
+- **The key is exempt from the deployed-catalog intersection.** A declared index can be missing from
+  the catalog part way through a rolling deploy, which is why the runtime gate intersects. The key
+  cannot: it is created with the table.
+- **A refusal that pins your whole key points you at the point read, not at a duplicate index.** When
+  the predicate fixes every key column with a single-value equality, at most one row can match, so no
+  index would help: the suggestion is withheld and the message names `session.Read(key)`, or the typed
+  `Records` read. Only that shape gets it. A disjunction, a range, or an equality over part of a
+  composite key can mention exactly the key's columns and still need an index, so those keep the
+  ordinary `[GwIndex(...)]` suggestion.
+
+> **MongoDB caveat.** MongoDB stores the key in `_id` but filters on the declared field names, and
+> creates no index over them, so a key-bounded read is admitted by the gate and then scans. The
+> verdict is portable; the plan is not yet. See [#238](https://github.com/valence-works/groundwork-v2/issues/238).
+
 ## The analyzer
 
 `Groundwork.Analyzers` reads your schema from the current assembly's generated `GroundworkSchema`
@@ -128,31 +163,6 @@ the analyzer reported at build time.
   than inventing one. A budget is a deployment property — SQLite's ceiling is a compile-time option
   of the library you loaded — which is why it is advertised rather than assumed, and why it lives on
   the connection where a session decorator cannot drop it.
-
-### A declared key is not a coverage candidate
-
-**Filtering on a key column is refused unless you also declare an index over it.**
-
-```csharp
-table.Query.Where(c => c.Id == id).ToListAsync(executor);   // GW-COVER-006
-```
-
-This is not specific to the runtime. Coverage candidates are built from `Indexes` and never from
-`Key` — in the analyzer, in the CLI, and now at runtime — so all three agree, and they agree on the
-wrong answer: every provider does physically index a declared key (a relational `PRIMARY KEY`, or
-Mongo's `_id`), so the deployed catalog *can* serve that read.
-
-Until that is fixed, your options are:
-
-- **Read the row by key instead.** `session.Read(key)` is a point read. It is not a query, does not
-  go through coverage, and is the right call for "fetch this row".
-- **Declare an index over the key column** if you genuinely need the query surface for it — and be
-  aware of what you are buying. The refusal's suggested `[GwIndex(...)]` names the key column, and
-  following it creates a *second* physical index duplicating the primary key: extra storage and
-  write amplification on every insert, on every provider. Prefer the point read.
-
-Tracked in [#203](https://github.com/valence-works/groundwork-v2/issues/203). Fixing it changes what
-the analyzer reports, which regenerates the conformance corpus, so it is its own piece of work.
 
 ## Accepted scans
 

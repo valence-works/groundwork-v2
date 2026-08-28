@@ -1427,7 +1427,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         RefusePrivilegedOperation("insert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, ToStoreOptions(options));
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Insert, mode);
     }
 
@@ -1444,7 +1444,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         RefusePrivilegedOperation("update");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, ToStoreOptions(options));
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Update, mode);
     }
 
@@ -1461,7 +1461,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         RefusePrivilegedOperation("upsert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, ToStoreOptions(options));
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         return Mutate(values, options, MutationKind.Upsert, mode);
     }
 
@@ -1481,7 +1481,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         RefusePrivilegedOperation("conditional upsert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, ToStoreOptions(options));
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         return ConditionalUpsertCore(values, options, mode);
     }
 
@@ -2107,7 +2107,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             operationId,
             values.Select(value => new StorageValues(value.Values)).ToArray());
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
         MongoWriteOutcome outcome;
         for (var attempt = 0; ; attempt++)
         {
@@ -2172,7 +2172,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             operationId,
             values.Select(value => new StorageValues(value.Values)).ToArray());
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
 
         MongoAppendOutcomeReport report;
         for (var attempt = 0; ; attempt++)

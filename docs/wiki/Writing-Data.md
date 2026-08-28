@@ -146,7 +146,9 @@ var result = session.CompareAndDelete(
 Details that matter:
 
 - The equality set is a **dictionary of declared scalar or binary columns**, not a general predicate.
-- `PortableType.Json` is refused before I/O — JSON equality and property ordering differ across stores.
+- `PortableType.Json` and `PortableType.Double` are refused before I/O — JSON equality and property
+  ordering differ across stores, and binary floating point has no comparison semantics that hold
+  across them.
 - A nullable expected value means the logical null value; an omitted nullable field normalizes to the
   same thing.
 - Provider-owned scope, version, action, and derived search-key columns **cannot** be compared.

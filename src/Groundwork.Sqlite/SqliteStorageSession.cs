@@ -365,28 +365,28 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
         return Mutate(values, options, Mutation.Insert);
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
         return Mutate(values, options, Mutation.Update);
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
         return Mutate(values, options, Mutation.Upsert);
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
@@ -739,7 +739,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
         AppendExecution execution;
@@ -761,7 +761,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         var declaration = IdempotencyRules.RequireDeclaration(Unit);
         IdempotencyRules.ValidateOperation(Unit, operationId, values);
         foreach (var value in values)
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
         AppendOutcomeReport outcome;

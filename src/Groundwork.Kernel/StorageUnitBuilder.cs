@@ -49,6 +49,15 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Json(string name, Action<ColumnBuilder>? configure = null) =>
         AddColumn(name, PortableType.Json, configure);
 
+    /// <summary>
+    /// Adds a storage-only IEEE-754 binary64 column. The value round-trips bit-for-bit on every
+    /// supported store, but the column cannot be compared: keys, indexes, predicates, ordering,
+    /// and grouping are refused. Declare <see cref="Decimal"/> or <see cref="Int64"/> for values
+    /// you query on.
+    /// </summary>
+    public StorageDeclarationBuilder Double(string name, Action<ColumnBuilder>? configure = null) =>
+        AddColumn(name, PortableType.Double, configure);
+
     /// <summary>Adds a column from a runtime portable type. Typed helpers remain preferred for readability.</summary>
     public StorageDeclarationBuilder Column(string name, PortableType type, Action<ColumnBuilder>? configure = null) =>
         AddColumn(name, type, configure);

@@ -252,7 +252,7 @@ public sealed class RowWrite
         }
 
         if (values is not null)
-            WritePreconditionValidator.ValidateSystemOwnedValues(unit, values.Values);
+            WritePreconditionValidator.ValidateWrittenValues(unit, values.Values);
     }
 
     public StorageUnit Unit { get; }

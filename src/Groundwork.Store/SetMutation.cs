@@ -75,7 +75,7 @@ public static class SetMutationValidation
         }
 
         // The optimistic token is system-owned by the same rule that governs a keyed write.
-        WritePreconditionValidator.ValidateSystemOwnedValues(unit, assignments);
+        WritePreconditionValidator.ValidateWrittenValues(unit, assignments);
 
         var declared = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
         var keyColumns = unit.Key.Columns.ToHashSet(StringComparer.Ordinal);

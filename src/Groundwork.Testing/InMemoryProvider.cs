@@ -1011,7 +1011,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
         RefusePrivilegedPointOperation("insert");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
         return Mutate(values, options, MutationKind.Insert, "in-memory.insert");
     }
@@ -1019,7 +1019,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
         RefusePrivilegedPointOperation("update");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
         return Mutate(values, options, MutationKind.Update, "in-memory.update");
     }
@@ -1027,7 +1027,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
         RefusePrivilegedPointOperation("upsert");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
         return Mutate(values, options, MutationKind.Upsert, "in-memory.upsert", preserveCreatedAt: true);
     }
@@ -1035,7 +1035,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
     {
         RefusePrivilegedPointOperation("conditional upsert");
-        WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
+        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
         return Mutate(values, options, MutationKind.Upsert, "in-memory.conditional-upsert", exactOutcome: true, preserveCreatedAt: true);
     }
@@ -1277,7 +1277,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         var outcomes = new List<WriteOutcome>(values.Count);
         foreach (var value in values)
         {
-            WritePreconditionValidator.ValidateSystemOwnedValues(Unit, value.Values);
+            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
             var outcome = Mutation.Apply(candidate, partition, value, WriteOptions.Unconditional, MutationKind.Insert);
             if (!outcome.Succeeded)
                 throw new InvalidOperationException($"Append row failed with outcome '{outcome.Status}'.");

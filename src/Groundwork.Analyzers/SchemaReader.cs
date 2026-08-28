@@ -140,9 +140,8 @@ internal sealed class AnalyzerTable
                     column.Name,
                     column.Descending ? OrderDirection.Descending : OrderDirection.Ascending,
                     columns[column.Name].IsNullable)),
-                index.IncludeNulls ? IndexMissingValueBehavior.Included : IndexMissingValueBehavior.Excluded))
-            .ToImmutableArray();
-        return new AnalyzerTable(table.Name, columns, indexes);
+                index.IncludeNulls ? IndexMissingValueBehavior.Included : IndexMissingValueBehavior.Excluded));
+        return new AnalyzerTable(table.Name, columns, CoverageCandidates.Derive(table.Key, indexes));
     }
 }
 

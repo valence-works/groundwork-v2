@@ -59,6 +59,10 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Json(string name, Action<ColumnBuilder>? configure = null) =>
         Wrap(inner.Json(name, configure));
 
+    /// <summary>Adds a storage-only IEEE-754 binary64 column. See the kernel builder's overload.</summary>
+    public StorageDeclarationBuilder Double(string name, Action<ColumnBuilder>? configure = null) =>
+        Wrap(inner.Double(name, configure));
+
     public StorageDeclarationBuilder Column(string name, PortableType type, Action<ColumnBuilder>? configure = null) =>
         Wrap(inner.Column(name, type, configure));
 

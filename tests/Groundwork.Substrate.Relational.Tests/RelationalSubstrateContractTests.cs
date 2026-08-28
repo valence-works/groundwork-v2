@@ -336,6 +336,101 @@ public sealed class RelationalSubstrateContractTests
     }
 
     [Fact]
+    public void Runtime_admission_blocks_a_missing_column_and_names_it()
+    {
+        var dialect = new StubDialect { TableExistsResult = true };
+        SeedRuntimeCatalog(dialect);
+        var target = RuntimeTarget();
+        var (executor, history) = Applied(dialect, target);
+        dialect.CatalogColumns.Remove("status");
+
+        var inspection = executor.InspectHistory(target);
+        var admission = new GroundworkRuntimeSchemaAdmissionResult(
+            inspection,
+            PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UnixEpoch));
+
+        Assert.False(admission.IsReady);
+        var refusal = Assert.Single(admission.Refusals);
+        Assert.Equal("GW-RUNTIME-001", refusal.Code);
+        Assert.Equal("columns.status", refusal.Path);
+        Assert.Equal("Relational schema table 'tickets' is missing column 'status'.", refusal.Message);
+    }
+
+    [Fact]
+    public void Runtime_admission_degrades_for_a_missing_index_without_blocking_startup()
+    {
+        var dialect = new StubDialect { TableExistsResult = true };
+        SeedRuntimeCatalog(dialect);
+        var target = RuntimeTarget();
+        var (executor, history) = Applied(dialect, target);
+        dialect.CatalogIndexes.Remove("ix_status");
+
+        var inspection = executor.InspectHistory(target);
+        var admission = new GroundworkRuntimeSchemaAdmissionResult(
+            inspection,
+            PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UnixEpoch));
+
+        Assert.True(inspection.IsAppliedSchemaValid);
+        Assert.True(inspection.HasIndexDrift);
+        Assert.True(admission.IsReady);
+        var refusal = Assert.Single(admission.Refusals);
+        Assert.Equal("GW-RUNTIME-002", refusal.Code);
+        Assert.Equal("indexes.ix_status", refusal.Path);
+        Assert.Equal("Relational schema table 'tickets' is missing index 'ix_status'.", refusal.Message);
+    }
+
+    [Fact]
+    public void Inspection_classifies_collation_search_key_and_index_shape_drift()
+    {
+        const string expectedAlgorithmId =
+            "groundwork-unicode-ordinal-ignore-case-v1-3206f759667cb9cc764ec243dfb3d322a39970184efab619e80163c36d86818f";
+        var dialect = new StubDialect
+        {
+            TableExistsResult = true,
+            MappedCollation = "OrdinalIgnoreCase"
+        };
+        dialect.CatalogColumns["status"] = new("status", "varchar(255)", true, null, "OrdinalIgnoreCase", 1);
+        dialect.CatalogColumns["status_folded"] = new("status_folded", "varchar(255)", false, null, null, 0);
+        dialect.DerivedSearchKeyAlgorithms["status_folded"] = expectedAlgorithmId;
+        dialect.CatalogIndexes["ix_status"] = new(
+            true,
+            [new RelationalIndexColumnMetadata("status", SortDirection.Ascending)],
+            "\"status\" IS NOT NULL");
+        var target = SearchTarget();
+        var (executor, _) = Applied(dialect, target);
+        dialect.CatalogColumns["status"] = new("status", "varchar(255)", true, null, "Ordinal", 1);
+        dialect.DerivedSearchKeyAlgorithms["status_folded"] = "old-fold-v1";
+        dialect.CatalogIndexes["ix_status"] = new(
+            true,
+            [new RelationalIndexColumnMetadata("status", SortDirection.Descending)],
+            null);
+
+        var inspection = executor.InspectHistory(target);
+
+        var collationRefusal = Assert.Single(inspection.ColumnDrift, refusal => refusal.Path == "columns.status");
+        Assert.Equal("GW-RUNTIME-001", collationRefusal.Code);
+        Assert.Equal(
+            "Relational schema column 'search.status' differs: collation 'Ordinal' != 'OrdinalIgnoreCase'.",
+            collationRefusal.Message);
+        var searchKeyRefusal = Assert.Single(
+            inspection.ColumnDrift,
+            refusal => refusal.Path == "columns.status_folded.searchKeyAlgorithm");
+        Assert.Equal("GW-RUNTIME-001", searchKeyRefusal.Code);
+        Assert.Equal(
+            "Relational persisted search-key algorithm for derived column 'search.status_folded' differs: " +
+            "'old-fold-v1' != 'groundwork-unicode-ordinal-ignore-case-v1-" +
+            "3206f759667cb9cc764ec243dfb3d322a39970184efab619e80163c36d86818f'.",
+            searchKeyRefusal.Message);
+        var indexRefusal = Assert.Single(inspection.IndexDrift);
+        Assert.Equal("GW-RUNTIME-002", indexRefusal.Code);
+        Assert.Equal("indexes.ix_status", indexRefusal.Path);
+        Assert.Equal(
+            "Relational schema index 'search.ix_status' does not match its declaration.",
+            indexRefusal.Message);
+        Assert.False(inspection.IsAppliedSchemaValid);
+    }
+
+    [Fact]
     public void Executor_opens_one_connection_and_releases_it_with_the_application_lock()
     {
         var connection = new TrackingConnection();
@@ -383,6 +478,7 @@ public sealed class RelationalSubstrateContractTests
         public bool ThrowOnAcquireFence { get; init; }
         public bool ThrowOnValidateTarget { get; set; }
         public bool TableExistsResult { get; init; }
+        public string? MappedCollation { get; init; }
         public int TableExistsCalls { get; private set; }
         public int ReadColumnsCalls { get; private set; }
         public int ValidateTargetCalls { get; private set; }
@@ -392,6 +488,7 @@ public sealed class RelationalSubstrateContractTests
         public bool LastPublishHadTransaction { get; private set; }
         public ColumnDefinition? FinalizedColumn { get; private set; }
         public Dictionary<string, RelationalColumnMetadata> CatalogColumns { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, RelationalIndexMetadata> CatalogIndexes { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, string> DerivedSearchKeyAlgorithms { get; } = new(StringComparer.Ordinal);
         public PhysicalSchemaHistoryState History { get; set; } = PhysicalSchemaHistoryState.Empty;
 
@@ -402,7 +499,8 @@ public sealed class RelationalSubstrateContractTests
             MapTypeCalls++;
             return definition.Type == PortableType.Int64 ? "integer" : $"varchar({definition.MaxLength ?? 255})";
         }
-        public override string? MapCollation(ColumnDefinition definition) => null;
+        public override string? MapCollation(ColumnDefinition definition) =>
+            definition.Collation is null ? null : MappedCollation;
         public override string? MapDefault(ColumnDefinition definition) => null;
         public override string CreateTableSql(string table, IReadOnlyList<string> columns, IReadOnlyList<string> primaryKey) =>
             $"CREATE TABLE {QuoteIdentifier(table)} ({string.Join(", ", columns)}, PRIMARY KEY ({string.Join(", ", primaryKey.Select(QuoteIdentifier))}))";
@@ -477,7 +575,8 @@ public sealed class RelationalSubstrateContractTests
         }
         public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(DbConnection connection, DbTransaction? transaction, string table) =>
             DerivedSearchKeyAlgorithms;
-        public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index) => null;
+        public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index) =>
+            CatalogIndexes.GetValueOrDefault(index);
         public override void ValidateTarget(DbConnection connection, DbTransaction? transaction, PhysicalSchemaTarget target)
         {
             ValidateTargetCalls++;
@@ -568,4 +667,73 @@ public sealed class RelationalSubstrateContractTests
             Key = new KeyDefinition { Columns = ["id"] }
         }),
         new ProviderIdentity("stub", "1"));
+
+    private static PhysicalSchemaTarget RuntimeTarget() => new(
+        new SchemaSubject(new StorageUnit
+        {
+            Id = new StorageUnitId("tickets"),
+            Name = "tickets",
+            Columns =
+            [
+                new ColumnDefinition { Name = "status", Type = PortableType.String },
+                new ColumnDefinition { Name = "assignee", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["status"] },
+            Indexes = [new IndexDefinition { Name = "ix_status", Columns = [new IndexColumn("status")] }]
+        }),
+        new ProviderIdentity("stub", "1"));
+
+    private static PhysicalSchemaTarget SearchTarget() => new(
+        new SchemaSubject(new StorageUnit
+        {
+            Id = new StorageUnitId("search"),
+            Name = "search",
+            Columns =
+            [
+                new ColumnDefinition
+                {
+                    Name = "status",
+                    Type = PortableType.String,
+                    Collation = PortableCollation.OrdinalIgnoreCase
+                },
+                new ColumnDefinition { Name = "status_folded", Type = PortableType.String, IsNullable = false }
+            ],
+            DerivedColumns = [new DerivedColumnDefinition
+            {
+                Name = "status_folded",
+                SourceColumn = "status",
+                Projection = PortableProjection.UnicodeFold
+            }],
+            Key = new KeyDefinition { Columns = ["status"] },
+            Indexes = [new IndexDefinition
+            {
+                Name = "ix_status",
+                Columns = [new IndexColumn("status", SortDirection.Ascending)],
+                IsUnique = true,
+                MissingValues = MissingValueBehavior.Excluded
+            }]
+        }),
+        new ProviderIdentity("stub", "1"));
+
+    private static (RelationalSchemaExecutor Executor, PhysicalSchemaHistoryState History) Applied(
+        StubDialect dialect,
+        PhysicalSchemaTarget target)
+    {
+        var executor = new RelationalSchemaExecutor(() => new TrackingConnection(), dialect);
+        var application = PhysicalSchemaApplication.Apply(target, executor, DateTimeOffset.UnixEpoch);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, application.Outcome);
+        var history = PhysicalSchemaHistoryState.FromApplied(application.AppliedState!);
+        dialect.History = history;
+        return (executor, history);
+    }
+
+    private static void SeedRuntimeCatalog(StubDialect dialect)
+    {
+        dialect.CatalogColumns["status"] = new("status", "varchar(255)", true, null, null, 1);
+        dialect.CatalogColumns["assignee"] = new("assignee", "varchar(255)", true, null, null, 0);
+        dialect.CatalogIndexes["ix_status"] = new(
+            false,
+            [new RelationalIndexColumnMetadata("status", SortDirection.Ascending)],
+            null);
+    }
 }
