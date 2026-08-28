@@ -29,6 +29,7 @@ try
     RunPrivilegedCrossScopeJourney(connection);
     RunExactAppendJourney(connection);
     RunCompareAndDeleteJourney(connection);
+    RunSetMutationJourney(connection);
     RunLifecycleJourney(connection);
     RunAggregationSourcePredicateJourney(connection);
     RunTimeBucketJourney(connection);
@@ -199,6 +200,43 @@ static void RunCompareAndDeleteJourney(IStorageProviderConnection connection)
     Require(ReferenceEquals(stagedOutcome.Write, staged) &&
             stagedOutcome.Outcome.Status == WriteOutcomeStatus.Deleted,
         "The package-only exact batch did not attribute the staged compare-and-delete outcome.");
+}
+
+static void RunSetMutationJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("set_mutation_records"),
+        Name = "set_mutation_records",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+            new() { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The package-only set-mutation schema did not apply.");
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    foreach (var id in new[] { "a", "b" })
+    {
+        Require(session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = id, ["status"] = "open", ["value"] = "before"
+        })).Status == WriteOutcomeStatus.Inserted,
+            "The package-only set-mutation setup row did not insert.");
+    }
+
+    var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, isNullable: false, maxLength: 32);
+    var result = session.UpdateWhere(
+        new Predicate.Equal(status, QueryConstant.Of(status, "open")),
+        new Dictionary<string, object?> { ["value"] = "after" },
+        SetMutationOptions.Exact);
+    Require(result.IsExact && result.MatchedRows == 2 && result.Outcomes.Count == 2,
+        "The package-only exact set mutation did not return one outcome per selected row.");
+    Require(result.Outcomes.All(item => item.Outcome.Status == WriteOutcomeStatus.Updated),
+        "The package-only exact set mutation did not preserve keyed write statuses.");
 }
 
 static T AssertSingle<T>(IReadOnlyList<T> items)

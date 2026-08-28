@@ -93,9 +93,12 @@ public sealed class SqliteSetMutationTests
         }));
 
         Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "alph"))["id"]);
-        Assert.Equal(1L, session.UpdateWhere(
+        var aggregate = session.UpdateWhere(
             Status(unit, "open"),
-            new Dictionary<string, object?> { ["name"] = "Omega" }).MatchedRows);
+            new Dictionary<string, object?> { ["name"] = "Omega" });
+        Assert.Equal(1L, aggregate.MatchedRows);
+        Assert.False(aggregate.IsExact);
+        Assert.Empty(aggregate.Outcomes);
 
         Assert.Empty(ByNamePrefix(session, unit, "alph"));
         Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "omeg"))["id"]);
@@ -217,6 +220,122 @@ public sealed class SqliteSetMutationTests
         Assert.Equal(1L, first.DeleteWhere(KeyEquals(unit, "a")).MatchedRows);
         Assert.Null(first.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
         Assert.NotNull(second.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
+    }
+
+    [Fact]
+    public void Exact_update_returns_one_write_outcome_per_matched_key()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "open", "one"));
+        session.Insert(Row("b", "open", "two"));
+        session.Insert(Row("c", "closed", "three"));
+
+        var result = session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            new SetMutationOptions { OutcomeMode = SetMutationOutcomeMode.Exact });
+
+        Assert.True(result.IsExact);
+        Assert.Equal(2L, result.MatchedRows);
+        Assert.Equal(2, result.Outcomes.Count);
+        Assert.All(result.Outcomes, outcome => Assert.Equal(WriteOutcomeStatus.Updated, outcome.Outcome.Status));
+        Assert.Equal(new[] { "a", "b" }, result.Outcomes.Select(outcome => outcome.Key.Values["id"]).OrderBy(value => value).ToArray());
+    }
+
+    [Fact]
+    public void Exact_update_uses_the_logical_predicate_for_folded_search_keys()
+    {
+        using var connection = Open();
+        var unit = FoldedUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "a",
+            ["status"] = "open",
+            ["name"] = "Alpha"
+        }));
+
+        var result = session.UpdateWhere(
+            NamePrefix(unit, "alph"),
+            new Dictionary<string, object?> { ["name"] = "Omega" },
+            SetMutationOptions.Exact);
+
+        Assert.Equal(1L, result.MatchedRows);
+        Assert.Equal("a", Assert.Single(result.Outcomes).Key.Values["id"]);
+        Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "omeg"))["id"]);
+    }
+
+    [Fact]
+    public void Exact_update_preserves_keyed_optimistic_version_outcomes()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Concurrency = ConcurrencyDeclaration.Optimistic() };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "open", "one"));
+
+        var result = session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact);
+
+        var outcome = Assert.Single(result.Outcomes).Outcome;
+        Assert.Equal(WriteOutcomeStatus.Updated, outcome.Status);
+        Assert.Equal(2L, outcome.Version);
+        Assert.Equal(2L, session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" }))!.Version);
+    }
+
+    [Fact]
+    public async Task Exact_delete_async_returns_deleted_outcomes_and_empty_exact_results_are_distinct()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "gone", "one"));
+
+        var deleted = await session.DeleteWhereAsync(
+            Status(unit, "gone"), SetMutationOptions.Exact);
+        Assert.True(deleted.IsExact);
+        Assert.Equal(1L, deleted.MatchedRows);
+        Assert.Equal(WriteOutcomeStatus.Deleted, Assert.Single(deleted.Outcomes).Outcome.Status);
+
+        var empty = await session.DeleteWhereAsync(
+            Status(unit, "gone"), SetMutationOptions.Exact);
+        Assert.True(empty.IsExact);
+        Assert.Equal(0L, empty.MatchedRows);
+        Assert.Empty(empty.Outcomes);
+    }
+
+    [Fact]
+    public void Exact_delete_flushes_prior_stage_and_runs_before_a_later_keyed_stage()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        var session = work.OpenSession(unit);
+
+        work.Stage(RowWrite.Insert(unit, Row("staged", "gone", "before")));
+        var result = session.DeleteWhere(
+            Status(unit, "gone"),
+            new SetMutationOptions { OutcomeMode = SetMutationOutcomeMode.Exact });
+        Assert.Equal(1L, result.MatchedRows);
+        var outcome = Assert.Single(result.Outcomes);
+        Assert.Equal("staged", outcome.Key.Values["id"]);
+        Assert.Equal(WriteOutcomeStatus.Deleted, outcome.Outcome.Status);
+
+        work.Stage(RowWrite.Upsert(unit, Row("staged", "gone", "after")));
+        work.Commit();
+
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        var row = reader.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "staged" }));
+        Assert.NotNull(row);
+        Assert.Equal("after", row!.Values.Values["label"]);
     }
 
     private static IStorageProviderConnection Open() => new SqliteProviderFactory().Create(

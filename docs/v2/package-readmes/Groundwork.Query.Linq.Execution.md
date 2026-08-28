@@ -15,7 +15,9 @@ behind `IStorageSession.Query`, and the native budgets it advertises through
 `QueryAdmissionProfile`.
 
 The same adapter also admits `UpdateWhere` and `DeleteWhere` through the read coverage gate before
-delegating to a provider's `ISetMutationStorageSession` capability.
+delegating to a provider's `ISetMutationStorageSession` capability. Aggregate mode keeps the
+provider-native affected-count path; `SetMutationOptions.Exact` takes a deterministic key snapshot
+and reuses keyed writes to return one `WriteOutcome` per selected row.
 
 ## Pass the connection, not just the session
 
