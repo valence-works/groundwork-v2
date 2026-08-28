@@ -7,6 +7,18 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerKeyBudgetTests
 {
     [Fact]
+    public void Physicalization_refuses_an_invalid_raw_json_string_default_before_provider_work()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            SqlServerSchemaCoordinator.Physicalize(RawJsonStringDefaultUnit()));
+
+        Assert.Contains("GW-PORT-013", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("payload", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Json", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(String), exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Batch_type_names_use_the_validated_physical_name_not_the_logical_id()
     {
         var physical = new StorageUnit
@@ -207,6 +219,18 @@ public sealed class SqlServerKeyBudgetTests
         Columns = columns,
         Key = new KeyDefinition { Columns = [columns[0].Name] },
         Indexes = [index]
+    };
+
+    private static StorageUnit RawJsonStringDefaultUnit() => new()
+    {
+        Id = new StorageUnitId("sqlserver-invalid-raw-json-default"),
+        Name = "sqlserver_invalid_raw_json_default",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+            new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault("pending") }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
     };
 
     private static ColumnDefinition Column(

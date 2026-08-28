@@ -43,7 +43,7 @@ Raised by `PortabilityValidator`, builders, and providers **before schema I/O**.
 | `GW-PORT-010` | Invalid physical identifier | ASCII letters/digits/underscores, starts with letter/underscore, ≤ 63 bytes, no `__groundwork_` prefix |
 | `GW-PORT-011` | Duplicate physical index name | Use unique names |
 | `GW-PORT-012` | A `Double` column used as a key, index, or aggregation group-by column | Declare `Decimal` or `Int64` for a value you compare; keep `Double` for one you only store |
-| `GW-PORT-013` | A `Double` column declares a default outside the **defaultable** domain — non-finite, negative zero, subnormal, or not a `double` at all | Use a finite, normal `double` default other than negative zero; a subnormal can still be written as a value |
+| `GW-PORT-013` | A declared default's supplied CLR value is outside its `PortableType` domain (the diagnostic names the column, declared type, and supplied CLR type), or a `Double` default is outside the **defaultable** domain — non-finite, negative zero, or subnormal | Supply a default of the CLR type named by the column; for `Json`, use a JSON-compatible scalar/object/array graph and valid serialized JSON text for a top-level string; for `Double`, use a finite, normal value other than negative zero; a subnormal can still be written as a value |
 | `GW-PORT-014` | Locale sort-key declaration is invalid, or the host cannot provide real ICU collation | Declare a bounded String and positive `MaximumExpansionFactor`; disable invariant globalization and Windows NLS; pin ICU consistently across hosts |
 
 ---

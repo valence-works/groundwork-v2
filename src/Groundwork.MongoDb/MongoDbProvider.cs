@@ -341,6 +341,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 {
     public MongoSchemaDiff Diff(StorageUnit desired)
     {
+        PortabilityValidator.EnsurePortableDefaults(desired);
         ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);
@@ -365,6 +366,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
     public MongoSchemaApplyResult Apply(StorageUnit desired)
     {
+        PortabilityValidator.EnsurePortableDefaults(desired);
         ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
         desired = SearchKeyProjection.Expand(desired);
         AggregationProfileValidator.ValidateUnit(desired);

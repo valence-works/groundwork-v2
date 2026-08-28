@@ -72,20 +72,6 @@ public static class PortableDouble
               "Declare a normal default, and write the subnormal as a value instead."
             : Explain(column, value);
 
-    /// <summary>
-    /// The refusal text for a declared default whose runtime type is not <see cref="double"/> — for
-    /// example an <see cref="int"/> literal such as <c>.Default(1)</c>. Providers disagree on
-    /// whether they coerce it: MongoDB's codec dispatches on the column's portable type and throws
-    /// for anything but a <see cref="double"/>, while other providers accept the narrower CLR type.
-    /// Refusing at declaration time keeps that disagreement from surfacing only when a schema is
-    /// applied to one provider and not another.
-    /// </summary>
-    internal static string ExplainNonDoubleDefault(string column, object value) =>
-        $"Double column '{column}' declares a default of type '{value.GetType().Name}', not " +
-        "double. MongoDB's codec accepts only a double for this column and refuses the value " +
-        "outright; declare the default as a double literal, for example .Default(1.0) rather " +
-        "than .Default(1).";
-
     /// <summary>The refusal text without a code, for callers that carry the code separately.</summary>
     internal static string Explain(string column, double value) =>
         double.IsFinite(value)

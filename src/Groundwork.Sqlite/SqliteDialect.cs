@@ -470,6 +470,7 @@ internal sealed class SqliteDialect : RelationalDialect
         PortableType.Int32 or PortableType.Int64 => Convert.ToString(value, CultureInfo.InvariantCulture)!,
         PortableType.Decimal => $"'{Convert.ToDecimal(value, CultureInfo.InvariantCulture).ToString("G29", CultureInfo.InvariantCulture)}'",
         PortableType.Binary => $"X'{Convert.ToHexString((byte[])value)}'",
+        PortableType.Json => $"'{(value is string text ? text : JsonSerializer.Serialize(value)).Replace("'", "''", StringComparison.Ordinal)}'",
         _ => $"'{(value is DateTimeOffset date ? date.ToUniversalTime().ToString("O") : Convert.ToString(value, CultureInfo.InvariantCulture))!.Replace("'", "''", StringComparison.Ordinal)}'"
     };
 

@@ -40,6 +40,7 @@ public static class MongoSchemaTargets
     public static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        PortabilityValidator.EnsurePortableDefaults(source);
         ProviderOwnedColumns.ValidateLogicalDeclaration(source);
         var expanded = SearchKeyProjection.Expand(source);
         AggregationProfileValidator.ValidateUnit(expanded);
