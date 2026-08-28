@@ -30,7 +30,7 @@ public interface IStorageProviderConnection : IDisposable
 
 `OpenSession` returns a non-owning view tied to the connection lifetime. `OpenOwnedSession` returns an
 `IOwnedStorageSession`; providers must release its per-session resources from both `Dispose` and
-`DisposeAsync`, and reject operations after release.
+`DisposeAsync`, report that state through `IsReleased`, and reject operations after release.
 
 ## Two routes
 
