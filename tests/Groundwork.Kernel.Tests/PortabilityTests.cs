@@ -101,6 +101,29 @@ public sealed class PortabilityTests
         }
     }
 
+    [Theory]
+    [InlineData("pending", false)]
+    [InlineData("\"pending\"", true)]
+    [InlineData("{\"state\":\"pending\"}", true)]
+    [InlineData("[true,2]", true)]
+    public void Top_level_json_strings_are_validated_as_raw_json_text(string value, bool expectedPortable)
+    {
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with { Default = new PortableDefault(value) }
+        ], key: ["id"]));
+
+        Assert.Equal(expectedPortable, result.IsPortable);
+        if (!expectedPortable)
+        {
+            var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+            Assert.Equal("columns.payload.default", refusal.Path);
+            Assert.Contains("payload", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("Json", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains(nameof(String), refusal.Message, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void An_int64_default_is_not_widened_from_an_int()
     {

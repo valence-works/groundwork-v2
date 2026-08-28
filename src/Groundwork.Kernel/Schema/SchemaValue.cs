@@ -42,7 +42,7 @@ internal static class SchemaValue
         Snapshot(value, type, new HashSet<object>(ReferenceEqualityComparer.Instance));
 
     internal static bool IsPortableJsonValue(object value) =>
-        IsPortableJsonValue(value, new HashSet<object>(ReferenceEqualityComparer.Instance));
+        IsPortableJsonValue(value, new HashSet<object>(ReferenceEqualityComparer.Instance), topLevel: true);
 
     public static string Canonicalize(object? value, PortableType type) => type switch
     {
@@ -167,8 +167,10 @@ internal static class SchemaValue
         _ => throw new ArgumentException($"Unsupported JSON schema default token '{element.ValueKind}'.", nameof(element))
     };
 
-    private static bool IsPortableJsonValue(object value, ISet<object> active)
+    private static bool IsPortableJsonValue(object value, ISet<object> active, bool topLevel)
     {
+        if (topLevel && value is string text)
+            return IsSerializedJsonText(text);
         if (value is float single)
             return float.IsFinite(single);
         if (value is double number)
@@ -186,14 +188,14 @@ internal static class SchemaValue
         try
         {
             if (value is IReadOnlyDictionary<string, object?> readOnlyDictionary)
-                return readOnlyDictionary.Values.All(item => item is null || IsPortableJsonValue(item, active));
+                return readOnlyDictionary.Values.All(item => item is null || IsPortableJsonValue(item, active, topLevel: false));
 
             if (value is IDictionary dictionary)
             {
                 foreach (DictionaryEntry entry in dictionary)
                 {
                     if (entry.Key is not string ||
-                        entry.Value is not null && !IsPortableJsonValue(entry.Value, active))
+                        entry.Value is not null && !IsPortableJsonValue(entry.Value, active, topLevel: false))
                     {
                         return false;
                     }
@@ -206,7 +208,7 @@ internal static class SchemaValue
             {
                 foreach (var item in sequence)
                 {
-                    if (item is not null && !IsPortableJsonValue(item, active))
+                    if (item is not null && !IsPortableJsonValue(item, active, topLevel: false))
                         return false;
                 }
 
@@ -219,6 +221,19 @@ internal static class SchemaValue
         }
 
         return false;
+    }
+
+    private static bool IsSerializedJsonText(string text)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            return document.RootElement.ValueKind != JsonValueKind.Undefined;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static string CanonicalJsonElement(JsonElement element) =>

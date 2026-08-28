@@ -17,6 +17,18 @@ public sealed class PostgreSqlDialectTests
     private readonly PostgreSqlDialect dialect = new();
 
     [Fact]
+    public void Physicalization_refuses_an_invalid_raw_json_string_default_before_provider_work()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            PostgreSqlSchemaCoordinator.Physicalize(RawJsonStringDefaultUnit()));
+
+        Assert.Contains("GW-PORT-013", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("payload", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Json", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(String), exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Aggregation_contains_uses_array_membership_not_string_substring_search()
     {
         var unit = AggregationUnit();
@@ -146,6 +158,18 @@ public sealed class PostgreSqlDialectTests
             new() { Name = "id", Type = PortableType.String, IsNullable = false },
             new() { Name = "group", Type = PortableType.String },
             new() { Name = "label", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    private static StorageUnit RawJsonStringDefaultUnit() => new()
+    {
+        Id = new StorageUnitId("pg-invalid-raw-json-default"),
+        Name = "pg_invalid_raw_json_default",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+            new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault("pending") }
         ],
         Key = new KeyDefinition { Columns = ["id"] }
     };

@@ -107,6 +107,50 @@ public sealed class SqliteProviderTests
         Assert.Equal(2, items[1].GetInt32());
     }
 
+    [Theory]
+    [InlineData("pending", false)]
+    [InlineData("\"pending\"", true)]
+    public void Raw_json_string_defaults_are_validated_and_deployed_consistently(string value, bool expectedPortable)
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-raw-json-default-" + expectedPortable),
+            Name = "gw_sqlite_raw_json_default_" + (expectedPortable ? "valid" : "invalid"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        if (!expectedPortable)
+        {
+            var diffFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Diff(unit));
+            Assert.Contains("GW-PORT-013", diffFailure.Message, StringComparison.Ordinal);
+            Assert.Contains("payload", diffFailure.Message, StringComparison.Ordinal);
+            Assert.Contains("Json", diffFailure.Message, StringComparison.Ordinal);
+            Assert.Contains(nameof(String), diffFailure.Message, StringComparison.Ordinal);
+
+            var applyFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+            Assert.Contains("GW-PORT-013", applyFailure.Message, StringComparison.Ordinal);
+            return;
+        }
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var id = Guid.NewGuid();
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+                new Dictionary<string, object?> { ["id"] = id })).Status);
+
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = id }));
+        Assert.NotNull(stored);
+        Assert.Equal("pending", Assert.IsType<JsonElement>(stored!.Values.Values["payload"]).GetString());
+    }
+
     /// <summary>
     /// The runtime convenience apply takes no authorization callback, so it is the one path where a
     /// declaration edit could reach a live catalog unreviewed. It performs what re-applying could

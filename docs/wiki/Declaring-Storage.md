@@ -70,7 +70,9 @@ non-null default must supply the exact CLR type named by its `PortableType`; dec
 all provider schema `Diff`/`Apply` paths refuse a mismatch with `GW-PORT-013` before provider work.
 `Json` is the intentional multi-shape exception: JSON-compatible scalars and recursively portable
 object/array graphs are accepted, including `JsonDocument` and `JsonElement`, while arbitrary CLR
-objects are refused. Provider-specific coercion is never used to make a mismatched default portable.
+objects are refused. A top-level CLR `string` follows the provider convention of already-serialized
+JSON text and must itself parse as JSON; strings nested in an object or array remain ordinary JSON
+string values. Provider-specific coercion is never used to make a mismatched default portable.
 
 ```csharp
 .Double("reading")                              // stored, never compared
