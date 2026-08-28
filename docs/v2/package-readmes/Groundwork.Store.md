@@ -5,6 +5,28 @@ The runtime contract that providers implement and applications call.
 `WriteOutcome`, `RowWrite`, `BatchWriteOptions`, set-based mutation capabilities, and the execution
 of retention, exact append, and durable idempotency.
 
+Set-based mutation defaults to the provider-native affected-count result:
+
+```csharp
+var changed = session.UpdateWhere(predicate, assignments);
+long count = changed.MatchedRows;
+```
+
+Use `SetMutationOptions.Exact` when one keyed `WriteOutcome` per selected row is required:
+
+```csharp
+var result = session.DeleteWhere(predicate, SetMutationOptions.Exact);
+foreach (var item in result.Outcomes)
+    Console.WriteLine($"{item.Key.Values[\"id\"]}: {item.Outcome.Status}");
+```
+
+Exact mode takes a deterministic key snapshot and applies the existing keyed mutation contract, so
+its outcomes preserve provider-neutral version and conflict/not-found statuses. On a unit-of-work
+session, any earlier staged writes flush before that snapshot and later staged keyed writes run
+after the set operation, all inside the unit's transaction. Exact mode can require one read and one
+keyed write per selected row; choose the default aggregate mode when whole-set atomicity and an
+affected count are sufficient outside a unit of work.
+
 Sessions execute declared aggregation profiles and runtime-composed profiles only when the latter
 carry an active `AggregationAcceptance`; scoped and privileged-access refusals apply to both.
 

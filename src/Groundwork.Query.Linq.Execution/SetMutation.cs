@@ -27,7 +27,11 @@ public static class SetMutationSessionExtensions
         SetMutationOptions? options = null)
     {
         EnsureAccess(session, "update-where");
+        options ??= SetMutationOptions.Aggregate;
+        options.Validate();
         var (native, predicate, validated) = PrepareUpdate(session, where, assignments, options);
+        if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
+            return ExecuteExactUpdate(session, where, validated, options);
         return native.UpdateWhere(predicate, validated);
     }
 
@@ -39,7 +43,11 @@ public static class SetMutationSessionExtensions
         CancellationToken cancellationToken = default)
     {
         EnsureAccess(session, "update-where");
+        options ??= SetMutationOptions.Aggregate;
+        options.Validate();
         var (native, predicate, validated) = PrepareUpdate(session, where, assignments, options);
+        if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
+            return ExecuteExactUpdateAsync(session, where, validated, options, cancellationToken);
         return native.UpdateWhereAsync(predicate, validated, cancellationToken);
     }
 
@@ -49,7 +57,11 @@ public static class SetMutationSessionExtensions
         SetMutationOptions? options = null)
     {
         EnsureAccess(session, "delete-where");
+        options ??= SetMutationOptions.Aggregate;
+        options.Validate();
         var (native, predicate) = PrepareDelete(session, where, options);
+        if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
+            return ExecuteExactDelete(session, where, options);
         return native.DeleteWhere(predicate);
     }
 
@@ -60,9 +72,218 @@ public static class SetMutationSessionExtensions
         CancellationToken cancellationToken = default)
     {
         EnsureAccess(session, "delete-where");
+        options ??= SetMutationOptions.Aggregate;
+        options.Validate();
         var (native, predicate) = PrepareDelete(session, where, options);
+        if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
+            return ExecuteExactDeleteAsync(session, where, options, cancellationToken);
         return native.DeleteWhereAsync(predicate, cancellationToken);
     }
+
+    /// <summary>
+    /// Executes an admitted update with one keyed <see cref="WriteOutcome"/> per selected row.
+    /// Exact mode deliberately uses the existing keyed write contract: providers can therefore
+    /// report the same version, conflict, and not-found semantics as an ordinary update. The
+    /// initial key read and all keyed writes are one transaction when the session belongs to a
+    /// unit of work; outside a unit of work, callers should use aggregate mode when atomicity of
+    /// the whole set is required.
+    /// </summary>
+    private static SetMutationResult ExecuteExactUpdate(
+        IStorageSession session,
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        SetMutationOptions options)
+    {
+        try
+        {
+            var keys = FindMatchingKeys(session, where, options);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+                outcomes.Add(new SetMutationOutcome(key, session.Update(ValuesFor(key, assignments))));
+            return SetMutationResult.Exact(outcomes);
+        }
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
+    }
+
+    private static async ValueTask<SetMutationResult> ExecuteExactUpdateAsync(
+        IStorageSession session,
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        SetMutationOptions options,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var keys = await FindMatchingKeysAsync(session, where, options, cancellationToken).ConfigureAwait(false);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                outcomes.Add(new SetMutationOutcome(
+                    key,
+                    await session.UpdateAsync(ValuesFor(key, assignments), cancellationToken: cancellationToken)
+                        .ConfigureAwait(false)));
+            }
+            return SetMutationResult.Exact(outcomes);
+        }
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
+    }
+
+    private static SetMutationResult ExecuteExactDelete(
+        IStorageSession session,
+        Predicate where,
+        SetMutationOptions options)
+    {
+        try
+        {
+            var keys = FindMatchingKeys(session, where, options);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+                outcomes.Add(new SetMutationOutcome(key, session.Delete(key)));
+            return SetMutationResult.Exact(outcomes);
+        }
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
+    }
+
+    private static async ValueTask<SetMutationResult> ExecuteExactDeleteAsync(
+        IStorageSession session,
+        Predicate where,
+        SetMutationOptions options,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var keys = await FindMatchingKeysAsync(session, where, options, cancellationToken).ConfigureAwait(false);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                outcomes.Add(new SetMutationOutcome(
+                    key,
+                    await session.DeleteAsync(key, cancellationToken: cancellationToken).ConfigureAwait(false)));
+            }
+            return SetMutationResult.Exact(outcomes);
+        }
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
+    }
+
+    private static void FailUnitOfWork(IStorageSession session, Exception exception)
+    {
+        if (session is BatchStorageSession batched)
+            batched.Fail(exception);
+    }
+
+    private static IReadOnlyList<StorageKey> FindMatchingKeys(
+        IStorageSession session,
+        Predicate where,
+        SetMutationOptions options)
+    {
+        var request = KeyRequest(session.Unit, where, options);
+        return OrderedKeys(session.Unit, session.Query(request).Rows);
+    }
+
+    private static async ValueTask<IReadOnlyList<StorageKey>> FindMatchingKeysAsync(
+        IStorageSession session,
+        Predicate where,
+        SetMutationOptions options,
+        CancellationToken cancellationToken)
+    {
+        var request = KeyRequest(session.Unit, where, options);
+        var result = await session.QueryAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return OrderedKeys(session.Unit, result.Rows);
+    }
+
+    private static IReadOnlyList<StorageKey> OrderedKeys(
+        StorageUnit unit,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        var logicalUnit = LogicalKeyUnit(unit);
+        return rows.Select(row => KeyFromRow(unit, row))
+            .OrderBy(key => RowWrite.IdentityFor(logicalUnit, key.Values), StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static StorageUnit LogicalKeyUnit(StorageUnit unit) => unit with
+    {
+        Key = new KeyDefinition { Columns = LogicalKeyColumns(unit) }
+    };
+
+    private static QueryRequest KeyRequest(
+        StorageUnit unit,
+        Predicate where,
+        SetMutationOptions options)
+    {
+        var table = new TableId(unit.Name);
+        var columns = LogicalKeyColumns(unit)
+            .Select(column => unit.Columns.Single(definition => definition.Name == column))
+            .Select(definition => new ColumnRef(
+                table,
+                definition.Name,
+                QueryTypeFor(definition.Type),
+                definition.IsNullable,
+                maxLength: definition.MaxLength))
+            .ToArray();
+        return new QueryRequest(
+            table,
+            where,
+            ImmutableArray<OrderTerm>.Empty,
+            Projection.ColumnsOnly(columns),
+            Paging.None,
+            acceptedScan: options.AcceptedScan);
+    }
+
+    private static StorageKey KeyFromRow(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> row) =>
+        new(LogicalKeyColumns(unit)
+            .ToDictionary(
+                column => column,
+                column => row.TryGetValue(column, out var value)
+                    ? value
+                    : throw new InvalidOperationException(
+                        $"The exact set-mutation key projection did not return '{column}'."),
+                StringComparer.Ordinal));
+
+    private static IReadOnlyList<string> LogicalKeyColumns(StorageUnit unit) =>
+        unit.Key.Columns
+            .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal))
+            .ToArray();
+
+    private static StorageValues ValuesFor(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> assignments) =>
+        new(key.Values.Concat(assignments)
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
+
+    private static QueryType QueryTypeFor(PortableType type) => type switch
+    {
+        PortableType.Boolean => QueryType.Boolean,
+        PortableType.Int32 => QueryType.Int32,
+        PortableType.Int64 => QueryType.Int64,
+        PortableType.Decimal => QueryType.Decimal,
+        PortableType.Double => QueryType.Double,
+        PortableType.String => QueryType.String,
+        PortableType.DateTimeOffset => QueryType.DateTimeOffset,
+        PortableType.Guid => QueryType.Guid,
+        PortableType.Binary => QueryType.Binary,
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
 
     private static void EnsureAccess(IStorageSession session, string operation)
     {

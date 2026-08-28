@@ -41,7 +41,7 @@ in a load test.
 | `groundwork.storage.durable-high-water-inspection` | `BatchWriteCapabilities.DurableHighWaterInspection` | Durable scoped `ProviderSequence` high-water surviving retention and restart |
 | `groundwork.storage.exact-retention` | `BatchWriteCapabilities.ExactRetention` | Operation-identified, replay-stable retention |
 | `groundwork.storage.compare-and-delete` | `BatchWriteCapabilities.CompareAndDelete` | Atomic delete-if-values-match |
-| `groundwork.storage.set-mutation` | `BatchWriteCapabilities.SetMutation` | One provider-native update/delete for every row matching an admitted predicate |
+| `groundwork.storage.set-mutation` | `BatchWriteCapabilities.SetMutation` | One provider-native update/delete for every row matching an admitted predicate in aggregate mode; exact mode returns keyed outcomes through the existing write contract |
 
 ## Capability → interface → refusal
 
@@ -54,7 +54,7 @@ The public extension methods check first and refuse **before** provider work:
 | High-water inspection | `IStorageInspectionSession` | `session.Inspect()` | `GW-INSPECT-001` / `-002` |
 | Exact retention | `IExactRetentionStorageSession` | `session.ApplyRetention(operationId, …)` | `GW-RETENTION-003` |
 | Compare-and-delete | `ICompareAndDeleteStorageSession` | `session.CompareAndDelete(...)` | capability absent |
-| Set-based mutation | `ISetMutationStorageSession` | `session.UpdateWhere(...)` / `session.DeleteWhere(...)` | `GW-SET-001` |
+| Set-based mutation | `ISetMutationStorageSession` | `session.UpdateWhere(...)` / `session.DeleteWhere(...)` (aggregate default; `SetMutationOptions.Exact` for keyed outcomes) | `GW-SET-001` |
 | Cross-scope query | `IPrivilegedCrossScopeQuerySession` | `session.QueryAcrossScopes(...)` | `GW-ACCESS-001` / `-002` |
 
 ```csharp

@@ -58,6 +58,8 @@ internal static class PublicApiApprovalFixture
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
         _ = typeof(SetMutationOptions);
+        _ = typeof(SetMutationOutcomeMode);
+        _ = typeof(SetMutationOutcome);
         _ = typeof(ISetMutationStorageSession);
         _ = typeof(SetMutationResult);
         _ = typeof(StorageAccess);
@@ -125,6 +127,11 @@ internal static class PublicApiApprovalFixture
         });
         _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, SetMutationResult>(
             (session, predicate, assignments, options) => session.UpdateWhere(predicate, assignments, options));
+        _ = SetMutationOptions.Exact;
+        _ = new Func<SetMutationResult, IReadOnlyList<SetMutationOutcome>>(result => result.Outcomes);
+        _ = new Func<SetMutationResult, SetMutationOutcomeMode>(result => result.OutcomeMode);
+        _ = new Func<SetMutationOutcome, StorageKey>(outcome => outcome.Key);
+        _ = new Func<SetMutationOutcome, WriteOutcome>(outcome => outcome.Outcome);
         _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, CancellationToken, ValueTask<SetMutationResult>>(
             (session, predicate, assignments, options, cancellationToken) =>
                 session.UpdateWhereAsync(predicate, assignments, options, cancellationToken));
