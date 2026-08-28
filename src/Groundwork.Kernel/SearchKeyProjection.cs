@@ -2,7 +2,7 @@ using System.Collections.ObjectModel;
 
 namespace Groundwork.Kernel;
 
-/// <summary>Provider-neutral physical expansion for folded text columns.</summary>
+/// <summary>Provider-neutral physical expansion for folded and locale-ordered text columns.</summary>
 public static class SearchKeyProjection
 {
     public const string Prefix = "__groundwork_search_";
@@ -20,6 +20,10 @@ public static class SearchKeyProjection
 
     public static bool IsFolded(PortableCollation? collation) =>
         collation is PortableCollation.OrdinalIgnoreCase or PortableCollation.UnicodeOrdinalIgnoreCase;
+
+    public static bool IsProjected(ColumnDefinition column) =>
+        column.Type == PortableType.String &&
+        (IsFolded(LogicalCollation(column)) || column.LocaleSortKey is not null);
 
     public static PortableCollation? LogicalCollation(ColumnDefinition column) =>
         column.LogicalCollation ?? column.Collation;
@@ -47,9 +51,17 @@ public static class SearchKeyProjection
     public static string AlgorithmId(PortableCollation collation) =>
         PortableStringComparison.GetSearchKeyAlgorithmId(Policy(collation));
 
+    internal static void ValidateAlgorithmId(string? algorithmId)
+    {
+        if (algorithmId?.StartsWith(PortableLocaleOrdering.AlgorithmName + ":", StringComparison.Ordinal) == true)
+            _ = PortableLocaleOrdering.ParseAlgorithmId(algorithmId);
+        else
+            _ = PortableSearchKeyAlgorithmIdentity.Parse(algorithmId);
+    }
+
     /// <summary>
-    /// Identifies the additive folded-column migration that replaces an existing logical index
-    /// term with its provider-owned search key. Other index definition changes remain refused.
+    /// Identifies the additive projected-column migration that replaces an existing logical index
+    /// term with its provider-owned search/sort key. Other index definition changes remain refused.
     /// </summary>
     public static bool IsIndexRetarget(
         IndexDefinition previous,
@@ -91,14 +103,22 @@ public static class SearchKeyProjection
     }
 
     /// <summary>
-    /// Adds exactly one nullable ASCII-text key for each folded source column and retargets
-    /// declared physical indexes. Ordinal source columns deliberately remain base-column only.
+    /// Adds exactly one nullable ASCII-text key for each folded or locale-ordered source column and
+    /// retargets declared physical indexes. Ordinal source columns deliberately remain base-column only.
     /// </summary>
     public static StorageUnit Expand(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        foreach (var column in (source.Columns ?? []).Where(column => column.LocaleSortKey is not null))
+        {
+            var refusal = PortableLocaleOrdering.ValidateDeclaration(column, $"columns.{column.Name}.localeSortKey");
+            if (refusal is not null)
+                throw new InvalidOperationException($"{refusal.Code} at {refusal.Path}: {refusal.Message}");
+        }
+        var projectedSources = (source.Columns ?? []).Where(IsProjected).ToArray();
+
         var columns = (source.Columns ?? []).Select(column =>
-            column.Type == PortableType.String && IsFolded(LogicalCollation(column))
+            IsProjected(column)
                 ? column with
                 {
                     // A previously uncollated source already has the provider's ordinal
@@ -109,17 +129,15 @@ public static class SearchKeyProjection
                 }
                 : column with { }).ToList();
         var derived = (source.DerivedColumns ?? []).Select(column => column with { }).ToList();
-        var folded = (source.Columns ?? [])
-            .Where(column => column.Type == PortableType.String && IsFolded(LogicalCollation(column)))
-            .ToArray();
 
-        foreach (var column in folded)
+        foreach (var column in projectedSources)
         {
             var name = ColumnName(column.Name);
             var existing = columns.FirstOrDefault(item => item.Name == name);
-            var policy = Policy(LogicalCollation(column)!.Value);
+            var locale = column.LocaleSortKey;
+            var expansionFactor = locale?.MaximumExpansionFactor ?? ExpansionFactor(LogicalCollation(column)!.Value);
             int? maxLength = column.MaxLength is int length
-                ? checked(length * ExpansionFactor(LogicalCollation(column)!.Value))
+                ? checked(length * expansionFactor)
                 : null;
             var expected = new ColumnDefinition
             {
@@ -134,7 +152,10 @@ public static class SearchKeyProjection
             else if (existing.Type != expected.Type || existing.MaxLength != expected.MaxLength || existing.Collation != expected.Collation)
                 throw new InvalidOperationException($"Search-key column '{name}' has incompatible physical metadata.");
 
-            var algorithmId = PortableStringComparison.GetSearchKeyAlgorithmId(policy);
+            var projection = locale is null ? PortableProjection.BoundarySearchKey : PortableProjection.LocaleSortKey;
+            var algorithmId = locale is null
+                ? PortableStringComparison.GetSearchKeyAlgorithmId(Policy(LogicalCollation(column)!.Value))
+                : PortableLocaleOrdering.GetAlgorithmId(locale.CultureName);
             var existingDerived = derived.FirstOrDefault(item => item.Name == name);
             if (existingDerived is null)
             {
@@ -142,11 +163,11 @@ public static class SearchKeyProjection
                 {
                     Name = name,
                     SourceColumn = column.Name,
-                    Projection = PortableProjection.BoundarySearchKey,
+                    Projection = projection,
                     AlgorithmId = algorithmId
                 });
             }
-            else if (existingDerived.SourceColumn != column.Name || existingDerived.Projection != PortableProjection.BoundarySearchKey ||
+            else if (existingDerived.SourceColumn != column.Name || existingDerived.Projection != projection ||
                      !string.Equals(existingDerived.AlgorithmId, algorithmId, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException($"Search-key declaration '{name}' does not match source '{column.Name}'.");
@@ -158,7 +179,7 @@ public static class SearchKeyProjection
             Columns = index.Columns.Select(column =>
             {
                 var sourceColumn = (source.Columns ?? []).FirstOrDefault(item => item.Name == column.Column);
-                return sourceColumn is not null && sourceColumn.Type == PortableType.String && IsFolded(LogicalCollation(sourceColumn))
+                return sourceColumn is not null && IsProjected(sourceColumn)
                     ? column with { Column = ColumnName(column.Column) }
                     : column with { };
             }).ToArray()
@@ -179,18 +200,22 @@ public static class SearchKeyProjection
         ArgumentNullException.ThrowIfNull(values);
         var result = values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         var declarations = unit.DerivedColumns
-            .Where(column => column.Projection == PortableProjection.BoundarySearchKey)
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
             .ToArray();
         if (declarations.Length == 0)
         {
             declarations = unit.Columns
-                .Where(column => column.Type == PortableType.String && IsFolded(LogicalCollation(column)))
+                .Where(IsProjected)
                 .Select(column => new DerivedColumnDefinition
                 {
                     Name = ColumnName(column.Name),
                     SourceColumn = column.Name,
-                    Projection = PortableProjection.BoundarySearchKey,
-                    AlgorithmId = AlgorithmId(LogicalCollation(column)!.Value)
+                    Projection = column.LocaleSortKey is null
+                        ? PortableProjection.BoundarySearchKey
+                        : PortableProjection.LocaleSortKey,
+                    AlgorithmId = column.LocaleSortKey is null
+                        ? AlgorithmId(LogicalCollation(column)!.Value)
+                        : PortableLocaleOrdering.GetAlgorithmId(column.LocaleSortKey.CultureName)
                 })
                 .ToArray();
         }
@@ -199,14 +224,33 @@ public static class SearchKeyProjection
             if (result.ContainsKey(declaration.Name))
                 throw new ArgumentException($"Search-key column '{declaration.Name}' is provider-owned and cannot be supplied.", nameof(values));
             var source = declaration.SourceColumn;
-            var policy = PortableSearchKeyAlgorithmIdentity.Parse(declaration.AlgorithmId).Policy;
             if (result.TryGetValue(source, out var value))
             {
-                result[declaration.Name] = value is string text
-                    ? PortableStringComparison.CreateSearchKey(text, policy)
+                var projected = value is string text
+                    ? CreateProjectedValue(text, declaration)
                     : null;
+                var maximumLength = unit.Columns.FirstOrDefault(column => column.Name == declaration.Name)?.MaxLength;
+                if (projected?.Length > maximumLength)
+                {
+                    throw new InvalidOperationException(
+                        $"Locale sort key '{declaration.Name}' requires {projected.Length} characters, exceeding its declared maximum {maximumLength}. Increase MaximumExpansionFactor and rebuild the derived column.");
+                }
+                result[declaration.Name] = projected;
             }
         }
         return new ReadOnlyDictionary<string, object?>(result);
     }
+
+    private static string CreateProjectedValue(string value, DerivedColumnDefinition declaration) =>
+        declaration.Projection switch
+        {
+            PortableProjection.BoundarySearchKey => PortableStringComparison.CreateSearchKey(
+                value,
+                PortableSearchKeyAlgorithmIdentity.Parse(declaration.AlgorithmId).Policy),
+            PortableProjection.LocaleSortKey => PortableLocaleOrdering.CreateSortKey(
+                value,
+                PortableLocaleOrdering.ParseAlgorithmId(declaration.AlgorithmId).CultureName),
+            _ => throw new InvalidOperationException(
+                $"Derived search-key projection '{declaration.Projection}' is not supported.")
+        };
 }

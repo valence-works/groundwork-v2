@@ -149,7 +149,9 @@ public sealed record QuerySearchKeyColumn
         string sourceColumn,
         string physicalColumn,
         QuerySearchKeyPolicy policy,
-        int? maxLength = null)
+        int? maxLength = null,
+        bool orderByPhysicalColumn = false,
+        bool supportsPrefixPredicates = true)
     {
         if (string.IsNullOrWhiteSpace(sourceColumn))
             throw new ArgumentException("A source column is required.", nameof(sourceColumn));
@@ -159,12 +161,18 @@ public sealed record QuerySearchKeyColumn
         PhysicalColumn = physicalColumn;
         Policy = policy;
         MaxLength = maxLength;
+        OrderByPhysicalColumn = orderByPhysicalColumn;
+        SupportsPrefixPredicates = supportsPrefixPredicates;
     }
 
     public string SourceColumn { get; }
     public string PhysicalColumn { get; }
     public QuerySearchKeyPolicy Policy { get; }
     public int? MaxLength { get; }
+    /// <summary>Whether logical ordering is executed against this persisted key.</summary>
+    public bool OrderByPhysicalColumn { get; }
+    /// <summary>Whether prefix predicates may be lowered through this mapping.</summary>
+    public bool SupportsPrefixPredicates { get; }
 }
 
 /// <summary>Provider-neutral knobs passed to a native query renderer.</summary>

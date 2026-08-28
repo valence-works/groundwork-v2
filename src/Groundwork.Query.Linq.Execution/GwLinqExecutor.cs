@@ -161,13 +161,22 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     private static ImmutableArray<CoverageIndex> DeclaredIndexes(StorageUnit unit)
     {
         var nullable = unit.Columns.ToDictionary(column => column.Name, column => column.IsNullable, StringComparer.Ordinal);
+        var logicalByPhysical = unit.DerivedColumns
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
+            .ToDictionary(column => column.Name, column => column.SourceColumn, StringComparer.Ordinal);
         return unit.Indexes
             .Select(index => new CoverageIndex(
                 index.Name,
-                index.Columns.Select(column => new CoverageIndexColumn(
-                    column.Column,
-                    column.Direction == SortDirection.Descending ? OrderDirection.Descending : OrderDirection.Ascending,
-                    !nullable.TryGetValue(column.Column, out var isNullable) || isNullable)),
+                index.Columns.Select(column =>
+                {
+                    var logical = logicalByPhysical.TryGetValue(column.Column, out var source)
+                        ? source
+                        : column.Column;
+                    return new CoverageIndexColumn(
+                        logical,
+                        column.Direction == SortDirection.Descending ? OrderDirection.Descending : OrderDirection.Ascending,
+                        !nullable.TryGetValue(logical, out var isNullable) || isNullable);
+                }),
                 index.MissingValues == MissingValueBehavior.Excluded
                     ? IndexMissingValueBehavior.Excluded
                     : IndexMissingValueBehavior.Included))

@@ -44,6 +44,39 @@ public sealed class LinqExecutorTests
     }
 
     [Fact]
+    public async Task Locale_sort_key_index_covers_logical_ordering_and_returns_locale_order()
+    {
+        using var fixture = Fixture.Open(localeOrder: true);
+
+        var rows = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Take(5)
+            .ToListAsync(fixture.Executor);
+
+        Assert.Equal(["Ake", "Zebra", "Åke", "Äke", "Öke"], rows.Select(row => row.Status));
+    }
+
+    [Fact]
+    public void In_memory_locale_ordering_continuation_uses_the_hidden_sort_key()
+    {
+        using var fixture = Fixture.Open(localeOrder: true);
+        var table = new TableId(Fixture.TableName);
+        var status = new ColumnRef(table, "status", QueryType.String, true, 32);
+        QueryRequest Request(Paging paging) => new(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(status, OrderDirection.Ascending, NullOrder.First)],
+            Projection.ColumnsOnly(status),
+            paging);
+
+        var first = fixture.Session.Query(Request(Paging.Keyset(2)));
+        var second = fixture.Session.Query(Request(Paging.Continuation(first.NextContinuationToken!, 2)));
+
+        Assert.Equal(["Ake", "Zebra"], first.Rows.Select(row => row["status"]));
+        Assert.Equal(["Åke", "Äke"], second.Rows.Select(row => row["status"]));
+    }
+
+    [Fact]
     public async Task Uncovered_query_is_refused_before_the_provider_is_asked_to_render_it()
     {
         using var fixture = Fixture.Open();
@@ -348,7 +381,7 @@ public sealed class LinqExecutorTests
             new GwColumn<Ticket>(nameof(Ticket.Optional), "optional", QueryType.Int64, IsNullable: true)
         ]);
 
-        internal static Fixture Open(bool withJsonIndex = false)
+        internal static Fixture Open(bool withJsonIndex = false, bool localeOrder = false)
         {
             var connection = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
             var unit = new StorageUnit
@@ -358,7 +391,19 @@ public sealed class LinqExecutorTests
                 Columns =
                 [
                     new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
-                    new() { Name = "status", Type = PortableType.String, MaxLength = 32 },
+                    new()
+                    {
+                        Name = "status",
+                        Type = PortableType.String,
+                        MaxLength = 32,
+                        LocaleSortKey = localeOrder
+                            ? new LocaleSortKeyDefinition
+                            {
+                                CultureName = "sv-SE",
+                                MaximumExpansionFactor = 12
+                            }
+                            : null
+                    },
                     new() { Name = "weight", Type = PortableType.Int32, IsNullable = false },
                     new() { Name = "optional", Type = PortableType.Int64 },
                     .. withJsonIndex
@@ -376,10 +421,17 @@ public sealed class LinqExecutorTests
             };
             connection.Schema.Apply(unit);
             var session = connection.OpenSession(unit, StorageAccess.Global);
-            session.Insert(new StorageValues(new Dictionary<string, object?>
+            var statuses = localeOrder ? new[] { "Ake", "Åke", "Äke", "Öke", "Zebra" } : ["open"];
+            for (var index = 0; index < statuses.Length; index++)
             {
-                ["id"] = "a", ["status"] = "open", ["weight"] = 7, ["optional"] = null
-            }));
+                session.Insert(new StorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = ((char)('a' + index)).ToString(),
+                    ["status"] = statuses[index],
+                    ["weight"] = 7,
+                    ["optional"] = null
+                }));
+            }
             return new Fixture(connection, session);
         }
 

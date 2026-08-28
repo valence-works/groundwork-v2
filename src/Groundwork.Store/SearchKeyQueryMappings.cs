@@ -10,7 +10,7 @@ public static class SearchKeyQueryMappings
     {
         ArgumentNullException.ThrowIfNull(unit);
         var derived = unit.DerivedColumns
-            .Where(column => column.Projection == PortableProjection.BoundarySearchKey)
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
             .ToDictionary(column => column.SourceColumn, StringComparer.Ordinal);
         return unit.Columns
             .Where(column => column.Type == PortableType.String && !column.Name.StartsWith(SearchKeyProjection.Prefix, StringComparison.Ordinal))
@@ -20,6 +20,18 @@ public static class SearchKeyQueryMappings
                 {
                     if (!derived.TryGetValue(column.Name, out var physical))
                         return new QuerySearchKeyColumn(column.Name, column.Name, QuerySearchKeyPolicy.Ordinal, column.MaxLength);
+                    var physicalColumn = unit.Columns.FirstOrDefault(item => item.Name == physical.Name);
+                    if (physical.Projection == PortableProjection.LocaleSortKey)
+                    {
+                        _ = PortableLocaleOrdering.ParseAlgorithmId(physical.AlgorithmId);
+                        return new QuerySearchKeyColumn(
+                            column.Name,
+                            physical.Name,
+                            QuerySearchKeyPolicy.Ordinal,
+                            physicalColumn?.MaxLength,
+                            orderByPhysicalColumn: true,
+                            supportsPrefixPredicates: false);
+                    }
                     var policy = PortableSearchKeyAlgorithmIdentity.Parse(physical.AlgorithmId).Policy switch
                     {
                         PortableStringComparisonPolicy.AsciiIgnoreCase => QuerySearchKeyPolicy.AsciiIgnoreCase,
@@ -27,7 +39,6 @@ public static class SearchKeyQueryMappings
                         var unsupported => throw new InvalidOperationException(
                             $"Boundary search-key mapping '{physical.Name}' cannot use comparison policy '{unsupported}'.")
                     };
-                    var physicalColumn = unit.Columns.FirstOrDefault(item => item.Name == physical.Name);
                     return new QuerySearchKeyColumn(
                         column.Name,
                         physical.Name,

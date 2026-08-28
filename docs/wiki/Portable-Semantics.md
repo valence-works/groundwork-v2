@@ -68,7 +68,9 @@ Only compile shapes for which `Validate` returns **no** refusals.
 - `UnicodeOrdinalIgnoreCase` and `AsciiIgnoreCase` prefix matching require the schema's **versioned
   persisted search-key mapping**; the `ColumnRef` policy must match that mapping exactly or rendering
   fails with `GW-QUERY-031`.
-- Culture, ICU, accent, and implicit Unicode-normalization semantics are refused (`GW-SEM-TEXT-001`).
+- Culture, ICU, accent, and implicit Unicode-normalization predicate semantics are refused
+  (`GW-SEM-TEXT-001`). Locale ordering is available only through a declared, versioned ICU sort-key
+  projection whose encoded text is ordered ordinally by providers.
 - **No renderer emits database-side case folding.**
 - Malformed UTF-16 is rejected at binding.
 - Evaluating a refused folded policy stays deterministic and never invokes runtime

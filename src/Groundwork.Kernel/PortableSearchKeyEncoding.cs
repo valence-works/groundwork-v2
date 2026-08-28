@@ -11,7 +11,8 @@ internal enum PortableSearchKeyPolicy
 {
     Ordinal,
     AsciiIgnoreCase,
-    UnicodeOrdinalIgnoreCase
+    UnicodeOrdinalIgnoreCase,
+    IcuSortKey
 }
 
 internal static class PortableSearchKeyEncoding
@@ -44,6 +45,7 @@ internal static class PortableSearchKeyEncoding
             PortableSearchKeyPolicy.Ordinal => 4,
             PortableSearchKeyPolicy.UnicodeOrdinalIgnoreCase => 6,
             PortableSearchKeyPolicy.AsciiIgnoreCase => 1,
+            PortableSearchKeyPolicy.IcuSortKey => 2,
             _ => throw new ArgumentOutOfRangeException(nameof(policy), policy, null)
         };
         if (comparisonKey.Length % unitWidth != 0)
@@ -68,6 +70,23 @@ internal static class PortableSearchKeyEncoding
             }
         }
         return result.ToString();
+    }
+
+    /// <summary>
+    /// Encodes raw ICU comparison bytes through the same fixed-width text path as every other
+    /// persisted search key. The resulting ordinal text order is the unsigned byte order ICU
+    /// defines, without relying on provider-specific binary ordering.
+    /// </summary>
+    internal static string CreateSearchKeyFromComparisonKey(ReadOnlySpan<byte> comparisonKey)
+    {
+        const string hex = "0123456789ABCDEF";
+        var encodedUnits = new StringBuilder(comparisonKey.Length * 2);
+        foreach (var value in comparisonKey)
+        {
+            encodedUnits.Append(hex[value >> 4]);
+            encodedUnits.Append(hex[value & 0x0F]);
+        }
+        return CreateSearchKeyFromComparisonKey(encodedUnits.ToString(), PortableSearchKeyPolicy.IcuSortKey);
     }
 
     internal static string? CreateSuccessor(string searchKey, PortableSearchKeyPolicy policy)
