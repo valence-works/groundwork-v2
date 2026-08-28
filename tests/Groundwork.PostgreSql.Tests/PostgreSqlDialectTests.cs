@@ -780,12 +780,15 @@ public sealed class PostgreSqlDialectTests
         var observer = new BlockingFallbackObserver();
         var session = connection.OpenSession(unit, StorageAccess.Global, observer);
         var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
-        var first = batched.ApplyBatchAsync(
+        // Run the producer away from xUnit's synchronization context. It deliberately blocks in the
+        // observer after reaching the provider command; invoking it inline can park its continuation
+        // behind this test's synchronous signal wait before the signal has been raised.
+        var first = Task.Run(async () => await batched.ApplyBatchAsync(
             [RowWrite.Upsert(
                 unit,
                 new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "first" }),
                 WriteOptions.CreateOnly)],
-            exactOutcomes: true);
+            exactOutcomes: true));
 
         Assert.True(observer.FallbackEntered.Wait(TimeSpan.FromSeconds(5)),
             "The fallback did not reach its provider command in time.");

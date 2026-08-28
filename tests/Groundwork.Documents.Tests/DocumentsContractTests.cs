@@ -725,8 +725,13 @@ public sealed class DocumentsContractTests
     private sealed class CapturingStorageSession(Groundwork.Kernel.StorageUnit unit, WriteOutcome result) : IOwnedStorageSession
     {
         public Groundwork.Kernel.StorageUnit Unit { get; } = unit;
-        public void Dispose() { }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public bool IsReleased { get; private set; }
+        public void Dispose() => IsReleased = true;
+        public ValueTask DisposeAsync()
+        {
+            IsReleased = true;
+            return ValueTask.CompletedTask;
+        }
         public StorageAccess Access => StorageAccess.Global;
         public RowWriteMode? LastMode { get; private set; }
         public StorageValues? LastValues { get; private set; }
