@@ -168,6 +168,23 @@ public sealed class StorageOnlyDoubleTests
     }
 
     [Fact]
+    public void A_declared_default_of_a_non_double_clr_type_is_refused()
+    {
+        var unit = Unit(
+            [
+                Column("id", PortableType.Guid, nullable: false),
+                Column("reading", PortableType.Double) with { Default = new PortableDefault(1) }
+            ],
+            key: ["id"]);
+
+        var refusal = Assert.Single(
+            PortabilityValidator.Validate(unit).Refusals,
+            finding => finding.Code == "GW-PORT-013");
+        Assert.Equal("columns.reading.default", refusal.Path);
+        Assert.Contains("Int32", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_smallest_normal_value_is_both_storable_and_defaultable()
     {
         // The measured boundary on SQL Server: the smallest normal survives a DDL default and
@@ -189,6 +206,19 @@ public sealed class StorageOnlyDoubleTests
             [
                 Column("id", PortableType.Guid, nullable: false),
                 Column("reading", PortableType.Double) with { Default = new PortableDefault(0.1d) }
+            ],
+            key: ["id"]);
+
+        Assert.Empty(PortabilityValidator.Validate(unit).Refusals);
+    }
+
+    [Fact]
+    public void A_null_declared_default_is_accepted()
+    {
+        var unit = Unit(
+            [
+                Column("id", PortableType.Guid, nullable: false),
+                Column("reading", PortableType.Double) with { Default = new PortableDefault(null) }
             ],
             key: ["id"]);
 

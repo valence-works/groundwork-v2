@@ -598,11 +598,21 @@ public static class PortabilityValidator
         foreach (var column in columns.Where(column =>
             column is { Type: PortableType.Double, Default: not null }))
         {
-            if (column.Default!.Value is double value && !PortableDouble.IsStorableAsDefault(value))
+            if (column.Default!.Value is double value)
+            {
+                if (!PortableDouble.IsStorableAsDefault(value))
+                {
+                    diagnostics.Add(new(
+                        "GW-PORT-013",
+                        PortableDouble.ExplainDefault(column.Name, value),
+                        $"columns.{column.Name}.default"));
+                }
+            }
+            else if (column.Default.Value is not null)
             {
                 diagnostics.Add(new(
                     "GW-PORT-013",
-                    PortableDouble.ExplainDefault(column.Name, value),
+                    PortableDouble.ExplainNonDoubleDefault(column.Name, column.Default.Value),
                     $"columns.{column.Name}.default"));
             }
         }
