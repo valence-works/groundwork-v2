@@ -2,8 +2,8 @@
 
 The runtime contract that providers implement and applications call.
 `IStorageProviderConnection`, `IStorageSession`, `IUnitOfWork`, `StorageAccess`, `StorageScope`,
-`WriteOutcome`, `RowWrite`, `BatchWriteOptions`, and the execution of retention, exact append, and
-durable idempotency.
+`WriteOutcome`, `RowWrite`, `BatchWriteOptions`, set-based mutation capabilities, and the execution
+of retention, exact append, and durable idempotency.
 
 Store sits directly above `Groundwork.Kernel` and knows nothing about contract families: a provider
 implementing these interfaces never learns that `Groundwork.Records` or `Groundwork.Documents`
