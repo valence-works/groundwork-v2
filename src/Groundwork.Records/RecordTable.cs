@@ -71,6 +71,17 @@ public sealed class RecordTableBuilder<T>
         return this;
     }
 
+    /// <summary>Declares a closed aggregation profile alongside this typed table.</summary>
+    public RecordTableBuilder<T> Aggregate(
+        string name,
+        Action<Groundwork.Kernel.AggregationBuilder> configure)
+    {
+        if (configure is null)
+            throw new ArgumentNullException(nameof(configure));
+        state.AddAggregation(BuildAggregation(name, configure));
+        return this;
+    }
+
     public RecordTable<T> Build(PortabilityValidationContext? context = null)
     {
         try
@@ -102,6 +113,11 @@ public sealed class RecordTableBuilder<T>
         if (count == 0)
             throw new ArgumentException($"'{typeof(T).FullName}' has no public instance columns.", nameof(T));
     }
+
+    private static Groundwork.Kernel.AggregationProfile BuildAggregation(
+        string name,
+        Action<Groundwork.Kernel.AggregationBuilder> configure)
+        => Groundwork.Kernel.AggregationProfile.Create(name, configure);
 
     private static IReadOnlyList<string> MemberNames<TKey>(
         Expression<Func<T, TKey>> selector,

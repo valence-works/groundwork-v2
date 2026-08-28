@@ -144,3 +144,21 @@ public interface IRecordStore
         Groundwork.Query.Model.QueryRequest request,
         Groundwork.Query.Model.QueryRenderOptions? options = null);
 }
+
+/// <summary>
+/// Optional provider-neutral aggregation capability for a typed Records adapter.
+/// </summary>
+/// <remarks>
+/// This capability is separate from <see cref="IRecordStore"/> so existing custom record stores
+/// remain source-compatible. The shipped Records.Store adapter implements it by forwarding to the
+/// existing <see cref="IStorageSession.Aggregate"/> contract; it does not implement provider logic.
+/// </remarks>
+public interface IRecordAggregationStore
+{
+    AggregationResult Aggregate(KernelStorageUnit unit, AggregationQuery query);
+
+    ValueTask<AggregationResult> AggregateAsync(
+        KernelStorageUnit unit,
+        AggregationQuery query,
+        CancellationToken cancellationToken = default);
+}

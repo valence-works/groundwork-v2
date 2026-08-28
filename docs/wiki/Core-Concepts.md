@@ -167,7 +167,7 @@ Nothing is added to your schema that you did not declare.
 | Retention | `Retention(...)` / `KeepNewest(...)` | No cleanup happens |
 | Exact retention replay | `RetentionIdempotency(window)` (requires `Retention`) | Retention runs status-only, still resumable |
 | Multi-tenancy | `.Scoped()` | Unit is global |
-| Aggregation | `AggregationProfiles` / `.Aggregate(...)` | `session.Aggregate(...)` has no profile to name |
+| Aggregation | `AggregationProfiles` / `.Aggregate(...)` | `session.Aggregate(...)` has no profile to name; typed Records bindings require a declared profile |
 | Provider sequence | `ColumnGeneration.ProviderSequence` | You supply keys yourself |
 
 This is deliberate. A unit with `ConcurrencyDeclaration.None` produces exactly the columns you

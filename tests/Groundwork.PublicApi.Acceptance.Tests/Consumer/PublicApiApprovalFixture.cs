@@ -39,6 +39,11 @@ internal static class PublicApiApprovalFixture
         _ = typeof(AggregationTimeBucketCalculator);
         _ = typeof(AggregationBuilder);
         _ = typeof(Aggregate.Count);
+        _ = typeof(AggregationProfile);
+        _ = typeof(RecordAggregationBinding<,>);
+        _ = typeof(RecordAggregationResult<,>);
+        _ = typeof(AggregationRowExtensions);
+        _ = typeof(IRecordAggregationStore);
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
@@ -58,6 +63,8 @@ internal static class PublicApiApprovalFixture
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
         _ = typeof(SetMutationOptions);
+        _ = typeof(SetMutationOutcomeMode);
+        _ = typeof(SetMutationOutcome);
         _ = typeof(ISetMutationStorageSession);
         _ = typeof(SetMutationResult);
         _ = typeof(StorageAccess);
@@ -89,6 +96,7 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Aggregate("summary", aggregation => aggregation.GroupBy("group").Count("count")));
+        _ = new Func<string, Action<AggregationBuilder>, AggregationProfile>(AggregationProfile.Create);
         _ = new AggregationQuery("summary")
         {
             OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending)]
@@ -125,6 +133,11 @@ internal static class PublicApiApprovalFixture
         });
         _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, SetMutationResult>(
             (session, predicate, assignments, options) => session.UpdateWhere(predicate, assignments, options));
+        _ = SetMutationOptions.Exact;
+        _ = new Func<SetMutationResult, IReadOnlyList<SetMutationOutcome>>(result => result.Outcomes);
+        _ = new Func<SetMutationResult, SetMutationOutcomeMode>(result => result.OutcomeMode);
+        _ = new Func<SetMutationOutcome, StorageKey>(outcome => outcome.Key);
+        _ = new Func<SetMutationOutcome, WriteOutcome>(outcome => outcome.Outcome);
         _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, CancellationToken, ValueTask<SetMutationResult>>(
             (session, predicate, assignments, options, cancellationToken) =>
                 session.UpdateWhereAsync(predicate, assignments, options, cancellationToken));
@@ -153,6 +166,10 @@ internal static class PublicApiApprovalFixture
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));
         _ = new Func<DocumentUnit<ApprovalDocument>, RowValues, DocumentReadResult<ApprovalDocument>>((unit, values) => unit.Read(values, null));
         _ = new Func<RecordTable<ApprovalRecord>, IGwQueryable<ApprovalRecord>>(table => table.Query.Where(row => row.Value == "approved"));
+        _ = new Func<RecordTable<ApprovalRecord>, RecordAggregationBinding<string, long>>(table => table.Aggregate<string, long>(
+            "summary",
+            "value",
+            row => row.Get<long>("count")));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<long?>>(query => query.Sum(row => row.Count));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<decimal?>>(query => query.Sum(row => row.Amount));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<string?>>(query => query.Min(row => row.Label));
