@@ -515,6 +515,30 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Accepted_aggregation_with_persian_calendar_expiry_fails_closed()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0011\", \"admin report\", \"billing\", new System.DateTimeOffset(1405, 1, 1, 0, 0, 0, 0, new System.Globalization.PersianCalendar(), System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_906" && item.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_with_unresolved_calendar_expiry_fails_closed()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static System.Globalization.Calendar Calendar => GetCalendar(); static System.Globalization.Calendar GetCalendar() => null!; static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0012\", \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, 0, Calendar, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_906" && item.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
+    [Fact]
     public async Task Accepted_aggregation_with_runtime_id_fails_closed_instead_of_bypassing_opt_in()
     {
         var source = WithSchema("{\"tables\":[]}") +

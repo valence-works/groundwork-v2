@@ -183,6 +183,14 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             operation.Constructor is not IMethodSymbol constructor ||
             constructor.ContainingType.ToDisplayString() != "System.DateTimeOffset")
             return null;
+
+        // A calendar changes the meaning of year/month/day. Unless its complete calendar
+        // semantics are proven here, treating the values as Gregorian would inventory a
+        // different expiry from the one the acceptance constructs at runtime.
+        if (constructor.Parameters.Any(parameter =>
+                parameter.Type.ToDisplayString() == "System.Globalization.Calendar"))
+            return null;
+
         var values = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var argument in operation.Arguments)
         {
