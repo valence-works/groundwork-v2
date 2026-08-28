@@ -477,17 +477,32 @@ public sealed class ConcurrencyHarnessTests
                 WriteOptions.Unconditional);
         })).ToArray();
 
-        Assert.True(observer.AllCommandsEntered.Wait(TimeSpan.FromSeconds(30)),
-            "Owned-session commands queued behind a shared provider gate instead of overlapping.");
-        var elapsed = System.Diagnostics.Stopwatch.StartNew();
-        observer.Release.Set();
-        var outcomes = await Task.WhenAll(work);
-        elapsed.Stop();
-        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5),
-            $"Eight one-second PostgreSQL commands took {elapsed.Elapsed}; owned sessions were physically serialized.");
-        Assert.All(outcomes, outcome => Assert.True(outcome.Succeeded));
-        foreach (var session in sessions)
-            await session.DisposeAsync();
+        try
+        {
+            Assert.True(observer.AllCommandsEntered.Wait(TimeSpan.FromSeconds(30)),
+                "Owned-session commands queued behind a shared provider gate instead of overlapping.");
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            observer.Release.Set();
+            var outcomes = await Task.WhenAll(work);
+            elapsed.Stop();
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5),
+                $"Eight one-second PostgreSQL commands took {elapsed.Elapsed}; owned sessions were physically serialized.");
+            Assert.All(outcomes, outcome => Assert.True(outcome.Succeeded));
+        }
+        finally
+        {
+            observer.Release.Set();
+            try
+            {
+                await Task.WhenAll(work).WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            catch
+            {
+                // Preserve the primary assertion or command failure while still releasing every connection.
+            }
+
+            await Task.WhenAll(sessions.Select(session => session.DisposeAsync().AsTask()));
+        }
 
         // Released: a fresh session still reads every row, and the provider never accumulated the eight
         // connections — they went back to the pool when each session was disposed.
