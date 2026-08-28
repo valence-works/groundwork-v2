@@ -207,14 +207,15 @@ public static class StorageUnitCoverage
                                 : OrderDirection.Ascending,
                             !nullable.TryGetValue(logical, out var isNullable) || isNullable);
                     });
-                return new CoverageIndex(
-                    index.Name,
-                    columns,
-                    index.MissingValues == MissingValueBehavior.Excluded
-                        ? IndexMissingValueBehavior.Excluded
-                        : IndexMissingValueBehavior.Included);
+                return (index, columns: columns.ToArray());
             })
-            .Where(index => index.Columns.Any())
+            .Where(item => item.columns.Length != 0)
+            .Select(item => new CoverageIndex(
+                item.index.Name,
+                item.columns,
+                item.index.MissingValues == MissingValueBehavior.Excluded
+                    ? IndexMissingValueBehavior.Excluded
+                    : IndexMissingValueBehavior.Included))
             .ToImmutableArray();
     }
 }
