@@ -433,6 +433,13 @@ jobs:
           dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
           --no-restore --configuration Release
           --filter FullyQualifiedName~MongoDB_without_transaction_fit_refuses
+      - name: Run standalone MongoDB set-mutation capability proof
+        env:
+          GROUNDWORK_MONGO_STANDALONE_CONNECTION: mongodb://localhost:27017/s6setmutation
+        run: >-
+          dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj
+          --no-restore --configuration Release
+          --filter FullyQualifiedName~MongoSetMutationGuardTests.MongoDB_standalone_set_mutation
 
   concurrency-conformance:
     runs-on: ubuntu-latest

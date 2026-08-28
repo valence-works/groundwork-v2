@@ -169,7 +169,7 @@ public static class StorageUnitCoverage
     public static ImmutableArray<CoverageIndex> PortableIndexes(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
-        return DeclaredIndexes(unit with
+        var indexes = DeclaredIndexes(unit with
         {
             Indexes = unit.Indexes
                 .Select(index => index with
@@ -181,6 +181,9 @@ public static class StorageUnitCoverage
                 .Where(index => index.Columns.Count != 0)
                 .ToArray()
         });
+        var key = unit.Key.Columns
+            .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal));
+        return CoverageCandidates.Derive(key, indexes);
     }
 
     public static ImmutableArray<CoverageIndex> DeclaredIndexes(StorageUnit unit)
