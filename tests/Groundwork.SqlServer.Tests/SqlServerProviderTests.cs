@@ -152,8 +152,14 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.True(observer.RetentionEntered.Wait(TimeSpan.FromSeconds(5)),
             "On-append retention did not start in time.");
 
-        var second = Task.Run(() => session.Read(new StorageKey(
-            new Dictionary<string, object?> { ["id"] = "missing" })));
+        using var secondStarted = new ManualResetEventSlim();
+        var second = Task.Run(() =>
+        {
+            secondStarted.Set();
+            return session.Read(new StorageKey(
+                new Dictionary<string, object?> { ["id"] = "missing" }));
+        });
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(5)), "The second caller did not start in time.");
         await Task.Delay(TimeSpan.FromMilliseconds(150));
         Assert.False(observer.Overlapped,
             "A shared-session read reached SQL Server while retention held the session gate.");

@@ -998,6 +998,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     internal void Close() => closed = true;
 
+    public bool IsReleased => closed;
+
     public void Dispose()
     {
         if (closed)

@@ -24,8 +24,13 @@ public sealed class MongoProviderIntegrationTests
         {
             Id = new StorageUnitId(name),
             Name = name,
-            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
-            Key = new KeyDefinition { Columns = ["id"] }
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
 
@@ -35,9 +40,19 @@ public sealed class MongoProviderIntegrationTests
 
         var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
         Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        Assert.False(owned.IsReleased);
+        Assert.True(owned.Upsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "conflict", ["value"] = "current" }),
+            WriteOptions.Unconditional).Succeeded);
+        var stale = Assert.IsAssignableFrom<IConcurrencyStorageSession>(owned).ConditionalUpsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "conflict", ["value"] = "stale" }),
+            WriteOptions.IfVersion(0));
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, stale.Status);
         owned.Dispose();
+        Assert.True(owned.IsReleased);
         Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
             new Dictionary<string, object?> { ["id"] = "after-release" })));
+        Assert.Throws<ObjectDisposedException>(() => { _ = stale.Detail; });
     }
 
     [SkippableFact]

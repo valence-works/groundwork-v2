@@ -153,6 +153,8 @@ internal class MongoStoreSession(
 {
     private bool released;
 
+    public bool IsReleased => released;
+
     /// <summary>
     /// MongoDB's driver is thread-safe and a session here holds no exclusive connection, so releasing one
     /// only closes it. The capability exists so a consumer can use one session lifetime model across every
@@ -520,6 +522,7 @@ internal class MongoStoreSession(
             result.Version,
             () =>
             {
+                ThrowIfReleased();
                 commandObserver?.Observe(new ProviderCommandEvent(
                     "mongodb.write-probe",
                     "MongoDB.FindOne(identity)",

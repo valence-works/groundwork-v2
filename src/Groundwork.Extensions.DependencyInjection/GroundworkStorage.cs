@@ -48,6 +48,15 @@ internal sealed class GroundworkStorage : IGroundworkStorage
     private readonly List<ScopedUnitOfWork> owned = [];
     private bool disposed;
 
+    internal int TrackedSessionCount
+    {
+        get
+        {
+            lock (gate)
+                return sessions.Count;
+        }
+    }
+
     internal GroundworkStorage(string name, IStorageProviderConnection connection)
     {
         Name = name;
@@ -66,6 +75,7 @@ internal sealed class GroundworkStorage : IGroundworkStorage
         {
             if (!disposed)
             {
+                sessions.RemoveAll(static candidate => candidate.IsReleased);
                 sessions.Add(session);
                 return session;
             }

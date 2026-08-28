@@ -444,41 +444,58 @@ public sealed class ConcurrencyHarnessTests
         connection.Schema.Apply(unit);
 
         const int callers = 8;
-        var barrier = new CountdownEvent(callers);
-        var proceed = new ManualResetEventSlim(false);
-        var failures = new ConcurrentBag<Exception>();
-        var overlapped = 0;
+        using var observer = new OwnedOperationOverlapObserver(callers);
+        var sessions = Enumerable.Range(0, callers)
+            .Select(_ => connection.OpenOwnedSession(unit, StorageAccess.Global, observer))
+            .ToArray();
+        observer.Arm();
 
-        var work = Enumerable.Range(0, callers).Select(index => Task.Run(async () =>
+        var work = sessions.Select((owned, index) => Task.Run(() =>
         {
-            try
-            {
-                await using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
-                // Every caller holds its own session open at the same moment. On one shared connection this
-                // is precisely what deadlocks or faults; on owned sessions it simply overlaps.
-                barrier.Signal();
-                proceed.Wait(TimeSpan.FromSeconds(30));
-                Interlocked.Increment(ref overlapped);
-                for (var pass = 0; pass < 4; pass++)
-                    owned.Upsert(Values($"row-{index}", $"pass-{pass}", DateTimeOffset.UnixEpoch), WriteOptions.Unconditional);
-            }
-            catch (Exception failure) { failures.Add(failure); }
+            return owned.Upsert(
+                Values($"row-{index}", "overlapped", DateTimeOffset.UnixEpoch),
+                WriteOptions.Unconditional);
         })).ToArray();
 
-        Assert.True(barrier.Wait(TimeSpan.FromSeconds(30)), "Owned sessions could not all be open at once.");
-        proceed.Set();
-        await Task.WhenAll(work);
-
-        Assert.True(failures.IsEmpty,
-            "Owned sessions must be independently usable: " +
-            string.Join("; ", failures.Select(failure => failure.GetType().Name + ": " + failure.Message)));
-        Assert.Equal(callers, overlapped);
+        Assert.True(observer.AllCommandsEntered.Wait(TimeSpan.FromSeconds(30)),
+            "Owned-session commands queued behind a shared provider gate instead of overlapping.");
+        observer.Release.Set();
+        var outcomes = await Task.WhenAll(work);
+        Assert.All(outcomes, outcome => Assert.True(outcome.Succeeded));
+        foreach (var session in sessions)
+            await session.DisposeAsync();
 
         // Released: a fresh session still reads every row, and the provider never accumulated the eight
         // connections — they went back to the pool when each session was disposed.
         var reader = connection.OpenSession(unit, StorageAccess.Global);
         for (var index = 0; index < callers; index++)
             Assert.NotNull(reader.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = $"row-{index}" })));
+    }
+
+    private sealed class OwnedOperationOverlapObserver(int callers) : IProviderCommandObserver, IDisposable
+    {
+        private int armed;
+
+        internal CountdownEvent AllCommandsEntered { get; } = new(callers);
+
+        internal ManualResetEventSlim Release { get; } = new();
+
+        internal void Arm() => Volatile.Write(ref armed, 1);
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (Volatile.Read(ref armed) == 0 || command.IsProbe)
+                return;
+            AllCommandsEntered.Signal();
+            Release.Wait(TimeSpan.FromSeconds(30));
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            AllCommandsEntered.Dispose();
+            Release.Dispose();
+        }
     }
 
     private static StorageValues Values(string id, string value, DateTimeOffset createdAt) =>

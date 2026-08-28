@@ -1068,7 +1068,11 @@ public interface IUnitOfWork : IDisposable
 /// Sessions obtained from <see cref="IUnitOfWork.OpenSession"/> are owned by their unit of work and are not
 /// of this kind: one owner per session, decided where it is opened.
 /// </remarks>
-public interface IOwnedStorageSession : IStorageSession, IDisposable, IAsyncDisposable;
+public interface IOwnedStorageSession : IStorageSession, IDisposable, IAsyncDisposable
+{
+    /// <summary>Whether this caller-owned session has released its provider resources.</summary>
+    bool IsReleased { get; }
+}
 
 /// <summary>
 /// Owns the provider resources for a connection and the sessions opened directly from it. Dispose

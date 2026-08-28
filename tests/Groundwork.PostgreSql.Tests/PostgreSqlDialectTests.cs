@@ -789,8 +789,14 @@ public sealed class PostgreSqlDialectTests
 
         Assert.True(observer.FallbackEntered.Wait(TimeSpan.FromSeconds(5)),
             "The fallback did not reach its provider command in time.");
-        var second = Task.Run(() => session.Read(new StorageKey(
-            new Dictionary<string, object?> { ["id"] = "missing" })));
+        using var secondStarted = new ManualResetEventSlim();
+        var second = Task.Run(() =>
+        {
+            secondStarted.Set();
+            return session.Read(new StorageKey(
+                new Dictionary<string, object?> { ["id"] = "missing" }));
+        });
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(5)), "The second caller did not start in time.");
         await Task.Delay(TimeSpan.FromMilliseconds(150));
         Assert.False(observer.Overlapped,
             "A concurrent caller reached the shared connection while the batch fallback held its gate.");

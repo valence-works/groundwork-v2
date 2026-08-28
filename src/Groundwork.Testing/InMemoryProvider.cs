@@ -1511,6 +1511,8 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
 
     internal void Close() => disposed = true;
 
+    public bool IsReleased => disposed;
+
     /// <summary>
     /// The in-memory provider holds no scarce per-session resource, so releasing one only closes it. The
     /// capability exists so a consumer can use one lifetime model across every provider.

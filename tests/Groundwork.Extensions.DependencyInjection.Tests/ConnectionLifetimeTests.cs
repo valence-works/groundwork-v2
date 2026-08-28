@@ -245,6 +245,32 @@ public sealed class ConnectionLifetimeTests
     }
 
     [Fact]
+    public void A_long_lived_scope_does_not_retain_sessions_the_caller_already_released()
+    {
+        fixture.Deploy(HostingFixture.Orders);
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(options => options
+            .UseProvider(fixture.Provider, fixture.ConnectionString)
+            .AddUnits(HostingFixture.Orders));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+        using var scope = provider.CreateScope();
+        var storage = Assert.IsType<GroundworkStorage>(
+            scope.ServiceProvider.GetRequiredService<IGroundworkStorage>());
+
+        for (var index = 0; index < 32; index++)
+        {
+            var session = Assert.IsAssignableFrom<IOwnedStorageSession>(
+                storage.OpenSession(HostingFixture.Orders, StorageAccess.Global));
+            session.Dispose();
+            Assert.True(session.IsReleased);
+        }
+
+        // The just-released final session is retained until the next open or scope disposal; all
+        // earlier released sessions were pruned as new sessions were registered.
+        Assert.Equal(1, storage.TrackedSessionCount);
+    }
+
+    [Fact]
     public void A_scope_still_disposes_a_unit_of_work_that_never_reached_a_terminal_call()
     {
         fixture.Deploy(HostingFixture.Orders);

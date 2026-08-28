@@ -1042,6 +1042,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     internal void Close() => closed = true;
 
+    public bool IsReleased => closed;
+
     public void Dispose()
     {
         if (closed)
