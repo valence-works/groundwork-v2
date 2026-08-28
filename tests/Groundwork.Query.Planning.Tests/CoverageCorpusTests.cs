@@ -132,7 +132,13 @@ public sealed class CoverageCorpusTests
         if (!expectedCovered)
         {
             Assert.NotNull(result.Refusal);
-            Assert.Contains(result.Refusal!.SuggestedDeclaration, result.Refusal.Message, StringComparison.Ordinal);
+            if (result.Refusal!.Code == "GW-COVER-016")
+                Assert.DoesNotContain("Add: [GwIndex(", result.Refusal.Message, StringComparison.Ordinal);
+            else
+            {
+                Assert.NotEmpty(result.Refusal.SuggestedDeclaration);
+                Assert.Contains(result.Refusal.SuggestedDeclaration, result.Refusal.Message, StringComparison.Ordinal);
+            }
         }
     }
 

@@ -17,6 +17,8 @@ public sealed class CoverageCheckerTests
     private static readonly ColumnRef Id = new(Table, "id", QueryType.String, isNullable: false);
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Decimal);
     private static readonly ColumnRef Enabled = new(Table, "enabled", QueryType.Boolean, isNullable: false);
+    private static readonly ColumnRef Weight = new(Table, "weight", QueryType.Double);
+    private static readonly ColumnRef Payload = new(Table, "payload", QueryType.Binary);
 
     [Fact]
     public void Equality_prefix_and_ordered_suffix_are_covered()
@@ -169,6 +171,97 @@ public sealed class CoverageCheckerTests
 
         Assert.False(result.IsCovered);
         Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Provider_default_null_ordering_does_not_suggest_an_index()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Created, OrderDirection.Ascending)],
+            Paging.OffsetLimit(0, 10),
+            Index("ix_created", "created_at"));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal(
+            "Query on 'tickets' is not index-covered. Provider-default null ordering is not portable; choose explicit nulls-first or nulls-last ordering. Nearest index 'ix_created' (created_at ASC). Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").",
+            result.Refusal!.Message);
+        Assert.Null(result.Refusal.SuggestedIndex);
+    }
+
+    [Fact]
+    public void Boolean_double_and_binary_ordering_do_not_suggest_an_index()
+    {
+        var columns = new[]
+        {
+            (Column: Enabled, IndexName: "ix_enabled", ExpectedMessage: "Query on 'tickets' is not index-covered. Ordering this type is not portable; order a declared portable projection or key instead. Nearest index 'ix_enabled' (enabled ASC). Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\")."),
+            (Column: Weight, IndexName: "ix_weight", ExpectedMessage: "Query on 'tickets' is not index-covered. Ordering this type is not portable; order a declared portable projection or key instead. Nearest index 'ix_weight' (weight ASC). Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\")."),
+            (Column: Payload, IndexName: "ix_payload", ExpectedMessage: "Query on 'tickets' is not index-covered. Ordering this type is not portable; order a declared portable projection or key instead. Nearest index 'ix_payload' (payload ASC). Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").")
+        };
+
+        foreach (var (column, indexName, expectedMessage) in columns)
+        {
+            var result = Check(
+                Predicate.AlwaysTrue.Instance,
+                [new OrderTerm(column, OrderDirection.Ascending, NullOrder.First)],
+                Paging.OffsetLimit(0, 10),
+                Index(indexName, column.Name));
+
+            Assert.False(result.IsCovered);
+            Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+            Assert.Equal(expectedMessage, result.Refusal.Message);
+            Assert.Null(result.Refusal.SuggestedIndex);
+        }
+    }
+
+    [Fact]
+    public void Nonportable_range_ordering_does_not_suggest_an_index()
+    {
+        var result = Check(
+            new Predicate.Range(Payload, Bound.Inclusive(QueryConstant.Of(Payload, new byte[] { 1 })), null),
+            [],
+            Paging.None,
+            Index("ix_payload", "payload"));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal(
+            "Query on 'tickets' is not index-covered. Range ordering for column 'payload' is not portable; use equality/membership or a declared orderable projection instead. Nearest index 'ix_payload' (payload ASC). Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").",
+            result.Refusal!.Message);
+        Assert.Null(result.Refusal.SuggestedIndex);
+    }
+
+    [Fact]
+    public void Cross_column_or_does_not_suggest_an_index()
+    {
+        var result = Check(
+            new Predicate.Or([
+                new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+                new Predicate.Equal(Assignee, QueryConstant.Of(Assignee, "sam"))]),
+            [],
+            Paging.None,
+            Index("ix_status_assignee", "status", "assignee"));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal(
+            "Query on 'tickets' is not index-covered. A cross-column Or is not index-covered; only a single-column Or folded to In is portable. Nearest index 'ix_status_assignee' (status ASC, assignee ASC). Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").",
+            result.Refusal!.Message);
+        Assert.Null(result.Refusal.SuggestedIndex);
+    }
+
+    [Fact]
+    public void Non_index_representable_predicate_does_not_suggest_an_index()
+    {
+        var result = Check(
+            new Predicate.Substring(Status, "open", Anchor.Contains),
+            [],
+            Paging.None,
+            Index("ix_status", "status"));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal(
+            "Query on 'tickets' is not index-covered. The query contains a predicate that cannot be represented by an ordered index. Nearest index 'ix_status' (status ASC). Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").",
+            result.Refusal!.Message);
+        Assert.Null(result.Refusal.SuggestedIndex);
     }
 
     [Fact]
@@ -464,7 +557,10 @@ public sealed class CoverageCheckerTests
             ResultShape.TotalCount.Instance);
 
         Assert.False(unbounded.IsCovered);
-        Assert.Contains("unbounded Count", unbounded.Refusal!.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            "Query on 'tickets' is not index-covered. An unbounded Count is not index-covered; full counts are scans. Nearest index 'ix_status' (status ASC). Add: [GwIndex(\"ix_tickets\", \"<query-bound> ASC\")] Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").",
+            unbounded.Refusal!.Message);
+        Assert.Equal("[GwIndex(\"ix_tickets\", \"<query-bound> ASC\")]", unbounded.Refusal.SuggestedDeclaration);
         Assert.True(bounded.IsCovered);
     }
 
@@ -532,7 +628,7 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
-    public void Unsupported_element_predicates_name_the_element_set_in_the_suggestion()
+    public void Unsupported_element_predicates_do_not_suggest_an_index()
     {
         var result = Check(
             new Predicate.ElementOf(
@@ -545,11 +641,12 @@ public sealed class CoverageCheckerTests
 
         Assert.False(result.IsCovered);
         Assert.Equal("GW-COVER-016", result.Refusal!.Code);
-        Assert.Contains("ticket_id", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
+        Assert.Null(result.Refusal.SuggestedIndex);
+        Assert.DoesNotContain("Add: [GwIndex(", result.Refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Refusal_diagnostic_names_nearest_index_and_emits_covering_declaration()
+    public void Refusal_diagnostic_names_nearest_index_without_an_index_suggestion()
     {
         var result = Check(
             new Predicate.And([
@@ -560,10 +657,11 @@ public sealed class CoverageCheckerTests
             Index("ix_tickets_status_created", "status", new CoverageIndexColumn("created_at", OrderDirection.Descending)));
 
         Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
         Assert.Equal("ix_tickets_status_created", result.Refusal!.NearestIndex!.Name);
         Assert.Contains("ix_tickets_status_created", result.Refusal.Message, StringComparison.Ordinal);
-        Assert.Contains("assignee", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
-        Assert.Contains("GwIndex", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
+        Assert.Null(result.Refusal.SuggestedIndex);
+        Assert.DoesNotContain("Add: [GwIndex(", result.Refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

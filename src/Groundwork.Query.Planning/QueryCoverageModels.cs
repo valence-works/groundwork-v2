@@ -87,7 +87,8 @@ public sealed record CoverageIndex
     /// — and withholds the index suggestion there, because no index improves on a single key
     /// lookup. Naming the key's columns is not itself that shape: a disjunction, a range, or an
     /// equality over part of a composite key can name exactly those columns and still need an
-    /// index, and each keeps the ordinary suggestion.
+    /// index when the refusal is actionable. A nonportable <c>GW-COVER-016</c> refusal never keeps
+    /// the suggestion, because declaring an ordered index cannot clear that refusal.
     /// </summary>
     public bool IsDeclaredKey { get; init; }
 
