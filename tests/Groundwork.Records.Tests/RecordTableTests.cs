@@ -375,6 +375,18 @@ public sealed class RecordTableTests
             row => row.Get<string>("name"),
             row => row.Get<long>("count")));
         Assert.Contains("must bind every declared alias", missingGroup.Message, StringComparison.Ordinal);
+
+        var constantResult = Assert.Throws<ArgumentException>(() => table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => 0));
+        Assert.Contains("must bind at least one declared alias", constantResult.Message, StringComparison.Ordinal);
+
+        var subsetResult = table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => new { Count = row.Get<long>("count") });
+        Assert.NotNull(subsetResult);
     }
 
     [Fact]

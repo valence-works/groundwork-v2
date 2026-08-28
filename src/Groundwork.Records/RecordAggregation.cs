@@ -34,7 +34,11 @@ public sealed class RecordAggregationBinding<TGroup, TResult>
             groupTypes,
             "group",
             requireAllAliases: true);
-        this.resultSelector = RecordAggregationSelector.Compile(resultSelector, resultTypes, "result");
+        this.resultSelector = RecordAggregationSelector.Compile(
+            resultSelector,
+            resultTypes,
+            "result",
+            requireAnyAlias: true);
     }
 
     /// <summary>The name of the declaration this binding invokes.</summary>
@@ -210,7 +214,8 @@ internal static class RecordAggregationSelector
         Expression<Func<AggregationRow, TResult>> selector,
         IReadOnlyDictionary<string, Type> aliases,
         string selectorKind,
-        bool requireAllAliases = false)
+        bool requireAllAliases = false,
+        bool requireAnyAlias = false)
     {
         ArgumentNullException.ThrowIfNull(selector);
         ArgumentNullException.ThrowIfNull(aliases);
@@ -218,6 +223,8 @@ internal static class RecordAggregationSelector
         visitor.Visit(selector.Body);
         if (requireAllAliases)
             visitor.EnsureAllAliasesRead();
+        else if (requireAnyAlias)
+            visitor.EnsureAnyAliasRead();
         return selector.Compile();
     }
 
@@ -254,6 +261,14 @@ internal static class RecordAggregationSelector
                 throw new ArgumentException(
                     $"A typed aggregation {selectorKind} selector must bind every declared alias; " +
                     $"missing '{string.Join("', '", missing)}'.",
+                    nameof(aliases));
+        }
+
+        public void EnsureAnyAliasRead()
+        {
+            if (usedAliases.Count == 0)
+                throw new ArgumentException(
+                    $"A typed aggregation {selectorKind} selector must bind at least one declared alias.",
                     nameof(aliases));
         }
 
