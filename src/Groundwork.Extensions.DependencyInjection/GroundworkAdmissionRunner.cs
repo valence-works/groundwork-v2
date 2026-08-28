@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Store;
 using Microsoft.Extensions.Options;
 
@@ -9,15 +10,10 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// host started on.
 /// </summary>
 /// <remarks>
-/// Admission is inspect-only: it asks each connection for the difference between the deployed
-/// catalog and the compiled declaration, and it verifies that the deployed database really
-/// advertises the capabilities the application said it needs. It does not write, and it does not
-/// apply physical schema unless a connection explicitly opted into development auto-apply.
+/// Admission asks each connection for the kernel's runtime admission result. It does not write, and
+/// it does not apply physical schema unless a connection explicitly opted into development
+/// auto-apply; the provider seam delegates that choice to the kernel's plan-protection rule.
 /// </remarks>
-/// <seealso href="https://github.com/valence-works/groundwork-v2/issues/201">
-/// The drift classification below duplicates a rule the kernel owns, because that rule is not
-/// reachable through the public Store contract yet. Read the comment above the mapping methods.
-/// </seealso>
 public sealed class GroundworkAdmissionRunner
 {
     private readonly IGroundworkConnections connections;
@@ -90,64 +86,46 @@ public sealed class GroundworkAdmissionRunner
         StorageUnit unit,
         bool autoApply)
     {
-        var pending = connection.Schema.Diff(unit).Changes;
-        if (pending.Count == 0)
-            return new GroundworkUnitAdmission(unit.Name, GroundworkAdmissionStatus.Ready, []);
+        // Establish the kernel verdict before asking the reporting-only public diff surface. The
+        // first inspect is intentionally read-only; when auto-apply is enabled the second inspect
+        // executes the same provider seam after the pending display has been captured.
+        var initial = connection.Schema.InspectRuntimeAdmission(
+            unit,
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = false });
 
-        // "Additive" here approximates PhysicalSchemaPlanProtection.IsSafe from the public SchemaDiff.
-        // It is the weaker of the two tests — see the note above IsAdditive, and #201.
-        if (autoApply && pending.All(IsAdditive))
+        // Keep the established public description for logs and health data. It is deliberately
+        // reporting only: the admission verdict and any auto-apply decision come from the provider
+        // seam below, not from the legacy display vocabulary.
+        IReadOnlyList<SchemaChange> pending;
+        try
         {
-            connection.Schema.Apply(unit);
-            return new GroundworkUnitAdmission(unit.Name, GroundworkAdmissionStatus.Ready, pending, Applied: true);
+            pending = connection.Schema.Diff(unit).Changes;
         }
-
-        var status = pending.Any(IsColumnLevel)
-            ? GroundworkAdmissionStatus.Blocked
-            : GroundworkAdmissionStatus.Degraded;
-        return new GroundworkUnitAdmission(unit.Name, status, pending);
+        catch
+        {
+            // Reporting must not replace a kernel admission verdict. A provider may reject its
+            // public display diff for a declaration that the seam has already classified as
+            // blocked, while the unit status remains actionable.
+            pending = [];
+        }
+        var result = autoApply
+            ? connection.Schema.InspectRuntimeAdmission(
+                unit,
+                new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true })
+            : initial;
+        return new GroundworkUnitAdmission(
+            unit.Name,
+            Status(result),
+            pending,
+            Applied: result.AppliedOperationCount != 0);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // TEMPORARY DUPLICATE — this is not the authority. See
-    // https://github.com/valence-works/groundwork-v2/issues/201.
-    //
-    // Provider schema executors decide what is column drift (GW-RUNTIME-001) versus index drift
-    // (GW-RUNTIME-002), and PhysicalSchemaPlanProtection decides what a startup auto-apply may
-    // execute without authorization. Neither is reachable from IStorageProviderConnection —
-    // GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission needs an IPhysicalSchemaExecutor and
-    // a PhysicalSchemaTarget, which are provider-internal — so this maps the public SchemaDiff onto
-    // the same intent by hand.
-    //
-    // Two implementations of one rule, with nothing keeping them in step, is the shape #74 was about
-    // and #196 removed by making one physicalization the only implementation. It can disagree in both
-    // directions: a Ready verdict where the first session open would refuse with GW-RUNTIME-001, or a
-    // Blocked verdict where the runtime would have admitted. Do not extend these methods to cover new
-    // cases — close #201 by exposing runtime admission on the Store contract and delete them.
-    //
-    // This has already drifted once, before it shipped: the additive list below included
-    // UpdateAggregationProfile, which providers emit for a *changed* deployed profile as well as a new
-    // one. The kernel's rule is that anything semantic needs explicit authorization. Read that as
-    // evidence for #201 rather than as a list that is now correct.
-    // ---------------------------------------------------------------------------------------------
-
-    private static bool IsColumnLevel(SchemaChange change) => change.Kind is
-        SchemaChangeKind.CreateStorageUnit or
-        SchemaChangeKind.AddColumn or
-        SchemaChangeKind.AddDerivedColumn;
-
-    /// <summary>
-    /// Only what genuinely adds without altering anything already deployed.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="SchemaChangeKind.UpdateAggregationProfile"/> is deliberately absent. Providers emit
-    /// that kind both for a profile that is new and for one that already exists deployed, so applying
-    /// it can redefine how an aggregation behaves against stored data. That is a semantic migration,
-    /// and the kernel requires explicit authorization for those rather than a startup switch.
-    /// </remarks>
-    private static bool IsAdditive(SchemaChange change) => change.Kind is
-        SchemaChangeKind.CreateStorageUnit or
-        SchemaChangeKind.AddColumn or
-        SchemaChangeKind.AddDerivedColumn or
-        SchemaChangeKind.CreateIndex;
+    private static GroundworkAdmissionStatus Status(GroundworkRuntimeSchemaAdmissionResult result)
+        => result.Status switch
+        {
+            GroundworkRuntimeSchemaAdmissionStatus.Ready => GroundworkAdmissionStatus.Ready,
+            GroundworkRuntimeSchemaAdmissionStatus.Degraded => GroundworkAdmissionStatus.Degraded,
+            GroundworkRuntimeSchemaAdmissionStatus.Blocked => GroundworkAdmissionStatus.Blocked,
+            _ => throw new ArgumentOutOfRangeException(nameof(result))
+        };
 }

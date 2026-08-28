@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
+using System.Collections.Immutable;
 using System.Text.Json;
 using Xunit;
 
@@ -405,6 +406,37 @@ public sealed class K5SchemaEvolutionTests
         Assert.Contains(result.Refusals, diagnostic => diagnostic.Code == "GW-SCHEMA-007" &&
             diagnostic.Message.Contains("backfill-column", StringComparison.Ordinal));
         Assert.Null(executor.AppliedState);
+    }
+
+    [Fact]
+    public void Safe_auto_apply_reports_ready_from_the_post_apply_inspection()
+    {
+        var result = AutoApplyAddedIndex([]);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Application?.Outcome);
+        Assert.True(result.IsReady);
+        Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Ready, result.Status);
+        Assert.Empty(result.Refusals);
+        Assert.Empty(result.Plan.Operations);
+        Assert.Empty(result.PendingOperations);
+    }
+
+    [Fact]
+    public void Safe_auto_apply_preserves_unrelated_post_apply_index_drift()
+    {
+        var drift = new SchemaRefusal(
+            "GW-RUNTIME-002",
+            "The already-applied index is still missing after auto-apply.",
+            "indexes.by_existing");
+        var result = AutoApplyAddedIndex([drift]);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Application?.Outcome);
+        Assert.True(result.IsReady);
+        Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Degraded, result.Status);
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-RUNTIME-002" &&
+            refusal.Path == "indexes.by_existing");
+        Assert.Empty(result.Plan.Operations);
+        Assert.Empty(result.PendingOperations);
     }
 
     [Fact]
@@ -919,6 +951,34 @@ public sealed class K5SchemaEvolutionTests
 
     private static PhysicalSchemaTarget CreateTarget(StorageUnit unit) =>
         new(new SchemaSubject(unit), Provider);
+
+    private static GroundworkRuntimeSchemaAdmissionResult AutoApplyAddedIndex(
+        ImmutableArray<SchemaRefusal> postApplyIndexDrift)
+    {
+        var original = CreateUnit(includePriority: false);
+        var desired = original with
+        {
+            Indexes = [new IndexDefinition { Name = "by_name", Columns = [new IndexColumn("name")] }]
+        };
+        var executor = new FakeExecutor { PostApplyIndexDrift = postApplyIndexDrift };
+        PhysicalSchemaApplication.Apply(CreateTarget(original), executor, PlannedAt.AddMinutes(1));
+
+        var inspected = new PhysicalSchemaInspectionResult(
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            IsAppliedSchemaValid: true,
+            IndexDrift:
+            [
+                new SchemaRefusal(
+                    "GW-RUNTIME-002",
+                    "An index was reported as drifting before safe auto-apply.",
+                    "indexes.by_existing")
+            ]);
+        return GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+            executor,
+            CreateTarget(desired),
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true },
+            inspected: inspected);
+    }
 
     private static StorageUnit CreateUnit(bool includePriority) => new()
     {
@@ -1519,6 +1579,8 @@ public sealed class K5SchemaEvolutionTests
 
         public List<PhysicalSchemaOperationAcknowledgement> Acknowledgements { get; } = [];
 
+        public ImmutableArray<SchemaRefusal> PostApplyIndexDrift { get; init; } = [];
+
         public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target) =>
             new Lock(target);
 
@@ -1528,7 +1590,10 @@ public sealed class K5SchemaEvolutionTests
             AppliedState is null ? PhysicalSchemaHistoryState.Empty : PhysicalSchemaHistoryState.FromApplied(AppliedState);
 
         public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target) =>
-            new(AppliedState is null ? PhysicalSchemaHistoryState.Empty : PhysicalSchemaHistoryState.FromApplied(AppliedState), true);
+            new(
+                AppliedState is null ? PhysicalSchemaHistoryState.Empty : PhysicalSchemaHistoryState.FromApplied(AppliedState),
+                true,
+                IndexDrift: PostApplyIndexDrift);
 
         public PhysicalSchemaOperationAcknowledgement ApplyOperation(
             PhysicalSchemaTargetIdentity target,
