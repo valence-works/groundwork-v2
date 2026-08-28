@@ -143,15 +143,19 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
-    public void First_and_single_require_explicit_ordering()
+    public void First_requires_explicit_ordering_but_single_does_not()
     {
         var query = new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.IsOpen);
 
         var first = Assert.Throws<LinqTranslationException>(() => query.First());
-        var single = Assert.Throws<LinqTranslationException>(() => query.Single());
+        var single = query.Single().Request;
 
         Assert.Equal("GW-LINQ-111", Assert.Single(first.Diagnostics).Code);
-        Assert.Equal("GW-LINQ-111", Assert.Single(single.Diagnostics).Code);
+        Assert.IsType<ResultShape.Single>(single.Result);
+
+        var emptyFirst = query.OrderBy(ticket => ticket.CreatedAt).Take(0).First().Request;
+        Assert.IsType<Predicate.AlwaysFalse>(emptyFirst.Where);
+        Assert.Equal(1, emptyFirst.Paging.Limit);
     }
 
     [Fact]

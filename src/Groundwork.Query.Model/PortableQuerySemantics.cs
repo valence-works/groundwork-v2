@@ -66,14 +66,8 @@ public static class PortableQuerySemantics
                 Refuse(refusals, "GW-SEM-ORDER-005", "Boolean ordering is not portable without an explicit three-state projected key; order the declared projection instead.", "order." + term.Column.Name);
         }
 
-        if (!request.Projection.AllColumns)
-        {
-            foreach (var column in request.Projection.Columns)
-                ValidateColumn(column, refusals, "projection." + column.Name);
-        }
-
         if (request.Result.RequiresDeterministicOrder && request.Order.Length == 0)
-            Refuse(refusals, "GW-SEM-ORDER-006", "First and Single queries require an explicit deterministic order; add an OrderBy term.", "order");
+            Refuse(refusals, "GW-SEM-ORDER-006", "First and FirstOrDefault queries require an explicit deterministic order; add an OrderBy term.", "order");
 
         if (request.LatestPerKey is not null)
         {

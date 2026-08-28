@@ -129,7 +129,7 @@ public abstract record ResultShape
         public static Single Instance { get; } = new();
         public override bool IncludesTotalCount => false;
         public override int? MaxRows => 2;
-        public override bool RequiresDeterministicOrder => true;
+        public override bool RequiresDeterministicOrder => false;
     }
 
     public sealed record SingleOrDefault : ResultShape
@@ -137,7 +137,7 @@ public abstract record ResultShape
         public static SingleOrDefault Instance { get; } = new();
         public override bool IncludesTotalCount => false;
         public override int? MaxRows => 2;
-        public override bool RequiresDeterministicOrder => true;
+        public override bool RequiresDeterministicOrder => false;
     }
 }
 

@@ -33,7 +33,9 @@ excluded null, except for match-none. This preserves the v1 sparse-index safety 
 `ResultShape.Rows` never adds a count expression. `ResultShape.TotalCount` adds the provider
 window-count projection. `ResultShape.First` and `ResultShape.FirstOrDefault` execute with a
 one-row bound, while `ResultShape.Single` and `ResultShape.SingleOrDefault` use a two-row bound
-so an over-one result can be detected. All four cardinality shapes require an explicit order.
+so an over-one result can be detected. `First` and `FirstOrDefault` require an explicit order;
+`Single` and `SingleOrDefault` use their bounded probe to detect an over-one result without
+imposing an order.
 `QueryRequest.Distinct` deduplicates the public projection before paging and cardinality checks.
 Provider sessions expose this through the public `IStorageSession.Query`
 operation, returning immutable rows, an optional `TotalCount`, and a bound next continuation token.

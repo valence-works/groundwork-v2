@@ -60,7 +60,9 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
 
     public IGwQueryable<T> Take(int count)
     {
-        if (count <= 0) throw new ArgumentOutOfRangeException(nameof(count));
+        if (count < 0) throw new ArgumentOutOfRangeException(nameof(count));
+        if (count == 0)
+            return New(state with { Where = Predicate.AlwaysFalse.Instance, Take = null });
         return New(state with { Take = count });
     }
 
@@ -105,10 +107,10 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
 
     private QueryRequest CardinalityRequest(ResultShape result, int limit)
     {
-        if (state.Order.Length == 0)
+        if (result.RequiresDeterministicOrder && state.Order.Length == 0)
             throw new LinqTranslationException(new[]
             {
-                new LinqDiagnostic("GW-LINQ-111", "First and Single queries require an explicit deterministic order; add an OrderBy term.", Expression.Empty())
+                new LinqDiagnostic("GW-LINQ-111", "First and FirstOrDefault queries require an explicit deterministic order; add an OrderBy term.", Expression.Empty())
             });
         var offset = state.Skip ?? 0;
         var boundedLimit = state.Take is int take ? Math.Min(take, limit) : limit;

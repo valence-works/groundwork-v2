@@ -57,7 +57,7 @@ which `Validate` returns no refusals.
   appends the identity tie-break before paging. Callers must provide the
   corresponding explicit null order; `ProviderDefault` is refused. Guid
   ordering uses the same network-byte key; binary ordering is refused.
-- `First` and `Single` cardinality queries require a caller-supplied deterministic order. The
+- `First` and `FirstOrDefault` cardinality queries require a caller-supplied deterministic order. The
   model refuses an un-ordered cardinality request with `GW-SEM-ORDER-006`; `First` reads at most
   one row, while `Single` reads at most two so an over-one result can be detected.
 

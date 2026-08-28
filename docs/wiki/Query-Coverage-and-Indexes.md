@@ -66,7 +66,7 @@ attribute, from referenced assemblies via `GroundworkSchemaMetadata`, or from a 
 The closed query surface it understands: `Table<T>()`, `Where`, `WhereIf`, ordering, `Skip`/`Take`,
 mapped-column `Select`, `Distinct`, and the terminals `ToList`, `ToListAsync`, `Count`,
 `CountAsync`, `Any`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, and `SingleOrDefault` (plus
-their async adapter forms). Cardinality terminals require an explicit deterministic order. A
+their async adapter forms). `First` and `FirstOrDefault` require an explicit deterministic order. A
 distinct projection is covered only when every projected column is present in the candidate index,
 unless the query carries an explicit accepted scan.
 

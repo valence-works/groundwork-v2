@@ -57,7 +57,7 @@ The query-shape diagnostics are versioned separately from the predicate corpus:
 
 | Code | Query-shape refusal | Fix |
 | --- | --- | --- |
-| GW-LINQ-111 | Cardinality query without deterministic order | Add an explicit `OrderBy` before `First` or `Single` |
+| GW-LINQ-111 | First/FirstOrDefault without deterministic order | Add an explicit `OrderBy` before `First` or `FirstOrDefault` |
 
 Closed terms are read from constants and closure fields without compiling an expression per query
 call. Unsupported expression nodes are rejected rather than evaluated on the client.

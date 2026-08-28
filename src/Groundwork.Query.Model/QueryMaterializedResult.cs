@@ -75,9 +75,11 @@ public static class QueryResultMaterializer
         var totalCount = request.Result.IncludesTotalCount &&
             source.FirstOrDefault(row => row.TryGetValue("__groundwork_total_count", out var value) && value is not null) is { } counted &&
             counted.TryGetValue("__groundwork_total_count", out var count) && count is not null
-                ? Convert.ToInt64(count, CultureInfo.InvariantCulture)
+                ? request.Distinct && effectiveSource.Length != 0
+                    ? effectiveSource.Length
+                    : Convert.ToInt64(count, CultureInfo.InvariantCulture)
                 : (long?)null;
-        if (!sourceIncludesContinuation && request.Paging.ContinuationToken is { } token)
+        if ((!sourceIncludesContinuation || request.Distinct) && request.Paging.ContinuationToken is { } token)
         {
             IReadOnlyList<QueryConstant> cursor;
             try
@@ -91,19 +93,17 @@ public static class QueryResultMaterializer
             var order = options.GetEffectiveOrder(executionRequest);
             effectiveSource = effectiveSource.Where(row => IsAfter(row, order, cursor)).ToArray();
         }
-        var offset = sourceIncludesRequestedOffset ? 0 : request.Paging.Offset ?? 0;
-        var limit = request.Result.MaxRows ?? request.Paging.Limit;
+        // A provider page is over raw rows. Distinct changes the page's unit to
+        // projected values, so the provider execution request deliberately leaves
+        // this window unpaged and the materializer applies it after de-duplication.
+        var offset = sourceIncludesRequestedOffset && !request.Distinct ? 0 : request.Paging.Offset ?? 0;
+        var limit = request.Result.MaxRows is int maxRows
+            ? request.Paging.Limit is int requestedLimit ? Math.Min(requestedLimit, maxRows) : maxRows
+            : request.Paging.Limit;
         var hasMore = limit is int pageSize && effectiveSource.Count() > checked(offset + pageSize);
         var visible = effectiveSource.Skip(offset).Take(limit ?? int.MaxValue).ToArray();
-        switch (request.Result)
-        {
-            case ResultShape.First when visible.Length == 0:
-                throw new InvalidOperationException("Sequence contains no elements.");
-            case ResultShape.Single when visible.Length == 0:
-                throw new InvalidOperationException("Sequence contains no elements.");
-            case ResultShape.Single or ResultShape.SingleOrDefault when visible.Length > 1:
-                throw new InvalidOperationException("Sequence contains more than one element.");
-        }
+        if (request.Result is ResultShape.Single or ResultShape.SingleOrDefault && visible.Length > 1)
+            throw new InvalidOperationException("Sequence contains more than one element.");
         var effectiveOrder = options.GetEffectiveOrder(executionRequest);
         string? nextToken = null;
         if (hasMore && effectiveOrder.Length != 0 && visible.Length != 0)
@@ -240,15 +240,18 @@ public static class QueryResultMaterializer
 /// <summary>Builds the internal execution request without changing the public query binding.</summary>
 public static class QueryRequestExecution
 {
-    /// <summary>Bounds a direct model request for a First/Single result shape.</summary>
+    /// <summary>Bounds a direct model request for a cardinality result shape.</summary>
     public static QueryRequest ForResultShape(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (request.Result.MaxRows is not int maxRows)
             return request;
+        var limit = request.Paging.Limit is int requested
+            ? Math.Min(requested, maxRows)
+            : maxRows;
         var paging = request.Paging.ContinuationToken is { } token
-            ? Paging.Continuation(token, maxRows)
-            : Paging.OffsetLimit(request.Paging.Offset ?? 0, maxRows);
+            ? Paging.Continuation(token, limit)
+            : Paging.OffsetLimit(request.Paging.Offset ?? 0, limit);
         return ReferenceEquals(paging, request.Paging)
             ? request
             : new QueryRequest(request.Table, request.Where, request.Order, request.Projection, paging,
@@ -284,13 +287,15 @@ public static class QueryRequestExecution
 
     /// <summary>
     /// Builds a provider execution request that answers a count with the provider's total-count
-    /// shape over a single-row page, so the count never materializes the matching rows.
+    /// shape. Distinct counts retain the full source so projected values can be de-duplicated
+    /// before the total is materialized; ordinary counts use a single-row probe.
     /// </summary>
     public static QueryRequest ForProviderCount(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            ProbePaging(request.Paging, keepOffset: false), ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+            request.Distinct ? Paging.None : ProbePaging(request.Paging, keepOffset: false),
+            ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -339,7 +344,11 @@ public static class QueryRequestExecution
         };
     }
 
-    public static QueryRequest ForPage(QueryRequest request, QueryRenderOptions options)
+    /// <summary>
+    /// Builds the provider page request. Distinct queries fetch the ordered source without a
+    /// raw-row window because their offset and limit apply only after projected values are deduped.
+    /// </summary>
+    public static QueryRequest ForProviderPage(QueryRequest request, QueryRenderOptions options)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
@@ -357,11 +366,13 @@ public static class QueryRequestExecution
             projection = Projection.ColumnsOnly(columns);
         }
 
-        var paging = request.Paging;
-        if (request.Paging.Limit is int limit)
+        var paging = request.Distinct
+            ? Paging.None
+            : request.Paging;
+        if (!request.Distinct && request.Paging.Limit is int limit)
         {
             var expandedLimit = request.Result.MaxRows is int maxRows
-                ? Math.Min(checked(limit + 1), maxRows)
+                ? Math.Min(limit, maxRows)
                 : checked(limit + 1);
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, expandedLimit)
@@ -369,7 +380,7 @@ public static class QueryRequestExecution
                     ? Paging.OffsetLimit(offset, expandedLimit)
                     : Paging.Keyset(expandedLimit);
         }
-        else if (request.Result.MaxRows is int maxRows)
+        else if (!request.Distinct && request.Result.MaxRows is int maxRows)
         {
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, maxRows)
@@ -386,4 +397,7 @@ public static class QueryRequestExecution
                 ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
             };
     }
+
+    public static QueryRequest ForPage(QueryRequest request, QueryRenderOptions options) =>
+        ForProviderPage(request, options);
 }

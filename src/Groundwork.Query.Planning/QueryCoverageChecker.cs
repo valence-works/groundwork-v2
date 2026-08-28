@@ -57,7 +57,7 @@ public static class QueryCoverageChecker
         if (request.Result.RequiresDeterministicOrder && request.Order.Length == 0)
             refusals.Add(new Refusal(
                 "GW-COVER-016",
-                "First and Single queries require an explicit deterministic order; add an OrderBy term."));
+                "First and FirstOrDefault queries require an explicit deterministic order; add an OrderBy term."));
         if (constraints.HasUnsupportedRange)
             refusals.Add(new Refusal(
                 "GW-COVER-016",
