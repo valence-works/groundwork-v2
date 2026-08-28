@@ -29,6 +29,41 @@ public sealed class AggregationConformanceTests
     }
 
     [Fact]
+    public void In_memory_public_session_executes_an_accepted_ad_hoc_shape()
+    {
+        using var connection = new InMemoryProviderFactory().Create("aggregation-adhoc-" + Guid.NewGuid().ToString("N"));
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation_adhoc_public"),
+            Name = "aggregation_adhoc_public",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new() { Name = "team", Type = PortableType.String, IsNullable = false },
+                new() { Name = "amount", Type = PortableType.Int32, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 1L, ["team"] = "a", ["amount"] = 2 }));
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = 2L, ["team"] = "a", ["amount"] = 3 }));
+
+        var query = AggregationQuery.ForAdHoc(
+            "support-summary",
+            ["team"],
+            [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")],
+            AggregationAcceptance.Allow(
+                "GW-AGG-0010", "temporary support report", "operations",
+                DateTimeOffset.UtcNow.AddDays(2), maxGroups: 5, maxInputRows: 10));
+        var row = Assert.Single(session.Aggregate(query).Rows);
+
+        Assert.Equal("a", row["team"]);
+        Assert.Equal(2L, row["count"]);
+        Assert.Equal(5L, row["total"]);
+    }
+
+    [Fact]
     public void SQLite_native_aggregation_is_bit_identical_to_the_portable_oracle()
     {
         var directory = Path.Combine(Path.GetTempPath(), "groundwork-aggregation-" + Guid.NewGuid().ToString("N"));

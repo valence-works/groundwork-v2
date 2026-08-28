@@ -766,7 +766,7 @@ public interface IStorageSession
         QueryRenderOptions? options = null,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Executes one named, closed aggregation profile with its declared budgets.</summary>
+    /// <summary>Executes one declared profile or an explicitly accepted ad-hoc closed-vocabulary profile.</summary>
     AggregationResult Aggregate(AggregationQuery query);
 
     ValueTask<AggregationResult> AggregateAsync(

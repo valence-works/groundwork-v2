@@ -314,7 +314,7 @@ public interface IMongoStorageSession
         QueryRenderOptions? options = null,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Executes one named, declared aggregation profile through the native provider.</summary>
+    /// <summary>Executes one declared or explicitly accepted ad-hoc aggregation profile through the native provider.</summary>
     AggregationResult Aggregate(AggregationQuery query);
 
     ValueTask<AggregationResult> AggregateAsync(

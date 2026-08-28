@@ -27,6 +27,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
         _ = typeof(PortabilityValidator);
         _ = typeof(AggregationOrderTerm);
+        _ = typeof(AggregationAcceptance);
         _ = typeof(AggregationQuery);
         _ = typeof(AggregationGroup);
         _ = typeof(AggregationGroup.Column);
@@ -82,6 +83,13 @@ internal static class PublicApiApprovalFixture
         {
             OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending)]
         };
+        _ = AggregationQuery.ForAdHoc(
+            "summary",
+            ["group"],
+            [new Aggregate.Count("count")],
+            AggregationAcceptance.Allow(
+                "GW-AGG-0001", "support report", "operations",
+                DateTimeOffset.UtcNow.AddDays(30), maxGroups: 100, maxInputRows: 1_000));
         _ = AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1));
         _ = AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt");
         _ = PortabilityValidator.MaximumPortableIdentifierLength;

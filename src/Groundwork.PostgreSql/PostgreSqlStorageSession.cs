@@ -190,7 +190,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
         var decode = (string name, object? value) =>
         {
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);

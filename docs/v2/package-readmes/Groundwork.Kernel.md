@@ -5,6 +5,9 @@ The declaration layer. `StorageUnit`, `ColumnDefinition`, `PortableType`, `KeyDe
 `PortabilityValidator`, the capability registry, and the schema subject and fingerprint model that
 startup admission compares against.
 
+Runtime-composed aggregation uses the same closed `AggregationGroup`/`Aggregate` vocabulary and
+requires an expiring `AggregationAcceptance` with explicit `MaxGroups` and `MaxInputRows` budgets.
+
 Kernel declarations describe *physical* storage in provider-neutral terms. They do not know about
 records, documents, connections, or any particular database. A declaration that cannot be honoured
 portably is refused at declaration time rather than at the first write.

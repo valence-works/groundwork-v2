@@ -23,6 +23,32 @@ alias or operator is refused. Source predicates use the existing portable `Predi
 bound to the storage unit's declared columns and literal types during admission. Callers cannot
 submit an aggregate expression, change a reducer, or raise a profile's budgets.
 
+## Accepted ad-hoc profiles
+
+Operational reports that cannot be known at declaration time may compose a profile at runtime, but
+the composition remains limited to the same `AggregationGroup` and `Aggregate` closed vocabulary.
+The caller must carry an explicit, expiring acceptance; its budgets replace any caller-supplied
+profile budgets:
+
+```csharp
+var acceptance = AggregationAcceptance.Allow(
+    "GW-AGG-0001", "temporary support report", "operations",
+    expiresOn: new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero),
+    maxGroups: 100, maxInputRows: 10_000);
+var query = AggregationQuery.ForAdHoc(
+    "support-summary",
+    ["team"],
+    [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")],
+    acceptance);
+var result = session.Aggregate(query);
+```
+
+`AggregationAcceptance` requires an id, reason, owner, expiry date, and positive `MaxGroups` /
+`MaxInputRows` budgets. Missing or expired acceptance is refused before provider I/O, and the
+the acceptance value itself is the operational inventory entry, alongside accepted-scan entries.
+Ad-hoc profiles are never persisted as schema declarations. Scoped sessions still bind the
+operation to their scope, and privileged cross-scope sessions refuse aggregation.
+
 This ordering matters when repeated records share a group. For example, a trace can contain an
 older row with `service = "orders"`, `duration = 7`, and a newer row with `service = "billing"`,
 `duration = 11`. A source predicate for `service == "orders"` reduces only the matching row and

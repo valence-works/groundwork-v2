@@ -100,6 +100,29 @@ They are not interchangeable. Worked example — a trace with an older row
 Callers **cannot** submit an aggregate expression, change a reducer, or raise a profile's budgets.
 Those are declaration-time decisions.
 
+## Accepted ad-hoc aggregation
+
+For a report whose grouping and reducers are selected at runtime, compose an ad-hoc query from the
+same closed `AggregationGroup` and `Aggregate` vocabulary and attach an explicit acceptance:
+
+```csharp
+var query = AggregationQuery.ForAdHoc(
+    "support-summary",
+    ["team"],
+    [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")],
+    AggregationAcceptance.Allow(
+        "GW-AGG-0001", "temporary support report", "operations",
+        DateTimeOffset.UtcNow.AddDays(30), maxGroups: 100, maxInputRows: 10_000));
+var result = session.Aggregate(query);
+```
+
+`AggregationAcceptance` is the operational inventory entry: id, reason, owner, expiry,
+`MaxGroups`, and `MaxInputRows` are all required. An ad-hoc query without an active acceptance,
+or with an expired acceptance, is refused before provider I/O. Its budgets override any profile
+budget supplied during composition, and its shape is not persisted in schema history. Scoped
+sessions retain their scope restriction; privileged cross-scope sessions continue to refuse
+aggregation.
+
 Provider rendering: SQL emits the source predicate in the base `WHERE`; MongoDB emits `$match` before
 `$group`; the reference provider filters its input before reduction. Relational aggregation source
 predicates use the **same ordinary renderer fragment** as `QueryRequest`, so provider hooks, portable

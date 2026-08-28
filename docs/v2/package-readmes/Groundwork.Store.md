@@ -5,6 +5,9 @@ The runtime contract that providers implement and applications call.
 `WriteOutcome`, `RowWrite`, `BatchWriteOptions`, and the execution of retention, exact append, and
 durable idempotency.
 
+Sessions execute declared aggregation profiles and runtime-composed profiles only when the latter
+carry an active `AggregationAcceptance`; scoped and privileged-access refusals apply to both.
+
 Store sits directly above `Groundwork.Kernel` and knows nothing about contract families: a provider
 implementing these interfaces never learns that `Groundwork.Records` or `Groundwork.Documents`
 exists. Scoped sessions are tenant-isolated; cross-scope reads require the explicit, query-only

@@ -258,6 +258,7 @@ Grouped by concern:
 | `GW-AGG-TYPE-001`…`004`, `GW-AGG-COLUMN-001`/`002` | Reducer types and columns |
 | `GW-AGG-SUM-001` | `Sum` accepts only `Int32`/`Int64`/`Decimal` |
 | `GW-AGG-FIRST-001` | `FirstBy` requires a non-null orderable order column |
+| `GW-AGG-ADHOC-001`…`004` | Missing, expired, or mismatched ad-hoc acceptance |
 
 ---
 
