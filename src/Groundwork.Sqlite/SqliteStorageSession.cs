@@ -528,8 +528,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
     public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments)
     {
         ArgumentNullException.ThrowIfNull(where);
-        ArgumentNullException.ThrowIfNull(assignments);
-        var columns = assignments.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
+        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
+        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
         return ExecuteWrite(() =>
         {
             var rendered = new SqliteQueryRenderer().RenderUpdateWhere(
@@ -540,7 +540,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
             {
                 command.Parameters.AddWithValue(
                     "@" + rendered.AssignmentParameters[index],
-                    ToSqlite(assignments[columns[index]], Column(columns[index])) ?? DBNull.Value);
+                    ToSqlite(physical[columns[index]], Column(columns[index])) ?? DBNull.Value);
             }
             commandObserver?.Observe(new ProviderCommandEvent(
                 "sqlite.update-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));

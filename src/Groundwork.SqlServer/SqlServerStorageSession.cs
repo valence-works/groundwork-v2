@@ -558,8 +558,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IProviderBoundS
         RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(where);
-        ArgumentNullException.ThrowIfNull(assignments);
-        var columns = assignments.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
+        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
+        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
         return ExecuteWrite(async () =>
         {
             var rendered = new SqlServerQueryRenderer().RenderUpdateWhere(
@@ -571,7 +571,7 @@ internal sealed class SqlServerStorageSession : IStorageSession, IProviderBoundS
                 SqlServerProviderConnection.AddParameter(
                     command,
                     "@" + rendered.AssignmentParameters[index],
-                    assignments[columns[index]],
+                    physical[columns[index]],
                     Column(columns[index]));
             }
             commandObserver?.Observe(new ProviderCommandEvent(

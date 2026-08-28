@@ -27,8 +27,8 @@ public static class SetMutationSessionExtensions
         SetMutationOptions? options = null)
     {
         EnsureAccess(session, "update-where");
-        var (native, predicate, physical) = PrepareUpdate(session, where, assignments, options);
-        return native.UpdateWhere(predicate, physical);
+        var (native, predicate, validated) = PrepareUpdate(session, where, assignments, options);
+        return native.UpdateWhere(predicate, validated);
     }
 
     public static ValueTask<SetMutationResult> UpdateWhereAsync(
@@ -39,8 +39,8 @@ public static class SetMutationSessionExtensions
         CancellationToken cancellationToken = default)
     {
         EnsureAccess(session, "update-where");
-        var (native, predicate, physical) = PrepareUpdate(session, where, assignments, options);
-        return native.UpdateWhereAsync(predicate, physical, cancellationToken);
+        var (native, predicate, validated) = PrepareUpdate(session, where, assignments, options);
+        return native.UpdateWhereAsync(predicate, validated, cancellationToken);
     }
 
     public static SetMutationResult DeleteWhere(
@@ -77,7 +77,11 @@ public static class SetMutationSessionExtensions
         SetMutationOptions? options)
     {
         var native = Require(session);
-        var validated = SetMutationValidation.ValidateAssignments(session.Unit, assignments);
+        // Keep this snapshot logical. Native providers validate it again at their public
+        // capability seam before physicalizing it, while a unit-of-work wrapper can validate the
+        // same shape before its flush barrier. Passing an already-expanded dictionary here would
+        // make that second invariant check indistinguishable from a forged provider-owned value.
+        var validated = SetMutationValidation.ValidateLogicalAssignments(session.Unit, assignments);
         return (native, SetMutationAdmission.Admit(session, where, options), validated);
     }
 

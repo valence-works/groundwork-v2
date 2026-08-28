@@ -503,8 +503,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBound
         RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(where);
-        ArgumentNullException.ThrowIfNull(assignments);
-        var columns = assignments.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
+        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
+        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
         return ExecuteWrite(async () =>
         {
             var rendered = new PostgreSqlQueryRenderer().RenderUpdateWhere(
@@ -514,7 +514,7 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBound
             for (var index = 0; index < columns.Length; index++)
             {
                 Add(command, rendered.AssignmentParameters[index],
-                    ConvertValue(assignments[columns[index]], Column(columns[index])), columns[index]);
+                    ConvertValue(physical[columns[index]], Column(columns[index])), columns[index]);
             }
             Observe("postgresql.update-where", rendered.CommandText, ProviderCommandKind.Write);
             return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));

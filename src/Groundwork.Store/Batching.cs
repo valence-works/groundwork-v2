@@ -910,8 +910,9 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         Predicate where,
         IReadOnlyDictionary<string, object?> assignments)
     {
+        var validated = SetMutationValidation.ValidateLogicalAssignments(Unit, assignments);
         context.FlushAll();
-        return RequireSetMutation().UpdateWhere(where, assignments);
+        return RequireSetMutation().UpdateWhere(where, validated);
     }
 
     protected async ValueTask<SetMutationResult> UpdateWhereWithBarrierAsync(
@@ -919,8 +920,9 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         IReadOnlyDictionary<string, object?> assignments,
         CancellationToken cancellationToken)
     {
+        var validated = SetMutationValidation.ValidateLogicalAssignments(Unit, assignments);
         await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
-        return await RequireSetMutation().UpdateWhereAsync(where, assignments, cancellationToken).ConfigureAwait(false);
+        return await RequireSetMutation().UpdateWhereAsync(where, validated, cancellationToken).ConfigureAwait(false);
     }
 
     protected SetMutationResult DeleteWhereWithBarrier(Predicate where)

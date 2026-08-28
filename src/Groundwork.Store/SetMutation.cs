@@ -35,10 +35,12 @@ public sealed record SetMutationResult(long MatchedRows);
 /// deletes every row matching a portable predicate.
 /// </summary>
 /// <remarks>
-/// The seam receives an already-admitted predicate and already-validated, already-physicalized
-/// assignments. Admission — access, capability, assignment validity, portability, and index
-/// coverage — belongs to <see cref="SetMutationSessionExtensions"/> so that it is decided once for
-/// every provider rather than four times.
+/// The seam receives an already-admitted predicate and a logical assignment snapshot. Providers
+/// validate and physicalize assignments again at this public capability boundary, because callers
+/// may reach the optional interface directly and must not be able to mutate keys or provider-owned
+/// projections. Admission — access, capability, portability, and index coverage — belongs to
+/// <see cref="SetMutationSessionExtensions"/> so that it is decided once for every provider rather
+/// than four times.
 /// </remarks>
 public interface ISetMutationStorageSession
 {
@@ -57,11 +59,12 @@ public interface ISetMutationStorageSession
 internal static class SetMutationValidation
 {
     /// <summary>
-    /// Refuses an assignment set that no provider could apply faithfully, and expands it into the
-    /// physical assignment set — including the derived search-key column of every folded source
-    /// column it assigns, so a set-based update cannot leave a search key describing the old value.
+    /// Refuses an assignment set that no provider could apply faithfully and returns a defensive
+    /// logical snapshot. The physical expansion is a separate step so providers can enforce these
+    /// invariants again at their public capability seam without accepting already-expanded caller
+    /// input as if it had been validated.
     /// </summary>
-    public static IReadOnlyDictionary<string, object?> ValidateAssignments(
+    public static IReadOnlyDictionary<string, object?> ValidateLogicalAssignments(
         StorageUnit unit,
         IReadOnlyDictionary<string, object?> assignments)
     {
@@ -110,10 +113,33 @@ internal static class SetMutationValidation
                 definition, pair.Value, pair.Key, nameof(assignments), "Assignment value"));
         }
 
+        return new ReadOnlyDictionary<string, object?>(canonical);
+    }
+
+    /// <summary>
+    /// Converts a validated logical assignment snapshot to the provider's physical assignment
+    /// set. Providers call this after validating their public capability input, while the LINQ
+    /// and unit-of-work adapters validate logical values before admission or a flush barrier.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> PhysicalizeAssignments(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> logicalAssignments)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(logicalAssignments);
         return new ReadOnlyDictionary<string, object?>(
-            SearchKeyProjection.Populate(unit, canonical).ToDictionary(
+            SearchKeyProjection.Populate(unit, logicalAssignments).ToDictionary(
                 pair => pair.Key,
                 pair => pair.Value,
                 StringComparer.Ordinal));
     }
+
+    /// <summary>
+    /// Validates a public capability assignment and expands its logical values into the
+    /// provider-owned physical representation.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> ValidateAndPhysicalizeAssignments(
+        StorageUnit unit,
+        IReadOnlyDictionary<string, object?> assignments) =>
+        PhysicalizeAssignments(unit, ValidateLogicalAssignments(unit, assignments));
 }

@@ -1728,7 +1728,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         MongoExecution mode)
     {
         ArgumentNullException.ThrowIfNull(where);
-        ArgumentNullException.ThrowIfNull(assignments);
+        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
         ThrowIfDisposed();
         RefusePrivilegedOperation("update-where");
         var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(
@@ -1739,8 +1739,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
             });
         var set = new BsonDocument();
-        foreach (var column in assignments.Keys.OrderBy(column => column, StringComparer.Ordinal))
-            set[column] = MongoValueCodec.Encode(assignments[column], Unit.Columns.First(definition => definition.Name == column));
+        foreach (var column in physical.Keys.OrderBy(column => column, StringComparer.Ordinal))
+            set[column] = MongoValueCodec.Encode(physical[column], Unit.Columns.First(definition => definition.Name == column));
         var update = new BsonDocument { ["$set"] = set };
         if (Unit.Concurrency.IsOptimistic)
             update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);

@@ -108,6 +108,86 @@ public sealed class SqliteSetMutationTests
     }
 
     [Fact]
+    public async Task Direct_capability_calls_validate_logical_assignments_before_provider_work()
+    {
+        using var connection = Open();
+        var unit = FoldedUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "a",
+            ["status"] = "open",
+            ["name"] = "Alpha"
+        }));
+        var native = Assert.IsAssignableFrom<ISetMutationStorageSession>(session);
+
+        var key = Assert.Throws<ArgumentException>(() => native.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["id"] = "b" }));
+        Assert.Contains("GW-SET-002", key.Message, StringComparison.Ordinal);
+
+        var searchKey = Assert.Throws<ArgumentException>(() => native.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { [SearchKeyProjection.ColumnName("name")] = "forged" }));
+        Assert.Contains("GW-SET-002", searchKey.Message, StringComparison.Ordinal);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => native.UpdateWhereAsync(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["id"] = "c" }).AsTask());
+
+        Assert.Equal("Alpha", Assert.Single(Read(session, unit))["name"]);
+    }
+
+    [Fact]
+    public async Task Direct_capability_cannot_relocate_a_scoped_row_by_assigning_scope()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Scope = ScopePolicy.Scoped };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+        first.Insert(Row("a", "open", "first"));
+        second.Insert(Row("a", "open", "second"));
+        var native = Assert.IsAssignableFrom<ISetMutationStorageSession>(first);
+
+        var refusal = Assert.Throws<ArgumentException>(() => native.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { [ProviderOwnedColumns.Scope] = "scope-b" }));
+        Assert.Contains("GW-SET-002", refusal.Message, StringComparison.Ordinal);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => native.UpdateWhereAsync(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { [ProviderOwnedColumns.Scope] = "scope-b" }).AsTask());
+
+        Assert.Equal("first", Assert.Single(Read(first, unit))["label"]);
+        Assert.Equal("second", Assert.Single(Read(second, unit))["label"]);
+    }
+
+    [Fact]
+    public void Direct_unit_of_work_capability_refuses_invalid_assignments_before_flush()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+        {
+            var session = Assert.IsAssignableFrom<ISetMutationStorageSession>(work.OpenSession(unit));
+            work.Stage(RowWrite.Insert(unit, Row("staged", "open", "one")));
+
+            var refusal = Assert.Throws<ArgumentException>(() => session.UpdateWhere(
+                Status(unit, "open"),
+                new Dictionary<string, object?> { ["id"] = "moved" }));
+            Assert.Contains("GW-SET-002", refusal.Message, StringComparison.Ordinal);
+            work.Rollback();
+        }
+
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Null(reader.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "staged" })));
+    }
+
+    [Fact]
     public void A_privileged_cross_scope_session_cannot_mutate_a_set()
     {
         using var connection = Open();
