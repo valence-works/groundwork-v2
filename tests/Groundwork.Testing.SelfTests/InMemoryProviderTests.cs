@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
 using Groundwork.Store;
@@ -31,7 +32,9 @@ public sealed class InMemoryProviderTests
         using var connection = new InMemoryProviderFactory().Create("memory://aggregation-profile-drift");
 
         Assert.True(connection.Schema.Apply(initial).Applied);
-        Assert.False(connection.Schema.Apply(initial).Applied);
+        var initialReplay = connection.Schema.Apply(initial);
+        Assert.False(initialReplay.Applied);
+        Assert.True(initialReplay.IsNoOp);
 
         var changed = AggregationUnit(2_000);
         var diff = connection.Schema.Diff(changed);
@@ -39,7 +42,9 @@ public sealed class InMemoryProviderTests
         Assert.Contains(diff.Changes, change =>
             change.Kind == SchemaChangeKind.UpdateAggregationProfile && change.Identity == "summary");
         Assert.True(connection.Schema.Apply(changed).Applied);
-        Assert.False(connection.Schema.Apply(changed).Applied);
+        var changedReplay = connection.Schema.Apply(changed);
+        Assert.False(changedReplay.Applied);
+        Assert.True(changedReplay.IsNoOp);
     }
 
     [Fact]
@@ -246,7 +251,7 @@ public sealed class InMemoryProviderTests
 
         var migration = connection.Schema.Apply(folded);
         Assert.Contains(migration.Diff.Changes,
-            change => change.Kind == SchemaChangeKind.CreateIndex && change.Identity == "ix_name");
+            change => change.Kind == SchemaChangeKind.RebuildIndex && change.Identity == "ix_name");
 
         var session = connection.OpenSession(folded, StorageAccess.Global);
         var name = new ColumnRef(new TableId(folded.Name), "name", QueryType.String, false, 32,
@@ -348,6 +353,315 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Schema_apply_renames_a_column_by_logical_id_and_carries_its_value()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-rename");
+        var initial = EvolutionUnit("schema-rename");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var renamed = EvolutionUnit("schema-rename", displayName: "full_name");
+
+        var diff = connection.Schema.Diff(renamed);
+        var change = Assert.Single(diff.Changes);
+        Assert.Equal(SchemaChangeKind.RenameColumn, change.Kind);
+        Assert.Equal("full_name", change.Identity);
+        Assert.True(connection.Schema.Apply(renamed).Applied);
+
+        var stored = ReadEvolutionRow(connection, renamed);
+        Assert.Equal("Ada", stored.Values.Values["full_name"]);
+        Assert.False(stored.Values.Values.ContainsKey("name"));
+        Assert.True(connection.Schema.Diff(renamed).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_apply_renames_primary_storage_and_preserves_its_rows()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-storage-rename");
+        var initial = EvolutionUnit("schema-storage-rename");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var renamed = initial with { Name = "schema_storage_renamed" };
+
+        var change = Assert.Single(connection.Schema.Diff(renamed).Changes);
+        Assert.Equal(SchemaChangeKind.RenameStorageUnit, change.Kind);
+        Assert.Equal("schema_storage_renamed", change.Identity);
+        Assert.True(connection.Schema.Apply(renamed).Applied);
+
+        var stored = ReadEvolutionRow(connection, renamed);
+        Assert.Equal("Ada", stored.Values.Values["name"]);
+        Assert.True(connection.Schema.Diff(renamed).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_apply_widens_a_string_column_and_preserves_its_value()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-widen");
+        var initial = EvolutionUnit("schema-widen", maxLength: 32);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var widened = EvolutionUnit("schema-widen", maxLength: 64);
+
+        var diff = connection.Schema.Diff(widened);
+        var change = Assert.Single(diff.Changes);
+        Assert.Equal(SchemaChangeKind.AlterColumn, change.Kind);
+        Assert.Equal("name", change.Identity);
+        Assert.True(connection.Schema.Apply(widened).Applied);
+
+        var stored = ReadEvolutionRow(connection, widened);
+        Assert.Equal("Ada", stored.Values.Values["name"]);
+        Assert.Equal(64, connection.OpenSession(widened, StorageAccess.Global).Unit.Columns
+            .Single(column => column.Name == "name").MaxLength);
+        Assert.True(connection.Schema.Diff(widened).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_apply_backfills_a_new_required_column_from_its_portable_default()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-default-backfill");
+        var initial = EvolutionUnit("schema-default-backfill");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var changed = initial with
+        {
+            Columns =
+            [
+                .. initial.Columns,
+                new ColumnDefinition
+                {
+                    Name = "status",
+                    Type = PortableType.String,
+                    MaxLength = 16,
+                    IsNullable = false,
+                    Default = new PortableDefault("active")
+                }
+            ]
+        };
+
+        var change = Assert.Single(connection.Schema.Diff(changed).Changes);
+        Assert.Equal(SchemaChangeKind.AddColumn, change.Kind);
+        Assert.Equal("status", change.Identity);
+        Assert.True(connection.Schema.Apply(changed).Applied);
+
+        var stored = ReadEvolutionRow(connection, changed);
+        Assert.Equal("active", stored.Values.Values["status"]);
+        Assert.True(connection.Schema.Diff(changed).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_drop_requires_authorization_and_an_authorized_apply_removes_column_and_index()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-drop");
+        var initial = EvolutionUnit("schema-drop", includeLegacy: true);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial, legacy: "retained");
+        var reduced = EvolutionUnit("schema-drop", includeLegacy: false);
+
+        Assert.Collection(
+            connection.Schema.Diff(reduced).Changes.OrderBy(change => change.Kind),
+            change =>
+            {
+                Assert.Equal(SchemaChangeKind.DropColumn, change.Kind);
+                Assert.Equal("legacy", change.Identity);
+            },
+            change =>
+            {
+                Assert.Equal(SchemaChangeKind.DropIndex, change.Kind);
+                Assert.Equal("by_legacy", change.Identity);
+            });
+        var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(reduced));
+        Assert.Contains("GW-SCHEMA-010", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("drop-column:schema-drop.legacy", refusal.Message, StringComparison.Ordinal);
+
+        var stored = ReadEvolutionRow(connection, initial);
+        Assert.Equal("retained", stored.Values.Values["legacy"]);
+        Assert.Contains(connection.Catalog.ReadIndexes(initial.Id), index => index.Name == "by_legacy");
+
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var target = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(reduced));
+        var authorized = PhysicalSchemaApplication.Apply(
+            target,
+            coordinator.Executor,
+            planAuthorization: _ => PhysicalSchemaPlanAuthorization.Allow);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, authorized.Outcome);
+
+        var afterDrop = ReadEvolutionRow(connection, reduced);
+        Assert.False(afterDrop.Values.Values.ContainsKey("legacy"));
+        Assert.DoesNotContain(connection.Catalog.ReadIndexes(reduced.Id), index => index.Name == "by_legacy");
+        Assert.True(connection.Schema.Diff(reduced).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_diff_reports_an_index_definition_change_as_a_rebuild()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-index-rebuild");
+        var initial = EvolutionUnit("schema-index-rebuild", includeDisplayIndex: true);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var rebuilt = EvolutionUnit(
+            "schema-index-rebuild",
+            includeDisplayIndex: true,
+            displayIndexDirection: SortDirection.Descending);
+
+        var change = Assert.Single(connection.Schema.Diff(rebuilt).Changes);
+        Assert.Equal(SchemaChangeKind.RebuildIndex, change.Kind);
+        Assert.Equal("by_name", change.Identity);
+        Assert.True(connection.Schema.Apply(rebuilt).Applied);
+
+        var index = Assert.Single(connection.Catalog.ReadIndexes(rebuilt.Id));
+        var column = Assert.Single(index.Columns);
+        Assert.Equal("name", column.Column);
+        Assert.Equal(SortDirection.Descending, column.Direction);
+        var stored = ReadEvolutionRow(connection, rebuilt);
+        Assert.Equal("Ada", stored.Values.Values["name"]);
+        Assert.True(connection.Schema.Diff(rebuilt).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_apply_removes_an_index_without_removing_its_rows()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-index-drop");
+        var initial = EvolutionUnit("schema-index-drop", includeDisplayIndex: true);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var reduced = EvolutionUnit("schema-index-drop");
+
+        var change = Assert.Single(connection.Schema.Diff(reduced).Changes);
+        Assert.Equal(SchemaChangeKind.DropIndex, change.Kind);
+        Assert.Equal("by_name", change.Identity);
+        Assert.True(connection.Schema.Apply(reduced).Applied);
+
+        Assert.Empty(connection.Catalog.ReadIndexes(reduced.Id));
+        var stored = ReadEvolutionRow(connection, reduced);
+        Assert.Equal("Ada", stored.Values.Values["name"]);
+        Assert.True(connection.Schema.Diff(reduced).IsEmpty);
+    }
+
+    [Fact]
+    public void In_memory_schema_history_refuses_a_stale_expected_fingerprint()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-history-cas");
+        var initial = EvolutionUnit("schema-history-cas", maxLength: 32);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var widened = EvolutionUnit("schema-history-cas", maxLength: 64);
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var target = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(widened));
+        var appliedAt = new DateTimeOffset(2026, 8, 28, 12, 0, 0, TimeSpan.Zero);
+
+        using var lease = coordinator.Executor.AcquireApplicationLock(target.Identity);
+        var history = coordinator.Executor.ReadHistory(target.Identity, lease);
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, history, appliedAt);
+        var operations = plan.Operations
+            .Where(operation => operation.Kind != PhysicalSchemaOperationKind.PublishAppliedState)
+            .ToArray();
+        var acknowledgements = coordinator.Executor.ApplyOperationBatch(target.Identity, operations, lease);
+        var applied = plan.Complete(acknowledgements, appliedAt);
+
+        var conflict = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.Executor.PublishAppliedState(applied, "stale-fingerprint", lease));
+        Assert.Equal(
+            "In-memory schema history CAS failed for 'InMemory:schema-history-cas'.",
+            conflict.Message);
+    }
+
+    [Fact]
+    public void In_memory_schema_executor_refuses_an_unknown_operation_type()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-unknown-operation");
+        var unit = EvolutionUnit("schema-unknown-operation");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var target = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(unit));
+
+        using var lease = coordinator.Executor.AcquireApplicationLock(target.Identity);
+        var refusal = Assert.Throws<ArgumentOutOfRangeException>(() =>
+            coordinator.Executor.ApplyOperation(target.Identity, new UnknownPhysicalSchemaOperation(unit.Id), lease));
+        Assert.Equal("operation", refusal.ParamName);
+    }
+
+    [Fact]
+    public void In_memory_schema_executor_retires_primary_storage_under_authorization()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-retire");
+        var initial = EvolutionUnit("schema-retire", includeLegacy: true);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial, legacy: "discarded");
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var physical = InMemorySchemaCoordinator.Prepare(initial);
+        var target = new PhysicalSchemaTarget(
+            new SchemaSubject(physical, new SchemaEvolutionMetadata(retiresPrimaryStorage: true)),
+            InMemorySchemaCoordinator.Identity);
+
+        var retired = PhysicalSchemaApplication.Apply(
+            target,
+            coordinator.Executor,
+            new DateTimeOffset(2026, 8, 28, 13, 0, 0, TimeSpan.Zero),
+            _ => PhysicalSchemaPlanAuthorization.Allow);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, retired.Outcome);
+        Assert.Empty(retired.AppliedState!.Snapshot.SemanticOperations);
+        Assert.Empty(connection.Catalog.ReadIndexes(initial.Id));
+        Assert.Empty(PhysicalSchemaDiffPlanner.Plan(
+            target,
+            PhysicalSchemaHistoryState.FromApplied(retired.AppliedState),
+            new DateTimeOffset(2026, 8, 28, 13, 1, 0, TimeSpan.Zero)).Operations);
+    }
+
+    [Fact]
+    public void In_memory_schema_validation_refuses_present_retired_storage()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-retire-validation");
+        var unit = EvolutionUnit("schema-retire-validation");
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var physical = InMemorySchemaCoordinator.Prepare(unit);
+        var target = new PhysicalSchemaTarget(
+            new SchemaSubject(physical, new SchemaEvolutionMetadata(retiresPrimaryStorage: true)),
+            InMemorySchemaCoordinator.Identity);
+
+        using var lease = coordinator.Executor.AcquireApplicationLock(target.Identity);
+        var history = coordinator.Executor.ReadHistory(target.Identity, lease);
+        var validation = Assert.Single(PhysicalSchemaDiffPlanner.Plan(
+            target,
+            history,
+            new DateTimeOffset(2026, 8, 28, 13, 2, 0, TimeSpan.Zero)).Operations
+            .OfType<ValidatePhysicalSchemaOperation>());
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.Executor.ApplyOperation(
+                target.Identity,
+                validation,
+                lease));
+
+        Assert.Equal(
+            "In-memory schema validation expected retired storage 'schema_retire_validation' to be absent.",
+            refusal.Message);
+    }
+
+    [Fact]
+    public void In_memory_schema_validation_refuses_missing_active_storage()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-active-validation");
+        var unit = EvolutionUnit("schema-active-validation");
+        var coordinator = Assert.IsType<InMemorySchemaCoordinator>(connection.Schema);
+        var target = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(unit));
+
+        using var lease = coordinator.Executor.AcquireApplicationLock(target.Identity);
+        var validation = Assert.Single(PhysicalSchemaDiffPlanner.Plan(
+            target,
+            PhysicalSchemaHistoryState.Empty,
+            new DateTimeOffset(2026, 8, 28, 13, 3, 0, TimeSpan.Zero)).Operations
+            .OfType<ValidatePhysicalSchemaOperation>());
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.Executor.ApplyOperation(
+                target.Identity,
+                validation,
+                lease));
+
+        Assert.Equal(
+            "In-memory schema validation expected active storage 'schema_active_validation' to exist.",
+            refusal.Message);
+    }
+
+    [Fact]
     public void Schema_apply_refuses_retention_partition_layout_drift()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://retention-partition-drift");
@@ -384,7 +698,7 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
-    public void Schema_diff_identity_includes_scope_version_defaults_and_index_version()
+    public void Schema_diff_classifies_default_and_index_definition_changes_and_refuses_scope_changes()
     {
         var factory = new InMemoryProviderFactory();
         using var connection = factory.Create("memory://schema-identity");
@@ -405,7 +719,23 @@ public sealed class InMemoryProviderTests
                 .Select(column => column.Name == "value" ? column with { Default = null } : column)
                 .ToArray()
         };
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(absentDefault));
+        Assert.Collection(
+            connection.Schema.Diff(absentDefault).Changes,
+            change =>
+            {
+                Assert.Equal(SchemaChangeKind.RebuildIndex, change.Kind);
+                Assert.Equal("by_value", change.Identity);
+            },
+            change =>
+            {
+                Assert.Equal(SchemaChangeKind.AlterColumn, change.Kind);
+                Assert.Equal("value", change.Identity);
+            },
+            change =>
+            {
+                Assert.Equal(SchemaChangeKind.CreateIndex, change.Kind);
+                Assert.Equal("by_value", change.Identity);
+            });
 
         var changedIndex = initial with
         {
@@ -413,10 +743,36 @@ public sealed class InMemoryProviderTests
                 .Select(index => index.Name == "by_value" ? index with { SchemaVersion = 2 } : index)
                 .ToArray()
         };
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedIndex));
+        var indexChange = Assert.Single(connection.Schema.Diff(changedIndex).Changes);
+        Assert.Equal(SchemaChangeKind.RebuildIndex, indexChange.Kind);
+        Assert.Equal("by_value", indexChange.Identity);
 
         var changedScope = initial with { Scope = ScopePolicy.Scoped };
         Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedScope));
+    }
+
+    [Fact]
+    public void Schema_diff_refuses_unplanned_concurrency_declaration_changes()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-concurrency-drift");
+        var initial = TestingFixture.GlobalUnit("schema-concurrency-drift");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+
+        var changed = initial with { Concurrency = ConcurrencyDeclaration.Optimistic() };
+
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
+    }
+
+    [Fact]
+    public void Schema_diff_refuses_unplanned_schema_version_changes()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-version-drift");
+        var initial = TestingFixture.GlobalUnit("schema-version-drift");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+
+        var changed = initial with { SchemaVersion = 2 };
+
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
     }
 
     [Fact]
@@ -1019,11 +1375,16 @@ public sealed class InMemoryProviderTests
         var baseUnit = TestingFixture.GlobalUnit("default-snapshot");
         var unit = baseUnit with
         {
-            Columns = baseUnit.Columns
-                .Select(column => column.Name == "value"
-                    ? column with { Default = new PortableDefault(nested) }
-                    : column)
-                .ToArray()
+            Columns =
+            [
+                .. baseUnit.Columns,
+                new ColumnDefinition
+                {
+                    Name = "document",
+                    Type = PortableType.Json,
+                    Default = new PortableDefault(nested)
+                }
+            ]
         };
 
         connection.Schema.Apply(unit);
@@ -1032,7 +1393,7 @@ public sealed class InMemoryProviderTests
         nested["new"] = "mutated";
 
         var session = connection.OpenSession(unit, StorageAccess.Global);
-        var snapshot = session.Unit.Columns.Single(column => column.Name == "value").Default!.Value;
+        var snapshot = session.Unit.Columns.Single(column => column.Name == "document").Default!.Value;
         var dictionary = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(snapshot);
         Assert.Equal(new byte[] { 1, 2 }, Assert.IsType<byte[]>(dictionary["bytes"]));
         Assert.Equal(new object?[] { 3, 4 },
@@ -1148,6 +1509,71 @@ public sealed class InMemoryProviderTests
     private sealed class MutableValue
     {
         public string Text { get; set; } = "mutable";
+    }
+
+    private sealed class UnknownPhysicalSchemaOperation(StorageUnitId subjectId)
+        : PhysicalSchemaOperation(PhysicalSchemaOperationKind.ValidatePhysicalSchema, subjectId, "unknown");
+
+    private static StorageUnit EvolutionUnit(
+        string id,
+        string displayName = "name",
+        int maxLength = 32,
+        bool includeLegacy = false,
+        bool includeDisplayIndex = false,
+        SortDirection displayIndexDirection = SortDirection.Ascending)
+    {
+        var columns = new List<ColumnDefinition>
+        {
+            new() { Name = "id", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+            new() { Name = displayName, Id = "name", Type = PortableType.String, MaxLength = maxLength }
+        };
+        var indexes = new List<IndexDefinition>();
+        if (includeLegacy)
+        {
+            columns.Add(new ColumnDefinition { Name = "legacy", Type = PortableType.String, MaxLength = 32 });
+            indexes.Add(new IndexDefinition { Name = "by_legacy", Columns = [new IndexColumn("legacy")] });
+        }
+        if (includeDisplayIndex)
+        {
+            indexes.Add(new IndexDefinition
+            {
+                Name = "by_name",
+                Columns = [new IndexColumn(displayName, displayIndexDirection)]
+            });
+        }
+        return new StorageUnit
+        {
+            Id = new StorageUnitId(id),
+            Name = id.Replace('-', '_'),
+            Columns = columns,
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = indexes
+        };
+    }
+
+    private static void InsertEvolutionRow(
+        IStorageProviderConnection connection,
+        StorageUnit unit,
+        string? legacy = null)
+    {
+        var values = new Dictionary<string, object?>
+        {
+            ["id"] = "customer-1",
+            ["name"] = "Ada"
+        };
+        if (legacy is not null)
+            values["legacy"] = legacy;
+        Assert.Equal(
+            WriteOutcomeStatus.Inserted,
+            connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(values)).Status);
+    }
+
+    private static StoredEntry ReadEvolutionRow(IStorageProviderConnection connection, StorageUnit unit)
+    {
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "customer-1" }));
+        Assert.NotNull(stored);
+        return stored!;
     }
 
     private static void AssertOpaque(string token, params string[] forbiddenValues)
