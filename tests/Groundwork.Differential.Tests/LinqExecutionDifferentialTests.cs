@@ -372,7 +372,7 @@ public sealed class LinqExecutionDifferentialTests
         // These three numbers are published in the wiki. They are asserted here so the documentation
         // and the renderers cannot drift apart.
         Assert.Equal(999, SqliteQueryRenderer.ParameterBudget);
-        Assert.Equal(2_100, SqlServerQueryRenderer.ParameterBudget);
+        Assert.Equal(2_098, SqlServerQueryRenderer.ParameterBudget);
         Assert.Equal(65_535, PostgreSqlQueryRenderer.ParameterBudget);
     }
 

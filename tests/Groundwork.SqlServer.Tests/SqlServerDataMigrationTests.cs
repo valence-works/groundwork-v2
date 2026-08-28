@@ -84,8 +84,8 @@ public sealed class SqlServerDataMigrationTests
     {
         // SQL Server has no LIMIT; the shared scan asks the dialect for the spelling it accepts.
         Assert.Equal(" OFFSET 0 ROWS FETCH NEXT 512 ROWS ONLY", new SqlServerDialect().LimitClause(512));
-        Assert.Equal(2_100, new SqlServerDialect().ParameterBudget);
-        Assert.Equal(1_050, RelationalRowMigration.AdmittedRows(new SqlServerDialect(), 1, 1, 5_000));
+        Assert.Equal(2_098, new SqlServerDialect().ParameterBudget);
+        Assert.Equal(1_049, RelationalRowMigration.AdmittedRows(new SqlServerDialect(), 1, 1, 5_000));
     }
 
     // ------------------------------------------------------------------ fixtures

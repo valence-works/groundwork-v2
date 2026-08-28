@@ -170,9 +170,11 @@ the analyzer reported at build time.
   still satisfy it — and the fence falls back to portable defaults.
 - Each provider supplies only its native budgets, advertised by the **connection** as a
   `QueryAdmissionProfile`, so the pre-execution value fence uses the provider's real limit instead of
-  a portable guess — SQLite 999, SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter
-  budget of its own (its bound is the 16 MB command document), so it advertises no parameter
-  ceiling while ordinary membership retains the portable 1,000-value renderer limit. Keyed batch reads use the separate
+  a portable guess — SQLite 999, SQL Server 2,098 caller-owned parameters, PostgreSQL 65,535. SQL
+  Server's 2,100 statement limit reserves two slots for the `Microsoft.Data.SqlClient`
+  `sp_executesql` wrapper. MongoDB has no bound-parameter budget of its own (its bound is the 16 MB
+  command document), so it advertises no parameter ceiling while ordinary membership retains the
+  portable 1,000-value renderer limit. Keyed batch reads use the separate
   `MaximumBatchReadKeys` budget (999 by default; SQLite 999, SQL Server 2,098, and PostgreSQL
   65,535), with MongoDB using an effectively unbounded count plus a conservative 15 MiB payload
   budget; the same 15 MiB payload fence applies when a caller omits its connection. An explicit

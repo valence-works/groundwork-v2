@@ -133,7 +133,9 @@ using var connection = new SqlServerProviderFactory().Create(
 - Schema coordination uses `sp_getapplock` plus a durable fence/history pair; optimistic concurrency
   uses serializable write transactions.
 - Provider sequences use `IDENTITY(1,1)`, read from `OUTPUT INSERTED`.
-- Parameter budget: **2,100** — advertised by the connection to the runtime value fence, not restated by it.
+- Parameter budget: **2,098 caller-owned parameters** — SQL Server's 2,100 statement limit leaves two
+  slots for the `Microsoft.Data.SqlClient` `sp_executesql` wrapper; the connection advertises this
+  effective ceiling to the runtime value fence, not restating it in the fence.
 - Supports native index hints when a declaration is `QueryIndexPinning.Pinned`. Explain assertions use
   showplan XML and are labeled `hinted`.
 

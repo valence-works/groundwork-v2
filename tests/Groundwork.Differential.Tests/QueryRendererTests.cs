@@ -703,17 +703,24 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
-    public void In_cardinality_and_provider_parameter_budgets_fail_with_the_v1_fence_code()
+    public void In_cardinality_and_provider_parameter_budgets_are_checked_at_the_boundary()
     {
         var values = Enumerable.Range(0, 1_001).Select(value => QueryConstant.Of(Amount, value)).ToArray();
         var overIn = Request(new Predicate.In(Amount, values), [], Paging.None, ResultShape.Rows.Instance);
         var inFailure = Assert.Throws<QueryRenderException>(() => new SqliteQueryRenderer().Render(overIn));
         Assert.Equal("GW-QUERY-015", inFailure.Code);
 
-        var budgetValues = Enumerable.Range(0, 2_101).Select(value => QueryConstant.Of(Amount, value)).ToArray();
+        var options = new QueryRenderOptions { InValueLimit = SqlServerQueryRenderer.ParameterBudget + 1 };
+        var budgetValues = Enumerable.Range(0, SqlServerQueryRenderer.ParameterBudget)
+            .Select(value => QueryConstant.Of(Amount, value)).ToArray();
+        var accepted = new SqlServerQueryRenderer().Render(
+            Request(new Predicate.In(Amount, budgetValues), [], Paging.None, ResultShape.Rows.Instance), options);
+        Assert.Equal(SqlServerQueryRenderer.ParameterBudget, accepted.Parameters.Length);
+
+        var overBudgetValues = Enumerable.Range(0, SqlServerQueryRenderer.ParameterBudget + 1)
+            .Select(value => QueryConstant.Of(Amount, value)).ToArray();
         var budgetFailure = Assert.Throws<QueryRenderException>(() => new SqlServerQueryRenderer().Render(
-            Request(new Predicate.In(Amount, budgetValues), [], Paging.None, ResultShape.Rows.Instance),
-            new QueryRenderOptions { InValueLimit = 3_000 }));
+            Request(new Predicate.In(Amount, overBudgetValues), [], Paging.None, ResultShape.Rows.Instance), options));
         Assert.Equal("GW-QUERY-015", budgetFailure.Code);
     }
 
