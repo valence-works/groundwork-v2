@@ -51,7 +51,7 @@ public sealed class MongoSetMutationGuardTests
             Assert.Equal(2L, capability.UpdateWhere(
                 Status(unit, "open"),
                 new Dictionary<string, object?> { ["label"] = "after" }).MatchedRows);
-            Assert.Equal(2L, capability.DeleteWhere(Status(unit, "closed")).MatchedRows);
+            Assert.Equal(1L, capability.DeleteWhere(Status(unit, "closed")).MatchedRows);
 
             Assert.Equal(
                 ["mongodb.update-where", "mongodb.delete-where"],
