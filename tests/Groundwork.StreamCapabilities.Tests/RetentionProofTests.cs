@@ -565,10 +565,14 @@ public sealed class RetentionProofTests
         IStorageProviderConnection connection,
         string provider)
     {
-        var measurement = await MeasureOnAppend(connection, provider, concurrent: true);
-        for (var attempt = 2; attempt <= OnAppendOverlapAttempts && !HasConclusiveOverlap(measurement); attempt++)
-            measurement = await MeasureOnAppend(connection, provider, concurrent: true);
-        return measurement;
+        var bestMeasurement = await MeasureOnAppend(connection, provider, concurrent: true);
+        for (var attempt = 2; attempt <= OnAppendOverlapAttempts && !HasConclusiveOverlap(bestMeasurement); attempt++)
+        {
+            var measurement = await MeasureOnAppend(connection, provider, concurrent: true);
+            if (measurement.MaxOverlap > bestMeasurement.MaxOverlap)
+                bestMeasurement = measurement;
+        }
+        return bestMeasurement;
     }
 
     /// <summary>

@@ -586,6 +586,10 @@ jobs:
 
   stream-capabilities-retention:
     runs-on: ubuntu-latest
+    env:
+      GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+      GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+      GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s3ci?replicaSet=s3rs&directConnection=true
     services:
       postgres:
         image: postgres:17.6-alpine3.22
@@ -634,20 +638,12 @@ jobs:
       # runs both net8.0 and net10.0, and the second run's trx silently overwrites the first's, which would
       # let one framework's OnAppend coalescing proofs go unchecked below.
       - name: Run four-provider retention proof (net8.0)
-        env:
-          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s3ci?replicaSet=s3rs&directConnection=true
         run: >-
           dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
           --no-restore --configuration Release --filter Retention --framework net8.0
           --logger "trx;LogFileName=stream-capabilities-retention-net8.0.trx"
           --results-directory artifacts/stream-capabilities-retention
       - name: Run four-provider retention proof (net10.0)
-        env:
-          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s3ci?replicaSet=s3rs&directConnection=true
         run: >-
           dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
           --no-restore --configuration Release --filter Retention --framework net10.0
