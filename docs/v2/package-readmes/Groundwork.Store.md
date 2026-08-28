@@ -2,8 +2,8 @@
 
 The runtime contract that providers implement and applications call.
 `IStorageProviderConnection`, `IStorageSession`, `IUnitOfWork`, `StorageAccess`, `StorageScope`,
-`WriteOutcome`, `RowWrite`, `BatchWriteOptions`, and the execution of retention, exact append, and
-durable idempotency.
+`WriteOutcome`, `RowWrite`, `BatchWriteOptions`, set-based mutation capabilities, and the execution
+of retention, exact append, and durable idempotency.
 
 Sessions execute declared aggregation profiles and runtime-composed profiles only when the latter
 carry an active `AggregationAcceptance`; scoped and privileged-access refusals apply to both.

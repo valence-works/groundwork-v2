@@ -24,8 +24,10 @@ translate it, fall back to client evaluation, or throw. A closed surface accepts
 translate, and tells you *at build time* when you've stepped outside it.
 
 Supported: `Where`, `WhereIf`, `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenByDescending`, `Skip`,
-`Take`, `Select`, `LatestPer`, `AcceptScan`, and the terminals `ToList`, `ToListAsync`, `Count`,
-`Any`, `CountAsync`, `AnyAsync`.
+`Take`, mapped-column `Select`, `Distinct`, `LatestPer`, `AcceptScan`, and the terminals `ToList`,
+`ToListAsync`, `Count`, `Any`, `CountAsync`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, and
+`SingleOrDefault` (plus their async adapter forms). `First` and `FirstOrDefault` require an explicit
+deterministic order; `Distinct` removes duplicate projected values before paging.
 
 `ToQueryRequest()` is the provider-neutral boundary:
 
@@ -72,9 +74,11 @@ call**. Unsupported expression nodes are rejected rather than evaluated on the c
 | `GW-LINQ-108` | Unpinned string comparison | Use `Ordinal`/`OrdinalIgnoreCase` matching the column's folding |
 | `GW-LINQ-109` | Non-UTC clock | Use `DateTimeOffset.UtcNow` |
 | `GW-LINQ-110` | Decimal precision/scale overflow | The value exceeds the declared decimal |
+| `GW-LINQ-111` | First/FirstOrDefault without deterministic order | Add an explicit `OrderBy` before `First` or `FirstOrDefault` |
 
-These are locked by a **250-case conformance corpus** checked byte-for-byte in CI, so the codes and
-their fixes cannot drift.
+The predicate codes are locked by a **250-case conformance corpus** checked byte-for-byte in CI;
+the query-shape rows are covered by the model, lowering, and coverage suites so those contracts
+cannot drift either.
 
 ### Reusable predicate helpers
 
@@ -219,7 +223,16 @@ Parameter budgets are enforced against the provider's real limit — **SQLite 99
 PostgreSQL 65,535** — including cursor and page parameters. Exceeding it is a refusal, not a
 truncation. Each provider connection advertises that limit as a `QueryAdmissionProfile`, so the
 pre-execution fence and the renderer use the same number rather than two guesses at it. MongoDB has
-no bound-parameter budget and keeps the portable default.
+no bound-parameter budget and advertises no parameter ceiling; ordinary membership still uses the
+portable 1,000-value renderer limit.
+
+Keyed batch reads use the profile's separate `MaximumBatchReadKeys` budget (999 by default; SQLite
+999, SQL Server 2,098, and PostgreSQL 65,535). A scoped session reserves one key slot for its
+provider-injected scope parameter. The shared planner also applies a conservative 15 MiB
+encoded-payload budget by default, so an omitted connection cannot reach MongoDB's 16 MiB BSON
+command limit; a provider connection or explicit profile can advertise a different deployment
+budget. Folded string key columns must use the comparison policy matching their persisted search-key
+mapping or the batch read refuses with `GW-QUERY-031`.
 
 An empty `In` normalizes to match-none; a pinned declaration is still carried on the native command.
 

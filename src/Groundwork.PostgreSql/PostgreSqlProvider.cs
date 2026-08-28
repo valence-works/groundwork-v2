@@ -25,7 +25,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     /// </summary>
     public QueryAdmissionProfile QueryAdmission { get; } = new()
     {
-        MaximumParameters = PostgreSqlQueryRenderer.ParameterBudget
+        MaximumParameters = PostgreSqlQueryRenderer.ParameterBudget,
+        MaximumBatchReadKeys = PostgreSqlQueryRenderer.ParameterBudget
     };
 
     private readonly string connectionString;
@@ -55,7 +56,8 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         durableHighWaterInspection: true,
         exactRetention: true,
         atomicCommit: true,
-        compareAndDelete: true);
+        compareAndDelete: true,
+        setMutation: "Updates or deletes every row matching an index-covered portable predicate on PostgreSQL in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.");
 
     internal string ConnectionString => connectionString;
 

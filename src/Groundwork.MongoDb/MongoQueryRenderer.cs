@@ -104,11 +104,30 @@ public sealed class MongoQueryRenderer
     }
 
     internal BsonDocument RenderAggregationSourcePredicate(Predicate predicate, string table, int inValueLimit = 1_000)
+        => RenderAggregationSourcePredicate(predicate, table, new QueryRenderOptions { InValueLimit = inValueLimit });
+
+    /// <summary>
+    /// Renders a provider-bound source predicate using the same search-key mappings as a normal
+    /// query. Set-based mutation passes its admitted physical predicate here; retaining the map is
+    /// important because the renderer uses it to recognize hidden-key ranges as direct bounds.
+    /// </summary>
+    internal BsonDocument RenderAggregationSourcePredicate(
+        Predicate predicate,
+        string table,
+        QueryRenderOptions options)
     {
         ArgumentNullException.ThrowIfNull(predicate);
-        if (inValueLimit <= 0)
-            throw new ArgumentOutOfRangeException(nameof(inValueLimit));
-        return RenderPredicate(predicate, new QueryRenderOptions { InValueLimit = inValueLimit }, table);
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.InValueLimit <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "The In value limit must be positive.");
+        var request = new QueryRequest(
+            new TableId(table),
+            predicate,
+            [],
+            Projection.All,
+            Paging.None);
+        var rewritten = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        return RenderPredicate(rewritten.Where, options, table);
     }
 
     private static IReadOnlyList<OrderTerm> EffectiveOrder(QueryRequest request, QueryRenderOptions options) =>

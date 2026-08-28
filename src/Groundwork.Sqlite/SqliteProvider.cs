@@ -23,7 +23,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     /// </summary>
     public QueryAdmissionProfile QueryAdmission { get; } = new()
     {
-        MaximumParameters = SqliteQueryRenderer.ParameterBudget
+        MaximumParameters = SqliteQueryRenderer.ParameterBudget,
+        MaximumBatchReadKeys = SqliteQueryRenderer.ParameterBudget
     };
 
     private readonly object gate = new();
@@ -71,7 +72,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         durableHighWaterInspection: true,
         exactRetention: true,
         atomicCommit: true,
-        compareAndDelete: true);
+        compareAndDelete: true,
+        setMutation: "Updates or deletes every row matching an index-covered portable predicate on SQLite in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.");
 
     internal object Gate => gate;
 

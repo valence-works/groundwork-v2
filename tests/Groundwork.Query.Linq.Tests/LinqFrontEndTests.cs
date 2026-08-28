@@ -117,6 +117,77 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
+    public void First_and_single_are_ordered_cardinality_terminals()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query
+            .Where(ticket => ticket.IsOpen)
+            .OrderBy(ticket => ticket.CreatedAt);
+
+        var first = query.First().Request;
+        var firstOrDefault = query.FirstOrDefault().Request;
+        var single = query.Single().Request;
+        var singleOrDefault = query.SingleOrDefault().Request;
+
+        Assert.IsType<ResultShape.First>(first.Result);
+        Assert.IsType<ResultShape.FirstOrDefault>(firstOrDefault.Result);
+        Assert.IsType<ResultShape.Single>(single.Result);
+        Assert.IsType<ResultShape.SingleOrDefault>(singleOrDefault.Result);
+        Assert.Equal(1, first.Paging.Limit);
+        Assert.Equal(1, firstOrDefault.Paging.Limit);
+        Assert.Equal(2, single.Paging.Limit);
+        Assert.Equal(2, singleOrDefault.Paging.Limit);
+
+        var afterSkip = query.Skip(3).Take(10).First().Request;
+        Assert.Equal(3, afterSkip.Paging.Offset);
+        Assert.Equal(1, afterSkip.Paging.Limit);
+    }
+
+    [Fact]
+    public void First_requires_explicit_ordering_but_single_does_not()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.IsOpen);
+
+        var first = Assert.Throws<LinqTranslationException>(() => query.First());
+        var single = query.Single().Request;
+
+        Assert.Equal("GW-LINQ-111", Assert.Single(first.Diagnostics).Code);
+        Assert.IsType<ResultShape.Single>(single.Result);
+
+        var emptyFirst = query.OrderBy(ticket => ticket.CreatedAt).Take(0).First().Request;
+        Assert.IsType<Predicate.AlwaysFalse>(emptyFirst.Where);
+        Assert.Equal(1, emptyFirst.Paging.Limit);
+    }
+
+    [Fact]
+    public void Distinct_marks_the_projected_query_request()
+    {
+        var request = new GwQueryDatabase().Table(Tickets).Query
+            .Select(ticket => new { ticket.Status })
+            .Distinct()
+            .ToQueryRequest();
+
+        Assert.True(request.Distinct);
+        Assert.False(request.Projection.AllColumns);
+        Assert.Equal(nameof(Ticket.Status), Assert.Single(request.Projection.Columns).Name);
+    }
+
+    [Fact]
+    public async Task Async_single_detects_an_over_one_result_from_the_adapter()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query
+            .OrderBy(ticket => ticket.CreatedAt);
+        var executor = new RowsExecutor(
+        [
+            new Ticket { TenantId = 1, CreatedAt = DateTimeOffset.UtcNow },
+            new Ticket { TenantId = 2, CreatedAt = DateTimeOffset.UtcNow.AddMinutes(1) }
+        ]);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.SingleAsync(executor));
+
+        Assert.Contains("more than one", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Async_terminals_use_an_explicit_provider_adapter()
     {
         var query = new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.TenantId == 7);
@@ -154,6 +225,16 @@ public sealed class LinqFrontEndTests
         }
         public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(1L);
         public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    }
+
+    private sealed class RowsExecutor(IReadOnlyList<Ticket> rows) : IGwQueryExecutor
+    {
+        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<T>>(rows.Cast<T>().ToArray());
+
+        public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult((long)rows.Count);
+
+        public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(rows.Count != 0);
     }
 
     [Fact]

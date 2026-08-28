@@ -123,12 +123,17 @@ public interface IGwQueryable<T>
     IGwQueryable<T> Skip(int count);
     IGwQueryable<T> Take(int count);
     IGwQueryable<TResult> Select<TResult>(Expression<Func<T, TResult>> selector);
+    IGwQueryable<T> Distinct();
     IGwQueryable<T> AcceptScan(string id, string reason, string owner, DateTimeOffset expiresOn);
     IGwQueryable<T> LatestPer<TKey, TTimestamp>(Expression<Func<T, TKey>> key, Expression<Func<T, TTimestamp>> timestamp);
     LinqTerminal<T> ToList();
     Task<IReadOnlyList<T>> ToListAsync(CancellationToken cancellationToken = default);
     LinqTerminal<long> Count();
     LinqTerminal<bool> Any();
+    LinqTerminal<T> First();
+    LinqTerminal<T> FirstOrDefault();
+    LinqTerminal<T> Single();
+    LinqTerminal<T> SingleOrDefault();
 }
 
 /// <summary>A query terminal carrying the provider-neutral request, ready for a runtime adapter.</summary>
@@ -170,6 +175,47 @@ public static class GwQueryAsyncExtensions
 
     public static Task<bool> AnyAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default) =>
         (executor ?? throw new ArgumentNullException(nameof(executor))).AnyAsync(query.Any().Request, cancellationToken);
+
+    public static async Task<T> FirstAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default)
+    {
+        var rows = await ReadCardinalityAsync(query, executor, () => query.First().Request, cancellationToken).ConfigureAwait(false);
+        return rows.Count == 0 ? throw new InvalidOperationException("Sequence contains no elements.") : rows[0];
+    }
+
+    public static async Task<T> FirstOrDefaultAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default)
+    {
+        var rows = await ReadCardinalityAsync(query, executor, () => query.FirstOrDefault().Request, cancellationToken).ConfigureAwait(false);
+        return rows.Count == 0 ? default! : rows[0];
+    }
+
+    public static async Task<T> SingleAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default)
+    {
+        var rows = await ReadCardinalityAsync(query, executor, () => query.Single().Request, cancellationToken).ConfigureAwait(false);
+        if (rows.Count == 0) throw new InvalidOperationException("Sequence contains no elements.");
+        if (rows.Count > 1) throw new InvalidOperationException("Sequence contains more than one element.");
+        return rows[0];
+    }
+
+    public static async Task<T> SingleOrDefaultAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default)
+    {
+        var rows = await ReadCardinalityAsync(query, executor, () => query.SingleOrDefault().Request, cancellationToken).ConfigureAwait(false);
+        if (rows.Count > 1) throw new InvalidOperationException("Sequence contains more than one element.");
+        return rows.Count == 0 ? default! : rows[0];
+    }
+
+    private static Task<IReadOnlyList<T>> ReadCardinalityAsync<T>(IGwQueryable<T> query, IGwQueryExecutor executor, Func<QueryRequest> requestFactory, CancellationToken cancellationToken)
+    {
+        if (query is null) throw new ArgumentNullException(nameof(query));
+        if (executor is null) throw new ArgumentNullException(nameof(executor));
+        if (requestFactory is null) throw new ArgumentNullException(nameof(requestFactory));
+        var model = query switch
+        {
+            GwQueryable<T> typed => typed.Model,
+            GwQueryTable<T> table => table.Model,
+            _ => null
+        };
+        return executor.ToListAsync(requestFactory(), model, cancellationToken);
+    }
 }
 
 /// <summary>Creates closed typed query roots.</summary>
@@ -207,10 +253,15 @@ public sealed class GwQueryTable<T> : IGwQueryable<T>
     public IGwQueryable<T> Skip(int count) => Root.Skip(count);
     public IGwQueryable<T> Take(int count) => Root.Take(count);
     public IGwQueryable<TResult> Select<TResult>(Expression<Func<T, TResult>> selector) => Root.Select(selector);
+    public IGwQueryable<T> Distinct() => Root.Distinct();
     public IGwQueryable<T> AcceptScan(string id, string reason, string owner, DateTimeOffset expiresOn) => Root.AcceptScan(id, reason, owner, expiresOn);
     public IGwQueryable<T> LatestPer<TKey, TTimestamp>(Expression<Func<T, TKey>> key, Expression<Func<T, TTimestamp>> timestamp) => Root.LatestPer(key, timestamp);
     public LinqTerminal<T> ToList() => Root.ToList();
     public Task<IReadOnlyList<T>> ToListAsync(CancellationToken cancellationToken = default) => Root.ToListAsync(cancellationToken);
     public LinqTerminal<long> Count() => Root.Count();
     public LinqTerminal<bool> Any() => Root.Any();
+    public LinqTerminal<T> First() => Root.First();
+    public LinqTerminal<T> FirstOrDefault() => Root.FirstOrDefault();
+    public LinqTerminal<T> Single() => Root.Single();
+    public LinqTerminal<T> SingleOrDefault() => Root.SingleOrDefault();
 }

@@ -5,6 +5,15 @@ namespace Groundwork.Query.Model;
 /// <summary>Pure, provider-neutral prefix-key encoding used by native renderers.</summary>
 public static class QuerySearchKeys
 {
+    /// <summary>Reports whether a logical column comparison policy matches its persisted search-key policy.</summary>
+    public static bool MatchesPolicy(
+        QueryStringComparisonPolicy comparison,
+        QuerySearchKeyPolicy searchKey) =>
+        (comparison, searchKey) is
+            (QueryStringComparisonPolicy.Ordinal, QuerySearchKeyPolicy.Ordinal) or
+            (QueryStringComparisonPolicy.AsciiIgnoreCase, QuerySearchKeyPolicy.AsciiIgnoreCase) or
+            (QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase);
+
     public static string Encode(string value, QuerySearchKeyPolicy policy)
     {
         if (value == null) throw new ArgumentNullException(nameof(value));
@@ -49,7 +58,7 @@ public static class QuerySearchKeyRewriter
         return ReferenceEquals(where, request.Where) && order.Equals(request.Order)
             ? request
             : new QueryRequest(request.Table, where, order, request.Projection, request.Paging,
-                request.Result, request.LatestPerKey, request.AcceptedScan)
+                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
             {
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,
@@ -110,7 +119,7 @@ public static class QuerySearchKeyRewriter
                         starts.Column.MaxLength);
                 }
                 if (!string.Equals(mapping.SourceColumn, starts.Column.Name, StringComparison.Ordinal) ||
-                    !Matches(starts.Column.StringComparison, mapping.Policy))
+                    !QuerySearchKeys.MatchesPolicy(starts.Column.StringComparison, mapping.Policy))
                 {
                     throw new QueryRenderException(
                         "GW-QUERY-031",
@@ -153,10 +162,4 @@ public static class QuerySearchKeyRewriter
                 return predicate;
         }
     }
-
-    private static bool Matches(QueryStringComparisonPolicy comparison, QuerySearchKeyPolicy searchKey) =>
-        (comparison, searchKey) is
-            (QueryStringComparisonPolicy.Ordinal, QuerySearchKeyPolicy.Ordinal) or
-            (QueryStringComparisonPolicy.AsciiIgnoreCase, QuerySearchKeyPolicy.AsciiIgnoreCase) or
-            (QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase, QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase);
 }

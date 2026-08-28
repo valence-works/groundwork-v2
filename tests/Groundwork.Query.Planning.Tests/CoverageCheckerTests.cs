@@ -139,6 +139,24 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
+    public void Always_false_queries_still_validate_nonportable_ordering()
+    {
+        var boolean = new ColumnRef(Table, "is_open", QueryType.Boolean);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysFalse.Instance,
+            [new OrderTerm(boolean, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.None,
+            ResultShape.First.Instance);
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_is_open", "is_open")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+    }
+
+    [Fact]
     public void Provider_default_null_ordering_is_refused()
     {
         var result = Check(
@@ -211,6 +229,110 @@ public sealed class CoverageCheckerTests
         Assert.True(covered.IsCovered);
         Assert.False(unbounded.IsCovered);
         Assert.Equal("GW-COVER-005", unbounded.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Bounded_distinct_projection_is_covered_when_all_projected_columns_are_indexed()
+    {
+        var result = Check(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [new OrderTerm(Status, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.OffsetLimit(0, 1),
+            Index("ix_status", "status"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.True(result.IsCovered, result.Refusal?.Message);
+        Assert.Equal("ix_status", result.Index!.Name);
+    }
+
+    [Fact]
+    public void Unbounded_distinct_projection_is_not_covered_by_its_projection_index()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Paging.None,
+            Index("ix_status", "status"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Bounded_order_does_not_admit_an_unfiltered_distinct_scan()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Status, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.OffsetLimit(0, 1),
+            Index("ix_status", "status"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Unbounded_distinct_projection_accepts_a_live_scan_without_stale_marker()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(Status),
+            Paging.None,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-DISTINCT",
+                "distinct report",
+                "query-team",
+                new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero)),
+            distinct: true);
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_status", "status")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+        Assert.NotEqual("GW-COVER-901", result.Refusal.Code);
+        QueryCoverageEnforcer.EnsureCovered(request, [Index("ix_status", "status")],
+            new DateTimeOffset(2026, 8, 28, 0, 0, 0, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void Distinct_projection_requires_an_index_or_an_accepted_scan()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Paging.None,
+            Index("ix_other", "other"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+        Assert.Contains("unbounded Distinct", result.Refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cardinality_results_require_an_explicit_order()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.OffsetLimit(0, 1),
+            ResultShape.First.Instance);
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_created", "created_at")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Contains("deterministic order", result.Refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -464,9 +586,11 @@ public sealed class CoverageCheckerTests
         ImmutableArray<OrderTerm> order,
         Paging paging,
         CoverageIndex index,
-        ResultShape? result = null) =>
+        ResultShape? result = null,
+        Projection? projection = null,
+        bool distinct = false) =>
         QueryCoverageChecker.Check(
-            new QueryRequest(Table, predicate, order, Projection.All, paging, result ?? ResultShape.Rows.Instance),
+            new QueryRequest(Table, predicate, order, projection ?? Projection.All, paging, result ?? ResultShape.Rows.Instance, distinct: distinct),
             [index]);
 
     private static CoverageIndex Index(string name, params object[] columns) =>

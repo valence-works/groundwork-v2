@@ -18,6 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
     <ProjectReference Include="../../src/Groundwork.Query.Model/Groundwork.Query.Model.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj" />
   </ItemGroup>
 
 </Project>

@@ -6,9 +6,10 @@
 existing session APIs.
 
 The conformance corpus in `tests/Groundwork.Query.Linq.Tests` is the source of truth for this
-surface. The following diagnostic table is generated deterministically from the corpus decision
-rows and checked byte-for-byte by the corpus test; the test locks the ten codes and 250 cases
-together:
+surface. The following diagnostic table is generated deterministically from the predicate corpus
+decision rows and checked byte-for-byte by the corpus test; the test locks the ten predicate
+codes and 250 predicate cases together. The query-shape corpus below extends that versioned
+contract with projection, distinct, and cardinality terminals.
 
 | Code | AST equivalent / fix |
 | --- | --- |
@@ -44,6 +45,19 @@ together:
 | Unpinned string comparison | GW-LINQ-108: use Ordinal/OrdinalIgnoreCase matching the column's folding |
 | Non-UTC clock | GW-LINQ-109: use `DateTimeOffset.UtcNow` |
 | Decimal precision/scale | GW-LINQ-110: the value has more scale/range than `decimal(10,2)` |
+
+| Query shape | Lowered contract |
+| --- | --- |
+| `Select` over mapped columns | `Projection.ColumnsOnly(...)` |
+| `Distinct` | `QueryRequest.Distinct = true`; duplicates are removed before paging/cardinality |
+| `First` / `FirstOrDefault` | `ResultShape.First` / `ResultShape.FirstOrDefault`, limit 1, explicit order required |
+| `Single` / `SingleOrDefault` | `ResultShape.Single` / `ResultShape.SingleOrDefault`, limit 2, over-one detection |
+
+The query-shape diagnostics are versioned separately from the predicate corpus:
+
+| Code | Query-shape refusal | Fix |
+| --- | --- | --- |
+| GW-LINQ-111 | First/FirstOrDefault without deterministic order | Add an explicit `OrderBy` before `First` or `FirstOrDefault` |
 
 Closed terms are read from constants and closure fields without compiling an expression per query
 call. Unsupported expression nodes are rejected rather than evaluated on the client.

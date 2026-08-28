@@ -64,7 +64,12 @@ attribute, from referenced assemblies via `GroundworkSchemaMetadata`, or from a 
 `AdditionalFile` selected by `gw_schema_file`.
 
 The closed query surface it understands: `Table<T>()`, `Where`, `WhereIf`, ordering, `Skip`/`Take`,
-and the terminals `ToList`, `ToListAsync`, `Count`, `CountAsync`, `Any`, `AnyAsync`.
+mapped-column `Select`, `Distinct`, and the terminals `ToList`, `ToListAsync`, `Count`,
+`CountAsync`, `Any`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, and `SingleOrDefault` (plus
+their async adapter forms). `First` and `FirstOrDefault` require an explicit deterministic order. A
+distinct projection is covered only when every projected column is present in the candidate index
+and an equality/range predicate bounds the unpaged provider read. Otherwise the query must carry an
+explicit live accepted scan; a bounded `Take` or cardinality terminal alone is not coverage.
 
 - `WhereIf` is enumerated as **every 2ⁿ shape for n ≤ 6**.
 - The reassignment form `if (condition) q = q.Where(...)` is enumerated **up to 32 shapes**.
@@ -159,10 +164,16 @@ the analyzer reported at build time.
 - Each provider supplies only its native budgets, advertised by the **connection** as a
   `QueryAdmissionProfile`, so the pre-execution value fence uses the provider's real limit instead of
   a portable guess — SQLite 999, SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter
-  budget of its own (its bound is the 16 MB command document) and keeps the portable default rather
-  than inventing one. A budget is a deployment property — SQLite's ceiling is a compile-time option
-  of the library you loaded — which is why it is advertised rather than assumed, and why it lives on
-  the connection where a session decorator cannot drop it.
+  budget of its own (its bound is the 16 MB command document), so it advertises no parameter
+  ceiling while ordinary membership retains the portable 1,000-value renderer limit. Keyed batch reads use the separate
+  `MaximumBatchReadKeys` budget (999 by default; SQLite 999, SQL Server 2,098, and PostgreSQL
+  65,535), with MongoDB using an effectively unbounded count plus a conservative 15 MiB payload
+  budget; the same 15 MiB payload fence applies when a caller omits its connection. An explicit
+  profile can advertise a different deployment budget. A scoped session reserves one key slot for its
+  provider-injected scope parameter. A budget
+  is a deployment property — SQLite's ceiling is a compile-time option of the library you loaded —
+  which is why it is advertised rather than assumed, and why it lives on the connection where a
+  session decorator cannot drop it.
 
 ## Accepted scans
 

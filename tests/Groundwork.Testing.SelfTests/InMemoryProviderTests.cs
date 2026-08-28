@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
@@ -1007,6 +1008,70 @@ public sealed class InMemoryProviderTests
         Assert.Equal("GW-QUERY-013", tokenFailure.Code);
     }
 
+    [Fact]
+    public void Privileged_cross_scope_distinct_deduplicates_before_paging_and_keeps_the_first_scope()
+    {
+        var table = new TableId("cross-scope-distinct");
+        var value = new ColumnRef(table, "value", QueryType.String, isNullable: true);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(value, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(value),
+            Paging.OffsetLimit(1, 1),
+            distinct: true);
+        var source = new CrossScopeQueryRow[]
+        {
+            new(new StorageScope("tenant-a"), new Dictionary<string, object?> { ["value"] = "a" }),
+            new(new StorageScope("tenant-b"), new Dictionary<string, object?> { ["value"] = "a" }),
+            new(new StorageScope("tenant-c"), new Dictionary<string, object?> { ["value"] = "b" })
+        };
+
+        var result = CrossScopeQueryMaterializer.Materialize(request, QueryRenderOptions.Default, source);
+
+        var row = Assert.Single(result.Rows);
+        Assert.Equal("tenant-c", row.Scope.Value);
+        Assert.Equal("b", row.Values["value"]);
+
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> native = new[]
+        {
+            new Dictionary<string, object?> { ["value"] = "a", [CrossScopeQueryMaterializer.RawScopeColumn] = "tenant-a" },
+            new Dictionary<string, object?> { ["value"] = "a", [CrossScopeQueryMaterializer.RawScopeColumn] = "tenant-b" },
+            new Dictionary<string, object?> { ["value"] = "b", [CrossScopeQueryMaterializer.RawScopeColumn] = "tenant-c" }
+        };
+        var materialized = QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default, native,
+            sourceIncludesRequestedOffset: true);
+        var paired = CrossScopeQueryMaterializer.FromNativePage(
+            materialized, native, CrossScopeQueryMaterializer.RawScopeColumn);
+        Assert.Equal("tenant-c", Assert.Single(paired.Rows).Scope.Value);
+    }
+
+    [Fact]
+    public void Privileged_cross_scope_cardinality_shapes_cap_and_validate_rows()
+    {
+        var table = new TableId("cross-scope-cardinality");
+        var value = new ColumnRef(table, "value", QueryType.String, isNullable: true);
+        var order = ImmutableArray.Create(new OrderTerm(value, OrderDirection.Ascending, NullOrder.Last));
+        var source = new CrossScopeQueryRow[]
+        {
+            new(new StorageScope("tenant-a"), new Dictionary<string, object?> { ["value"] = "a" }),
+            new(new StorageScope("tenant-b"), new Dictionary<string, object?> { ["value"] = "b" })
+        };
+
+        var first = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order,
+            Projection.ColumnsOnly(value), Paging.None, ResultShape.First.Instance);
+        Assert.Single(CrossScopeQueryMaterializer.Materialize(first, QueryRenderOptions.Default, source).Rows);
+
+        var single = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order,
+            Projection.ColumnsOnly(value), Paging.None, ResultShape.Single.Instance);
+        Assert.Throws<InvalidOperationException>(() =>
+            CrossScopeQueryMaterializer.Materialize(single, QueryRenderOptions.Default, source));
+
+        var explicitlyBound = new QueryRequest(table, Predicate.AlwaysTrue.Instance, order,
+            Projection.ColumnsOnly(value), Paging.OffsetLimit(0, 1), ResultShape.Single.Instance);
+        Assert.Single(CrossScopeQueryMaterializer.Materialize(explicitlyBound, QueryRenderOptions.Default, source).Rows);
+    }
+
     private sealed class RecordingAccessObserver : IStorageAccessObserver
     {
         public List<StorageAccessEvent> Events { get; } = [];
@@ -1635,6 +1700,44 @@ public sealed class InMemoryProviderTests
             Paging.None);
         var budgetFailure = Assert.Throws<QueryRenderException>(() => session.Query(budgetRequest, options with { InValueLimit = 1 }));
         Assert.Equal("GW-QUERY-015", budgetFailure.Code);
+    }
+
+    [Fact]
+    public void In_memory_distinct_continuation_advances_after_projected_deduplication()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://distinct-continuation");
+        var unit = TestingFixture.GlobalUnit("distinct-continuation");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(TestingFixture.Values("a-1", "a"));
+        session.Insert(TestingFixture.Values("a-2", "a"));
+        session.Insert(TestingFixture.Values("b", "b"));
+
+        var table = new TableId(unit.Name);
+        var value = new ColumnRef(table, "value", QueryType.String, isNullable: true);
+        var id = new ColumnRef(table, "id", QueryType.String, isNullable: false);
+        var options = new QueryRenderOptions(tieBreakColumns: [id]);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(value, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(value),
+            Paging.Keyset(1),
+            distinct: true);
+
+        var first = session.Query(request, options);
+        Assert.Equal("a", Assert.Single(first.Rows)["value"]);
+        Assert.NotNull(first.NextContinuationToken);
+
+        var second = session.Query(new QueryRequest(
+            table,
+            request.Where,
+            request.Order,
+            request.Projection,
+            Paging.Continuation(first.NextContinuationToken!, 1),
+            distinct: true), options);
+
+        Assert.Equal("b", Assert.Single(second.Rows)["value"]);
     }
 
     private sealed class ExternalFactory : IStorageProviderFactory

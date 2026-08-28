@@ -101,6 +101,21 @@ public sealed class CoverageCorpusTests
             Paging.OffsetLimit(0, 20)),
             new CoverageIndex("ix_id_sparse", [new CoverageIndexColumn(Id.Name, isNullable: false)], IndexMissingValueBehavior.Excluded),
             true);
+        yield return Case("distinct-unbounded-indexed-projection-refused", Request(
+            Predicate.AlwaysTrue.Instance,
+            projection: Projection.ColumnsOnly(Text),
+            distinct: true), Index(Text), false);
+        yield return Case("distinct-uncovered-projection", Request(
+            Predicate.AlwaysTrue.Instance,
+            projection: Projection.ColumnsOnly(Text),
+            distinct: true), Index(Amount), false);
+        yield return Case("first-ordered", Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Created, OrderDirection.Ascending, NullOrder.First)],
+            result: ResultShape.First.Instance), Index(Created), true);
+        yield return Case("first-without-order", Request(
+            Predicate.AlwaysTrue.Instance,
+            result: ResultShape.First.Instance), Index(Text), false);
     }
 
     [Theory]
@@ -128,8 +143,10 @@ public sealed class CoverageCorpusTests
         Predicate predicate,
         ImmutableArray<OrderTerm> order = default,
         Paging? paging = null,
-        ResultShape? result = null) =>
-        new(Table, predicate, order, Projection.All, paging ?? Paging.None, result ?? ResultShape.Rows.Instance);
+        ResultShape? result = null,
+        Projection? projection = null,
+        bool distinct = false) =>
+        new(Table, predicate, order, projection ?? Projection.All, paging ?? Paging.None, result ?? ResultShape.Rows.Instance, distinct: distinct);
 
     private static CoverageIndex Index(ColumnRef column, OrderDirection direction = OrderDirection.Ascending) =>
         new("ix_" + column.Name, [new CoverageIndexColumn(column.Name, direction, column.IsNullable)]);
