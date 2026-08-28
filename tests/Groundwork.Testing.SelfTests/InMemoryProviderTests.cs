@@ -1620,8 +1620,11 @@ public sealed class InMemoryProviderTests
                 .ToArray()
         };
 
-        var refusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
-        Assert.Contains("GW-PORT-013", refusal.Message, StringComparison.Ordinal);
+        var diffRefusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Diff(unit));
+        Assert.Contains("GW-PORT-013", diffRefusal.Message, StringComparison.Ordinal);
+
+        var applyRefusal = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+        Assert.Contains("GW-PORT-013", applyRefusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

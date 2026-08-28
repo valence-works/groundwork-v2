@@ -1,5 +1,4 @@
-using System.Collections;
-using System.Text.Json;
+using Groundwork.Kernel.Schema;
 
 namespace Groundwork.Kernel;
 
@@ -98,28 +97,6 @@ public static class PortabilityValidator
     private const int MinimumPortableDecimalPrecision = 1;
     private const int MaximumPortableDecimalPrecision = 38;
 
-    private static readonly IReadOnlyList<Type> PortableJsonScalarTypes =
-    [
-        typeof(string),
-        typeof(bool),
-        typeof(byte),
-        typeof(sbyte),
-        typeof(short),
-        typeof(ushort),
-        typeof(int),
-        typeof(uint),
-        typeof(long),
-        typeof(ulong),
-        typeof(float),
-        typeof(double),
-        typeof(decimal),
-        typeof(char),
-        typeof(DateTime),
-        typeof(DateTimeOffset),
-        typeof(Guid),
-        typeof(byte[])
-    ];
-
     private static readonly IReadOnlyDictionary<PortableType, IReadOnlyList<Type>> PortableDefaultClrTypes =
         new Dictionary<PortableType, IReadOnlyList<Type>>
         {
@@ -132,16 +109,9 @@ public static class PortabilityValidator
             [PortableType.Guid] = [typeof(Guid)],
             [PortableType.Binary] = [typeof(byte[])],
             // JSON is intentionally opaque and has no single CLR scalar type. Its top-level
-            // CLR shapes are enumerated here, and IsPortableJsonValue validates the graph below
-            // each object/array rather than allowing an arbitrary object through as object.
-            [PortableType.Json] =
-            [
-                ..PortableJsonScalarTypes,
-                typeof(JsonDocument),
-                typeof(JsonElement),
-                typeof(IDictionary),
-                typeof(IEnumerable)
-            ],
+            // CLR shapes are enumerated by SchemaValue, and its graph validator rejects an
+            // arbitrary object even though JSON has no one exact CLR type.
+            [PortableType.Json] = SchemaValue.PortableJsonDefaultClrTypes,
             [PortableType.Double] = [typeof(double)]
         };
 
@@ -209,6 +179,37 @@ public static class PortabilityValidator
         ArgumentNullException.ThrowIfNull(unit);
         ThrowIfInvalid(ValidatePhysicalIdentifiers(unit));
     }
+
+    /// <summary>
+    /// Validates only declaration defaults. Provider schema paths that intentionally run a partial
+    /// portability pass still call this focused boundary before rendering or applying DDL.
+    /// </summary>
+    public static PortabilityValidationResult ValidatePortableDefaults(StorageUnit? unit)
+    {
+        if (unit is null)
+        {
+            return new([new(
+                "GW-PORT-000",
+                "A storage unit is required for portability validation.",
+                "storageUnit")]);
+        }
+
+        var diagnostics = new List<PortabilityRefusal>();
+        ValidatePortableDefaultClrTypes(unit.Columns ?? [], diagnostics);
+        return new(diagnostics);
+    }
+
+    /// <summary>Fails before provider work when a declaration default is not portable.</summary>
+    public static void EnsurePortableDefaults(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ThrowIfInvalid(ValidatePortableDefaults(unit));
+    }
+
+    internal static bool IsPortableDefaultValue(PortableType type, object? value) =>
+        value is null ||
+        PortableDefaultClrTypes.TryGetValue(type, out var expected) &&
+        IsCompatiblePortableDefault(type, value, expected);
 
     /// <summary>
     /// Validates one provider-rendered identifier using the same grammar and budget applied to a
@@ -689,62 +690,7 @@ public static class PortabilityValidator
         object value,
         IReadOnlyList<Type> expected) =>
         expected.Any(candidate => candidate.IsInstanceOfType(value)) &&
-        (type != PortableType.Json ||
-         IsPortableJsonValue(value, new HashSet<object>()));
-
-    private static bool IsPortableJsonValue(object value, ISet<object> active)
-    {
-        if (value is float single)
-            return float.IsFinite(single);
-        if (value is double number)
-            return double.IsFinite(number);
-        if (value is JsonDocument document)
-            return document.RootElement.ValueKind != JsonValueKind.Undefined;
-        if (value is JsonElement element)
-            return element.ValueKind != JsonValueKind.Undefined;
-        if (PortableJsonScalarTypes.Contains(value.GetType()))
-            return true;
-
-        if (!active.Add(value))
-            return false;
-
-        try
-        {
-            if (value is IReadOnlyDictionary<string, object?> readOnlyDictionary)
-                return readOnlyDictionary.Values.All(item => item is null || IsPortableJsonValue(item, active));
-
-            if (value is IDictionary dictionary)
-            {
-                foreach (DictionaryEntry entry in dictionary)
-                {
-                    if (entry.Key is not string ||
-                        entry.Value is not null && !IsPortableJsonValue(entry.Value, active))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
-            }
-
-            if (value is IEnumerable sequence)
-            {
-                foreach (var item in sequence)
-                {
-                    if (item is not null && !IsPortableJsonValue(item, active))
-                        return false;
-                }
-
-                return true;
-            }
-        }
-        finally
-        {
-            active.Remove(value);
-        }
-
-        return false;
-    }
+        (type != PortableType.Json || SchemaValue.IsPortableJsonValue(value));
 
     private static void ValidateBoundedIndexKeys(
         IReadOnlyList<IndexDefinition> indexes,

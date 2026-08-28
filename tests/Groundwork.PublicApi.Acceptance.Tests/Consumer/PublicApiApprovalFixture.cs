@@ -94,6 +94,7 @@ internal static class PublicApiApprovalFixture
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<ColumnBuilder, ColumnBuilder>(column => column.LocaleOrder("sv-SE", 12));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
+        _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.ValidatePortableDefaults(unit));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Aggregate("summary", aggregation => aggregation.GroupBy("group").Count("count")));
         _ = new Func<string, Action<AggregationBuilder>, AggregationProfile>(AggregationProfile.Create);
@@ -114,6 +115,7 @@ internal static class PublicApiApprovalFixture
         _ = new Func<string, string, PortabilityValidationResult>((identifier, path) =>
             PortabilityValidator.ValidatePhysicalIdentifier(identifier, path));
         _ = new Action<Groundwork.Kernel.StorageUnit>(PortabilityValidator.EnsurePhysicalIdentifiers);
+        _ = new Action<Groundwork.Kernel.StorageUnit>(PortabilityValidator.EnsurePortableDefaults);
         _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(

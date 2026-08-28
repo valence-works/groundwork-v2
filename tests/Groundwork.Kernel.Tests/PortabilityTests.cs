@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Groundwork.Kernel;
 using Xunit;
 
@@ -15,10 +16,11 @@ public sealed class PortabilityTests
     [InlineData(PortableType.Guid)]
     [InlineData(PortableType.Binary)]
     [InlineData(PortableType.Double)]
-    public void A_default_must_supply_the_clr_type_named_by_its_portable_type(PortableType type)
+    [InlineData(PortableType.Json)]
+    public void A_default_must_supply_a_clr_value_in_its_portable_type_domain(PortableType type)
     {
         var supplied = MismatchedDefault(type);
-        var result = Validate(Unit([
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
             Column("id", PortableType.Guid, nullable: false),
             Column("value", type, nullable: false, maxLength: 32, precision: 18, scale: 4) with
             {
@@ -44,6 +46,7 @@ public sealed class PortabilityTests
         PortableType.Guid => "00000000-0000-0000-0000-000000000000",
         PortableType.Binary => "AQI=",
         PortableType.Double => 1,
+        PortableType.Json => new UnsupportedJsonDefault(),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 
@@ -56,18 +59,18 @@ public sealed class PortabilityTests
             ["count"] = 7,
             ["items"] = new List<object?> { true, null, new Dictionary<string, object?> { ["active"] = false } }
         };
-        var result = Validate(Unit([
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
             Column("id", PortableType.Guid, nullable: false),
             Column("payload", PortableType.Json) with { Default = new PortableDefault(value) }
         ], key: ["id"]));
 
-        Assert.DoesNotContain(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.True(result.IsPortable, string.Join(Environment.NewLine, result.Refusals));
     }
 
     [Fact]
     public void A_json_default_rejects_a_non_json_compatible_clr_value()
     {
-        var result = Validate(Unit([
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
             Column("id", PortableType.Guid, nullable: false),
             Column("payload", PortableType.Json) with
             {
@@ -80,6 +83,22 @@ public sealed class PortabilityTests
         Assert.Contains("Json", refusal.Message, StringComparison.Ordinal);
         Assert.Contains(nameof(UnsupportedJsonDefault), refusal.Message, StringComparison.Ordinal);
         Assert.Contains("JSON-compatible", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Json_document_and_element_defaults_are_accepted_by_the_focused_boundary()
+    {
+        using var document = JsonDocument.Parse("{\"state\":\"pending\"}");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+                Column("id", PortableType.Guid, nullable: false),
+                Column("payload", PortableType.Json) with { Default = new PortableDefault(value) }
+            ], key: ["id"]));
+
+            Assert.True(result.IsPortable, string.Join(Environment.NewLine, result.Refusals));
+        }
     }
 
     [Fact]

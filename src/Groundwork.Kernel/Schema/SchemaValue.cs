@@ -7,8 +7,42 @@ namespace Groundwork.Kernel.Schema;
 
 internal static class SchemaValue
 {
+    private static readonly IReadOnlyList<Type> PortableJsonScalarTypes =
+    [
+        typeof(string),
+        typeof(bool),
+        typeof(byte),
+        typeof(sbyte),
+        typeof(short),
+        typeof(ushort),
+        typeof(int),
+        typeof(uint),
+        typeof(long),
+        typeof(ulong),
+        typeof(float),
+        typeof(double),
+        typeof(decimal),
+        typeof(char),
+        typeof(DateTime),
+        typeof(DateTimeOffset),
+        typeof(Guid),
+        typeof(byte[])
+    ];
+
+    internal static readonly IReadOnlyList<Type> PortableJsonDefaultClrTypes =
+    [
+        ..PortableJsonScalarTypes,
+        typeof(JsonDocument),
+        typeof(JsonElement),
+        typeof(IDictionary),
+        typeof(IEnumerable)
+    ];
+
     public static object? Snapshot(object? value, PortableType type) =>
         Snapshot(value, type, new HashSet<object>(ReferenceEqualityComparer.Instance));
+
+    internal static bool IsPortableJsonValue(object value) =>
+        IsPortableJsonValue(value, new HashSet<object>(ReferenceEqualityComparer.Instance));
 
     public static string Canonicalize(object? value, PortableType type) => type switch
     {
@@ -132,6 +166,60 @@ internal static class SchemaValue
             StringComparer.Ordinal),
         _ => throw new ArgumentException($"Unsupported JSON schema default token '{element.ValueKind}'.", nameof(element))
     };
+
+    private static bool IsPortableJsonValue(object value, ISet<object> active)
+    {
+        if (value is float single)
+            return float.IsFinite(single);
+        if (value is double number)
+            return double.IsFinite(number);
+        if (value is JsonDocument document)
+            return document.RootElement.ValueKind != JsonValueKind.Undefined;
+        if (value is JsonElement element)
+            return element.ValueKind != JsonValueKind.Undefined;
+        if (PortableJsonScalarTypes.Contains(value.GetType()))
+            return true;
+
+        if (!active.Add(value))
+            return false;
+
+        try
+        {
+            if (value is IReadOnlyDictionary<string, object?> readOnlyDictionary)
+                return readOnlyDictionary.Values.All(item => item is null || IsPortableJsonValue(item, active));
+
+            if (value is IDictionary dictionary)
+            {
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    if (entry.Key is not string ||
+                        entry.Value is not null && !IsPortableJsonValue(entry.Value, active))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            if (value is IEnumerable sequence)
+            {
+                foreach (var item in sequence)
+                {
+                    if (item is not null && !IsPortableJsonValue(item, active))
+                        return false;
+                }
+
+                return true;
+            }
+        }
+        finally
+        {
+            active.Remove(value);
+        }
+
+        return false;
+    }
 
     private static string CanonicalJsonElement(JsonElement element) =>
         CanonicalJson(SnapshotJsonElement(element), new HashSet<object>(ReferenceEqualityComparer.Instance));

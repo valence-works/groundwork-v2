@@ -134,6 +134,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        PortabilityValidator.EnsurePortableDefaults(source);
         PortabilityValidator.EnsurePhysicalIdentifiers(source);
         EnsurePhysicalIndexNames(source);
         return ProviderOwnedColumns.Physicalize(source, ColumnPolicy) with

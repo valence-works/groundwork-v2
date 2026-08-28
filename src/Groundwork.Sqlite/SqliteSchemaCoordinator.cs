@@ -111,6 +111,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        PortabilityValidator.EnsurePortableDefaults(source);
         PortabilityValidator.EnsurePhysicalIdentifiers(source);
         EnsurePhysicalIndexNames(source);
         if (source.Retention is not null)
