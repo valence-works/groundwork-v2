@@ -28,6 +28,36 @@ public sealed class TerminalSurfaceTests
         Assert.Equal(surface, QueryResolver.TerminalNames.OrderBy(name => name, StringComparer.Ordinal));
     }
 
+    [Fact]
+    public void Reduction_surface_is_closed_and_empty_safe()
+    {
+        var methods = typeof(IGwQueryable<>).GetMethods()
+            .Where(method => method.Name is "Sum" or "Min" or "Max")
+            .ToArray();
+
+        Assert.Equal(6, methods.Count(method => method.Name == "Sum"));
+        Assert.Equal(11, methods.Count(method => method.Name == "Min"));
+        Assert.Equal(11, methods.Count(method => method.Name == "Max"));
+        Assert.All(methods, method =>
+        {
+            Assert.False(method.IsGenericMethod);
+            Assert.Equal(typeof(LinqTerminal<>), method.ReturnType.GetGenericTypeDefinition());
+            var selectorType = method.GetParameters()[0].ParameterType.GetGenericArguments()[0];
+            var selectedType = selectorType.GetGenericArguments()[1];
+            var expectedType = method.Name == "Sum"
+                ? selectedType == typeof(decimal) || selectedType == typeof(decimal?) ? typeof(decimal?) : typeof(long?)
+                : selectedType == typeof(int) || selectedType == typeof(int?) ? typeof(int?)
+                : selectedType == typeof(long) || selectedType == typeof(long?) ? typeof(long?)
+                : selectedType == typeof(decimal) || selectedType == typeof(decimal?) ? typeof(decimal?)
+                : selectedType == typeof(string) ? typeof(string)
+                : selectedType == typeof(DateTimeOffset) || selectedType == typeof(DateTimeOffset?) ? typeof(DateTimeOffset?)
+                : typeof(Guid?);
+            Assert.Equal(expectedType, method.ReturnType.GetGenericArguments()[0]);
+        });
+        Assert.All(typeof(GwQueryAsyncExtensions).GetMethods(BindingFlags.Public | BindingFlags.Static), method =>
+            Assert.DoesNotContain(method.Name, new[] { "SumAsync", "MinAsync", "MaxAsync" }));
+    }
+
     private static bool IsTerminalReturn(Type type) =>
         type.IsGenericType &&
         (type.GetGenericTypeDefinition() == typeof(LinqTerminal<>) ||

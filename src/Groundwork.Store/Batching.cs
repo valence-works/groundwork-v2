@@ -623,6 +623,17 @@ internal sealed class BatchContext
         ordinals.Add(write, nextOrdinal++);
     }
 
+    /// <summary>
+    /// Poisons the batch after an operation that writes directly through a session fails. The
+    /// provider unit of work owns rollback; recording the failure here makes its normal commit
+    /// failure path perform that rollback before the transaction can be committed.
+    /// </summary>
+    internal void Fail(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        failure ??= exception;
+    }
+
     internal IReadOnlyList<RowWriteOutcome> FlushFor(StorageUnit unit, StorageKey key) =>
         FlushForAsync(unit, key, isAsync: false, CancellationToken.None).GetAwaiter().GetResult();
 
@@ -816,6 +827,9 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         Unit = inner.Unit;
         Access = inner.Access;
     }
+
+    /// <summary>Marks the enclosing unit of work failed so its commit path must roll it back.</summary>
+    internal void Fail(Exception exception) => context.Fail(exception);
 
     public StorageUnit Unit { get; }
 

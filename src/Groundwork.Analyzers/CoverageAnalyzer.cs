@@ -45,6 +45,8 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             AnalyzerDiagnostics.For("GW-COVER-006"),
             AnalyzerDiagnostics.For("GW-COVER-009"),
             AnalyzerDiagnostics.For("GW-COVER-016"),
+            AnalyzerDiagnostics.For("GW-LINQ-112"),
+            AnalyzerDiagnostics.For("GW-LINQ-113"),
             AnalyzerDiagnostics.For("GW-COVER-901"),
             AnalyzerDiagnostics.For("GW-COVER-902"),
             AnalyzerDiagnostics.For("GW-COVER-903"),
@@ -266,6 +268,14 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         var location = (resolution.FixNode ?? resolution.DiagnosticNode).GetLocation();
         if (!resolution.IsResolved)
         {
+            if (resolution.FailureCode is { } failureCode)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    AnalyzerDiagnostics.For(failureCode),
+                    location,
+                    failureCode + ": " + resolution.Failure + "."));
+                return;
+            }
             context.ReportDiagnostic(Diagnostic.Create(
                 AnalyzerDiagnostics.Unresolvable,
                 location,

@@ -65,6 +65,26 @@ Staged writes are flushed when:
 A staged-key read is a synchronization point: matching staged writes flush before the read is
 delegated. A **query** flushes the whole staged set.
 
+Set-based mutations are synchronization points too. For example, an exact mutation through a
+session opened from the unit of work first flushes all earlier staged writes, takes its key
+snapshot, and applies one keyed write per selected key. Staged writes added afterward are committed
+after the set operation. The snapshot and keyed writes remain inside the unit's transaction:
+
+```csharp
+work.Stage(RowWrite.Insert(unit, before));
+var result = work.OpenSession(unit).DeleteWhere(predicate, SetMutationOptions.Exact);
+work.Stage(RowWrite.Upsert(unit, after));
+work.Commit();
+```
+
+`result.Outcomes` is exact evidence for the keys selected at the synchronization point. Outside a
+unit of work, exact mode still uses the keyed contract but does not make the read-plus-writes one
+transaction; use aggregate mode when whole-set atomicity is required.
+
+As with other reads, the barrier applies to writes staged with `work.Stage`. Keyed methods called
+directly on a unit-of-work session are immediate provider writes, not staged declarations; use
+`Stage` when their declaration order relative to the set operation matters.
+
 > The row cap is a **memory and parameter-safety boundary, not a transaction boundary.** A
 > cap-triggered flush stays inside the enclosing transaction and rolls back with it.
 

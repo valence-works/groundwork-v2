@@ -15,6 +15,8 @@ public sealed class CoverageCheckerTests
     private static readonly ColumnRef Assignee = new(Table, "assignee", QueryType.String);
     private static readonly ColumnRef Created = new(Table, "created_at", QueryType.DateTimeOffset);
     private static readonly ColumnRef Id = new(Table, "id", QueryType.String, isNullable: false);
+    private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Decimal);
+    private static readonly ColumnRef Enabled = new(Table, "enabled", QueryType.Boolean, isNullable: false);
 
     [Fact]
     public void Equality_prefix_and_ordered_suffix_are_covered()
@@ -333,6 +335,44 @@ public sealed class CoverageCheckerTests
         Assert.False(result.IsCovered);
         Assert.Equal("GW-COVER-016", result.Refusal!.Code);
         Assert.Contains("deterministic order", result.Refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Reduction_column_must_be_present_in_the_covering_index()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [],
+            Projection.ColumnsOnly(Amount),
+            Paging.None,
+            new ResultShape.Sum(Amount));
+
+        var covered = QueryCoverageChecker.Check(request, [Index("ix_status_amount", "status", "amount")]);
+        var uncovered = QueryCoverageChecker.Check(request, [Index("ix_status", "status")]);
+
+        Assert.True(covered.IsCovered);
+        Assert.False(uncovered.IsCovered);
+        Assert.Equal("GW-COVER-006", uncovered.Refusal!.Code);
+        Assert.Contains("reduction column", uncovered.Refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Reduction_type_is_refused_before_index_coverage()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [],
+            Projection.ColumnsOnly(Enabled),
+            Paging.None,
+            new ResultShape.Min(Enabled));
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_status_enabled", "status", "enabled")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Contains("orderable", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

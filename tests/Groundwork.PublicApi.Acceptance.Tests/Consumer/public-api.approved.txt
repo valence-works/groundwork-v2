@@ -36,6 +36,8 @@ Groundwork.Store.IStorageInspectionSession
 Groundwork.Store.ICompareAndDeleteStorageSession
 Groundwork.Store.IExactRetentionStorageSession
 Groundwork.Store.SetMutationOptions
+Groundwork.Store.SetMutationOutcomeMode
+Groundwork.Store.SetMutationOutcome
 Groundwork.Store.ISetMutationStorageSession
 Groundwork.Store.SetMutationResult
 Groundwork.Store.RowWrite

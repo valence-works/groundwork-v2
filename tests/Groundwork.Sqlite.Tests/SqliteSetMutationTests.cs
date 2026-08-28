@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
@@ -93,9 +94,12 @@ public sealed class SqliteSetMutationTests
         }));
 
         Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "alph"))["id"]);
-        Assert.Equal(1L, session.UpdateWhere(
+        var aggregate = session.UpdateWhere(
             Status(unit, "open"),
-            new Dictionary<string, object?> { ["name"] = "Omega" }).MatchedRows);
+            new Dictionary<string, object?> { ["name"] = "Omega" });
+        Assert.Equal(1L, aggregate.MatchedRows);
+        Assert.False(aggregate.IsExact);
+        Assert.Empty(aggregate.Outcomes);
 
         Assert.Empty(ByNamePrefix(session, unit, "alph"));
         Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "omeg"))["id"]);
@@ -219,6 +223,246 @@ public sealed class SqliteSetMutationTests
         Assert.NotNull(second.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
     }
 
+    [Fact]
+    public void Exact_update_returns_one_write_outcome_per_matched_key()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "open", "one"));
+        session.Insert(Row("b", "open", "two"));
+        session.Insert(Row("c", "closed", "three"));
+
+        var result = session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            new SetMutationOptions { OutcomeMode = SetMutationOutcomeMode.Exact });
+
+        Assert.True(result.IsExact);
+        Assert.Equal(2L, result.MatchedRows);
+        Assert.Equal(2, result.Outcomes.Count);
+        Assert.All(result.Outcomes, outcome => Assert.Equal(WriteOutcomeStatus.Updated, outcome.Outcome.Status));
+        Assert.Equal(new[] { "a", "b" }, result.Outcomes.Select(outcome => outcome.Key.Values["id"]).OrderBy(value => value).ToArray());
+    }
+
+    [Fact]
+    public void Exact_update_keeps_composite_key_outcomes_in_deterministic_logical_order()
+    {
+        using var connection = Open();
+        var unit = CompositeUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(CompositeRow("z", "b"));
+        session.Insert(CompositeRow("a", "c"));
+        session.Insert(CompositeRow("a", "a"));
+
+        var result = session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact);
+
+        Assert.Equal(3L, result.MatchedRows);
+        Assert.Equal(
+            new[] { ("a", "a"), ("a", "c"), ("z", "b") },
+            result.Outcomes.Select(outcome =>
+                (Assert.IsType<string>(outcome.Key.Values["tenant"]), Assert.IsType<string>(outcome.Key.Values["id"]))).ToArray());
+    }
+
+    [Fact]
+    public void Exact_update_uses_the_logical_predicate_for_folded_search_keys()
+    {
+        using var connection = Open();
+        var unit = FoldedUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "a",
+            ["status"] = "open",
+            ["name"] = "Alpha"
+        }));
+
+        var result = session.UpdateWhere(
+            NamePrefix(unit, "alph"),
+            new Dictionary<string, object?> { ["name"] = "Omega" },
+            SetMutationOptions.Exact);
+
+        Assert.Equal(1L, result.MatchedRows);
+        Assert.Equal("a", Assert.Single(result.Outcomes).Key.Values["id"]);
+        Assert.Equal("a", Assert.Single(ByNamePrefix(session, unit, "omeg"))["id"]);
+    }
+
+    [Fact]
+    public void Exact_update_preserves_keyed_optimistic_version_outcomes()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Concurrency = ConcurrencyDeclaration.Optimistic() };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "open", "one"));
+
+        var result = session.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact);
+
+        var outcome = Assert.Single(result.Outcomes).Outcome;
+        Assert.Equal(WriteOutcomeStatus.Updated, outcome.Status);
+        Assert.Equal(2L, outcome.Version);
+        Assert.Equal(2L, session.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" }))!.Version);
+    }
+
+    [Fact]
+    public void Exact_scoped_update_orders_logical_keys_without_the_scope_discriminator()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Scope = ScopePolicy.Scoped };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+        first.Insert(Row("a", "open", "first"));
+        second.Insert(Row("a", "open", "second"));
+
+        var result = first.UpdateWhere(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact);
+
+        Assert.Equal(1L, result.MatchedRows);
+        Assert.Equal("a", Assert.Single(result.Outcomes).Key.Values["id"]);
+        Assert.Equal("updated", first.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" }))!.Values.Values["label"]);
+        Assert.Equal("second", second.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" }))!.Values.Values["label"]);
+    }
+
+    [Fact]
+    public async Task Exact_scoped_delete_async_orders_logical_keys_without_the_scope_discriminator()
+    {
+        using var connection = Open();
+        var unit = Unit() with { Scope = ScopePolicy.Scoped };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("scope-b")));
+        first.Insert(Row("a", "gone", "first"));
+        second.Insert(Row("a", "gone", "second"));
+
+        var result = await first.DeleteWhereAsync(Status(unit, "gone"), SetMutationOptions.Exact);
+
+        Assert.Equal(1L, result.MatchedRows);
+        Assert.Equal("a", Assert.Single(result.Outcomes).Key.Values["id"]);
+        Assert.Null(first.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
+        Assert.NotNull(second.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "a" })));
+    }
+
+    [Fact]
+    public async Task Exact_delete_async_returns_deleted_outcomes_and_empty_exact_results_are_distinct()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(Row("a", "gone", "one"));
+
+        var deleted = await session.DeleteWhereAsync(
+            Status(unit, "gone"), SetMutationOptions.Exact);
+        Assert.True(deleted.IsExact);
+        Assert.Equal(1L, deleted.MatchedRows);
+        Assert.Equal(WriteOutcomeStatus.Deleted, Assert.Single(deleted.Outcomes).Outcome.Status);
+
+        var empty = await session.DeleteWhereAsync(
+            Status(unit, "gone"), SetMutationOptions.Exact);
+        Assert.True(empty.IsExact);
+        Assert.Equal(0L, empty.MatchedRows);
+        Assert.Empty(empty.Outcomes);
+    }
+
+    [Fact]
+    public async Task Exact_async_cancellation_after_a_keyed_write_poisoned_unit_cannot_commit_partial_updates()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var seed = connection.OpenSession(unit, StorageAccess.Global);
+        seed.Insert(Row("a", "open", "one"));
+        seed.Insert(Row("b", "open", "two"));
+
+        using var cancellation = new CancellationTokenSource();
+        var observer = new CancelAfterFirstUpdate(cancellation);
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            BatchWriteOptions.Exact,
+            observer,
+            unit);
+        var session = work.OpenSession(unit);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => session.UpdateWhereAsync(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact,
+            cancellation.Token).AsTask());
+
+        // The first keyed update ran inside the provider transaction. The batch failure marker
+        // routes the later commit through the provider's normal rollback path instead of allowing
+        // that partial exact mutation to become durable.
+        Assert.Throws<InvalidOperationException>(() => work.Commit());
+
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal("one", reader.Read(Key(unit, "a"))!.Values.Values["label"]);
+        Assert.Equal("two", reader.Read(Key(unit, "b"))!.Values.Values["label"]);
+    }
+
+    [Fact]
+    public async Task Exact_async_provider_failure_after_a_keyed_write_poisoned_unit_cannot_commit_partial_updates()
+    {
+        using var connection = Open();
+        var unit = UniqueUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var seed = connection.OpenSession(unit, StorageAccess.Global);
+        seed.Insert(Row("a", "open", "one"));
+        seed.Insert(Row("b", "open", "two"));
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var session = work.OpenSession(unit);
+
+        await Assert.ThrowsAsync<SqliteException>(() => session.UpdateWhereAsync(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "same" },
+            SetMutationOptions.Exact).AsTask());
+
+        Assert.Throws<InvalidOperationException>(() => work.Commit());
+
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal("one", reader.Read(Key(unit, "a"))!.Values.Values["label"]);
+        Assert.Equal("two", reader.Read(Key(unit, "b"))!.Values.Values["label"]);
+    }
+
+    [Fact]
+    public void Exact_delete_flushes_prior_stage_and_runs_before_a_later_keyed_stage()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        var session = work.OpenSession(unit);
+
+        work.Stage(RowWrite.Insert(unit, Row("staged", "gone", "before")));
+        var result = session.DeleteWhere(
+            Status(unit, "gone"),
+            new SetMutationOptions { OutcomeMode = SetMutationOutcomeMode.Exact });
+        Assert.Equal(1L, result.MatchedRows);
+        var outcome = Assert.Single(result.Outcomes);
+        Assert.Equal("staged", outcome.Key.Values["id"]);
+        Assert.Equal(WriteOutcomeStatus.Deleted, outcome.Outcome.Status);
+
+        work.Stage(RowWrite.Upsert(unit, Row("staged", "gone", "after")));
+        work.Commit();
+
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        var row = reader.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "staged" }));
+        Assert.NotNull(row);
+        Assert.Equal("after", row!.Values.Values["label"]);
+    }
+
     private static IStorageProviderConnection Open() => new SqliteProviderFactory().Create(
         "Data Source=file:groundwork_p43_" + Guid.NewGuid().ToString("N") + "?mode=memory&cache=shared");
 
@@ -233,6 +477,9 @@ public sealed class SqliteSetMutationTests
         var column = new ColumnRef(new TableId(unit.Name), "id", QueryType.String, isNullable: false, maxLength: 64);
         return new Predicate.Equal(column, QueryConstant.Of(column, value));
     }
+
+    private static StorageKey Key(StorageUnit unit, string value) =>
+        new(new Dictionary<string, object?> { [unit.Key.Columns[0]] = value });
 
     /// <summary>
     /// A case-insensitive prefix read, which the provider answers from the search key rather than
@@ -275,6 +522,17 @@ public sealed class SqliteSetMutationTests
             ["amount"] = null
         });
 
+    private static StorageValues CompositeRow(string tenant, string id) =>
+        new(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["tenant"] = tenant,
+            ["id"] = id,
+            ["status"] = "open",
+            ["label"] = "before",
+            ["document"] = null,
+            ["amount"] = null
+        });
+
     private static StorageUnit Unit() => new()
     {
         Id = new StorageUnitId("p43_admission"),
@@ -296,6 +554,40 @@ public sealed class SqliteSetMutationTests
             new IndexDefinition { Name = "by_amount", Columns = [new IndexColumn("amount")] }
         ]
     };
+
+    private static StorageUnit UniqueUnit()
+    {
+        var unit = Unit();
+        return unit with
+        {
+            Id = new StorageUnitId("p43_exact_failure"),
+            Name = "p43_exact_failure",
+            Indexes = unit.Indexes.Append(new IndexDefinition
+            {
+                Name = "unique_label",
+                Columns = [new IndexColumn("label")],
+                IsUnique = true
+            }).ToArray()
+        };
+    }
+
+    private static StorageUnit CompositeUnit()
+    {
+        var unit = Unit();
+        return unit with
+        {
+            Id = new StorageUnitId("p43_composite"),
+            Name = "p43_composite",
+            Columns = unit.Columns.Append(new ColumnDefinition
+            {
+                Name = "tenant",
+                Type = PortableType.String,
+                IsNullable = false,
+                MaxLength = 64
+            }).ToArray(),
+            Key = new KeyDefinition { Columns = ["tenant", "id"] }
+        };
+    }
 
     private static StorageUnit FoldedUnit() => new()
     {
@@ -321,4 +613,15 @@ public sealed class SqliteSetMutationTests
             new IndexDefinition { Name = "by_name", Columns = [new IndexColumn("name")] }
         ]
     };
+
+    private sealed class CancelAfterFirstUpdate(CancellationTokenSource cancellation) : IProviderCommandObserver
+    {
+        private int updates;
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Operation == "sqlite.update" && Interlocked.Increment(ref updates) == 1)
+                cancellation.Cancel();
+        }
+    }
 }

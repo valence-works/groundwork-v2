@@ -69,6 +69,8 @@ public static class PortableQuerySemantics
         if (request.Result.RequiresDeterministicOrder && request.Order.Length == 0)
             Refuse(refusals, "GW-SEM-ORDER-006", "First and FirstOrDefault queries require an explicit deterministic order; add an OrderBy term.", "order");
 
+        ValidateReduction(request.Result, refusals);
+
         if (request.LatestPerKey is not null)
         {
             ValidateColumn(request.LatestPerKey.Key, refusals, "latestPerKey.key");
@@ -78,6 +80,31 @@ public static class PortableQuerySemantics
         }
 
         return new PortableSemanticValidationResult(refusals);
+    }
+
+    private static void ValidateReduction(ResultShape result, ICollection<PortableSemanticRefusal> refusals)
+    {
+        if (result is not ResultShape.Reduction reduction)
+            return;
+
+        if (result is ResultShape.Sum)
+        {
+            if (reduction.Column.Type is not (QueryType.Int32 or QueryType.Int64 or QueryType.Decimal))
+            {
+                Refuse(refusals, "GW-SEM-AGG-001", "Sum requires an Int32, Int64, or Decimal column.", "result.column");
+                return;
+            }
+        }
+        else if (result is ResultShape.Min or ResultShape.Max)
+        {
+            if (!IsOrderable(reduction.Column.Type))
+            {
+                Refuse(refusals, "GW-SEM-AGG-002", "Min and Max require an orderable column.", "result.column");
+                return;
+            }
+        }
+
+        ValidateColumn(reduction.Column, refusals, "result.column");
     }
 
     public static bool Evaluate(Predicate predicate, IReadOnlyDictionary<string, object?> row)

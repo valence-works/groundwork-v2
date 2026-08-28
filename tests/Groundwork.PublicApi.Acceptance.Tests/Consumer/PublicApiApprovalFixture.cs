@@ -63,6 +63,8 @@ internal static class PublicApiApprovalFixture
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
         _ = typeof(SetMutationOptions);
+        _ = typeof(SetMutationOutcomeMode);
+        _ = typeof(SetMutationOutcome);
         _ = typeof(ISetMutationStorageSession);
         _ = typeof(SetMutationResult);
         _ = typeof(StorageAccess);
@@ -131,6 +133,11 @@ internal static class PublicApiApprovalFixture
         });
         _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, SetMutationResult>(
             (session, predicate, assignments, options) => session.UpdateWhere(predicate, assignments, options));
+        _ = SetMutationOptions.Exact;
+        _ = new Func<SetMutationResult, IReadOnlyList<SetMutationOutcome>>(result => result.Outcomes);
+        _ = new Func<SetMutationResult, SetMutationOutcomeMode>(result => result.OutcomeMode);
+        _ = new Func<SetMutationOutcome, StorageKey>(outcome => outcome.Key);
+        _ = new Func<SetMutationOutcome, WriteOutcome>(outcome => outcome.Outcome);
         _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, CancellationToken, ValueTask<SetMutationResult>>(
             (session, predicate, assignments, options, cancellationToken) =>
                 session.UpdateWhereAsync(predicate, assignments, options, cancellationToken));
@@ -163,10 +170,15 @@ internal static class PublicApiApprovalFixture
             "summary",
             "value",
             row => row.Get<long>("count")));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<long?>>(query => query.Sum(row => row.Count));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<decimal?>>(query => query.Sum(row => row.Amount));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<string?>>(query => query.Min(row => row.Label));
+        _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<Guid?>>(query => query.Max(row => row.Id));
         _ = new Func<string, IStorageProviderConnection>(connectionString => new InMemoryProviderFactory().Create(connectionString));
         _ = new Func<QueryRequest, RuntimeCoverageGate>(request => new RuntimeCoverageGate([], []).Check(request) is not null ? new RuntimeCoverageGate([], []) : throw new InvalidOperationException());
     }
 
     private sealed record ApprovalRecord(Guid Id, string Value);
+    private sealed record ApprovalMetric(Guid Id, string Label, int Count, decimal Amount);
     private sealed record ApprovalDocument(Guid Id, string Value);
 }
