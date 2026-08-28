@@ -792,6 +792,7 @@ public sealed class PostgreSqlDialectTests
 
         Assert.True(observer.FallbackEntered.Wait(TimeSpan.FromSeconds(5)),
             "The fallback did not reach its provider command in time.");
+        observer.CheckForOverlap.Set();
         using var secondStarted = new ManualResetEventSlim();
         var second = Task.Run(() =>
         {
@@ -847,6 +848,7 @@ public sealed class PostgreSqlDialectTests
     private sealed class BlockingFallbackObserver : IProviderCommandObserver
     {
         internal ManualResetEventSlim FallbackEntered { get; } = new();
+        internal ManualResetEventSlim CheckForOverlap { get; } = new();
         internal ManualResetEventSlim Release { get; } = new();
         private int overlapped;
         internal bool Overlapped => Volatile.Read(ref overlapped) != 0;
@@ -866,7 +868,8 @@ public sealed class PostgreSqlDialectTests
 
             // The fallback may issue its own write probe before the blocked command. Only a
             // non-probe read can be the independent caller this test is measuring.
-            if (!Release.IsSet && command.Kind == ProviderCommandKind.Read && !command.IsProbe)
+            if (CheckForOverlap.IsSet && !Release.IsSet &&
+                command.Kind == ProviderCommandKind.Read && !command.IsProbe)
                 Interlocked.Exchange(ref overlapped, 1);
         }
     }
