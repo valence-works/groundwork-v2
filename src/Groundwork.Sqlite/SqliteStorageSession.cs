@@ -1650,6 +1650,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     private T Execute<T>(Func<T> operation)
     {
+        ThrowIfClosed();
         try
         {
             if (transaction is not null) return operation();
@@ -1664,6 +1665,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     private T ExecuteWrite<T>(Func<T> operation)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
+        ThrowIfClosed();
         if (transaction is not null) return Translate(operation);
         WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
         lock (owner.Gate)
@@ -1679,13 +1681,34 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             }
             catch (Exception failure)
             {
-                WriteFailureCleanup.Run(failure, writeTransaction.Rollback);
+                WriteFailureCleanup.Run(failure,
+                    () => RollbackOrRetire(writeTransaction));
                 throw;
             }
             finally
             {
                 activeTransaction = null;
             }
+        }
+    }
+
+    private void RollbackOrRetire(SqliteTransaction writeTransaction)
+    {
+        try
+        {
+            SqliteTransactionCleanup.RollbackOrClearPool(writeTransaction, connection);
+        }
+        catch
+        {
+            // ClearPool marks the checked-out native handle non-poolable but leaves it open. A
+            // failed rollback can leave the native transaction active, so this session must not
+            // attempt another write against that handle before it is retired.
+            closed = true;
+            if (owner.UsesSharedSessionConnection)
+                owner.Dispose();
+            else
+                connection.Close();
+            throw;
         }
     }
 

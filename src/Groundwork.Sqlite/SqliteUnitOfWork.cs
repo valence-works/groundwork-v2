@@ -82,11 +82,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         }
         catch (Exception failure)
         {
-            WriteFailureCleanup.Run(failure, () =>
-            {
-                try { transaction.Rollback(); }
-                finally { Complete(); }
-            });
+            WriteFailureCleanup.Run(failure, RollbackAndComplete);
             throw;
         }
         finally
@@ -116,8 +112,19 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
     public void Rollback()
     {
         ThrowIfTerminal();
-        try { transaction.Rollback(); }
-        finally { Complete(); }
+        RollbackAndComplete();
+    }
+
+    private void RollbackAndComplete()
+    {
+        try
+        {
+            SqliteTransactionCleanup.RollbackOrClearPool(transaction, connection);
+        }
+        finally
+        {
+            Complete();
+        }
     }
 
     public void Dispose()
