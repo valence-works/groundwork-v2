@@ -848,6 +848,16 @@ public interface IStorageSession
         AppendAsync(operationId, values, cancellationToken);
 }
 
+/// <summary>
+/// Internal bridge for execution adapters that need the connection's deployed-catalog evidence.
+/// Provider sessions remain public, connection-free views; the bridge is deliberately internal so
+/// the runtime coverage contract cannot become another consumer-facing capability to implement.
+/// </summary>
+internal interface IProviderBoundStorageSession
+{
+    IStorageProviderConnection? ProviderConnection { get; }
+}
+
 /// <summary>Durable lifecycle evidence for the current storage unit and access scope.</summary>
 public sealed record StorageInspection(long? LifetimeCommittedSequenceHighWater);
 

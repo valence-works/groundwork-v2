@@ -36,6 +36,36 @@ public sealed class RelationalQueryCommand
     public ImmutableArray<string> AppliedOrder { get; }
 }
 
+/// <summary>Native SQL and parameter values produced for one set-based mutation.</summary>
+/// <remarks>
+/// <see cref="Parameters"/> carries only the predicate's own bound values. The assigned values are
+/// left to the provider: it binds <see cref="AssignmentParameters"/> with the same encoder and the
+/// same native parameter typing its keyed update uses, so a set-based update cannot write a value
+/// a keyed update would have written differently.
+/// </remarks>
+public sealed class RelationalSetMutationCommand
+{
+    public RelationalSetMutationCommand(
+        string commandText,
+        IEnumerable<QueryRenderParameter> parameters,
+        IEnumerable<string>? assignmentParameters = null)
+    {
+        CommandText = commandText ?? throw new ArgumentNullException(nameof(commandText));
+        Parameters = (parameters ?? throw new ArgumentNullException(nameof(parameters))).ToImmutableArray();
+        if (Parameters.Any(parameter => parameter is null))
+            throw new ArgumentException("Set-mutation parameters cannot contain null references.", nameof(parameters));
+        AssignmentParameters = (assignmentParameters ?? []).ToImmutableArray();
+    }
+
+    public string CommandText { get; }
+
+    /// <summary>The predicate's bound values.</summary>
+    public ImmutableArray<QueryRenderParameter> Parameters { get; }
+
+    /// <summary>The unbound assignment parameter names, in the order the caller supplied columns.</summary>
+    public ImmutableArray<string> AssignmentParameters { get; }
+}
+
 /// <summary>One provider-rendered predicate fragment and its bound values.</summary>
 internal sealed class RelationalPredicateFragment
 {
@@ -125,6 +155,14 @@ public static class RelationalQueryResultReader
         ArgumentNullException.ThrowIfNull(command);
         ArgumentNullException.ThrowIfNull(query);
         AddParameters(command, query.Parameters);
+    }
+
+    /// <summary>Adds the bound values from a set-based mutation to a native command.</summary>
+    public static void AddParameters(DbCommand command, RelationalSetMutationCommand mutation)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(mutation);
+        AddParameters(command, mutation.Parameters);
     }
 
     /// <summary>Adds the bound values from an aggregation command to a native command.</summary>
@@ -340,6 +378,70 @@ public abstract class RelationalQueryRenderer
                 "GW-QUERY-015",
                 $"Query on '{table}' requires {parameters.Count} parameters, exceeding the {ProviderName} provider budget of {parameterBudget}.");
         return new RelationalPredicateFragment(commandText, parameters);
+    }
+
+    /// <summary>
+    /// Renders <c>DELETE FROM &lt;table&gt; WHERE &lt;predicate&gt;</c> from the same fragment, and
+    /// therefore the same comparison and literal semantics, an ordinary query renders.
+    /// </summary>
+    public RelationalSetMutationCommand RenderDeleteWhere(
+        string table,
+        Predicate where,
+        int inValueLimit = 1_000)
+    {
+        var fragment = RenderPredicateFragment(where, table, inValueLimit);
+        return new RelationalSetMutationCommand(
+            "DELETE FROM " + dialect.QuoteIdentifier(table) + " WHERE " + fragment.CommandText + ";",
+            fragment.Parameters);
+    }
+
+    /// <summary>
+    /// Renders <c>UPDATE &lt;table&gt; SET &lt;assignments&gt; WHERE &lt;predicate&gt;</c>.
+    /// </summary>
+    /// <param name="assignments">
+    /// Already-physical values, encoded by the provider's own write encoder rather than adapted
+    /// here, so a set-based update writes the byte-for-byte representation a keyed update writes.
+    /// </param>
+    /// <param name="incrementColumn">
+    /// The optimistic token column, incremented in the same statement exactly as a keyed update
+    /// increments it. Null for a unit that declares no token.
+    /// </param>
+    public RelationalSetMutationCommand RenderUpdateWhere(
+        string table,
+        Predicate where,
+        IReadOnlyList<string> assignmentColumns,
+        string? incrementColumn = null,
+        int inValueLimit = 1_000)
+    {
+        ArgumentNullException.ThrowIfNull(assignmentColumns);
+        if (assignmentColumns.Count == 0)
+            throw new ArgumentException("A set-based update requires at least one assignment.", nameof(assignmentColumns));
+        var fragment = RenderPredicateFragment(where, table, inValueLimit);
+        var names = new List<string>(assignmentColumns.Count);
+        var sets = new List<string>(assignmentColumns.Count + 1);
+        for (var index = 0; index < assignmentColumns.Count; index++)
+        {
+            // A distinct prefix from the fragment's own p0..pn names: the two sets are numbered
+            // independently and would otherwise collide on the first assignment.
+            var name = "s" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            names.Add(name);
+            sets.Add(dialect.QuoteIdentifier(assignmentColumns[index]) + " = @" + name);
+        }
+        if (incrementColumn is not null)
+        {
+            var quoted = dialect.QuoteIdentifier(incrementColumn);
+            sets.Add(quoted + " = " + quoted + " + 1");
+        }
+        var total = fragment.Parameters.Length + names.Count;
+        if (total > parameterBudget)
+            throw new QueryRenderException(
+                "GW-QUERY-015",
+                $"Set-based update on '{table}' requires {total} parameters, exceeding the {ProviderName} provider budget of {parameterBudget}.");
+        return new RelationalSetMutationCommand(
+            "UPDATE " + dialect.QuoteIdentifier(table) + " SET " + string.Join(", ", sets) +
+            " WHERE " + fragment.CommandText + ";",
+            fragment.Parameters,
+            names);
     }
 
     protected abstract string ProviderName { get; }

@@ -216,6 +216,66 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Mongo_set_mutation_update_filter_remains_native_index_bounds()
+    {
+        var folded = new ColumnRef(
+            Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var hidden = SearchKeyProjection.ColumnName("name");
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new(
+                    "name",
+                    hidden,
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    700)
+            }
+        };
+        var predicate = new Predicate.StartsWith(folded, "I");
+
+        var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(predicate, Table.Value, options);
+
+        var bounds = Assert.IsType<BsonDocument>(filter[hidden]);
+        Assert.Equal("|000049", bounds["$gte"].AsString);
+        Assert.Equal("|00004A", bounds["$lt"].AsString);
+        Assert.DoesNotContain("$expr", filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("$function", filter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_set_mutation_delete_filter_rewrites_a_logical_folded_prefix()
+    {
+        var filter = RenderMongoMutationFilter();
+
+        Assert.Contains(SearchKeyProjection.ColumnName("name"), filter.Names);
+        Assert.DoesNotContain("$expr", filter.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("$function", filter.ToString(), StringComparison.Ordinal);
+    }
+
+    private static BsonDocument RenderMongoMutationFilter()
+    {
+        var folded = new ColumnRef(
+            Table, "name", QueryType.String, true, 100,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>(StringComparer.Ordinal)
+            {
+                ["name"] = new(
+                    "name",
+                    SearchKeyProjection.ColumnName("name"),
+                    QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase,
+                    700)
+            }
+        };
+
+        return new MongoQueryRenderer().RenderAggregationSourcePredicate(
+            new Predicate.StartsWith(folded, "I"), Table.Value, options);
+    }
+
+    [Fact]
     public void All_four_renderers_refuse_a_forged_prefix_comparison_policy()
     {
         var forged = new ColumnRef(Table, "name", QueryType.String, true, 100,

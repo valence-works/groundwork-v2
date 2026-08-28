@@ -163,10 +163,16 @@ the analyzer reported at build time.
 - Each provider supplies only its native budgets, advertised by the **connection** as a
   `QueryAdmissionProfile`, so the pre-execution value fence uses the provider's real limit instead of
   a portable guess — SQLite 999, SQL Server 2,100, PostgreSQL 65,535. MongoDB has no bound-parameter
-  budget of its own (its bound is the 16 MB command document) and keeps the portable default rather
-  than inventing one. A budget is a deployment property — SQLite's ceiling is a compile-time option
-  of the library you loaded — which is why it is advertised rather than assumed, and why it lives on
-  the connection where a session decorator cannot drop it.
+  budget of its own (its bound is the 16 MB command document), so it advertises no parameter
+  ceiling while ordinary membership retains the portable 1,000-value renderer limit. Keyed batch reads use the separate
+  `MaximumBatchReadKeys` budget (999 by default; SQLite 999, SQL Server 2,098, and PostgreSQL
+  65,535), with MongoDB using an effectively unbounded count plus a conservative 15 MiB payload
+  budget; the same 15 MiB payload fence applies when a caller omits its connection. An explicit
+  profile can advertise a different deployment budget. A scoped session reserves one key slot for its
+  provider-injected scope parameter. A budget
+  is a deployment property — SQLite's ceiling is a compile-time option of the library you loaded —
+  which is why it is advertised rather than assumed, and why it lives on the connection where a
+  session decorator cannot drop it.
 
 ## Accepted scans
 

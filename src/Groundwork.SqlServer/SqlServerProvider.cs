@@ -24,7 +24,10 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     /// </summary>
     public QueryAdmissionProfile QueryAdmission { get; } = new()
     {
-        MaximumParameters = SqlServerQueryRenderer.ParameterBudget
+        MaximumParameters = SqlServerQueryRenderer.ParameterBudget,
+        // Keep two slots below SQL Server's 2,100-parameter renderer ceiling, as required by the
+        // keyed batch-read admission budget.
+        MaximumBatchReadKeys = 2_098
     };
 
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -54,7 +57,8 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         durableHighWaterInspection: true,
         exactRetention: true,
         atomicCommit: true,
-        compareAndDelete: true);
+        compareAndDelete: true,
+        setMutation: "Updates or deletes every row matching an index-covered portable predicate on SQL Server in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.");
 
     /// <summary>
     /// Serializes the writes and connection bookkeeping of every session this connection owns.

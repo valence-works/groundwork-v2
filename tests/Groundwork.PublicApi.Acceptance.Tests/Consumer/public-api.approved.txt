@@ -28,6 +28,9 @@ Groundwork.Store.RetentionOperationResult
 Groundwork.Store.IStorageInspectionSession
 Groundwork.Store.ICompareAndDeleteStorageSession
 Groundwork.Store.IExactRetentionStorageSession
+Groundwork.Store.SetMutationOptions
+Groundwork.Store.ISetMutationStorageSession
+Groundwork.Store.SetMutationResult
 Groundwork.Store.RowWrite
 Groundwork.Store.StorageAccess
 Groundwork.Store.StorageAccessAudit
@@ -39,4 +42,9 @@ Groundwork.Store.CrossScopeQueryRow
 Groundwork.Store.StorageKey
 Groundwork.Store.StorageValues
 Groundwork.Store.StorageUnitQueryRenderOptions
+Groundwork.Store.QueryAdmissionProfile
+Groundwork.Store.KeyedBatchReadRow
+Groundwork.Store.KeyedBatchReadResult
+Groundwork.Store.KeyedBatchReadRequest
+Groundwork.Store.KeyedBatchReadSessionExtensions
 Groundwork.Sqlite.SqliteProviderFactory

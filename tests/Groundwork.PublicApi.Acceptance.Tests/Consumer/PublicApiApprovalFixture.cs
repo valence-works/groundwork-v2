@@ -2,6 +2,7 @@ using Groundwork.Documents;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
@@ -54,6 +55,9 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RetentionExecutionOptions);
         _ = typeof(IStorageInspectionSession);
         _ = typeof(IExactRetentionStorageSession);
+        _ = typeof(SetMutationOptions);
+        _ = typeof(ISetMutationStorageSession);
+        _ = typeof(SetMutationResult);
         _ = typeof(StorageAccess);
         _ = typeof(StorageAccessAudit);
         _ = typeof(StorageAccessEvent);
@@ -64,6 +68,11 @@ internal static class PublicApiApprovalFixture
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
         _ = typeof(StorageUnitQueryRenderOptions);
+        _ = typeof(QueryAdmissionProfile);
+        _ = typeof(KeyedBatchReadRow);
+        _ = typeof(KeyedBatchReadResult);
+        _ = typeof(KeyedBatchReadRequest);
+        _ = typeof(KeyedBatchReadSessionExtensions);
         _ = typeof(SqliteProviderFactory);
         _ = typeof(InMemoryProviderFactory);
     }
@@ -97,10 +106,37 @@ internal static class PublicApiApprovalFixture
         _ = new Func<IStorageSession, OperationId, RetentionExecutionOptions, RetentionOperationResult>(
             (session, operation, options) => session.ApplyRetention(operation, options));
         _ = new RetentionExecutionOptions { KeepNewestOverride = 0 };
+        _ = new Func<SetMutationOptions>(() => new SetMutationOptions
+        {
+            AcceptedScan = ScanAcceptance.Allow(
+                "GW-SET-API",
+                "clean-room public API approval",
+                "groundwork",
+                DateTimeOffset.UtcNow.AddMinutes(5))
+        });
+        _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, SetMutationResult>(
+            (session, predicate, assignments, options) => session.UpdateWhere(predicate, assignments, options));
+        _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, CancellationToken, ValueTask<SetMutationResult>>(
+            (session, predicate, assignments, options, cancellationToken) =>
+                session.UpdateWhereAsync(predicate, assignments, options, cancellationToken));
+        _ = new Func<IStorageSession, Predicate, SetMutationOptions?, SetMutationResult>(
+            (session, predicate, options) => session.DeleteWhere(predicate, options));
+        _ = new Func<IStorageSession, Predicate, SetMutationOptions?, CancellationToken, ValueTask<SetMutationResult>>(
+            (session, predicate, options, cancellationToken) =>
+                session.DeleteWhereAsync(predicate, options, cancellationToken));
         _ = new Func<IStorageSession, StorageInspection>(session => session.Inspect());
         _ = new Func<StorageAccessAudit, StorageAccess>(StorageAccess.PrivilegedAcrossScopes);
         _ = new Func<IStorageSession, QueryRequest, CrossScopeQueryResult>(
             (session, request) => session.QueryAcrossScopes(request));
+        _ = new Func<IStorageSession, KeyedBatchReadRequest, IStorageProviderConnection?, KeyedBatchReadResult>(
+            (session, request, connection) => session.BatchRead(request, connection));
+        _ = new Func<IStorageSession, KeyedBatchReadRequest, IStorageProviderConnection?, CancellationToken, ValueTask<KeyedBatchReadResult>>(
+            (session, request, connection, cancellationToken) => session.BatchReadAsync(request, connection, cancellationToken));
+        _ = new QueryAdmissionProfile
+        {
+            MaximumBatchReadKeys = 999,
+            MaximumBatchReadPayloadBytes = 1_000_000
+        };
         _ = new Func<Groundwork.Kernel.StorageUnit, string, QueryRenderOptions>(
             (unit, selectedIndex) => unit.CreateQueryRenderOptions(selectedIndex));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));

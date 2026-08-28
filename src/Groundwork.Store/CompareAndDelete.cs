@@ -158,12 +158,17 @@ internal static class CompareAndDeleteValidation
             _ => Equals(left, right)
         };
 
-    private static void ValidateValue(ColumnDefinition definition, object? value, string column, string parameter)
+    private static void ValidateValue(
+        ColumnDefinition definition,
+        object? value,
+        string column,
+        string parameter,
+        string role)
     {
         if (value is null)
         {
             if (!definition.IsNullable)
-                throw new ArgumentException($"Comparison value for non-nullable column '{column}' cannot be null.", parameter);
+                throw new ArgumentException($"{role} for non-nullable column '{column}' cannot be null.", parameter);
             return;
         }
 
@@ -181,21 +186,22 @@ internal static class CompareAndDeleteValidation
         };
         if (!compatible)
             throw new ArgumentException(
-                $"Comparison value for column '{column}' is not compatible with declared type {definition.Type}.",
+                $"{role} for column '{column}' is not compatible with declared type {definition.Type}.",
                 parameter);
         if (definition.MaxLength is { } maxLength && value is string text && text.Length > maxLength)
-            throw new ArgumentException($"Comparison value for column '{column}' exceeds its declared length of {maxLength}.", parameter);
+            throw new ArgumentException($"{role} for column '{column}' exceeds its declared length of {maxLength}.", parameter);
         if (definition.MaxLength is { } binaryLength && value is byte[] bytes && bytes.Length > binaryLength)
-            throw new ArgumentException($"Comparison value for column '{column}' exceeds its declared length of {binaryLength}.", parameter);
+            throw new ArgumentException($"{role} for column '{column}' exceeds its declared length of {binaryLength}.", parameter);
     }
 
-    private static object? CanonicalizeValue(
+    internal static object? CanonicalizeValue(
         ColumnDefinition definition,
         object? value,
         string column,
-        string parameter)
+        string parameter,
+        string role = "Comparison value")
     {
-        ValidateValue(definition, value, column, parameter);
+        ValidateValue(definition, value, column, parameter, role);
         if (value is null)
             return null;
 
@@ -208,7 +214,8 @@ internal static class CompareAndDeleteValidation
                     Convert.ToDecimal(value, CultureInfo.InvariantCulture),
                     definition,
                     column,
-                    parameter),
+                    parameter,
+                    role),
                 PortableType.DateTimeOffset => ((DateTimeOffset)value).ToUniversalTime(),
                 PortableType.Binary => ((byte[])value).ToArray(),
                 _ => StorageValues.CloneValue(value)
@@ -217,7 +224,7 @@ internal static class CompareAndDeleteValidation
         catch (OverflowException exception)
         {
             throw new ArgumentException(
-                $"Comparison value for column '{column}' cannot be represented by declared type {definition.Type}.",
+                $"{role} for column '{column}' cannot be represented by declared type {definition.Type}.",
                 parameter,
                 exception);
         }
@@ -229,7 +236,8 @@ internal static class CompareAndDeleteValidation
         decimal value,
         ColumnDefinition definition,
         string column,
-        string parameter)
+        string parameter,
+        string role)
     {
         if (definition is not { Precision: int precision, Scale: int scale })
             return value;
@@ -237,7 +245,7 @@ internal static class CompareAndDeleteValidation
         if (decimal.Round(value, scale, MidpointRounding.ToEven) != value)
         {
             throw new ArgumentException(
-                $"Comparison value for column '{column}' cannot be represented exactly by Decimal({precision},{scale}).",
+                $"{role} for column '{column}' cannot be represented exactly by Decimal({precision},{scale}).",
                 parameter);
         }
 
@@ -248,7 +256,7 @@ internal static class CompareAndDeleteValidation
         if (integerDigits > precision - scale)
         {
             throw new ArgumentException(
-                $"Comparison value for column '{column}' exceeds Decimal({precision},{scale}).",
+                $"{role} for column '{column}' exceeds Decimal({precision},{scale}).",
                 parameter);
         }
 

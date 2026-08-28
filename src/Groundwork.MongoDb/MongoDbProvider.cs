@@ -964,7 +964,7 @@ internal static class MongoDeclarationRules
     }
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, ISetMutationStorageSession
 {
     private const string HighWaterValue = "high_water";
     private readonly MongoProviderState state;
@@ -1699,6 +1699,96 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
         return ExecuteWithTransactionIfNeeded(transactional => transactional.DeleteCore(key, options, mode), mode);
+    }
+
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+        UpdateWhereCore(where, assignments, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        UpdateWhereCore(where, assignments, MongoExecution.Asynchronous(cancellationToken));
+
+    public SetMutationResult DeleteWhere(Predicate where) =>
+        DeleteWhereCore(where, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        DeleteWhereCore(where, MongoExecution.Asynchronous(cancellationToken));
+
+    /// <summary>
+    /// Applies one <c>updateMany</c>. Scope needs no filter term: a scoped unit lives in its own
+    /// collection on MongoDB, and this session holds that collection.
+    /// </summary>
+    private async ValueTask<SetMutationResult> UpdateWhereCore(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        MongoExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
+        ThrowIfDisposed();
+        RefusePrivilegedOperation("update-where");
+        var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(
+            where,
+            Unit.Name,
+            QueryRenderOptions.Default with
+            {
+                SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
+            });
+        var set = new BsonDocument();
+        foreach (var column in physical.Keys.OrderBy(column => column, StringComparer.Ordinal))
+            set[column] = MongoValueCodec.Encode(physical[column], Unit.Columns.First(definition => definition.Name == column));
+        var update = new BsonDocument { ["$set"] = set };
+        if (Unit.Concurrency.IsOptimistic)
+            update["$inc"] = new BsonDocument(MongoDocumentMapper.VersionField, 1L);
+        // Observer text is diagnostic metadata, not a command recorder: it never carries filter or
+        // assignment values, which may hold PII.
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "mongodb.update-where",
+            $"MongoDB.UpdateMany(filter=predicate; update=$set{(Unit.Concurrency.IsOptimistic ? "/$inc" : string.Empty)})",
+            ProviderCommandKind.Write,
+            IsProbe: false));
+        var result = await mode.Run(
+            token => transactionSession is null
+                ? collection.UpdateManyAsync(filter, update, cancellationToken: token)
+                : collection.UpdateManyAsync(transactionSession, filter, update, cancellationToken: token),
+            () => transactionSession is null
+                ? collection.UpdateMany(filter, update)
+                : collection.UpdateMany(transactionSession, filter, update)).ConfigureAwait(false);
+        // MatchedCount, not ModifiedCount: matched is the count every provider reports the same
+        // way. ModifiedCount excludes documents whose assigned values were already equal, and no
+        // relational provider can distinguish those.
+        return new SetMutationResult(result.MatchedCount);
+    }
+
+    private async ValueTask<SetMutationResult> DeleteWhereCore(Predicate where, MongoExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        ThrowIfDisposed();
+        RefusePrivilegedOperation("delete-where");
+        var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(
+            where,
+            Unit.Name,
+            QueryRenderOptions.Default with
+            {
+                SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
+            });
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "mongodb.delete-where",
+            "MongoDB.DeleteMany(filter=predicate)",
+            ProviderCommandKind.Write,
+            IsProbe: false));
+        var result = await mode.Run(
+            token => transactionSession is null
+                ? collection.DeleteManyAsync(filter, cancellationToken: token)
+                : collection.DeleteManyAsync(transactionSession, filter, cancellationToken: token),
+            () => transactionSession is null
+                ? collection.DeleteMany(filter)
+                : collection.DeleteMany(transactionSession, filter)).ConfigureAwait(false);
+        return new SetMutationResult(result.DeletedCount);
     }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>

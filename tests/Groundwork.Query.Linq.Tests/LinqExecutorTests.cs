@@ -146,6 +146,57 @@ public sealed class LinqExecutorTests
     }
 
     [Fact]
+    public void Locale_only_hidden_indexes_cannot_admit_set_mutation_prefixes()
+    {
+        var logical = new StorageUnit
+        {
+            Id = new StorageUnitId("locale_set_mutation"),
+            Name = "locale_set_mutation",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
+                new()
+                {
+                    Name = "status",
+                    Type = PortableType.String,
+                    MaxLength = 32,
+                    LocaleSortKey = new LocaleSortKeyDefinition
+                    {
+                        CultureName = "sv-SE",
+                        MaximumExpansionFactor = 12
+                    }
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "ix_status", Columns = [new IndexColumn("status")] }]
+        };
+        var unit = SearchKeyProjection.Expand(logical);
+        var status = new ColumnRef(
+            new TableId(unit.Name), "status", QueryType.String, true, 32);
+
+        var refusal = Assert.Throws<QueryCoverageException>(() =>
+            SetMutationAdmission.Admit(unit, new Predicate.StartsWith(status, "A")));
+
+        Assert.Equal("GW-COVER-006", refusal.Code);
+        Assert.DoesNotContain(
+            StorageUnitCoverage.PortableIndexes(unit).SelectMany(index => index.Columns),
+            column => column.Column == "status");
+
+        var accepted = SetMutationAdmission.Admit(
+            unit,
+            new Predicate.StartsWith(status, "A"),
+            new SetMutationOptions
+            {
+                AcceptedScan = ScanAcceptance.Allow(
+                    "GW-SCAN-LOCALE",
+                    "locale sort keys are not executable mutation predicates",
+                    "query-team",
+                    new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero))
+            });
+        Assert.IsType<Predicate.Range>(accepted);
+    }
+
+    [Fact]
     public async Task Uncovered_query_is_refused_before_the_provider_is_asked_to_render_it()
     {
         using var fixture = Fixture.Open();
@@ -210,6 +261,20 @@ public sealed class LinqExecutorTests
             new GwQueryDatabase(executor).Table(Fixture.Model).Query
                 .Where(ticket => ticket.Status == "open")
                 .ToListAsync(executor);
+    }
+
+    [Fact]
+    public void Set_mutation_refuses_a_declared_index_the_catalog_does_not_carry()
+    {
+        using var fixture = Fixture.Open();
+        IStorageSession session = new PassThroughSession(
+            fixture.Session,
+            new ProbeConnection(fixture.Connection, new EmptyCatalog()));
+
+        var refusal = Assert.Throws<QueryCoverageException>(() => session.DeleteWhere(
+            StatusPredicate(Fixture.TableName, "open")));
+
+        Assert.Equal("GW-COVER-006", refusal.Code);
     }
 
     [Theory]
@@ -308,10 +373,14 @@ public sealed class LinqExecutorTests
     }
 
     /// <summary>Forwards the session contract and deliberately advertises no optional capability.</summary>
-    private sealed class PassThroughSession(IStorageSession inner) : IStorageSession
+    private sealed class PassThroughSession(
+        IStorageSession inner,
+        IStorageProviderConnection? providerConnection = null)
+        : IStorageSession, ISetMutationStorageSession, IProviderBoundStorageSession
     {
         public StorageUnit Unit => inner.Unit;
         public StorageAccess Access => inner.Access;
+        IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection => providerConnection;
         public StoredEntry? Read(StorageKey key) => inner.Read(key);
         public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => inner.Query(request, options);
         public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);
@@ -364,6 +433,22 @@ public sealed class LinqExecutorTests
             IReadOnlyList<StorageValues> values,
             CancellationToken cancellationToken = default) =>
             inner.AppendAsync(operationId, values, cancellationToken);
+
+        public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+            new(0);
+
+        public ValueTask<SetMutationResult> UpdateWhereAsync(
+            Predicate where,
+            IReadOnlyDictionary<string, object?> assignments,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new SetMutationResult(0));
+
+        public SetMutationResult DeleteWhere(Predicate where) => new(0);
+
+        public ValueTask<SetMutationResult> DeleteWhereAsync(
+            Predicate where,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new SetMutationResult(0));
     }
 
     /// <summary>
@@ -387,6 +472,12 @@ public sealed class LinqExecutorTests
             [],
             Projection.All,
             Paging.OffsetLimit(0, 1));
+    }
+
+    private static Predicate StatusPredicate(string table, string value)
+    {
+        var status = new ColumnRef(new TableId(table), "status", QueryType.String, isNullable: true, maxLength: 32);
+        return new Predicate.Equal(status, QueryConstant.Of(status, value));
     }
 
     private sealed class EmptyCatalog : IProviderCatalog

@@ -173,6 +173,28 @@ missing column, and index drift are unaffected.
 
 ---
 
+## `GW-SET-*` — set-based mutation
+
+`UpdateWhere` and `DeleteWhere` are admitted by the coverage rule that admits an equivalent read,
+so an uncovered set-based mutation is refused with a `GW-COVER-*` code and is accepted only by the
+same `AcceptScan` a read would need. The codes below cover what is specific to mutating a set.
+
+| Code | Meaning |
+| --- | --- |
+| `GW-SET-001` | Provider does not advertise set-based mutation. Check `ISetMutationStorageSession` / the `groundwork.storage.set-mutation` capability first. |
+| `GW-SET-002` | Assignment column is not an application-declared column of the unit, is provider-owned, or is a declared key column. A set-based update never moves rows between identities. |
+| `GW-SET-003` | A set-based update was issued with no column assignments. |
+| `GW-SET-004` | Assignment to a `PortableType.Json` column. Assign a portable scalar or binary column instead. |
+
+Assignments are values, never column-relative expressions. Repeating an update stores the same
+application values, but set mutation does not participate in the append idempotency ledger and a
+repeat on an optimistic-concurrency unit bumps every matched token again. Resolve an unknown
+acknowledgement before retrying when token stability matters. Assigning the optimistic token is
+refused as `GW-WRITE-CONCURRENCY-003`, by the same rule that refuses supplying it to a keyed write;
+a set-based update bumps the token itself.
+
+---
+
 ## `GW-APPEND-*` / `GW-RETENTION-*` / `GW-INSPECT-*`
 
 | Code | Meaning |
@@ -348,6 +370,10 @@ durable state. See **[expand–contract workflows](../v2/expand-contract.md)**.
 | Code | Meaning |
 | --- | --- |
 | `GW-COMPARE-DELETE-001` | Invalid compare-and-delete request (e.g. a JSON column in the equality set) |
+| `GW-BATCHREAD-001` | A keyed batch-read's key column does not belong to the requested table |
+| `GW-BATCHREAD-002` | A keyed batch-read key cannot be null |
+| `GW-BATCHREAD-003` | A provider's query result omitted the batch-read key column, so a matched row could not be attributed to its key |
+| `GW-BATCHREAD-004` | A single keyed batch-read value exceeds the provider's conservative encoded-payload budget |
 | `GW-BATCH-FINGERPRINT-001` | Batch fingerprint refusal |
 | `GW-SQLSERVER-LIFECYCLE-001` | SQL Server lifecycle table has a non-`BIN2` collation — migration required |
 | `GW-SQLITE-LIFETIME-001` | A second Groundwork connection to the same SQLite file — the schema lock is held for the life of a connection. One `IStorageProviderConnection` per database file per process; in tests, one file per test or `Data Source=:memory:` |

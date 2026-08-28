@@ -30,6 +30,8 @@ public static class BatchWriteCapabilities
 
     public static CapabilityId CompareAndDelete { get; } = new("groundwork.storage.compare-and-delete");
 
+    public static CapabilityId SetMutation { get; } = new("groundwork.storage.set-mutation");
+
     public static CapabilityDescriptor StagedUnitOfWorkDescriptor { get; } = new(
         StagedUnitOfWork,
         "Batched unit of work",
@@ -70,6 +72,11 @@ public static class BatchWriteCapabilities
         "Atomic compare-and-delete",
         "Deletes one identified row only when every declared equality value matches in the provider-owned atomic decision; row absence and comparison mismatch remain distinct.");
 
+    public static CapabilityDescriptor SetMutationDescriptor { get; } = new(
+        SetMutation,
+        "Set-based mutation",
+        "Updates or deletes every row matching an index-covered portable predicate in one provider-native statement, and reports the matched-row count.");
+
     public static CapabilityDescriptor AtomicCommitDescriptor { get; } = new(
         WellKnownCapabilities.AtomicCommit,
         "Atomic commit",
@@ -77,7 +84,7 @@ public static class BatchWriteCapabilities
         EvidenceGatedByDefault: true);
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } =
-        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, CompareAndDeleteDescriptor });
+        Array.AsReadOnly(new[] { StagedUnitOfWorkDescriptor, PerRowOutcomesDescriptor, ProviderSequenceDescriptor, AppendIdempotencyDescriptor, ExactAppendOutcomesDescriptor, DurableHighWaterInspectionDescriptor, ExactRetentionDescriptor, CompareAndDeleteDescriptor, SetMutationDescriptor });
 
     public static IReadOnlyList<CapabilityDescriptor> ForProvider(
         string provider,
@@ -107,7 +114,8 @@ public static class BatchWriteCapabilities
         bool durableHighWaterInspection,
         bool exactRetention,
         bool atomicCommit = false,
-        bool compareAndDelete = false)
+        bool compareAndDelete = false,
+        string? setMutation = null)
     {
         var descriptors = new List<CapabilityDescriptor>
         {
@@ -153,6 +161,8 @@ public static class BatchWriteCapabilities
             {
                 Description = $"Deletes one identified row on {provider} only when every declared equality value matches in one provider-owned atomic decision/transaction; zero-row outcomes distinguish absence from comparison mismatch."
             });
+        if (setMutation is not null)
+            descriptors.Add(SetMutationDescriptor with { Description = setMutation });
         if (nativeBatch)
             descriptors.Add(NativeBatchDescriptor);
         return Array.AsReadOnly(descriptors.ToArray());
@@ -781,15 +791,23 @@ internal sealed class BatchContext
 }
 
 /// <summary>Runtime wrapper that makes staged-key reads flush before delegating.</summary>
-internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
+internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
 {
     protected readonly IStorageSession inner;
     protected readonly BatchContext context;
 
-    internal static BatchStorageSession Create(IStorageSession inner, BatchContext context) =>
-        inner is ICompareAndDeleteStorageSession
-            ? new BatchCompareAndDeleteStorageSession(inner, context)
-            : new BatchStorageSession(inner, context);
+    internal static BatchStorageSession Create(IStorageSession inner, BatchContext context)
+    {
+        var compareAndDelete = inner is ICompareAndDeleteStorageSession;
+        var setMutation = inner is ISetMutationStorageSession;
+        return (compareAndDelete, setMutation) switch
+        {
+            (true, true) => new BatchCompareAndDeleteSetMutationStorageSession(inner, context),
+            (true, false) => new BatchCompareAndDeleteStorageSession(inner, context),
+            (false, true) => new BatchSetMutationStorageSession(inner, context),
+            _ => new BatchStorageSession(inner, context)
+        };
+    }
 
     internal BatchStorageSession(IStorageSession inner, BatchContext context)
     {
@@ -802,6 +820,9 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
     public StorageUnit Unit { get; }
 
     public StorageAccess Access { get; }
+
+    IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection =>
+        (inner as IProviderBoundStorageSession)?.ProviderConnection;
 
     public StoredEntry? Read(StorageKey key)
     {
@@ -877,6 +898,46 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
         WriteOptions? options = null,
         CancellationToken cancellationToken = default) =>
         inner.DeleteAsync(key, options, cancellationToken);
+
+    // Set-based mutation is implemented only by the conditional wrapper below. An unsupported
+    // provider therefore does not advertise ISetMutationStorageSession, and a refusal cannot flush
+    // staged writes before the capability check runs in SetMutationSessionExtensions.
+    protected ISetMutationStorageSession RequireSetMutation() =>
+        inner as ISetMutationStorageSession ?? throw new NotSupportedException(
+            "GW-SET-001: this provider session does not advertise set-based mutation.");
+
+    protected SetMutationResult UpdateWhereWithBarrier(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments)
+    {
+        var validated = SetMutationValidation.ValidateLogicalAssignments(Unit, assignments);
+        context.FlushAll();
+        return RequireSetMutation().UpdateWhere(where, validated);
+    }
+
+    protected async ValueTask<SetMutationResult> UpdateWhereWithBarrierAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken)
+    {
+        var validated = SetMutationValidation.ValidateLogicalAssignments(Unit, assignments);
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return await RequireSetMutation().UpdateWhereAsync(where, validated, cancellationToken).ConfigureAwait(false);
+    }
+
+    protected SetMutationResult DeleteWhereWithBarrier(Predicate where)
+    {
+        context.FlushAll();
+        return RequireSetMutation().DeleteWhere(where);
+    }
+
+    protected async ValueTask<SetMutationResult> DeleteWhereWithBarrierAsync(
+        Predicate where,
+        CancellationToken cancellationToken)
+    {
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return await RequireSetMutation().DeleteWhereAsync(where, cancellationToken).ConfigureAwait(false);
+    }
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
@@ -1027,7 +1088,7 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
     }
 }
 
-internal sealed class BatchCompareAndDeleteStorageSession : BatchStorageSession, ICompareAndDeleteStorageSession
+internal class BatchCompareAndDeleteStorageSession : BatchStorageSession, ICompareAndDeleteStorageSession
 {
     internal BatchCompareAndDeleteStorageSession(IStorageSession inner, BatchContext context)
         : base(inner, context)
@@ -1065,4 +1126,52 @@ internal sealed class BatchCompareAndDeleteStorageSession : BatchStorageSession,
         return await compareAndDelete.CompareAndDeleteAsync(canonicalKey, validated, options, cancellationToken)
             .ConfigureAwait(false);
     }
+}
+
+internal sealed class BatchSetMutationStorageSession : BatchStorageSession, ISetMutationStorageSession
+{
+    internal BatchSetMutationStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+        UpdateWhereWithBarrier(where, assignments);
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        UpdateWhereWithBarrierAsync(where, assignments, cancellationToken);
+
+    public SetMutationResult DeleteWhere(Predicate where) => DeleteWhereWithBarrier(where);
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        DeleteWhereWithBarrierAsync(where, cancellationToken);
+}
+
+internal sealed class BatchCompareAndDeleteSetMutationStorageSession : BatchCompareAndDeleteStorageSession, ISetMutationStorageSession
+{
+    internal BatchCompareAndDeleteSetMutationStorageSession(IStorageSession inner, BatchContext context)
+        : base(inner, context)
+    {
+    }
+
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+        UpdateWhereWithBarrier(where, assignments);
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        UpdateWhereWithBarrierAsync(where, assignments, cancellationToken);
+
+    public SetMutationResult DeleteWhere(Predicate where) => DeleteWhereWithBarrier(where);
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        DeleteWhereWithBarrierAsync(where, cancellationToken);
 }
