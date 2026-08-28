@@ -318,6 +318,18 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
                 RetentionCanonicalization.Canonicalize(desired.Retention),
                 StringComparison.Ordinal))
             throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change retention.");
+        if (previous.AppendIdempotency?.Window != desired.AppendIdempotency?.Window ||
+            !string.Equals(
+                previous.AppendIdempotency?.LedgerName,
+                desired.AppendIdempotency?.LedgerName,
+                StringComparison.Ordinal))
+            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change append idempotency.");
+        if (previous.RetentionIdempotency?.Window != desired.RetentionIdempotency?.Window ||
+            !string.Equals(
+                previous.RetentionIdempotency?.LedgerName,
+                desired.RetentionIdempotency?.LedgerName,
+                StringComparison.Ordinal))
+            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change retention idempotency.");
     }
 
     private static IReadOnlyList<SchemaChange> Describe(
