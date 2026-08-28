@@ -67,8 +67,9 @@ The closed query surface it understands: `Table<T>()`, `Where`, `WhereIf`, order
 mapped-column `Select`, `Distinct`, and the terminals `ToList`, `ToListAsync`, `Count`,
 `CountAsync`, `Any`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, and `SingleOrDefault` (plus
 their async adapter forms). `First` and `FirstOrDefault` require an explicit deterministic order. A
-distinct projection is covered only when every projected column is present in the candidate index,
-unless the query carries an explicit accepted scan.
+distinct projection is covered only when every projected column is present in the candidate index
+and an equality/range predicate bounds the unpaged provider read. Otherwise the query must carry an
+explicit live accepted scan; a bounded `Take` or cardinality terminal alone is not coverage.
 
 - `WhereIf` is enumerated as **every 2ⁿ shape for n ≤ 6**.
 - The reassignment form `if (condition) q = q.Where(...)` is enumerated **up to 32 shapes**.
