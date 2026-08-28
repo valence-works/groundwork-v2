@@ -10,6 +10,7 @@ CI, where no project token is available.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,7 @@ DEFAULT_REPOSITORY = "valence-works/groundwork-v2"
 DEFAULT_ORGANIZATION = "valence-works"
 DEFAULT_PROJECT_NUMBER = 6
 ROADMAP_LABEL = "roadmap-2.0"
+MAX_PAGINATION_PAGES = 10_000
 TODO = "Todo"
 IN_PROGRESS = "In Progress"
 DONE = "Done"
@@ -352,19 +354,25 @@ class GitHubClient:
     def get_pages(self, path: str, **params: Any) -> list[Mapping[str, Any]]:
         """Fetch every REST page, including a final empty page when needed."""
 
-        page = 1
         results: list[Mapping[str, Any]] = []
-        while True:
+        seen_pages: set[bytes] = set()
+        for page in range(1, MAX_PAGINATION_PAGES + 1):
             query = dict(params)
             query.update(page=page, per_page=100)
             url = f"{self._api_url}{path}?{urlencode(query)}"
             payload = self._request("GET", url)
             if not isinstance(payload, list):
                 raise GitHubError(f"GitHub {path} returned a non-list payload")
+            fingerprint = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).digest()
+            if fingerprint in seen_pages:
+                raise GitHubError(f"GitHub {path} returned a repeated page at page {page}")
+            seen_pages.add(fingerprint)
             results.extend(item for item in payload if isinstance(item, Mapping))
             if len(payload) < 100:
                 return results
-            page += 1
+        raise GitHubError(f"GitHub {path} exceeded the {MAX_PAGINATION_PAGES}-page limit")
 
     def list_roadmap_issues(self, repository: str) -> list[Mapping[str, Any]]:
         # The issues endpoint includes PRs; roadmap_issues filters those out
@@ -478,7 +486,11 @@ class GitHubClient:
         project_id: Optional[str] = None
         fields: list[Mapping[str, Any]] = []
         field_cursor: Optional[str] = None
-        while True:
+        seen_field_cursors: set[Optional[str]] = set()
+        for _ in range(MAX_PAGINATION_PAGES):
+            if field_cursor in seen_field_cursors:
+                raise GitHubError("GitHub GraphQL project fields pagination repeated a cursor")
+            seen_field_cursors.add(field_cursor)
             project = read_project(
                 self._request(
                     "POST",
@@ -511,10 +523,18 @@ class GitHubClient:
             field_cursor = page_info.get("endCursor")
             if not isinstance(field_cursor, str):
                 raise GitHubError("GitHub GraphQL project fields page has no end cursor")
+        else:
+            raise GitHubError(
+                f"GitHub GraphQL project fields exceeded the {MAX_PAGINATION_PAGES}-page limit"
+            )
 
         items: list[Mapping[str, Any]] = []
         item_cursor: Optional[str] = None
-        while True:
+        seen_item_cursors: set[Optional[str]] = set()
+        for _ in range(MAX_PAGINATION_PAGES):
+            if item_cursor in seen_item_cursors:
+                raise GitHubError("GitHub GraphQL project items pagination repeated a cursor")
+            seen_item_cursors.add(item_cursor)
             project = read_project(
                 self._request(
                     "POST",
@@ -547,6 +567,10 @@ class GitHubClient:
             item_cursor = page_info.get("endCursor")
             if not isinstance(item_cursor, str):
                 raise GitHubError("GitHub GraphQL project page has no end cursor")
+        else:
+            raise GitHubError(
+                f"GitHub GraphQL project items exceeded the {MAX_PAGINATION_PAGES}-page limit"
+            )
         if project_id is None:
             raise GitHubError("GitHub GraphQL project has no id")
 

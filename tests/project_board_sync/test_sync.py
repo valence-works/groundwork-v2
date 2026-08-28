@@ -324,6 +324,65 @@ class ClientResilienceTests(unittest.TestCase):
         def read():
             return b"[]"
 
+    def test_exact_full_page_then_short_page_is_a_valid_boundary(self):
+        class BoundaryClient(GitHubClient):
+            def __init__(self):
+                super().__init__("token", sleep_fn=lambda delay: None)
+                self.page = 0
+
+            def _request(self, method, url, body=None):
+                self.page += 1
+                return ([{"id": str(index)} for index in range(100)] if self.page == 1 else [{"id": "last"}])
+
+        self.assertEqual(101, len(BoundaryClient().get_pages("/resource")))
+
+    def test_identical_full_rest_page_is_rejected(self):
+        class RepeatingClient(GitHubClient):
+            def __init__(self):
+                super().__init__("token", sleep_fn=lambda delay: None)
+                self.calls = 0
+
+            def _request(self, method, url, body=None):
+                self.calls += 1
+                return [{"id": "same"}] * 100
+
+        client = RepeatingClient()
+        with self.assertRaisesRegex(GitHubError, "repeated page"):
+            client.get_pages("/resource")
+        self.assertEqual(2, client.calls)
+
+    def test_alternating_full_rest_pages_are_rejected(self):
+        class AlternatingClient(GitHubClient):
+            def __init__(self):
+                super().__init__("token", sleep_fn=lambda delay: None)
+                self.calls = 0
+
+            def _request(self, method, url, body=None):
+                page = self.calls % 2
+                self.calls += 1
+                return [{"id": str(page)}] * 100
+
+        client = AlternatingClient()
+        with self.assertRaisesRegex(GitHubError, "repeated page"):
+            client.get_pages("/resource")
+        self.assertEqual(3, client.calls)
+
+    def test_unique_full_rest_pages_hit_the_hard_limit(self):
+        class UniqueClient(GitHubClient):
+            def __init__(self):
+                super().__init__("token", sleep_fn=lambda delay: None)
+                self.calls = 0
+
+            def _request(self, method, url, body=None):
+                self.calls += 1
+                return [{"id": f"{self.calls}-{index}"} for index in range(100)]
+
+        client = UniqueClient()
+        with patch("eng.project_board_sync.MAX_PAGINATION_PAGES", 3):
+            with self.assertRaisesRegex(GitHubError, "exceeded the 3-page limit"):
+                client.get_pages("/resource")
+        self.assertEqual(3, client.calls)
+
     def test_retryable_get_succeeds_after_bounded_transient_failure(self):
         delays = []
         with patch(
@@ -431,6 +490,92 @@ class ClientResilienceTests(unittest.TestCase):
 
                 client = DisappearedClient(status)
                 self.assertEqual([], client.list_open_pull_requests(REPOSITORY))
+
+    def test_graphql_field_and_item_cursor_cycles_are_rejected(self):
+        class QueuedGraphQLClient(GitHubClient):
+            def __init__(self, responses):
+                super().__init__("token", sleep_fn=lambda delay: None)
+                self.responses = iter(responses)
+                self.calls = []
+
+            def _request(self, method, url, body=None):
+                self.calls.append(body)
+                return next(self.responses)
+
+        def payload(project):
+            return {"data": {"organization": {"projectV2": project}}}
+
+        with self.subTest(connection="fields"):
+            client = QueuedGraphQLClient(
+                [
+                    payload(
+                        {
+                            "id": "project-6",
+                            "fields": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "same"},
+                            },
+                        }
+                    ),
+                    payload(
+                        {
+                            "id": "project-6",
+                            "fields": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "same"},
+                            },
+                        }
+                    ),
+                ]
+            )
+            with self.assertRaisesRegex(GitHubError, "fields pagination repeated"):
+                client.get_project_snapshot("valence-works", 6)
+            self.assertEqual(2, len(client.calls))
+
+        with self.subTest(connection="items"):
+            client = QueuedGraphQLClient(
+                [
+                    payload(
+                        {
+                            "id": "project-6",
+                            "fields": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            },
+                        }
+                    ),
+                    payload(
+                        {
+                            "id": "project-6",
+                            "items": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "a"},
+                            },
+                        }
+                    ),
+                    payload(
+                        {
+                            "id": "project-6",
+                            "items": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "b"},
+                            },
+                        }
+                    ),
+                    payload(
+                        {
+                            "id": "project-6",
+                            "items": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "a"},
+                            },
+                        }
+                    ),
+                ]
+            )
+            with self.assertRaisesRegex(GitHubError, "items pagination repeated"):
+                client.get_project_snapshot("valence-works", 6)
+            self.assertEqual(4, len(client.calls))
 
 
 if __name__ == "__main__":
