@@ -60,6 +60,7 @@ public sealed class SqlServerParameterBudgetTests(SqlServerFixture fixture)
         Assert.Equal(1234, Assert.Single(result.Rows)["id"]);
         var queryCommands = observer.Commands.Count(command => command.Operation == "sqlserver.query");
         Assert.Equal(1, queryCommands);
+        var commandsBeforeRefusal = observer.Commands.Count;
 
         var overBudget = new QueryRequest(
             table,
@@ -71,6 +72,7 @@ public sealed class SqlServerParameterBudgetTests(SqlServerFixture fixture)
         var refusal = Assert.Throws<QueryRenderException>(() => session.Query(overBudget, options));
 
         Assert.Equal("GW-QUERY-015", refusal.Code);
+        Assert.Equal(commandsBeforeRefusal, observer.Commands.Count);
         Assert.Equal(queryCommands, observer.Commands.Count(command => command.Operation == "sqlserver.query"));
     }
 
