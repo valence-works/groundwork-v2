@@ -71,7 +71,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
-        return new InMemoryStorageSession(database, state, access, liveState: true, observer: observer);
+        return new InMemoryStorageSession(database, state, access, liveState: true, providerConnection: this, observer: observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -106,7 +106,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         if (states.Select(state => state.Unit.Id).Distinct().Count() != states.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
 
-        return new InMemoryUnitOfWork(database, states, access, options, observer);
+        return new InMemoryUnitOfWork(database, states, access, options, this, observer);
     }
 
     public void Dispose() => disposed = true;
@@ -562,7 +562,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -581,6 +581,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry>? stagedLedger = null,
         Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits = null,
         Dictionary<RetentionLedgerKey, RetentionLedgerEntry>? stagedRetentionLedger = null,
+        IStorageProviderConnection? providerConnection = null,
         IProviderCommandObserver? observer = null)
     {
         commandObserver = observer;
@@ -593,6 +594,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         Access = access;
         Unit = StorageDeclaration.Clone(state.Unit);
         partition = access.Scope?.Value ?? "<global>";
+        ProviderConnection = providerConnection;
     }
 
     /// <summary>
@@ -606,6 +608,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public StorageUnit Unit { get; }
 
     public StorageAccess Access { get; }
+
+    internal IStorageProviderConnection? ProviderConnection { get; }
+
+    IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection => ProviderConnection;
 
     public StoredEntry? Read(StorageKey key)
     {
@@ -1472,6 +1478,7 @@ internal sealed record RetentionLedgerEntry(
 
 internal sealed class InMemoryUnitOfWork : IUnitOfWork
 {
+    private readonly IStorageProviderConnection providerConnection;
     private readonly IProviderCommandObserver? commandObserver;
     private readonly InMemoryDatabase database;
     private readonly StorageAccess access;
@@ -1488,8 +1495,10 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         IReadOnlyList<InMemoryUnitState> states,
         StorageAccess access,
         BatchWriteOptions options,
+        IStorageProviderConnection providerConnection,
         IProviderCommandObserver? observer = null)
     {
+        this.providerConnection = providerConnection ?? throw new ArgumentNullException(nameof(providerConnection));
         commandObserver = observer;
         this.database = database;
         this.access = access;
@@ -1511,7 +1520,7 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
             throw new InvalidOperationException(
                 $"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
 
-        var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged, stagedRetentionLedger: stagedRetentionLedger, observer: commandObserver);
+        var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged, stagedRetentionLedger: stagedRetentionLedger, providerConnection: providerConnection, observer: commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);

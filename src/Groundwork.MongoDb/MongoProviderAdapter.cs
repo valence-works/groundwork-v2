@@ -43,7 +43,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
                 durableHighWaterInspection: true,
                 exactRetention: true,
                 atomicCommit: inner.ProviderSequenceFit is ProviderFit.Supported,
-                compareAndDelete: inner.ProviderSequenceFit is ProviderFit.Supported);
+                compareAndDelete: inner.ProviderSequenceFit is ProviderFit.Supported,
+                setMutation: "Updates or deletes every document matching an index-covered portable predicate on MongoDB with one updateMany/deleteMany, and reports matchedCount/deletedCount. Unlike the relational providers, a multi-document updateMany/deleteMany is atomic only when it runs inside a transaction: open a unit of work on a transaction-capable deployment when the whole set must apply or none of it.");
             return descriptors
                 .Where(descriptor => descriptor.Id != BatchWriteCapabilities.AppendIdempotency ||
                                      inner.ProviderSequenceFit is ProviderFit.Supported)
@@ -66,8 +67,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
     {
         var session = inner.OpenSession(unit, ToNative(access), observer);
         return inner.ProviderSequenceFit is ProviderFit.Supported
-            ? new MongoExactStoreSession(session, observer)
-            : new MongoStoreSession(session, commandObserver: observer);
+            ? new MongoExactStoreSession(session, commandObserver: observer, providerConnection: this)
+            : new MongoStoreSession(session, commandObserver: observer, providerConnection: this);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
@@ -90,7 +91,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
             inner.BeginUnitOfWork(ToNative(access), observer, units),
             options,
             inner.ProviderSequenceFit is ProviderFit.Supported,
-            observer);
+            observer,
+            this);
     }
 
     public void Dispose() => inner.Dispose();
@@ -135,9 +137,12 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
 internal class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null,
-    IProviderCommandObserver? commandObserver = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+    IProviderCommandObserver? commandObserver = null,
+    IStorageProviderConnection? providerConnection = null) : IStorageSession, IProviderBoundStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     public StorageUnit Unit => inner.Unit;
+
+    IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection => providerConnection;
 
     public StorageAccess Access => inner.Access.IsPrivilegedAcrossScopes
         ? StorageAccess.PrivilegedAcrossScopes(inner.Access.Audit ?? throw new InvalidOperationException(
@@ -314,6 +319,29 @@ internal class MongoStoreSession(
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
     }
 
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+        SetMutation.UpdateWhere(where, assignments);
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        SetMutation.UpdateWhereAsync(where, assignments, cancellationToken);
+
+    public SetMutationResult DeleteWhere(Predicate where) => SetMutation.DeleteWhere(where);
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        SetMutation.DeleteWhereAsync(where, cancellationToken);
+
+    /// <summary>
+    /// Total by construction: this adapter is built only by <see cref="MongoProviderFactory"/> over
+    /// the MongoDB provider connection, whose sessions implement set-based mutation. Admission,
+    /// capability and access are all decided before a call reaches here.
+    /// </summary>
+    private ISetMutationStorageSession SetMutation => (ISetMutationStorageSession)inner;
+
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "retention");
@@ -447,8 +475,11 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 {
     private readonly IMongoStorageSession exactInner;
 
-    internal MongoExactStoreSession(IMongoStorageSession inner, IProviderCommandObserver? commandObserver = null)
-        : base(inner, commandObserver: commandObserver) => exactInner = inner;
+    internal MongoExactStoreSession(
+        IMongoStorageSession inner,
+        IProviderCommandObserver? commandObserver = null,
+        IStorageProviderConnection? providerConnection = null)
+        : base(inner, commandObserver: commandObserver, providerConnection: providerConnection) => exactInner = inner;
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
         ToStore(RequireExactAppend(values).AppendWithOutcomes(
@@ -551,15 +582,22 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
     private readonly BatchContext batch;
     private readonly bool exactAvailable;
     private readonly IProviderCommandObserver? commandObserver;
+    private readonly IStorageProviderConnection? providerConnection;
     private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
     private bool terminal;
 
-    internal MongoStoreUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options, bool exactAvailable, IProviderCommandObserver? commandObserver = null)
+    internal MongoStoreUnitOfWork(
+        IMongoUnitOfWork inner,
+        BatchWriteOptions options,
+        bool exactAvailable,
+        IProviderCommandObserver? commandObserver = null,
+        IStorageProviderConnection? providerConnection = null)
     {
         this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
         batch = new BatchContext(options ?? throw new ArgumentNullException(nameof(options)));
         this.exactAvailable = exactAvailable;
         this.commandObserver = commandObserver;
+        this.providerConnection = providerConnection;
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -570,8 +608,8 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
             return existing;
         var native = inner.OpenSession(unit);
         var store = exactAvailable
-            ? new MongoExactStoreSession(native, commandObserver)
-            : new MongoStoreSession(native, commandObserver: commandObserver);
+            ? new MongoExactStoreSession(native, commandObserver: commandObserver, providerConnection: providerConnection)
+            : new MongoStoreSession(native, commandObserver: commandObserver, providerConnection: providerConnection);
         var session = BatchStorageSession.Create(store, batch);
         sessions.Add(unit.Id, session);
         batch.Register(session);

@@ -19,6 +19,7 @@
     <PackageReference Include="Groundwork.Records" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Records.Store" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Query.Planning" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Query.Linq.Execution" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Sqlite" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Documents" Version="$(GroundworkVersion)" />
     <PackageReference Include="Groundwork.Testing" Version="$(GroundworkVersion)" />

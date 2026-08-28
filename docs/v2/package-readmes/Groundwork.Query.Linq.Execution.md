@@ -14,6 +14,9 @@ What is genuinely provider-specific already lives with the provider: the SQL or 
 behind `IStorageSession.Query`, and the native budgets it advertises through
 `QueryAdmissionProfile`.
 
+The same adapter also admits `UpdateWhere` and `DeleteWhere` through the read coverage gate before
+delegating to a provider's `ISetMutationStorageSession` capability.
+
 ## Pass the connection, not just the session
 
 Both constructors work, but prefer `new GwLinqExecutor(session, connection)`. Given only the

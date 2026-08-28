@@ -28,6 +28,9 @@ Groundwork.Store.RetentionOperationResult
 Groundwork.Store.IStorageInspectionSession
 Groundwork.Store.ICompareAndDeleteStorageSession
 Groundwork.Store.IExactRetentionStorageSession
+Groundwork.Store.SetMutationOptions
+Groundwork.Store.ISetMutationStorageSession
+Groundwork.Store.SetMutationResult
 Groundwork.Store.RowWrite
 Groundwork.Store.StorageAccess
 Groundwork.Store.StorageAccessAudit

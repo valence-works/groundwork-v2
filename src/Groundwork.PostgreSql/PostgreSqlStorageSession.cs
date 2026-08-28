@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -50,6 +50,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     public StorageUnit Unit { get; }
 
     public StorageAccess Access { get; }
+
+    IStorageProviderConnection IProviderBoundStorageSession.ProviderConnection => owner;
 
     /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
     private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(
@@ -485,6 +487,68 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
             return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
                 CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
         });
+
+    public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
+        UpdateWhere(where, assignments, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<SetMutationResult> UpdateWhereAsync(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        CancellationToken cancellationToken = default) =>
+        UpdateWhere(where, assignments, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<SetMutationResult> UpdateWhere(
+        Predicate where,
+        IReadOnlyDictionary<string, object?> assignments,
+        RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
+        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
+        return ExecuteWrite(async () =>
+        {
+            var rendered = new PostgreSqlQueryRenderer().RenderUpdateWhere(
+                Unit.Name, ScopedSetPredicate(where), columns, VersionColumn?.Name);
+            using var command = Command(rendered.CommandText);
+            RelationalQueryResultReader.AddParameters(command, rendered);
+            for (var index = 0; index < columns.Length; index++)
+            {
+                Add(command, rendered.AssignmentParameters[index],
+                    ConvertValue(physical[columns[index]], Column(columns[index])), columns[index]);
+            }
+            Observe("postgresql.update-where", rendered.CommandText, ProviderCommandKind.Write);
+            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
+        }, mode);
+    }
+
+    public SetMutationResult DeleteWhere(Predicate where) =>
+        DeleteWhere(where, RelationalExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<SetMutationResult> DeleteWhereAsync(
+        Predicate where,
+        CancellationToken cancellationToken = default) =>
+        DeleteWhere(where, RelationalExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<SetMutationResult> DeleteWhere(Predicate where, RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        return ExecuteWrite(async () =>
+        {
+            var rendered = new PostgreSqlQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
+            using var command = Command(rendered.CommandText);
+            RelationalQueryResultReader.AddParameters(command, rendered);
+            Observe("postgresql.delete-where", rendered.CommandText, ProviderCommandKind.Write);
+            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
+        }, mode);
+    }
+
+    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
+        where,
+        Unit.Name,
+        Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn)
+            ? PostgreSqlSchemaCoordinator.ScopeColumn
+            : null,
+        Access.Scope?.Value);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ApplyRetention(options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
