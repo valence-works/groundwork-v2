@@ -88,7 +88,7 @@ public sealed class RetentionProofTests
         {
             using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
             var serial = await MeasureOnAppend(connection, "lites", concurrent: false);
-            var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "litec");
+            var concurrent = await MeasureConcurrentOnAppendWithRegistrationGate(connection, "litec");
             AssertNativeOnAppendCoalesces(serial, concurrent, "SQLite");
         }
         finally
@@ -106,8 +106,63 @@ public sealed class RetentionProofTests
         using var connection = new SqliteProviderFactory().Create(connectionString);
 
         var serial = await MeasureOnAppend(connection, "mems", concurrent: false);
-        var concurrent = await MeasureConcurrentOnAppendWithOverlapRetries(connection, "memc");
+        var concurrent = await MeasureConcurrentOnAppendWithRegistrationGate(connection, "memc");
         AssertNativeOnAppendCoalesces(serial, concurrent, "SQLite in-memory");
+    }
+
+    [Fact]
+    public async Task SQLite_registration_observer_failure_drains_pending_OnAppend_cleanup()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-s3-registration-failure-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create($"Data Source={path}");
+            var unit = RetentionUnit(
+                "s3_registration_failure_" + Guid.NewGuid().ToString("N"),
+                RetentionTrigger.OnAppend);
+            connection.Schema.Apply(unit);
+            var seed = connection.OpenSession(unit, StorageAccess.Global);
+            for (var index = 0; index < 3; index++)
+                Assert.True(seed.Insert(Values("a")).Succeeded);
+
+            using var observer = new FailingRegistrationObserver();
+            var first = Task.Factory.StartNew(
+                () => connection.OpenSession(unit, StorageAccess.Global, observer).Insert(Values("a")),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Assert.True(observer.FirstRegistered.Wait(TimeSpan.FromSeconds(5)), "The first appender did not register.");
+
+            var second = Task.Factory.StartNew(
+                () => connection.OpenSession(unit, StorageAccess.Global, observer).Insert(Values("a")),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Assert.True(observer.SecondRegistered.Wait(TimeSpan.FromSeconds(5)), "The second appender did not register.");
+
+            observer.ReleaseFirst.Set();
+            Assert.True((await first).Succeeded);
+            observer.FailSecond.Set();
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await second);
+
+            Assert.Equal(3, seed.Query(All(unit)).Rows.Count);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void OnAppend_proof_rejects_effectively_serial_cleanup()
+    {
+        var serial = new OnAppendMeasurement(TimeSpan.Zero, 32, 8, 1, 32, false);
+        var concurrent = new OnAppendMeasurement(TimeSpan.Zero, 32, 8, 32, 32, true);
+
+        var failure = Assert.ThrowsAny<Exception>(() =>
+            AssertNativeOnAppendCoalesces(serial, concurrent, "SQLite"));
+
+        Assert.Contains("must remove at least half", failure.Message);
     }
 
     [SkippableFact]
@@ -450,7 +505,8 @@ public sealed class RetentionProofTests
     private static async Task<OnAppendMeasurement> MeasureOnAppend(
         IStorageProviderConnection connection,
         string provider,
-        bool concurrent)
+        bool concurrent,
+        bool coordinateRegistrations = false)
     {
         const int writes = 32;
         var name = "s3_convoy_" + provider + "_" + Guid.NewGuid().ToString("N");
@@ -472,8 +528,14 @@ public sealed class RetentionProofTests
             }
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
-        var observer = new ProviderCommandObserver();
-        static void Append(IStorageSession session, ProviderCommandObserver observer, int index)
+        var recordingObserver = new ProviderCommandObserver();
+        using var registrationGate = concurrent && coordinateRegistrations
+            ? new RegistrationBarrierObserver(recordingObserver, writes)
+            : null;
+        IProviderCommandObserver observer = registrationGate is not null
+            ? registrationGate
+            : recordingObserver;
+        static void Append(IStorageSession session, int index)
         {
             var outcome = session.Insert(new StorageValues(new Dictionary<string, object?>
             {
@@ -488,36 +550,54 @@ public sealed class RetentionProofTests
         {
             using var start = new ManualResetEventSlim();
             using var ready = new CountdownEvent(writes);
-            var spans = new ConcurrentBag<(long StartTicks, long EndTicks)>();
+            var spans = coordinateRegistrations
+                ? null
+                : new ConcurrentBag<(long StartTicks, long EndTicks)>();
             var tasks = Enumerable.Range(0, writes).Select(index => Task.Factory.StartNew(() =>
             {
                 var session = connection.OpenSession(unit, StorageAccess.Global, observer);
                 ready.Signal();
                 start.Wait();
                 var begin = stopwatch.ElapsedTicks;
-                Append(session, observer, index);
-                spans.Add((begin, stopwatch.ElapsedTicks));
+                Append(session, index);
+                spans?.Add((begin, stopwatch.ElapsedTicks));
             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
             Assert.True(ready.Wait(TimeSpan.FromSeconds(5)), "Native writers did not reach the start gate.");
             stopwatch.Start();
             start.Set();
+            var registrationsComplete = registrationGate is null ||
+                registrationGate.AllRegistered.Wait(TimeSpan.FromSeconds(5));
+            registrationGate?.Release.Set();
             await Task.WhenAll(tasks);
-            maxOverlap = MaxConcurrentSpans(spans);
+            Assert.True(registrationsComplete, "Native writers did not all register before the write gate.");
+            if (spans is not null)
+                maxOverlap = MaxConcurrentSpans(spans);
         }
         else
         {
             stopwatch.Start();
             for (var index = 0; index < writes; index++)
-                Append(connection.OpenSession(unit, StorageAccess.Global, observer), observer, index);
+                Append(connection.OpenSession(unit, StorageAccess.Global, observer), index);
         }
         stopwatch.Stop();
 
         var verification = connection.OpenSession(unit, StorageAccess.Global);
         var survivors = verification.Query(All(unit)).Rows.Count;
-        var retentionCommands = observer.Commands.Count(command =>
+        var retentionCommands = recordingObserver.Commands.Count(command =>
             command.Operation.Contains("retention", StringComparison.OrdinalIgnoreCase));
-        return new OnAppendMeasurement(stopwatch.Elapsed, retentionCommands, survivors, maxOverlap, writes);
+        return new OnAppendMeasurement(
+            stopwatch.Elapsed,
+            retentionCommands,
+            survivors,
+            maxOverlap,
+            writes,
+            coordinateRegistrations);
     }
+
+    private static Task<OnAppendMeasurement> MeasureConcurrentOnAppendWithRegistrationGate(
+        IStorageProviderConnection connection,
+        string provider) =>
+        MeasureOnAppend(connection, provider, concurrent: true, coordinateRegistrations: true);
 
     /// <summary>
     /// The largest number of the given [start, end) spans that were simultaneously in flight, found by a
@@ -593,7 +673,7 @@ public sealed class RetentionProofTests
         OnAppendMeasurement concurrent,
         string provider)
     {
-        Skip.If(!HasConclusiveOverlap(concurrent),
+        Skip.If(!concurrent.RegistrationBoundaryCoordinated && !HasConclusiveOverlap(concurrent),
             $"{provider}: only {concurrent.MaxOverlap} of {concurrent.Writes} concurrent writers were ever in " +
             $"flight at the same instant across {OnAppendOverlapAttempts} attempts (needed at least " +
             $"{MinimumConclusiveOverlap(concurrent.Writes)}). The scheduler kept serializing the writers past " +
@@ -957,10 +1037,78 @@ public sealed class RetentionProofTests
         }
     }
 
+    private sealed class RegistrationBarrierObserver(
+        ProviderCommandObserver recordingObserver,
+        int participants) : IProviderCommandObserver, IOnAppendRegistrationObserver, IDisposable
+    {
+        private readonly CountdownEvent allRegistered = new(participants);
+
+        internal ManualResetEventSlim AllRegistered { get; } = new();
+
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command) => recordingObserver.Observe(command);
+
+        public void OnAppendRegistered()
+        {
+            if (allRegistered.Signal())
+                AllRegistered.Set();
+            Release.Wait();
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            allRegistered.Dispose();
+            AllRegistered.Dispose();
+            Release.Dispose();
+        }
+    }
+
+    private sealed class FailingRegistrationObserver : IProviderCommandObserver, IOnAppendRegistrationObserver, IDisposable
+    {
+        private int registrations;
+
+        internal ManualResetEventSlim FirstRegistered { get; } = new();
+
+        internal ManualResetEventSlim SecondRegistered { get; } = new();
+
+        internal ManualResetEventSlim ReleaseFirst { get; } = new();
+
+        internal ManualResetEventSlim FailSecond { get; } = new();
+
+        public void Observe(ProviderCommandEvent command) { }
+
+        public void OnAppendRegistered()
+        {
+            if (Interlocked.Increment(ref registrations) == 1)
+            {
+                FirstRegistered.Set();
+                ReleaseFirst.Wait();
+                return;
+            }
+
+            SecondRegistered.Set();
+            FailSecond.Wait();
+            throw new InvalidOperationException("Synthetic registration failure.");
+        }
+
+        public void Dispose()
+        {
+            ReleaseFirst.Set();
+            FailSecond.Set();
+            FirstRegistered.Dispose();
+            SecondRegistered.Dispose();
+            ReleaseFirst.Dispose();
+            FailSecond.Dispose();
+        }
+    }
+
     private sealed record OnAppendMeasurement(
         TimeSpan Elapsed,
         int RetentionCommands,
         int Survivors,
         int MaxOverlap,
-        int Writes);
+        int Writes,
+        bool RegistrationBoundaryCoordinated);
 }
