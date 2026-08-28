@@ -418,7 +418,7 @@ public sealed class ConcurrencyHarnessTests
     /// <summary>
     /// The property the connection gate cannot provide: owned sessions run genuinely CONCURRENTLY rather
     /// than queueing. Each caller opens its own session, so each has its own connection; if owned sessions
-    /// secretly shared one, the gate would serialize them and the elapsed time would collapse to the serial
+    /// secretly shared one, the gate would serialize them and the elapsed time would expand to the serial
     /// sum. Also proves the release half — the reason per-call sessions were rejected before this seam is
     /// that every one leaked a connection for the provider's lifetime (groundwork-v2#233).
     /// </summary>
@@ -443,6 +443,26 @@ public sealed class ConcurrencyHarnessTests
         };
         connection.Schema.Apply(unit);
 
+        var delayFunction = "owned_session_delay_" + suffix;
+        var delayTrigger = "owned_session_trigger_" + suffix;
+        await using (var delayConnection = new NpgsqlConnection(store.ConnectionString))
+        {
+            await delayConnection.OpenAsync();
+            await using var delayCommand = delayConnection.CreateCommand();
+            delayCommand.CommandText = $"""
+                CREATE FUNCTION "{delayFunction}"() RETURNS trigger AS $function$
+                BEGIN
+                    PERFORM pg_sleep(1);
+                    RETURN NEW;
+                END;
+                $function$ LANGUAGE plpgsql;
+                CREATE TRIGGER "{delayTrigger}"
+                BEFORE INSERT ON "{unit.Name}"
+                FOR EACH ROW EXECUTE FUNCTION "{delayFunction}"();
+                """;
+            await delayCommand.ExecuteNonQueryAsync();
+        }
+
         const int callers = 8;
         using var observer = new OwnedOperationOverlapObserver(callers);
         var sessions = Enumerable.Range(0, callers)
@@ -459,8 +479,12 @@ public sealed class ConcurrencyHarnessTests
 
         Assert.True(observer.AllCommandsEntered.Wait(TimeSpan.FromSeconds(30)),
             "Owned-session commands queued behind a shared provider gate instead of overlapping.");
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         observer.Release.Set();
         var outcomes = await Task.WhenAll(work);
+        elapsed.Stop();
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5),
+            $"Eight one-second PostgreSQL commands took {elapsed.Elapsed}; owned sessions were physically serialized.");
         Assert.All(outcomes, outcome => Assert.True(outcome.Succeeded));
         foreach (var session in sessions)
             await session.DisposeAsync();
