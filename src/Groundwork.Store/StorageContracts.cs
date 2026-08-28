@@ -1069,6 +1069,21 @@ public interface IUnitOfWork : IDisposable
 }
 
 /// <summary>
+/// A storage session whose provider resources belong to the caller.
+/// </summary>
+/// <remarks>
+/// Disposal releases the session's connection — returning it to the provider's pool — and must be
+/// idempotent. Every operation after disposal throws, rather than silently using a released connection.
+/// Sessions obtained from <see cref="IUnitOfWork.OpenSession"/> are owned by their unit of work and are not
+/// of this kind: one owner per session, decided where it is opened.
+/// </remarks>
+public interface IOwnedStorageSession : IStorageSession, IDisposable, IAsyncDisposable
+{
+    /// <summary>Whether this caller-owned session has released its provider resources.</summary>
+    bool IsReleased { get; }
+}
+
+/// <summary>
 /// Owns the provider resources for a connection and the sessions opened directly from it. Dispose
 /// the connection after all of its sessions are no longer needed; disposal invalidates those
 /// non-owning session views.
@@ -1089,6 +1104,25 @@ public interface IStorageProviderConnection : IDisposable
     /// is not included: it runs through <see cref="Schema"/> on the connection, not through a session.
     /// </param>
     IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null);
+
+    /// <summary>
+    /// Opens a session whose provider resources belong to the caller and are released when it is disposed.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="OpenSession"/> returns a non-owning view over a connection this provider keeps until the
+    /// provider itself is disposed, which leaves a consumer choosing between sharing one session across
+    /// concurrent callers — PostgreSQL and SQL Server refuse concurrent commands on one connection — and
+    /// opening per call, which leaks a connection every time. An owned session is the third option: its
+    /// connection is not registered for provider-disposal and returns to the pool on release, so per-caller
+    /// sessions neither leak nor serialize unrelated callers against each other.
+    ///
+    /// Use it when callers are concurrent and independent. Prefer <see cref="OpenSession"/> when the
+    /// provider's own lifetime is the natural bound, which is the single-threaded case.
+    /// </remarks>
+    IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null);
 
     /// <summary>Begins a unit of work that owns its transaction and staged sessions until terminal or disposed.</summary>
     IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units);

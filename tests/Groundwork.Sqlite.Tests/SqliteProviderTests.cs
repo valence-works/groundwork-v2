@@ -17,6 +17,141 @@ namespace Groundwork.Sqlite.Tests;
 public sealed class SqliteProviderTests
 {
     [Fact]
+    public void Owned_session_marker_matches_the_opening_path()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("session-ownership"),
+            Name = "session_ownership",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        var legacy = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.False(legacy is IOwnedStorageSession);
+
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+            Assert.False(work.OpenSession(unit) is IOwnedStorageSession);
+
+        var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+    }
+
+    [Fact]
+    public void Owned_file_sessions_release_their_physical_handles()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("session-pool"),
+            Name = "session_pool",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        for (var index = 0; index < 8; index++)
+        {
+            var owned = Assert.IsType<OwnedSqliteStorageSession>(connection.OpenOwnedSession(unit, StorageAccess.Global));
+            Assert.True(owned.IsConnectionOpen);
+            owned.Dispose();
+            Assert.False(owned.IsConnectionOpen);
+        }
+    }
+
+    [Fact]
+    public async Task Provider_disposal_cannot_miss_a_registering_legacy_session()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("session-registration-race"),
+            Name = "session_registration_race",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var observer = new RegistrationBarrierObserver();
+
+        var opening = Task.Run(() => connection.OpenSession(unit, StorageAccess.Global, observer));
+        Assert.True(observer.EligibilityChecked.Wait(TimeSpan.FromSeconds(5)), "Session registration did not reach the eligibility check.");
+        var disposing = Task.Run(connection.Dispose);
+        Assert.True(observer.DisposalAttempted.Wait(TimeSpan.FromSeconds(5)), "Provider disposal did not reach the registration boundary.");
+
+        observer.Release.Set();
+        var session = Assert.IsType<SqliteStorageSession>(await opening);
+        await disposing;
+
+        Assert.False(session.IsConnectionOpen);
+        Assert.Throws<ObjectDisposedException>(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-provider" })));
+    }
+
+    [Fact]
+    public void Owned_session_rejects_reads_after_its_provider_is_disposed()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("owned-provider-lifetime"),
+            Name = "owned_provider_lifetime",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+
+        connection.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-provider" })));
+    }
+
+    [Fact]
+    public void Owned_deferred_conflict_detail_rejects_provider_disposal()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("owned-deferred-provider-lifetime"),
+            Name = "owned_deferred_provider_lifetime",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        var values = new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one",
+            ["value"] = "value"
+        });
+        Assert.Equal(WriteOutcomeStatus.Inserted, owned.Insert(values).Status);
+        var stale = Assert.IsAssignableFrom<IConcurrencyStorageSession>(owned).ConditionalUpsert(
+            values,
+            new WriteOptions { Precondition = WritePrecondition.IfVersion(99) });
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, stale.Status);
+
+        connection.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => { _ = stale.Detail; });
+    }
+
+    [Fact]
     public void Provider_composed_index_names_are_injective_for_underscore_components()
     {
         var left = SqliteDialect.PhysicalIndexName("a_", "b");
@@ -1613,7 +1748,7 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public async Task Nested_write_is_refused_rather_than_blocking()
+    public async Task Batch_fallback_completes_without_reentering_the_connection_gate()
     {
         using var store = TemporaryStore.Create();
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
@@ -1632,17 +1767,16 @@ public sealed class SqliteProviderTests
         var session = connection.OpenSession(unit, StorageAccess.Global);
         var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
 
-        // A non-unconditional precondition takes the batch fallback, which re-enters the write
-        // path from inside the batch's own transaction.
+        // A non-unconditional precondition takes the batch fallback. The fallback must reuse the
+        // batch transaction rather than re-entering the non-reentrant connection gate.
         var write = RowWrite.Upsert(
             unit,
             new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["Value"] = "nested" }),
             WriteOptions.CreateOnly);
 
-        var pending = Task.Run(() => batched.ApplyBatch([write]));
-        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
-        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
-        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var outcomes = await batched.ApplyBatchAsync([write], exactOutcomes: true, timeout.Token);
+        Assert.Equal(WriteOutcomeStatus.Upserted, outcomes.Single().Outcome.Status);
     }
 
     [Fact]
@@ -1993,6 +2127,31 @@ public sealed class SqliteProviderTests
 
     private static StorageKey Key(long sequence) => new(
         new Dictionary<string, object?> { ["sequence"] = sequence });
+
+    private sealed class RegistrationBarrierObserver : ISessionRegistrationObserver, IDisposable
+    {
+        internal ManualResetEventSlim EligibilityChecked { get; } = new();
+        internal ManualResetEventSlim DisposalAttempted { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command) { }
+
+        public void OnSessionRegistrationEligibilityChecked()
+        {
+            EligibilityChecked.Set();
+            Release.Wait(TimeSpan.FromSeconds(5));
+        }
+
+        public void OnProviderDisposalAttempted() => DisposalAttempted.Set();
+
+        public void Dispose()
+        {
+            Release.Set();
+            EligibilityChecked.Dispose();
+            DisposalAttempted.Dispose();
+            Release.Dispose();
+        }
+    }
 
     private sealed class TemporaryStore : IDisposable
     {

@@ -22,10 +22,15 @@ public interface IStorageProviderConnection : IDisposable
     IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
 
     IStorageSession OpenSession(StorageUnit unit, StorageAccess access);
+    IOwnedStorageSession OpenOwnedSession(StorageUnit unit, StorageAccess access);
     IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units);
     IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, params StorageUnit[] units);
 }
 ```
+
+`OpenSession` returns a non-owning view tied to the connection lifetime. `OpenOwnedSession` returns an
+`IOwnedStorageSession`; providers must release its per-session resources from both `Dispose` and
+`DisposeAsync`, report that state through `IsReleased`, and reject operations after release.
 
 ## Two routes
 

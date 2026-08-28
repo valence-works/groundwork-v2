@@ -29,7 +29,7 @@ This is the part that catches people, so it comes first.
 | --- | --- | --- |
 | `IStorageProviderConnection` | **Process singleton**, one per database | `AddKeyedSingleton` per name, plus an unkeyed alias for the default connection |
 | `IGroundworkStorage` | **Scoped** — one per request | `AddKeyedScoped` per name, plus an unkeyed alias for the default connection |
-| `IStorageSession` | A cheap non-owning view; not disposable | Opened from `IGroundworkStorage`, never registered |
+| `IStorageSession` | Scope-owned when opened from `IGroundworkStorage` | Opened from `IGroundworkStorage`, released when the scope is disposed |
 | `IUnitOfWork` | Owned by the scope until it becomes terminal | Opened from `IGroundworkStorage`, never registered |
 
 A connection owns provider resources for its whole life — pools, transactions, and for SQLite the
@@ -77,21 +77,16 @@ and those are exactly the ones that need rolling back.
    raises `GW-SQLITE-LIFETIME-001` naming the file, the one-connection-per-file rule, and what to do
    in hosts, tests, and tools.
 
-### Known limitation: sessions retain their provider connection
+### Session release
 
-A session opened from a storage connection currently keeps the provider connection it was given
-**until the storage connection itself is disposed**. `IStorageSession` is deliberately not
-`IDisposable`, and the relational providers hold those connections in a list that only drains on
-connection disposal.
+`IGroundworkStorage.OpenSession` opens a provider-owned session for the current scope and tracks it
+until the scope ends. The scope releases every session during synchronous or asynchronous disposal,
+so a request-per-scope session does not accumulate one provider handle per request. A session can
+also be used as `IOwnedStorageSession` when a caller needs to release it before the scope ends.
 
-For a long-running service that opens a session per request, that means **one open database handle
-accumulates per request** for the life of the process. Units of work are unaffected: they own their
-connection and release it at commit, rollback, or dispose.
-
-Until that is fixed ([#199](https://github.com/valence-works/groundwork-v2/issues/199)), prefer
-unit-of-work-owned sessions on the write path, and treat a per-request read session as something to
-watch under sustained load rather than a settled pattern. Batch jobs, tools, and tests that open a
-bounded number of sessions are fine.
+The lower-level `IStorageProviderConnection.OpenSession` remains a non-owning view for callers whose
+connection lifetime is the natural bound. For concurrent or per-call work opened directly from a
+connection, use `OpenOwnedSession` and dispose the returned session when the operation completes.
 
 ### Tests and tools
 

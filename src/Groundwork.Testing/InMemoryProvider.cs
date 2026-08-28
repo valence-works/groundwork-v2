@@ -41,7 +41,7 @@ public sealed class SchemaConflictException : InvalidOperationException
 public sealed class InMemoryProviderConnection : IStorageProviderConnection
 {
     private readonly InMemoryDatabase database;
-    private bool disposed;
+    private volatile bool disposed;
 
     internal InMemoryProviderConnection(InMemoryDatabase database)
     {
@@ -72,6 +72,19 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
         return new InMemoryStorageSession(database, state, access, liveState: true, providerConnection: this, observer: observer);
+    }
+
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        var state = database.GetState(unit, access);
+        return new OwnedInMemoryStorageSession(database, state, access, this, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -111,7 +124,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
 
     public void Dispose() => disposed = true;
 
-    private void ThrowIfDisposed()
+    internal void ThrowIfDisposed()
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(InMemoryProviderConnection));
@@ -573,7 +586,7 @@ internal static class StorageDeclaration
     };
 }
 
-internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
+internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession
 {
     private readonly InMemoryDatabase database;
     private InMemoryUnitState state;
@@ -1509,6 +1522,20 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
 
     internal void Close() => disposed = true;
 
+    public bool IsReleased => disposed;
+
+    /// <summary>
+    /// The in-memory provider holds no scarce per-session resource, so releasing one only closes it. The
+    /// capability exists so a consumer can use one lifetime model across every provider.
+    /// </summary>
+    public void Dispose() => disposed = true;
+
+    public ValueTask DisposeAsync()
+    {
+        disposed = true;
+        return ValueTask.CompletedTask;
+    }
+
     private WriteOutcome Mutate(
         StorageValues values,
         WriteOptions? options,
@@ -1559,6 +1586,21 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(InMemoryStorageSession));
+        if (ProviderConnection is InMemoryProviderConnection providerConnection)
+            providerConnection.ThrowIfDisposed();
+    }
+}
+
+internal sealed class OwnedInMemoryStorageSession : InMemoryStorageSession, IOwnedStorageSession
+{
+    internal OwnedInMemoryStorageSession(
+        InMemoryDatabase database,
+        InMemoryUnitState state,
+        StorageAccess access,
+        IStorageProviderConnection providerConnection,
+        IProviderCommandObserver? observer = null)
+        : base(database, state, access, liveState: true, providerConnection: providerConnection, observer: observer)
+    {
     }
 }
 

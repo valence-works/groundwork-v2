@@ -35,7 +35,8 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
     private readonly SqlServerSchemaCoordinator schemaCoordinator;
-    private bool disposed;
+    private volatile ISessionRegistrationObserver? activeRegistrationObserver;
+    private volatile bool disposed;
 
     public SqlServerProviderConnection(string connectionString)
     {
@@ -109,6 +110,32 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqlServerSchemaCoordinator.Physicalize(unit);
+        var connection = CreateIndependentConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            RegisterSessionConnection(connection, observer);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+        return new SqlServerStorageSession(this, physicalUnit, access, connection, null, observer);
+    }
+
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqlServerSchemaCoordinator.Physicalize(unit);
         var connection = CreateIndependentConnection();
         try
         {
@@ -119,9 +146,8 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
             connection.Dispose();
             throw;
         }
-        using (EnterGate())
-            sessionConnections.Add(connection);
-        return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer);
+        // Deliberately not added to sessionConnections: the caller releases it on disposal.
+        return new OwnedSqlServerStorageSession(this, physicalUnit, access, connection, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -178,14 +204,43 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
 
     public void Dispose()
     {
-        if (disposed)
-            return;
-        disposed = true;
+        activeRegistrationObserver?.OnProviderDisposalAttempted();
         using (EnterGate())
         {
+            if (disposed)
+                return;
+            disposed = true;
             foreach (var connection in sessionConnections)
                 connection.Dispose();
             sessionConnections.Clear();
+        }
+    }
+
+    private void RegisterSessionConnection(
+        SqlConnection connection,
+        IProviderCommandObserver? observer)
+    {
+        using (EnterGate())
+        {
+            if (disposed)
+                throw new ObjectDisposedException(nameof(SqlServerProviderConnection));
+            if (observer is ISessionRegistrationObserver registrationObserver)
+            {
+                activeRegistrationObserver = registrationObserver;
+                try
+                {
+                    registrationObserver.OnSessionRegistrationEligibilityChecked();
+                    sessionConnections.Add(connection);
+                }
+                finally
+                {
+                    activeRegistrationObserver = null;
+                }
+            }
+            else
+            {
+                sessionConnections.Add(connection);
+            }
         }
     }
 

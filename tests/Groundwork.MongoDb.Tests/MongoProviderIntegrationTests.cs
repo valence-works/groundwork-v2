@@ -17,6 +17,49 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
+    public void Owned_session_marker_matches_the_opening_path()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var name = "mongo_session_ownership_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        Assert.False(connection.OpenSession(unit, StorageAccess.Global) is IOwnedStorageSession);
+        using (var work = connection.BeginUnitOfWork(StorageAccess.Global, unit))
+            Assert.False(work.OpenSession(unit) is IOwnedStorageSession);
+
+        var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
+        Assert.False(owned.IsReleased);
+        Assert.True(owned.Upsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "conflict", ["value"] = "current" }),
+            WriteOptions.Unconditional).Succeeded);
+        var stale = Assert.IsAssignableFrom<IConcurrencyStorageSession>(owned).ConditionalUpsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "conflict", ["value"] = "stale" }),
+            WriteOptions.IfVersion(0));
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, stale.Status);
+        owned.Dispose();
+        Assert.True(owned.IsReleased);
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+        Assert.Throws<ObjectDisposedException>(() => { _ = stale.Detail; });
+    }
+
+    [SkippableFact]
     public void Runtime_resolution_uses_kernel_history_not_the_legacy_schema_cache()
     {
         var connectionString = LiveMongo.ConnectionString;

@@ -708,15 +708,30 @@ public sealed class DocumentsContractTests
             LastAccess = access;
             return session;
         }
+        public IOwnedStorageSession OpenOwnedSession(Groundwork.Kernel.StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
+        {
+            // Counts like OpenSession does: this fake exists to assert how many sessions were opened, and a
+            // silently uncounted path would diverge from those assertions rather than fail them.
+            OpenCount++;
+            LastAccess = access;
+            return session;
+        }
         public IUnitOfWork BeginUnitOfWork(StorageAccess access, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
         public IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
         public IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, IProviderCommandObserver? observer, params Groundwork.Kernel.StorageUnit[] units) => throw new NotSupportedException();
         public void Dispose() { }
     }
 
-    private sealed class CapturingStorageSession(Groundwork.Kernel.StorageUnit unit, WriteOutcome result) : IStorageSession
+    private sealed class CapturingStorageSession(Groundwork.Kernel.StorageUnit unit, WriteOutcome result) : IOwnedStorageSession
     {
         public Groundwork.Kernel.StorageUnit Unit { get; } = unit;
+        public bool IsReleased { get; private set; }
+        public void Dispose() => IsReleased = true;
+        public ValueTask DisposeAsync()
+        {
+            IsReleased = true;
+            return ValueTask.CompletedTask;
+        }
         public StorageAccess Access => StorageAccess.Global;
         public RowWriteMode? LastMode { get; private set; }
         public StorageValues? LastValues { get; private set; }

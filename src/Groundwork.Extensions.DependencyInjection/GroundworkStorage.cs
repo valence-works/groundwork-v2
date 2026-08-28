@@ -1,5 +1,6 @@
 using Groundwork.Kernel;
 using Groundwork.Store;
+using System.Runtime.ExceptionServices;
 
 namespace Groundwork.Extensions.DependencyInjection;
 
@@ -9,10 +10,10 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The connection behind it is a process singleton. What is scoped is the work: sessions are cheap
-/// non-owning views, and every unit of work opened here is owned by the scope. When the scope ends
-/// — the request completes, or fails — units of work that never reached commit or rollback are
-/// disposed, which rolls them back.
+/// The connection behind it is a process singleton. What is scoped is the work: sessions opened here
+/// are scope-owned handles, and every unit of work opened here is owned by the scope. When the scope
+/// ends — the request completes, or fails — sessions are released and units of work that never
+/// reached commit or rollback are disposed, which rolls them back.
 /// </para>
 /// <para>
 /// A unit of work stops being owned the moment it becomes terminal, so a scope that outlives a
@@ -20,7 +21,7 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// not accumulate them.
 /// </para>
 /// </remarks>
-public interface IGroundworkStorage : IDisposable
+public interface IGroundworkStorage : IDisposable, IAsyncDisposable
 {
     /// <summary>The name of the connection this instance is bound to.</summary>
     string Name { get; }
@@ -31,7 +32,7 @@ public interface IGroundworkStorage : IDisposable
     /// </summary>
     IStorageProviderConnection Connection { get; }
 
-    /// <summary>Opens a non-owning session view over one declared unit.</summary>
+    /// <summary>Opens a scope-owned session over one declared unit.</summary>
     IStorageSession OpenSession(StorageUnit unit, StorageAccess access);
 
     /// <summary>Begins a scope-owned unit of work.</summary>
@@ -44,8 +45,18 @@ public interface IGroundworkStorage : IDisposable
 internal sealed class GroundworkStorage : IGroundworkStorage
 {
     private readonly object gate = new();
+    private readonly List<IOwnedStorageSession> sessions = [];
     private readonly List<ScopedUnitOfWork> owned = [];
     private bool disposed;
+
+    internal int TrackedSessionCount
+    {
+        get
+        {
+            lock (gate)
+                return sessions.Count;
+        }
+    }
 
     internal GroundworkStorage(string name, IStorageProviderConnection connection)
     {
@@ -60,7 +71,21 @@ internal sealed class GroundworkStorage : IGroundworkStorage
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        return Connection.OpenSession(unit, access);
+        var session = Connection.OpenOwnedSession(unit, access);
+        lock (gate)
+        {
+            if (!disposed)
+            {
+                sessions.RemoveAll(static candidate => candidate.IsReleased);
+                sessions.Add(session);
+                return session;
+            }
+        }
+
+        // The scope ended while the provider was opening this session. Nothing will ever come back
+        // for it, so release it here rather than retaining a checked-out provider resource.
+        session.Dispose();
+        throw new ObjectDisposedException(nameof(GroundworkStorage));
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -104,18 +129,46 @@ internal sealed class GroundworkStorage : IGroundworkStorage
 
     public void Dispose()
     {
+        IOwnedStorageSession[] pendingSessions;
         ScopedUnitOfWork[] pending;
         lock (gate)
         {
             if (disposed)
                 return;
             disposed = true;
+            pendingSessions = [.. sessions];
+            sessions.Clear();
             pending = [.. owned];
             owned.Clear();
         }
 
-        for (var index = pending.Length - 1; index >= 0; index--)
-            pending[index].Dispose();
+        ResourceCleanup.RunAll(
+            pendingSessions.AsEnumerable().Reverse().Select(session => (Action)(() => session.Dispose()))
+                .Concat(pending.AsEnumerable().Reverse().Select(work => (Action)(() => work.Dispose()))));
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        IOwnedStorageSession[] pendingSessions;
+        ScopedUnitOfWork[] pending;
+        lock (gate)
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            pendingSessions = [.. sessions];
+            sessions.Clear();
+            pending = [.. owned];
+            owned.Clear();
+        }
+
+        await ResourceCleanup.RunAllAsync(
+            pendingSessions.AsEnumerable().Reverse().Select(session => (Func<ValueTask>)(() => session.DisposeAsync()))
+                .Concat(pending.AsEnumerable().Reverse().Select(work => (Func<ValueTask>)(() =>
+                {
+                    work.Dispose();
+                    return ValueTask.CompletedTask;
+                })))).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -170,5 +223,47 @@ internal sealed class GroundworkStorage : IGroundworkStorage
             owner.Release(this);
             return result;
         }
+    }
+}
+
+/// <summary>Runs every cleanup step even when an earlier resource fails to dispose.</summary>
+internal static class ResourceCleanup
+{
+    internal static void RunAll(IEnumerable<Action> steps)
+    {
+        ArgumentNullException.ThrowIfNull(steps);
+        var failures = new List<Exception>();
+        foreach (var step in steps)
+        {
+            ArgumentNullException.ThrowIfNull(step);
+            try { step(); }
+            catch (Exception failure) { failures.Add(failure); }
+        }
+        ThrowIfAny(failures);
+    }
+
+    internal static async ValueTask RunAllAsync(IEnumerable<Func<ValueTask>> steps)
+    {
+        ArgumentNullException.ThrowIfNull(steps);
+        var failures = new List<Exception>();
+        foreach (var step in steps)
+        {
+            ArgumentNullException.ThrowIfNull(step);
+            try { await step().ConfigureAwait(false); }
+            catch (Exception failure) { failures.Add(failure); }
+        }
+        ThrowIfAny(failures);
+    }
+
+    private static void ThrowIfAny(IReadOnlyCollection<Exception> failures)
+    {
+        if (failures.Count == 0)
+            return;
+
+        // Reuse the store's cleanup-failure convention: preserve the first exception and its stack,
+        // and attach any later failures rather than replacing the primary signal.
+        WriteFailureCleanup.RunAll(failures
+            .Select(failure => (Action)(() => ExceptionDispatchInfo.Capture(failure).Throw()))
+            .ToArray());
     }
 }

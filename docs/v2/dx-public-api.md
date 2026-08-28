@@ -28,15 +28,18 @@ records.Insert(new Customer("a", "a@example.com"));
 
 ## Ownership and lifetime
 
-`IStorageProviderConnection` owns the provider resources it opens, including sessions opened
-directly from the connection. Keep the connection alive for every session, schema, catalog, or
-query operation that uses it; disposing the connection releases its resources and invalidates its
-sessions.
+`IStorageProviderConnection` owns the provider resources it opens, including non-owning sessions
+opened directly from the connection. Keep the connection alive for every session, schema, catalog,
+or query operation that uses it; disposing the connection releases its resources and invalidates its
+non-owning sessions. When a caller needs a shorter lifetime, `OpenOwnedSession` returns an
+`IOwnedStorageSession` whose resources are released by synchronous or asynchronous disposal.
 
-`IStorageSession` is intentionally a non-disposable view over a declared storage unit. It does not
-own the provider connection or its resources. A session opened from a connection is valid only
-while that connection is alive. A session opened from an `IUnitOfWork` is additionally bounded by
-that unit of work and becomes invalid when the unit reaches a terminal state or is disposed.
+`IStorageSession` is the common operation surface. A session opened from a connection is a
+non-owning view and is valid only while that connection is alive; a session opened through
+`OpenOwnedSession` also implements `IOwnedStorageSession` and releases its provider resources on
+disposal. A session opened from an `IUnitOfWork` is additionally bounded by that unit of work and
+becomes invalid when the unit reaches a terminal state or is disposed. The DI `IGroundworkStorage`
+scope uses owned sessions and releases them when the scope ends.
 
 `IUnitOfWork` owns its transaction, staged sessions, and their provider resources. Commit and
 rollback are terminal operations; disposing a non-terminal unit rolls it back. Dispose the unit of

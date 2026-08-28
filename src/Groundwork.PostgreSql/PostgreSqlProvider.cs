@@ -30,10 +30,50 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     };
 
     private readonly string connectionString;
+
+    /// <summary>
+    /// Serializes the operations of every session this connection owns.
+    /// </summary>
+    /// <remarks>
+    /// Consumers cache and share sessions — Elsa's storage session source keys them by target/unit/access
+    /// and hands the same instance to concurrent callers — and Npgsql refuses concurrent commands on one
+    /// connection outright (<c>NpgsqlOperationInProgressException</c>). Serializing makes a shared session
+    /// slow under contention rather than unusable. Mirrors the gate SqlServerProviderConnection already
+    /// carries; a semaphore rather than a monitor because the async paths hold it across an await.
+    ///
+    /// It is NOT re-entrant. The session takes it in exactly two places — its Execute and ExecuteWrite
+    /// funnels — which are the outermost wrapper of every public operation and never nest inside one
+    /// another: on-append retention runs sequentially after its write completes and reaches the retention
+    /// core directly rather than through a funnel.
+    /// </remarks>
+    private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly object connectionRegistryGate = new();
+
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+
+    internal IDisposable EnterGate()
+    {
+        gate.Wait();
+        return new GateScope(gate);
+    }
+
+    internal ValueTask<IDisposable> EnterGate(RelationalExecution mode) =>
+        mode.IsAsync ? EnterGateAsync(mode.CancellationToken) : new(EnterGate());
+
+    private async ValueTask<IDisposable> EnterGateAsync(CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new GateScope(gate);
+    }
+
+    private sealed class GateScope(SemaphoreSlim gate) : IDisposable
+    {
+        public void Dispose() => gate.Release();
+    }
     private readonly ConcurrentBag<NpgsqlConnection> ownedConnections = [];
     private readonly PostgreSqlSchemaCoordinator schemaCoordinator;
-    private bool disposed;
+    private volatile ISessionRegistrationObserver? activeRegistrationObserver;
+    private volatile bool disposed;
 
     public PostgreSqlProviderConnection(string connectionString)
     {
@@ -79,6 +119,32 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = Resolve(unit);
+        var connection = OpenConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            OwnConnection(connection, observer);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+        return new PostgreSqlStorageSession(this, physicalUnit, access, connection, null, observer);
+    }
+
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = Resolve(unit);
         var connection = OpenConnection();
         try
         {
@@ -89,8 +155,9 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
             connection.Dispose();
             throw;
         }
-        OwnConnection(connection);
-        return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null, observer);
+        // Deliberately NOT OwnConnection: the caller releases it, which is the whole point — a per-caller
+        // session that neither leaks a connection nor queues behind unrelated callers on a shared one.
+        return new OwnedPostgreSqlStorageSession(this, physicalUnit, access, connection, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -155,15 +222,38 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         }
     }
 
-    internal void OwnConnection(NpgsqlConnection connection)
+    internal void OwnConnection(
+        NpgsqlConnection connection,
+        IProviderCommandObserver? observer = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        if (disposed)
+        lock (connectionRegistryGate)
         {
-            connection.Dispose();
-            throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
+            if (disposed)
+            {
+                connection.Dispose();
+                throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
+            }
+            if (observer is ISessionRegistrationObserver registrationObserver)
+            {
+                activeRegistrationObserver = registrationObserver;
+                try
+                {
+                    registrationObserver.OnSessionRegistrationEligibilityChecked();
+                    if (disposed)
+                        throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
+                    ownedConnections.Add(connection);
+                }
+                finally
+                {
+                    activeRegistrationObserver = null;
+                }
+            }
+            else
+            {
+                ownedConnections.Add(connection);
+            }
         }
-        ownedConnections.Add(connection);
     }
 
     internal void ThrowIfDisposed()
@@ -174,10 +264,17 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
 
     public void Dispose()
     {
-        if (disposed)
-            return;
-        disposed = true;
-        while (ownedConnections.TryTake(out var connection))
+        activeRegistrationObserver?.OnProviderDisposalAttempted();
+        List<NpgsqlConnection> connections = [];
+        lock (connectionRegistryGate)
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            while (ownedConnections.TryTake(out var connection))
+                connections.Add(connection);
+        }
+        foreach (var connection in connections)
             connection.Dispose();
     }
 }

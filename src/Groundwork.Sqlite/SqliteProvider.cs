@@ -3,6 +3,7 @@ using System.Globalization;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Store;
+using Groundwork.Substrate.Relational;
 using Groundwork.Diagnostics;
 using System.Text;
 
@@ -33,7 +34,8 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     private readonly List<SqliteConnection> sessionConnections = [];
     private readonly bool isMemory;
     private readonly SqliteSchemaCoordinator schemaCoordinator;
-    private bool disposed;
+    private volatile ISessionRegistrationObserver? activeRegistrationObserver;
+    private volatile bool disposed;
 
     public SqliteProviderConnection(string connectionString)
     {
@@ -104,6 +106,33 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqliteSchemaCoordinator.Physicalize(unit);
+        var sessionConnection = isMemory ? connection : CreateIndependentConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, sessionConnection);
+            RegisterSessionConnection(sessionConnection, observer);
+        }
+        catch
+        {
+            if (!isMemory)
+                sessionConnection.Dispose();
+            throw;
+        }
+        return new SqliteStorageSession(this, physicalUnit, access, sessionConnection, null, observer);
+    }
+
+    public IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(access);
+        PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+        SqliteSchemaCoordinator.ValidateAccess(unit, access);
+        var physicalUnit = SqliteSchemaCoordinator.Physicalize(unit);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
         try
         {
@@ -115,9 +144,10 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
                 sessionConnection.Dispose();
             throw;
         }
-        if (!isMemory)
-            lock (gate) sessionConnections.Add(sessionConnection);
-        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer);
+        // Shared in-memory mode is the one place ownership cannot transfer: that connection IS the database,
+        // so releasing it would drop every table. Disposal there closes the session only. SQLite serializes
+        // internally, so the concurrency this seam buys elsewhere costs nothing to forgo here.
+        return new OwnedSqliteStorageSession(this, physicalUnit, access, sessionConnection, observer, !isMemory);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -173,14 +203,47 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
 
     public void Dispose()
     {
-        if (disposed)
-            return;
-        disposed = true;
-        connection.Dispose();
-        foreach (var sessionConnection in sessionConnections)
-            sessionConnection.Dispose();
-        sessionConnections.Clear();
-        schemaLock?.Dispose();
+        activeRegistrationObserver?.OnProviderDisposalAttempted();
+        lock (gate)
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            connection.Dispose();
+            foreach (var sessionConnection in sessionConnections)
+                sessionConnection.Dispose();
+            sessionConnections.Clear();
+            schemaLock?.Dispose();
+        }
+    }
+
+    private void RegisterSessionConnection(
+        SqliteConnection sessionConnection,
+        IProviderCommandObserver? observer)
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (observer is ISessionRegistrationObserver registrationObserver)
+            {
+                activeRegistrationObserver = registrationObserver;
+                try
+                {
+                    registrationObserver.OnSessionRegistrationEligibilityChecked();
+                    ThrowIfDisposed();
+                    if (!isMemory)
+                        sessionConnections.Add(sessionConnection);
+                }
+                finally
+                {
+                    activeRegistrationObserver = null;
+                }
+            }
+            else if (!isMemory)
+            {
+                sessionConnections.Add(sessionConnection);
+            }
+        }
     }
 
     internal static string QuoteIdentifier(string identifier) =>
