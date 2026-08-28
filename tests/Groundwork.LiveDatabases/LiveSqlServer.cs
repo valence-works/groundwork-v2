@@ -75,11 +75,21 @@ internal static class LiveSqlServer
 
     /// <summary>
     /// Drops every <c>groundwork_run_*</c> database on <paramref name="configured"/> whose
-    /// <c>sys.databases.create_date</c> is older than <paramref name="olderThan"/>, skipping any
-    /// still within that window because that is indistinguishable from a run still in progress.
+    /// <c>sys.databases.create_date</c> is older than <paramref name="olderThan"/> and which has no
+    /// session currently connected to it, skipping any still within that age window — or with a
+    /// live session — because either is indistinguishable from a run still in progress.
     /// <c>create_date</c> and <c>GETDATE()</c> are read from the same server round trip, so the
     /// age comparison in <see cref="SelectStale"/> sidesteps whatever time zone the server's clock
     /// happens to be in, and never depends on this process's own clock.
+    /// <para>
+    /// Age alone is not sufficient: a run that takes longer than <paramref name="olderThan"/> — an
+    /// unusually large concurrency probe, a debugger attached mid-test — is still connected to its
+    /// database the entire time, so <see cref="HasActiveSession"/> checks <c>sys.dm_exec_sessions</c>
+    /// immediately before a drop and skips any candidate with a session still attached, however old.
+    /// A candidate that cannot be checked (for example, a permissions error) is left alone rather
+    /// than assumed idle, since the whole point of this check is to err toward not touching a
+    /// database whose state cannot be confirmed.
+    /// </para>
     /// <para>
     /// <paramref name="onlyName"/>, when given, narrows discovery to that one database name in
     /// addition to the usual pattern. Production never sets it. It exists so a test can prove the
@@ -121,14 +131,35 @@ internal static class LiveSqlServer
         {
             try
             {
+                if (HasActiveSession(configured, name))
+                    continue;
+
                 Execute(configured, $"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}];");
             }
             catch (SqlException)
             {
-                // Another sibling reclaiming the same abandoned database, or one whose owner is
-                // still attached, is not this run's failure.
+                // Another sibling reclaiming the same abandoned database, one whose owner is still
+                // attached, or a failure to even check for one — none of those are this run's
+                // failure, and none of them justify dropping a database this process could not
+                // confirm was actually abandoned.
             }
         }
+    }
+
+    /// <summary>
+    /// Whether any session is currently connected to the database named <paramref name="name"/>.
+    /// A database past the age threshold with a session still attached belongs to a run still in
+    /// progress — long enough to have outlasted <see cref="StaleAfter"/> — not an abandoned one, so
+    /// reclamation defers to this check rather than age alone.
+    /// </summary>
+    private static bool HasActiveSession(string configured, string name)
+    {
+        using var connection = new SqlConnection(configured);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE database_id = DB_ID(@name);";
+        command.Parameters.AddWithValue("@name", name);
+        return (int)command.ExecuteScalar()! > 0;
     }
 
     /// <summary>

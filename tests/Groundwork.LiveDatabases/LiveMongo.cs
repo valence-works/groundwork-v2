@@ -74,9 +74,29 @@ internal static class LiveMongo
         url.DatabaseName = prefix + Guid.NewGuid().ToString("N");
         var claimed = url.ToMongoUrl().ToString();
         Mark(claimed, url.DatabaseName);
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => Release(claimed, url.DatabaseName);
+
+        // Mongo has no notion of "a session is connected to this database" the way SQL Server does
+        // — a client's connections are pooled per server, not scoped to one database — so age since
+        // claim is the only signal a sibling can read back, and a run that simply outlasts the age
+        // threshold would otherwise look identical to an abandoned one. A heartbeat closes that
+        // gap: for as long as this process is alive, it keeps refreshing its own marker, so a
+        // sibling only ever sees an old timestamp once nothing is left to refresh it.
+        var heartbeat = new Timer(_ => Refresh(claimed, url.DatabaseName), null, HeartbeatInterval, HeartbeatInterval);
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            heartbeat.Dispose();
+            Release(claimed, url.DatabaseName);
+        };
         return claimed;
     }
+
+    /// <summary>
+    /// How often the claiming process refreshes its own marker's <c>claimedAtUtc</c>. A small
+    /// fraction of <see cref="StaleAfter"/> so a process that stalls between refreshes — under load,
+    /// under a debugger, or simply between two slow tests — never drifts past the threshold while
+    /// still alive.
+    /// </summary>
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// Writes the marker document that records when this process's database was claimed, so a
@@ -86,6 +106,26 @@ internal static class LiveMongo
     {
         var collection = new MongoClient(connectionString).GetDatabase(name).GetCollection<BsonDocument>(MarkerCollection);
         collection.InsertOne(new BsonDocument { { "_id", "marker" }, { "claimedAtUtc", DateTime.UtcNow } });
+    }
+
+    /// <summary>
+    /// Updates the marker's <c>claimedAtUtc</c> to now, the heartbeat this process's database
+    /// relies on to keep reading as recently active for as long as this process is alive. Best
+    /// effort: a transient failure here is not this run's failure, and the next tick tries again.
+    /// </summary>
+    private static void Refresh(string connectionString, string name)
+    {
+        try
+        {
+            var collection = new MongoClient(connectionString).GetDatabase(name).GetCollection<BsonDocument>(MarkerCollection);
+            collection.UpdateOne(new BsonDocument("_id", "marker"), new BsonDocument("$set", new BsonDocument("claimedAtUtc", DateTime.UtcNow)));
+        }
+        catch (MongoException)
+        {
+            // A dropped connection or a server blip is the next heartbeat's problem, not this
+            // process's to report — the process is still alive regardless of whether this tick
+            // reached the server.
+        }
     }
 
     /// <summary>

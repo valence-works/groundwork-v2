@@ -93,4 +93,36 @@ public sealed class LiveMongoReclamationTests
 
         Assert.DoesNotContain(name, client.ListDatabaseNames().ToList());
     }
+
+    /// <summary>
+    /// Proves that refreshing the marker — what the claiming process's heartbeat does periodically
+    /// for as long as it is alive — keeps a database that would otherwise read as abandoned from
+    /// being dropped. This is the gap age-only reclaim would otherwise have: a run that outlasts
+    /// <see cref="LiveMongo.StaleAfter"/> looks identical to one that crashed two hours ago unless
+    /// something keeps rewriting its marker in the meantime.
+    /// </summary>
+    [SkippableFact]
+    public void Reclamation_leaves_a_database_alone_once_its_marker_has_been_refreshed()
+    {
+        var connectionString = LiveMongo.Required();
+        var client = new MongoClient(connectionString);
+        var prefix = "groundwork_run_rt_" + Guid.NewGuid().ToString("N") + "_";
+        var name = prefix + "t";
+        var collection = client.GetDatabase(name).GetCollection<BsonDocument>(MarkerCollection);
+        collection.InsertOne(new BsonDocument { { "_id", "marker" }, { "claimedAtUtc", DateTime.UtcNow - TimeSpan.FromHours(3) } });
+
+        // The heartbeat this claim's owning process would have sent well before the threshold.
+        collection.UpdateOne(new BsonDocument("_id", "marker"), new BsonDocument("$set", new BsonDocument("claimedAtUtc", DateTime.UtcNow)));
+
+        try
+        {
+            LiveMongo.ReclaimStale(connectionString, prefix, LiveMongo.StaleAfter);
+
+            Assert.Contains(name, client.ListDatabaseNames().ToList());
+        }
+        finally
+        {
+            client.DropDatabase(name);
+        }
+    }
 }

@@ -111,6 +111,37 @@ public sealed class LiveSqlServerReclamationTests
         Assert.False(DatabaseExists(connectionString, name));
     }
 
+    /// <summary>
+    /// Proves that a session still connected to a database blocks its drop even past the age
+    /// threshold — the gap age-only reclaim would otherwise have: a run that simply outlasts
+    /// <see cref="LiveSqlServer.StaleAfter"/> is still attached to its own database the whole time,
+    /// and must not be mistaken for an abandoned one. This test holds its own connection open
+    /// against a database it scopes reclamation to by exact name, so the zero threshold that
+    /// manufactures staleness can only ever apply to a database this test owns.
+    /// </summary>
+    [SkippableFact]
+    public void Reclamation_leaves_a_database_alone_while_a_session_is_connected_to_it()
+    {
+        var connectionString = LiveSqlServer.Required();
+        var name = "groundwork_run_" + Guid.NewGuid().ToString("N");
+        Execute(connectionString, $"CREATE DATABASE [{name}];");
+
+        using var held = new SqlConnection(new SqlConnectionStringBuilder(connectionString) { InitialCatalog = name }.ConnectionString);
+        held.Open();
+
+        try
+        {
+            LiveSqlServer.ReclaimStale(connectionString, TimeSpan.Zero, onlyName: name);
+
+            Assert.True(DatabaseExists(connectionString, name));
+        }
+        finally
+        {
+            held.Close();
+            Execute(connectionString, $"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}];");
+        }
+    }
+
     private static bool DatabaseExists(string connectionString, string name)
     {
         using var connection = new SqlConnection(connectionString);
