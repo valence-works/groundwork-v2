@@ -196,6 +196,11 @@ def _item_issue_key(item: Mapping[str, Any], repository: str) -> Optional[tuple[
 
 
 def _current_status(item: Mapping[str, Any]) -> Optional[str]:
+    direct_value = item.get("statusValue")
+    if isinstance(direct_value, Mapping):
+        name = direct_value.get("name")
+        if isinstance(name, str):
+            return name
     values = item.get("fieldValues")
     if not isinstance(values, Mapping):
         return None
@@ -343,12 +348,12 @@ class GitHubClient:
         return default_branch
 
     def get_project_snapshot(self, organization: str, project_number: int) -> Mapping[str, Any]:
-        query = """
+        fields_query = """
         query($organization: String!, $number: Int!, $after: String) {
           organization(login: $organization) {
             projectV2(number: $number) {
               id
-              fields(first: 100) {
+              fields(first: 100, after: $after) {
                 nodes {
                   __typename
                   ... on ProjectV2SingleSelectField {
@@ -357,7 +362,17 @@ class GitHubClient:
                     options { id name }
                   }
                 }
+                pageInfo { hasNextPage endCursor }
               }
+            }
+          }
+        }
+        """
+        items_query = """
+        query($organization: String!, $number: Int!, $after: String) {
+          organization(login: $organization) {
+            projectV2(number: $number) {
+              id
               items(first: 100, after: $after) {
                 nodes {
                   id
@@ -374,14 +389,11 @@ class GitHubClient:
                       repository { nameWithOwner }
                     }
                   }
-                  fieldValues(first: 100) {
-                    nodes {
-                      __typename
-                      ... on ProjectV2ItemFieldSingleSelectValue {
-                        name
-                        optionId
-                        field { ... on ProjectV2SingleSelectField { name } }
-                      }
+                  statusValue: fieldValueByName(name: "Status") {
+                    __typename
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name
+                      optionId
                     }
                   }
                 }
@@ -391,29 +403,81 @@ class GitHubClient:
           }
         }
         """
-        cursor: Optional[str] = None
-        project_id: Optional[str] = None
-        fields: list[Mapping[str, Any]] = []
-        items: list[Mapping[str, Any]] = []
-        while True:
-            payload = self._request(
-                "POST",
-                self._graphql_url,
-                {"query": query, "variables": {"organization": organization, "number": project_number, "after": cursor}},
-            )
+
+        def read_project(payload: Any) -> Mapping[str, Any]:
             if not isinstance(payload, Mapping):
                 raise GitHubError("GitHub GraphQL returned a non-object payload")
             errors = payload.get("errors")
             if errors:
                 raise GitHubError(f"GitHub GraphQL project query failed: {errors}")
-            organization_data = payload.get("data", {}).get("organization")
+            data = payload.get("data")
+            organization_data = data.get("organization") if isinstance(data, Mapping) else None
             project = organization_data.get("projectV2") if isinstance(organization_data, Mapping) else None
             if not isinstance(project, Mapping):
                 raise GitHubError(f"organization project #{project_number} was not found")
+            return project
+
+        project_id: Optional[str] = None
+        fields: list[Mapping[str, Any]] = []
+        field_cursor: Optional[str] = None
+        while True:
+            project = read_project(
+                self._request(
+                    "POST",
+                    self._graphql_url,
+                    {
+                        "query": fields_query,
+                        "variables": {
+                            "organization": organization,
+                            "number": project_number,
+                            "after": field_cursor,
+                        },
+                    },
+                )
+            )
+            current_project_id = project.get("id")
+            if not isinstance(current_project_id, str):
+                raise GitHubError("GitHub GraphQL project has no id")
             if project_id is None:
-                project_id = project.get("id") if isinstance(project.get("id"), str) else None
-                field_nodes = project.get("fields", {}).get("nodes", [])
-                fields = [field for field in field_nodes if isinstance(field, Mapping)]
+                project_id = current_project_id
+            elif current_project_id != project_id:
+                raise GitHubError("GitHub GraphQL project id changed while paging fields")
+            field_connection = project.get("fields")
+            if not isinstance(field_connection, Mapping):
+                raise GitHubError("GitHub GraphQL project query returned no fields connection")
+            field_nodes = field_connection.get("nodes", [])
+            fields.extend(field for field in field_nodes if isinstance(field, Mapping))
+            page_info = field_connection.get("pageInfo")
+            if not isinstance(page_info, Mapping) or not page_info.get("hasNextPage"):
+                break
+            field_cursor = page_info.get("endCursor")
+            if not isinstance(field_cursor, str):
+                raise GitHubError("GitHub GraphQL project fields page has no end cursor")
+
+        items: list[Mapping[str, Any]] = []
+        item_cursor: Optional[str] = None
+        while True:
+            project = read_project(
+                self._request(
+                    "POST",
+                    self._graphql_url,
+                    {
+                        "query": items_query,
+                        "variables": {
+                            "organization": organization,
+                            "number": project_number,
+                            "after": item_cursor,
+                        },
+                    },
+                )
+            )
+            current_project_id = project.get("id")
+            if not isinstance(current_project_id, str):
+                raise GitHubError("GitHub GraphQL project has no id")
+            if project_id is None:
+                project_id = current_project_id
+            elif current_project_id != project_id:
+                raise GitHubError("GitHub GraphQL project id changed while paging items")
             item_connection = project.get("items")
             if not isinstance(item_connection, Mapping):
                 raise GitHubError("GitHub GraphQL project query returned no items connection")
@@ -422,8 +486,8 @@ class GitHubClient:
             page_info = item_connection.get("pageInfo")
             if not isinstance(page_info, Mapping) or not page_info.get("hasNextPage"):
                 break
-            cursor = page_info.get("endCursor")
-            if not isinstance(cursor, str):
+            item_cursor = page_info.get("endCursor")
+            if not isinstance(item_cursor, str):
                 raise GitHubError("GitHub GraphQL project page has no end cursor")
         if project_id is None:
             raise GitHubError("GitHub GraphQL project has no id")

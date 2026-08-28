@@ -7,6 +7,7 @@ from eng.project_board_sync import (
     build_sync_plan,
     closing_issue_numbers,
     derive_status,
+    GitHubClient,
     is_roadmap_issue,
     roadmap_issues,
 )
@@ -200,6 +201,100 @@ class PlanTests(unittest.TestCase):
             ],
             [(a.kind, a.issue_number, a.status, a.item_id, a.content_id) for a in actions],
         )
+
+
+class SnapshotTests(unittest.TestCase):
+    def test_snapshot_pages_fields_and_items_and_reads_status_by_name(self):
+        status_field = {
+            "__typename": "ProjectV2SingleSelectField",
+            "id": "status-field",
+            "name": "Status",
+            "options": [
+                {"id": "todo", "name": TODO},
+                {"id": "progress", "name": IN_PROGRESS},
+                {"id": "done", "name": DONE},
+            ],
+        }
+        issue_item = {
+            "id": "item-17",
+            "content": {
+                "__typename": "Issue",
+                "number": 17,
+                "repository": {"nameWithOwner": REPOSITORY},
+            },
+            "statusValue": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": TODO,
+                "optionId": "todo",
+            },
+        }
+
+        def payload(project):
+            return {"data": {"organization": {"projectV2": project}}}
+
+        responses = iter(
+            [
+                payload(
+                    {
+                        "id": "project-6",
+                        "fields": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "fields-1"},
+                        },
+                    }
+                ),
+                payload(
+                    {
+                        "id": "project-6",
+                        "fields": {
+                            "nodes": [status_field],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ),
+                payload(
+                    {
+                        "id": "project-6",
+                        "items": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "items-1"},
+                        },
+                    }
+                ),
+                payload(
+                    {
+                        "id": "project-6",
+                        "items": {
+                            "nodes": [issue_item],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ),
+            ]
+        )
+
+        class FakeClient(GitHubClient):
+            def __init__(self):
+                super().__init__("token", api_url="https://example.test")
+                self.requests = []
+
+            def _request(self, method, url, body=None):
+                self.requests.append((method, url, body))
+                return next(responses)
+
+        client = FakeClient()
+        snapshot = client.get_project_snapshot("valence-works", 6)
+
+        self.assertEqual("project-6", snapshot["id"])
+        self.assertEqual("status-field", snapshot["status_field_id"])
+        self.assertEqual("todo", snapshot["status_options"][TODO])
+        self.assertEqual(["item-17"], [item["id"] for item in snapshot["items"]])
+        self.assertEqual(
+            [None, "fields-1", None, "items-1"],
+            [request[2]["variables"]["after"] for request in client.requests],
+        )
+        self.assertIn("fieldValueByName(name: \"Status\")", client.requests[2][2]["query"])
+        self.assertNotIn("fieldValues(first: 100)", client.requests[2][2]["query"])
 
 
 if __name__ == "__main__":
