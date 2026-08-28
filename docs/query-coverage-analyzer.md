@@ -18,9 +18,11 @@ backs with a unique index, so a key-bounded read is a seek rather than a scan. T
 candidate, so a composite key `(tenant, id)` bounds a predicate on `tenant` and on `tenant` and `id`
 together, but not on `id` alone. Where a refused predicate pins every key column with a single-value
 equality, at most one row can match and no index would improve on that, so the suggestion is withheld
-and the point-read path is named instead. Every other shape — a disjunction, a range, an equality
-over part of a composite key — keeps the ordinary suggestion, even when it names the key's own
-columns.
+and the point-read path is named instead. A refusal with `GW-COVER-016` likewise withholds the
+suggestion because the shape itself is not representable by an ordered index; rewrite it into a
+portable shape where possible, or use `.AcceptScan(...)`. Refusal sets containing only actionable
+codes such as `GW-COVER-005`, `GW-COVER-006`, and `GW-COVER-009` keep the ordinary suggestion, even
+when it names the key's own columns.
 
 An uncovered read may opt into a visible, attributed scan with the runtime AST value
 `.AcceptScan("GW-SCAN-0007", "reason", "owner", "yyyy-MM-dd")`. The marker is not a pragma
@@ -52,8 +54,10 @@ report and does not block opening. Its LINQ query executor is wired through the 
 `RuntimeCoverageGate` before native aggregation/find execution; extra native indexes are never
 used by the admission report to satisfy a declared index.
 
-Q3 refusal codes are preserved in the diagnostic message and include the suggested `[GwIndex(...)]`
-declaration. Roslyn requires compiler-valid diagnostic identifiers, so the emitted IDs use
+Q3 refusal codes are preserved in the diagnostic message. Actionable coverage refusals
+(`GW-COVER-005`, `GW-COVER-006`, and `GW-COVER-009`) include a suggested `[GwIndex(...)]` declaration
+when the refusal set has no `GW-COVER-016`; a set containing `GW-COVER-016` does not, because no
+ordered index can clear a nonportable shape. Roslyn requires compiler-valid diagnostic identifiers, so the emitted IDs use
 `GW_COVER_005`, `GW_COVER_006`, `GW_COVER_009`, `GW_COVER_016`, `GW_COVER_900`, and
 `GW_COVER_901` through `GW_COVER_905`, while each
 message retains the published `GW-COVER-*` code. `GW_COVER_900` is an error by default and is

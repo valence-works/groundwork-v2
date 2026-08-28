@@ -309,6 +309,107 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public async Task Declared_profile_binding_materializes_typed_group_and_reducer_results()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://record-aggregation-" + Guid.NewGuid().ToString("N"));
+        var table = AggregationTable();
+        Assert.True(connection.Schema.Apply(table.Definition).Applied);
+        var records = table.Open(connection);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(new AggregatedCustomer(Guid.NewGuid(), "Ada", 7)).Status);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(new AggregatedCustomer(Guid.NewGuid(), "Ada", 11)).Status);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(new AggregatedCustomer(Guid.NewGuid(), "Grace", 5)).Status);
+
+        var binding = table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => new AggregatedSummary(row.Get<long>("count"), row.Get<long>("total")));
+
+        var result = records.Aggregate(binding);
+        Assert.Equal(
+            [
+                new RecordAggregationResult<string, AggregatedSummary>("Ada", new AggregatedSummary(2, 18)),
+                new RecordAggregationResult<string, AggregatedSummary>("Grace", new AggregatedSummary(1, 5))
+            ],
+            result);
+
+        var asyncResult = await records.AggregateAsync(binding);
+        Assert.Equal(result, asyncResult);
+    }
+
+    [Fact]
+    public void Declared_profile_binding_refuses_unknown_profiles_and_alias_mismatches()
+    {
+        var table = AggregationTable();
+        var unknown = Assert.Throws<AggregationValidationException>(() => table.Aggregate(
+            "missing",
+            row => row.Get<string>("name"),
+            row => row.Get<long>("count")));
+        Assert.Contains(unknown.Errors, error => error.Code == "GW-AGG-QUERY-004");
+
+        var wrongGroupAlias = Assert.Throws<ArgumentException>(() => table.Aggregate(
+            "by-name",
+            row => row.Get<long>("count"),
+            row => row.Get<long>("total")));
+        Assert.Contains("not declared by this profile's group output", wrongGroupAlias.Message, StringComparison.Ordinal);
+
+        var wrongResultAlias = Assert.Throws<ArgumentException>(() => table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => row.Get<long>("name")));
+        Assert.Contains("not declared by this profile's result output", wrongResultAlias.Message, StringComparison.Ordinal);
+
+        var wrongResultType = Assert.Throws<ArgumentException>(() => table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => row.Get<int>("count")));
+        Assert.Contains("declared as 'System.Int64'", wrongResultType.Message, StringComparison.Ordinal);
+
+        var closedProfile = RecordTable.For<AggregatedCustomer>("record_aggregation_closed_" + Guid.NewGuid().ToString("N"))
+            .Key(row => row.Id)
+            .Aggregate("by-name-and-amount", aggregation => aggregation
+                .GroupBy("name", "amount")
+                .Count("count"))
+            .Build();
+        var missingGroup = Assert.Throws<ArgumentException>(() => closedProfile.Aggregate(
+            "by-name-and-amount",
+            row => row.Get<string>("name"),
+            row => row.Get<long>("count")));
+        Assert.Contains("must bind every declared alias", missingGroup.Message, StringComparison.Ordinal);
+
+        var constantResult = Assert.Throws<ArgumentException>(() => table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => 0));
+        Assert.Contains("must bind at least one declared alias", constantResult.Message, StringComparison.Ordinal);
+
+        var computedResult = Assert.Throws<ArgumentException>(() => table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => -row.Get<long>("count")));
+        Assert.Contains("Computed aggregation expressions are not portable", computedResult.Message, StringComparison.Ordinal);
+
+        var subsetResult = table.Aggregate(
+            "by-name",
+            row => row.Get<string>("name"),
+            row => new { Count = row.Get<long>("count") });
+        Assert.NotNull(subsetResult);
+    }
+
+    [Fact]
+    public void Declared_profile_binding_preserves_the_profile_and_supports_a_single_group_alias()
+    {
+        var table = AggregationTable();
+        var binding = table.Aggregate<string, long>("by-name", "name", row => row.Get<long>("count"));
+
+        Assert.Equal("by-name", binding.ProfileName);
+        var profile = Assert.Single(table.Definition.AggregationProfiles);
+        Assert.Equal(["name"], profile.GroupByColumns);
+        Assert.Equal(["count", "total"], profile.Aggregates.Select(aggregate => aggregate.Alias));
+        Assert.Equal(1_000, profile.MaxGroups);
+        Assert.Equal(100_000, profile.MaxInputRows);
+    }
+
+    [Fact]
     public void Count_executes_a_total_count_request_with_a_single_row_page()
     {
         var table = CustomerTable();
@@ -378,6 +479,17 @@ public sealed class RecordTableTests
     public sealed record VersionedCustomer(Guid Id, string Name, long Version);
     public sealed record InvalidVersionCustomer(Guid Id, string Name, string Version);
     public sealed record JsonCustomer(Guid Id, object Payload);
+    public sealed record AggregatedCustomer(Guid Id, string Name, int Amount);
+    public sealed record AggregatedSummary(long Count, long Total);
+
+    private static RecordTable<AggregatedCustomer> AggregationTable() => RecordTable.For<AggregatedCustomer>(
+            "record_aggregation_" + Guid.NewGuid().ToString("N"))
+        .Key(row => row.Id)
+        .Aggregate("by-name", aggregation => aggregation
+            .GroupBy("name")
+            .Count("count")
+            .Sum("total", "amount"))
+        .Build();
 
     private sealed class CapturingRecordStore(long? totalCount = null) : IRecordStore
     {

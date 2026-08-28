@@ -2,6 +2,7 @@ using Groundwork.Documents;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
@@ -29,6 +30,7 @@ try
     RunPrivilegedCrossScopeJourney(connection);
     RunExactAppendJourney(connection);
     RunCompareAndDeleteJourney(connection);
+    RunSetMutationJourney(connection);
     RunLifecycleJourney(connection);
     RunAggregationSourcePredicateJourney(connection);
     RunTimeBucketJourney(connection);
@@ -201,6 +203,43 @@ static void RunCompareAndDeleteJourney(IStorageProviderConnection connection)
         "The package-only exact batch did not attribute the staged compare-and-delete outcome.");
 }
 
+static void RunSetMutationJourney(IStorageProviderConnection connection)
+{
+    var unit = new KernelStorageUnit
+    {
+        Id = new StorageUnitId("set_mutation_records"),
+        Name = "set_mutation_records",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "status", Type = PortableType.String, MaxLength = 32, IsNullable = false },
+            new() { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = [new IndexDefinition { Name = "by_status", Columns = [new IndexColumn("status")] }]
+    };
+    Require(connection.Schema.Apply(unit).Applied, "The package-only set-mutation schema did not apply.");
+    var session = connection.OpenSession(unit, StorageAccess.Global);
+    foreach (var id in new[] { "a", "b" })
+    {
+        Require(session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = id, ["status"] = "open", ["value"] = "before"
+        })).Status == WriteOutcomeStatus.Inserted,
+            "The package-only set-mutation setup row did not insert.");
+    }
+
+    var status = new ColumnRef(new TableId(unit.Name), "status", QueryType.String, isNullable: false, maxLength: 32);
+    var result = session.UpdateWhere(
+        new Predicate.Equal(status, QueryConstant.Of(status, "open")),
+        new Dictionary<string, object?> { ["value"] = "after" },
+        SetMutationOptions.Exact);
+    Require(result.IsExact && result.MatchedRows == 2 && result.Outcomes.Count == 2,
+        "The package-only exact set mutation did not return one outcome per selected row.");
+    Require(result.Outcomes.All(item => item.Outcome.Status == WriteOutcomeStatus.Updated),
+        "The package-only exact set mutation did not preserve keyed write statuses.");
+}
+
 static T AssertSingle<T>(IReadOnlyList<T> items)
 {
     Require(items.Count == 1, "The package-only exact batch returned an unexpected outcome count.");
@@ -243,6 +282,9 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
         .Column(customer => customer.Email, column => column.MaxLength(320).Required())
         .Column(customer => customer.Name, column => column.MaxLength(200).Required())
         .Index("by_email", customer => customer.Email)
+        .Aggregate("by-name", aggregation => aggregation
+            .GroupBy("name")
+            .Count("count"))
         .Build();
 
     var applied = connection.Schema.Apply(table.Definition);
@@ -275,6 +317,13 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
     var query = table.Query.Where(customer => customer.Email == "ada@example.test");
     var matches = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));
     Require(matches.Count == 1 && matches[0].Name == "Ada Byron", "The covered typed query did not return the updated customer.");
+
+    var summaries = records.Aggregate(table.Aggregate(
+        "by-name",
+        row => row.Get<string>("name"),
+        row => row.Get<long>("count")));
+    Require(summaries.Count == 3 && summaries.Any(summary => summary.Group == "Ada Byron" && summary.Result == 1),
+        "The typed declared aggregation binding did not preserve group and reducer results.");
 
     var uncovered = new RuntimeCoverageGate(
         [new CoverageIndex("by_email", [new CoverageIndexColumn("email")])],

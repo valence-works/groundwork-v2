@@ -283,6 +283,18 @@ public sealed class GwAllowAcceptedAggregationsAttribute : Attribute
 /// </summary>
 public sealed record AggregationProfile
 {
+    /// <summary>Creates one closed aggregation profile for a typed declaration builder.</summary>
+    public static AggregationProfile Create(
+        string name,
+        Action<AggregationBuilder> configure)
+    {
+        if (configure is null)
+            throw new ArgumentNullException(nameof(configure));
+        var builder = new AggregationBuilder(name);
+        configure(builder);
+        return builder.Build();
+    }
+
     public required string Name { get; init; }
     /// <summary>Existing column-only grouping authoring surface.</summary>
     public IReadOnlyList<string> GroupByColumns { get; init; } = [];

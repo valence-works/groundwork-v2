@@ -1,4 +1,6 @@
+using Groundwork.Kernel;
 using Groundwork.Store;
+using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
 namespace Groundwork.Records;
 
@@ -62,7 +64,7 @@ public static class RecordTableStoreExtensions
     }
 }
 
-internal sealed class StorageSessionRecordStore : IRecordStore
+internal sealed class StorageSessionRecordStore : IRecordStore, IRecordAggregationStore
 {
     private readonly IStorageSession session;
 
@@ -97,6 +99,15 @@ internal sealed class StorageSessionRecordStore : IRecordStore
             result.Rows.Select(row => new RowValues(row)).ToArray(),
             result.TotalCount);
     }
+
+    public AggregationResult Aggregate(KernelStorageUnit unit, AggregationQuery query) =>
+        session.Aggregate(query ?? throw new ArgumentNullException(nameof(query)));
+
+    public ValueTask<AggregationResult> AggregateAsync(
+        KernelStorageUnit unit,
+        AggregationQuery query,
+        CancellationToken cancellationToken = default) =>
+        session.AggregateAsync(query ?? throw new ArgumentNullException(nameof(query)), cancellationToken);
 
     private static WriteOptions? ToWriteOptions(RecordWriteOptions? options) =>
         options?.ExpectedVersion is { } version

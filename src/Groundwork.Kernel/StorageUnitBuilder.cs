@@ -165,11 +165,7 @@ public sealed class StorageDeclarationBuilder
 
     public StorageDeclarationBuilder Aggregate(string name, Action<AggregationBuilder> configure)
     {
-        if (configure is null)
-            throw new ArgumentNullException(nameof(configure));
-        var builder = new AggregationBuilder(name);
-        configure(builder);
-        state.AddAggregation(builder.Build());
+        state.AddAggregation(AggregationProfile.Create(name, configure));
         return this;
     }
 

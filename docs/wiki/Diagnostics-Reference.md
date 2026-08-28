@@ -105,10 +105,10 @@ Published codes appear in messages; Roslyn ids use underscores.
 
 | Code | Roslyn id | Meaning |
 | --- | --- | --- |
-| `GW-COVER-005` | `GW_COVER_005` | Coverage refusal |
-| `GW-COVER-006` | `GW_COVER_006` | Uncovered query — includes suggested `[GwIndex(...)]` |
-| `GW-COVER-009` | `GW_COVER_009` | Coverage refusal |
-| `GW-COVER-016` | `GW_COVER_016` | Coverage refusal |
+| `GW-COVER-005` | `GW_COVER_005` | Actionable coverage refusal — may include suggested `[GwIndex(...)]` |
+| `GW-COVER-006` | `GW_COVER_006` | Uncovered query — may include suggested `[GwIndex(...)]` |
+| `GW-COVER-009` | `GW_COVER_009` | Sparse-index coverage refusal — may include suggested `[GwIndex(...)]` |
+| `GW-COVER-016` | `GW_COVER_016` | Nonportable query shape — no index suggestion; rewrite it or accept the scan |
 | `GW-COVER-900` | `GW_COVER_900` | Unresolved composition. Error by default; downgradeable in `.editorconfig` |
 | `GW-COVER-901` | `GW_COVER_901` | Scan marker on an index-covered query |
 | `GW-COVER-902` | `GW_COVER_902` | Accepted scan without `[assembly: GwAllowAcceptedScans]` |

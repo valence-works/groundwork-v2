@@ -80,6 +80,38 @@ public sealed partial class RecordTable<T>
         IGwQueryable<T> query,
         Expression<Func<T, TResult>> selector) => Select(query, selector);
 
+    /// <summary>
+    /// Binds typed selectors to one aggregation profile declared by this table. The selectors can
+    /// read only the profile's declared group and reducer aliases; the profile itself supplies all
+    /// grouping, reducer, and budget semantics.
+    /// </summary>
+    public RecordAggregationBinding<TGroup, TResult> Aggregate<TGroup, TResult>(
+        string profileName,
+        Expression<Func<AggregationRow, TGroup>> groupSelector,
+        Expression<Func<AggregationRow, TResult>> resultSelector) =>
+        RecordAggregationBindingFactory.Create(this, profileName, groupSelector, resultSelector);
+
+    /// <summary>Convenience form for a profile with one declared group alias.</summary>
+    public RecordAggregationBinding<TGroup, TResult> Aggregate<TGroup, TResult>(
+        string profileName,
+        string groupAlias,
+        Expression<Func<AggregationRow, TResult>> resultSelector)
+    {
+        if (string.IsNullOrWhiteSpace(groupAlias))
+            throw new ArgumentException("An aggregation group alias is required.", nameof(groupAlias));
+        ArgumentNullException.ThrowIfNull(resultSelector);
+        var row = Expression.Parameter(typeof(AggregationRow), "row");
+        var group = Expression.Lambda<Func<AggregationRow, TGroup>>(
+            Expression.Call(
+                typeof(AggregationRowExtensions),
+                nameof(AggregationRowExtensions.Get),
+                [typeof(TGroup)],
+                row,
+                Expression.Constant(groupAlias)),
+            row);
+        return Aggregate(profileName, group, resultSelector);
+    }
+
     internal T Read(RowValues values) => accessor.Read(values, optionalReadColumns);
 
     internal void ValidateRequest(QueryRequest request)
@@ -245,6 +277,49 @@ public sealed class RecordTableSession<T>
         table.ValidateRequest(request);
         return store.Query(request, table.CreateRenderOptions(null)).Rows.Count != 0;
     }
+
+    /// <summary>Executes a typed declared aggregation through the provider's covered aggregation path.</summary>
+    public IReadOnlyList<RecordAggregationResult<TGroup, TResult>> Aggregate<TGroup, TResult>(
+        RecordAggregationBinding<TGroup, TResult> binding)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        binding.EnsureOwner(table);
+        var result = RequireAggregationStore().Aggregate(table.Definition, binding.Query);
+        return result.Rows.Select(binding.Materialize).ToArray();
+    }
+
+    /// <summary>Creates and executes a typed declared aggregation in one call.</summary>
+    public IReadOnlyList<RecordAggregationResult<TGroup, TResult>> Aggregate<TGroup, TResult>(
+        string profileName,
+        Expression<Func<AggregationRow, TGroup>> groupSelector,
+        Expression<Func<AggregationRow, TResult>> resultSelector) =>
+        Aggregate(table.Aggregate(profileName, groupSelector, resultSelector));
+
+    /// <summary>Asynchronously executes a typed declared aggregation through the provider's covered path.</summary>
+    public async Task<IReadOnlyList<RecordAggregationResult<TGroup, TResult>>> AggregateAsync<TGroup, TResult>(
+        RecordAggregationBinding<TGroup, TResult> binding,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        binding.EnsureOwner(table);
+        var result = await RequireAggregationStore()
+            .AggregateAsync(table.Definition, binding.Query, cancellationToken)
+            .ConfigureAwait(false);
+        return result.Rows.Select(binding.Materialize).ToArray();
+    }
+
+    /// <summary>Creates and asynchronously executes a typed declared aggregation in one call.</summary>
+    public Task<IReadOnlyList<RecordAggregationResult<TGroup, TResult>>> AggregateAsync<TGroup, TResult>(
+        string profileName,
+        Expression<Func<AggregationRow, TGroup>> groupSelector,
+        Expression<Func<AggregationRow, TResult>> resultSelector,
+        CancellationToken cancellationToken = default) =>
+        AggregateAsync(table.Aggregate(profileName, groupSelector, resultSelector), cancellationToken);
+
+    private IRecordAggregationStore RequireAggregationStore() => store as IRecordAggregationStore ??
+        throw new InvalidOperationException(
+            "The configured record store does not support declared aggregation execution. " +
+            "Provide an adapter implementing IRecordAggregationStore.");
 
     private void ValidateOptions(RecordWriteOptions? options)
     {

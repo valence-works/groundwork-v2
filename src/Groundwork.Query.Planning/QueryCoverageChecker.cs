@@ -41,10 +41,10 @@ public static class QueryCoverageChecker
         // equalities over every column of the declared key, which can match at most one row. It
         // does not answer a disjunction, a range, or a partial-key equality — all of which can
         // mention precisely the key's columns. Only the shape the remedy is true of loses its
-        // index suggestion; every other shape keeps the ordinary one.
+        // index suggestion. Nonportable shapes lose the suggestion as well, because declaring an
+        // ordered index cannot clear a GW-COVER-016 refusal; actionable coverage refusals keep it.
         var isPointRead = declaredKey is not null &&
             constraints.AreSingleValueEqualities(declaredKey.Columns.Length, declaredKey);
-        var suggested = isPointRead ? null : SuggestIndex(request, constraints);
 
         var refusals = new List<Refusal>();
         foreach (var order in request.Order)
@@ -83,6 +83,13 @@ public static class QueryCoverageChecker
         if (!constraints.HasBound && request.Order.Length == 0 && !request.Distinct)
             refusals.Add(new Refusal("GW-COVER-005", "An unfiltered query has no index bound."));
 
+        // An index suggestion is useful only when declaring it can clear the refusal. Point reads
+        // have their own direct-read remedy, and GW-COVER-016 means the shape itself is not
+        // representable by an ordered index. GW-COVER-005 remains actionable with an index.
+        var suggested = isPointRead || refusals.Any(refusal => refusal.Code == "GW-COVER-016")
+            ? null
+            : SuggestIndex(request, constraints);
+
         var evaluated = candidates
             .Select(index => new
             {
@@ -113,7 +120,7 @@ public static class QueryCoverageChecker
             new Refusal("GW-COVER-006", "No candidate index covers the query shape.");
         var refusal = new CoverageRefusal(
             failure.Code,
-            BuildMessage(request, failure.Message, nearest, suggested),
+            BuildMessage(request, failure.Message, nearest, suggested, isPointRead),
             nearest,
             suggested);
         return new QueryCoverageResult(CoverageDecision.Refuse, null, [refusal], failure.Message);
@@ -137,18 +144,19 @@ public static class QueryCoverageChecker
         QueryRequest request,
         string reason,
         CoverageIndex? nearest,
-        CoverageIndex? suggested)
+        CoverageIndex? suggested,
+        bool isPointRead)
     {
         var nearestText = nearest is null
             ? "Nearest index: <none>."
             : "Nearest index '" + nearest.Name + "' (" + Describe(nearest) + ").";
-        var fix = suggested is null
+        var fix = isPointRead
             ? "The predicate pins every column of the declared key, so at most one row can match and" +
               " no index would improve on that. Read it directly instead: session.Read(key), or the" +
               " typed Records read."
-            : "Add: " + suggested.Declaration;
+            : suggested is null ? string.Empty : "Add: " + suggested.Declaration;
         return "Query on '" + request.Table.Value + "' is not index-covered. " + reason + " " +
-               nearestText + " " + fix +
+               nearestText + (fix.Length == 0 ? string.Empty : " " + fix) +
                " Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").";
     }
 
