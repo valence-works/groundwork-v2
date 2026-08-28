@@ -94,11 +94,19 @@ public static class SetMutationSessionExtensions
         IReadOnlyDictionary<string, object?> assignments,
         SetMutationOptions options)
     {
-        var keys = FindMatchingKeys(session, where, options);
-        var outcomes = new List<SetMutationOutcome>(keys.Count);
-        foreach (var key in keys)
-            outcomes.Add(new SetMutationOutcome(key, session.Update(ValuesFor(key, assignments))));
-        return SetMutationResult.Exact(outcomes);
+        try
+        {
+            var keys = FindMatchingKeys(session, where, options);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+                outcomes.Add(new SetMutationOutcome(key, session.Update(ValuesFor(key, assignments))));
+            return SetMutationResult.Exact(outcomes);
+        }
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
     }
 
     private static async ValueTask<SetMutationResult> ExecuteExactUpdateAsync(
@@ -108,17 +116,25 @@ public static class SetMutationSessionExtensions
         SetMutationOptions options,
         CancellationToken cancellationToken)
     {
-        var keys = await FindMatchingKeysAsync(session, where, options, cancellationToken).ConfigureAwait(false);
-        var outcomes = new List<SetMutationOutcome>(keys.Count);
-        foreach (var key in keys)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            outcomes.Add(new SetMutationOutcome(
-                key,
-                await session.UpdateAsync(ValuesFor(key, assignments), cancellationToken: cancellationToken)
-                    .ConfigureAwait(false)));
+            var keys = await FindMatchingKeysAsync(session, where, options, cancellationToken).ConfigureAwait(false);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                outcomes.Add(new SetMutationOutcome(
+                    key,
+                    await session.UpdateAsync(ValuesFor(key, assignments), cancellationToken: cancellationToken)
+                        .ConfigureAwait(false)));
+            }
+            return SetMutationResult.Exact(outcomes);
         }
-        return SetMutationResult.Exact(outcomes);
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
     }
 
     private static SetMutationResult ExecuteExactDelete(
@@ -126,11 +142,19 @@ public static class SetMutationSessionExtensions
         Predicate where,
         SetMutationOptions options)
     {
-        var keys = FindMatchingKeys(session, where, options);
-        var outcomes = new List<SetMutationOutcome>(keys.Count);
-        foreach (var key in keys)
-            outcomes.Add(new SetMutationOutcome(key, session.Delete(key)));
-        return SetMutationResult.Exact(outcomes);
+        try
+        {
+            var keys = FindMatchingKeys(session, where, options);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+                outcomes.Add(new SetMutationOutcome(key, session.Delete(key)));
+            return SetMutationResult.Exact(outcomes);
+        }
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
     }
 
     private static async ValueTask<SetMutationResult> ExecuteExactDeleteAsync(
@@ -139,16 +163,30 @@ public static class SetMutationSessionExtensions
         SetMutationOptions options,
         CancellationToken cancellationToken)
     {
-        var keys = await FindMatchingKeysAsync(session, where, options, cancellationToken).ConfigureAwait(false);
-        var outcomes = new List<SetMutationOutcome>(keys.Count);
-        foreach (var key in keys)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            outcomes.Add(new SetMutationOutcome(
-                key,
-                await session.DeleteAsync(key, cancellationToken: cancellationToken).ConfigureAwait(false)));
+            var keys = await FindMatchingKeysAsync(session, where, options, cancellationToken).ConfigureAwait(false);
+            var outcomes = new List<SetMutationOutcome>(keys.Count);
+            foreach (var key in keys)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                outcomes.Add(new SetMutationOutcome(
+                    key,
+                    await session.DeleteAsync(key, cancellationToken: cancellationToken).ConfigureAwait(false)));
+            }
+            return SetMutationResult.Exact(outcomes);
         }
-        return SetMutationResult.Exact(outcomes);
+        catch (Exception exception)
+        {
+            FailUnitOfWork(session, exception);
+            throw;
+        }
+    }
+
+    private static void FailUnitOfWork(IStorageSession session, Exception exception)
+    {
+        if (session is BatchStorageSession batched)
+            batched.Fail(exception);
     }
 
     private static IReadOnlyList<StorageKey> FindMatchingKeys(

@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
@@ -376,6 +377,66 @@ public sealed class SqliteSetMutationTests
     }
 
     [Fact]
+    public async Task Exact_async_cancellation_after_a_keyed_write_poisoned_unit_cannot_commit_partial_updates()
+    {
+        using var connection = Open();
+        var unit = Unit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var seed = connection.OpenSession(unit, StorageAccess.Global);
+        seed.Insert(Row("a", "open", "one"));
+        seed.Insert(Row("b", "open", "two"));
+
+        using var cancellation = new CancellationTokenSource();
+        var observer = new CancelAfterFirstUpdate(cancellation);
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            BatchWriteOptions.Exact,
+            observer,
+            unit);
+        var session = work.OpenSession(unit);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => session.UpdateWhereAsync(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "updated" },
+            SetMutationOptions.Exact,
+            cancellation.Token).AsTask());
+
+        // The first keyed update ran inside the provider transaction. The batch failure marker
+        // routes the later commit through the provider's normal rollback path instead of allowing
+        // that partial exact mutation to become durable.
+        Assert.Throws<InvalidOperationException>(() => work.Commit());
+
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal("one", reader.Read(Key(unit, "a"))!.Values.Values["label"]);
+        Assert.Equal("two", reader.Read(Key(unit, "b"))!.Values.Values["label"]);
+    }
+
+    [Fact]
+    public async Task Exact_async_provider_failure_after_a_keyed_write_poisoned_unit_cannot_commit_partial_updates()
+    {
+        using var connection = Open();
+        var unit = UniqueUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var seed = connection.OpenSession(unit, StorageAccess.Global);
+        seed.Insert(Row("a", "open", "one"));
+        seed.Insert(Row("b", "open", "two"));
+
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        var session = work.OpenSession(unit);
+
+        await Assert.ThrowsAsync<SqliteException>(() => session.UpdateWhereAsync(
+            Status(unit, "open"),
+            new Dictionary<string, object?> { ["label"] = "same" },
+            SetMutationOptions.Exact).AsTask());
+
+        Assert.Throws<InvalidOperationException>(() => work.Commit());
+
+        var reader = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal("one", reader.Read(Key(unit, "a"))!.Values.Values["label"]);
+        Assert.Equal("two", reader.Read(Key(unit, "b"))!.Values.Values["label"]);
+    }
+
+    [Fact]
     public void Exact_delete_flushes_prior_stage_and_runs_before_a_later_keyed_stage()
     {
         using var connection = Open();
@@ -416,6 +477,9 @@ public sealed class SqliteSetMutationTests
         var column = new ColumnRef(new TableId(unit.Name), "id", QueryType.String, isNullable: false, maxLength: 64);
         return new Predicate.Equal(column, QueryConstant.Of(column, value));
     }
+
+    private static StorageKey Key(StorageUnit unit, string value) =>
+        new(new Dictionary<string, object?> { [unit.Key.Columns[0]] = value });
 
     /// <summary>
     /// A case-insensitive prefix read, which the provider answers from the search key rather than
@@ -491,6 +555,22 @@ public sealed class SqliteSetMutationTests
         ]
     };
 
+    private static StorageUnit UniqueUnit()
+    {
+        var unit = Unit();
+        return unit with
+        {
+            Id = new StorageUnitId("p43_exact_failure"),
+            Name = "p43_exact_failure",
+            Indexes = unit.Indexes.Append(new IndexDefinition
+            {
+                Name = "unique_label",
+                Columns = [new IndexColumn("label")],
+                IsUnique = true
+            }).ToArray()
+        };
+    }
+
     private static StorageUnit CompositeUnit()
     {
         var unit = Unit();
@@ -533,4 +613,15 @@ public sealed class SqliteSetMutationTests
             new IndexDefinition { Name = "by_name", Columns = [new IndexColumn("name")] }
         ]
     };
+
+    private sealed class CancelAfterFirstUpdate(CancellationTokenSource cancellation) : IProviderCommandObserver
+    {
+        private int updates;
+
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Operation == "sqlite.update" && Interlocked.Increment(ref updates) == 1)
+                cancellation.Cancel();
+        }
+    }
 }
