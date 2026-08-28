@@ -34,7 +34,8 @@ native query.
 
 `__groundwork_scope` and `__groundwork_scope_token` are provider-owned logical
 column names. Schema admission refuses application declarations that use them;
-third-party providers can reuse `ProviderOwnedColumns.ValidateLogicalDeclaration`.
+third-party providers can reuse `ProviderOwnedColumns.ValidateLogicalDeclaration`; the same call also
+enforces the shared logical key/index reference rules before physicalization.
 
 MongoDB cannot apply one pinned physical index across separate scope
 collections and explicitly refuses that combination. Unpinned cross-scope

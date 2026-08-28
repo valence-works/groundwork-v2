@@ -114,7 +114,7 @@ Descriptors should state honest cost — `AdditionalProviderCommandsPerWrite` an
 | --- | --- |
 | **Schema** | `Apply` is idempotent — reapplying an unchanged declaration is a **no-op**, and `Diff` is empty afterwards |
 | **Naming** | Refuse invalid physical identifiers (`GW-PORT-010`) **before** schema I/O; reuse `PortabilityValidator.EnsurePhysicalIdentifiers` |
-| **Reserved names** | Refuse application declarations using `__groundwork_` (`ProviderOwnedColumns.ValidateLogicalDeclaration`) |
+| **Logical declaration** | Refuse invalid key/index references and application declarations using `__groundwork_` (`ProviderOwnedColumns.ValidateLogicalDeclaration`) |
 | **Scope** | Enforce scope as a **provider-owned physical restriction** applied before caller predicates; never expose it as a caller-visible column |
 | **Access mismatch** | Refuse global access on a scoped unit and vice versa, before I/O |
 | **Concurrency** | Support both `None` and `Optimistic`. For `None`, add **no** version column or version work |

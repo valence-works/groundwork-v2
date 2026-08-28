@@ -274,6 +274,7 @@ public sealed class SchemaSubject
 
     private static void Validate(StorageUnit unit)
     {
+        StorageDeclarationReferenceValidation.ThrowIfInvalid(unit);
         ConcurrencyDeclaration.ValidateDeclaration(unit);
         unit.AppendIdempotency?.Validate(unit);
         unit.RetentionIdempotency?.Validate(unit);
@@ -293,13 +294,6 @@ public sealed class SchemaSubject
         {
             throw new ArgumentException(
                 "Schema subject columns must have unique non-empty logical ids.", nameof(unit));
-        }
-
-        var columnSet = columnNames.ToHashSet(StringComparer.Ordinal);
-        if (unit.Key.Columns is null || unit.Key.Columns.Count == 0 ||
-            unit.Key.Columns.Any(column => !columnSet.Contains(column)))
-        {
-            throw new ArgumentException("A schema subject key must name one or more declared columns.", nameof(unit));
         }
 
         var concurrency = unit.Concurrency ?? throw new ArgumentException(
@@ -322,10 +316,9 @@ public sealed class SchemaSubject
         var indexes = unit.Indexes ?? [];
         if (indexes.GroupBy(index => index.Name, StringComparer.Ordinal).Any(group => string.IsNullOrWhiteSpace(group.Key) || group.Count() != 1))
             throw new ArgumentException("Schema subject indexes must have unique non-empty names.", nameof(unit));
-        if (indexes.Any(index => index.Columns is null || index.Columns.Count == 0 ||
-                                 index.Columns.Any(column => !columnSet.Contains(column.Column))))
+        if (indexes.Any(index => index.Columns is null || index.Columns.Count == 0))
         {
-            throw new ArgumentException("Schema subject indexes must name declared columns.", nameof(unit));
+            throw new ArgumentException("Schema subject indexes must name at least one column.", nameof(unit));
         }
 
         AggregationProfileValidator.ValidateUnit(unit);

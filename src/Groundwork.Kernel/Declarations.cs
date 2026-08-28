@@ -177,8 +177,18 @@ public static class ProviderOwnedColumns
     internal const string Version = "__groundwork_version";
     internal const string Action = "__groundwork_action";
 
-    /// <summary>Refuses application declarations that collide with provider-owned query fields.</summary>
+    /// <summary>
+    /// Refuses invalid logical key/index references and application declarations that collide with
+    /// provider-owned query fields. Reference diagnostics are evaluated first so every provider reports
+    /// the same <c>GW-DECL-*</c> refusal for compound-invalid declarations.
+    /// </summary>
     public static void ValidateLogicalDeclaration(StorageUnit unit)
+    {
+        StorageDeclarationReferenceValidation.ThrowIfInvalid(unit);
+        ValidateReservedLogicalNames(unit);
+    }
+
+    internal static void ValidateReservedLogicalNames(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
         if ((unit.Columns ?? []).FirstOrDefault(column =>
