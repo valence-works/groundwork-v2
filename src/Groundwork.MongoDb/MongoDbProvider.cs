@@ -339,6 +339,18 @@ internal sealed class MongoProviderCatalog(MongoProviderState state) : IMongoPro
 
 internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoSchemaCoordinator
 {
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(desired);
+        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+            new MongoSchemaExecutor(state.Context), MongoSchemaTargets.Compile(desired), options);
+        if (result.AppliedOperationCount != 0)
+            state.Remember(MongoSchemaTargets.Physicalize(desired));
+        return result;
+    }
+
     public MongoSchemaDiff Diff(StorageUnit desired)
     {
         PortabilityValidator.EnsurePortableDefaults(desired);

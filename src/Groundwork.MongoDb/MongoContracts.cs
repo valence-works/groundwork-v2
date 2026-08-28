@@ -285,6 +285,10 @@ public interface IMongoProviderCatalog
 
 public interface IMongoSchemaCoordinator
 {
+    GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null);
+
     MongoSchemaDiff Diff(StorageUnit desired);
 
     MongoSchemaApplyResult Apply(StorageUnit desired);

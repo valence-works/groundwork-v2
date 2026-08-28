@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 using Groundwork.Store;
 
@@ -122,6 +123,11 @@ internal sealed class MongoStoreCatalog(IMongoProviderCatalog inner) : IProvider
 
 internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaCoordinator
 {
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null) =>
+        inner.InspectRuntimeAdmission(desired, options);
+
     public SchemaDiff Diff(StorageUnit desired) => ToStore(inner.Diff(desired));
 
     public SchemaApplyResult Apply(StorageUnit desired)

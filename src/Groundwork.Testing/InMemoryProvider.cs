@@ -257,6 +257,20 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
 
     internal InMemoryPhysicalSchemaExecutor Executor { get; }
 
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
+    {
+        var physical = Prepare(desired);
+        lock (database.Gate)
+        {
+            var previous = database.Units.TryGetValue(physical.Id, out var state) ? state.Unit : null;
+            ValidateUnplannedChanges(previous, physical);
+            return GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                Executor, Target(physical), options);
+        }
+    }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
         var physical = Prepare(desired);
@@ -368,8 +382,21 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
     }
 }
 
-internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database) : IPhysicalSchemaExecutor
+internal sealed class InMemoryPhysicalSchemaExecutor(InMemoryDatabase database)
+    : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector
 {
+    public PhysicalSchemaInspectionResult InspectHistory(PhysicalSchemaTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        lock (database.Gate)
+        {
+            var history = database.SchemaHistory.TryGetValue(target.Identity, out var applied)
+                ? PhysicalSchemaHistoryState.FromApplied(applied)
+                : PhysicalSchemaHistoryState.Empty;
+            return new PhysicalSchemaInspectionResult(history, IsAppliedSchemaValid: true);
+        }
+    }
+
     public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target)
     {
         Monitor.Enter(database.Gate);

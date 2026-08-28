@@ -9,8 +9,8 @@ namespace Groundwork.Extensions.DependencyInjection;
 /// </summary>
 /// <remarks>
 /// A blocked verdict refuses startup with <c>GW-HOST-005</c> rather than letting the first request
-/// discover it. A degraded verdict is logged and the host starts — a missing index makes dependent
-/// query shapes refuse, not the whole application.
+/// discover it. A degraded verdict is logged and the host starts — physical index drift makes
+/// dependent query shapes refuse, not the whole application.
 /// </remarks>
 internal sealed class GroundworkStartupAdmissionService : IHostedService
 {

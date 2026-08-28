@@ -56,6 +56,27 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
             : executor.InspectDeployedHistory(target, connection);
     }
 
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(desired);
+        var physical = Physicalize(desired);
+        Remember(desired, physical);
+        var target = Target(physical);
+        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+            executor,
+            target,
+            options,
+            inspected: InspectDeployed(target, null));
+        if (result.AppliedOperationCount != 0)
+        {
+            owner.RefreshSchema();
+            admission.Invalidate(desired.Id);
+        }
+        return result;
+    }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);

@@ -1,5 +1,8 @@
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
+using Groundwork.Sqlite;
 using Groundwork.Store;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Xunit;
@@ -7,8 +10,8 @@ using Xunit;
 namespace Groundwork.Extensions.DependencyInjection.Tests;
 
 /// <summary>
-/// Startup admission and the health check. Runtime is inspect-only: the host refuses to start on
-/// column-level drift and starts, degraded, on index-level drift.
+/// Startup admission and the health check. Runtime admission is inspect-only: the host follows the
+/// kernel result, including degraded physical index drift and blocked target-fingerprint changes.
 /// </summary>
 public sealed class StartupAdmissionTests
 {
@@ -53,22 +56,103 @@ public sealed class StartupAdmissionTests
     }
 
     [Fact]
-    public async Task Index_drift_degrades_instead_of_blocking_startup()
+    public async Task Hosting_and_store_admission_agree_on_a_fatal_primary_schema_gap()
+    {
+        using var connection = fixture.Provider.Create(fixture.ConnectionString);
+        var runtime = connection.Schema.InspectRuntimeAdmission(HostingFixture.Orders);
+
+        var services = fixture.Services();
+        services.AddGroundwork().AddConnection(fixture.Connect(HostingFixture.Orders));
+        using var provider = services.BuildServiceProvider(validateScopes: true);
+
+        await Assert.ThrowsAsync<GroundworkHostingException>(() => HostingFixture.StartAsync(provider));
+
+        var hosted = Assert.Single(Assert.Single(
+            provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Connections).Units);
+        Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Blocked, runtime.Status);
+        Assert.Equal(GroundworkAdmissionStatus.Blocked, hosted.Status);
+    }
+
+    [Fact]
+    public async Task An_index_added_after_deployment_is_blocked_until_the_target_is_applied()
     {
         fixture.Deploy(HostingFixture.OrdersWithoutIndex);
         var services = fixture.Services();
         services.AddGroundwork().AddConnection(fixture.Connect(HostingFixture.Orders));
         using var provider = services.BuildServiceProvider(validateScopes: true);
 
-        await HostingFixture.StartAsync(provider);
+        var refusal = await Assert.ThrowsAsync<GroundworkHostingException>(
+            () => HostingFixture.StartAsync(provider));
 
         var report = provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!;
-        Assert.Equal(GroundworkAdmissionStatus.Degraded, report.Status);
+        Assert.Equal(GroundworkAdmissionStatus.Blocked, report.Status);
         var unit = Assert.Single(Assert.Single(report.Connections).Units);
-        Assert.Equal(GroundworkAdmissionStatus.Degraded, unit.Status);
+        Assert.Equal(GroundworkAdmissionStatus.Blocked, unit.Status);
         Assert.Contains("by_customer", unit.Describe(), StringComparison.Ordinal);
 
-        Assert.Equal(HealthStatus.Degraded, (await Check(provider)).Status);
+        Assert.Contains("by_customer", refusal.Message, StringComparison.Ordinal);
+        Assert.Equal(HealthStatus.Unhealthy, (await Check(provider)).Status);
+    }
+
+    [Fact]
+    public async Task Hosting_and_store_admission_agree_on_a_degrading_physical_index_gap()
+    {
+        var database = Path.Combine(Path.GetTempPath(), $"groundwork-hosting-{Guid.NewGuid():N}.db");
+        var connectionString = $"Data Source={database}";
+        try
+        {
+            var factory = new SqliteProviderFactory();
+            using (var deployed = factory.Create(connectionString))
+                Assert.True(deployed.Schema.Apply(HostingFixture.Orders).Applied);
+
+            using (var mutation = new SqliteConnection(connectionString))
+            {
+                mutation.Open();
+                using var command = mutation.CreateCommand();
+                command.CommandText = "DROP INDEX \"__groundwork_ix_6_orders_11_by_customer\";";
+                command.ExecuteNonQuery();
+            }
+
+            GroundworkRuntimeSchemaAdmissionResult runtime;
+            using (var connection = factory.Create(connectionString))
+                runtime = connection.Schema.InspectRuntimeAdmission(HostingFixture.Orders);
+
+            var services = fixture.Services();
+            services.AddGroundwork().AddConnection(options =>
+                options.UseProvider(factory, connectionString).AddUnits(HostingFixture.Orders));
+            using var provider = services.BuildServiceProvider(validateScopes: true);
+
+            await HostingFixture.StartAsync(provider);
+
+            var hosted = Assert.Single(Assert.Single(
+                provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Connections).Units);
+            Assert.True(runtime.IsReady);
+            Assert.True(runtime.Inspection.HasIndexDrift);
+            Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Degraded, runtime.Status);
+            Assert.Equal(GroundworkAdmissionStatus.Degraded, hosted.Status);
+        }
+        finally
+        {
+            if (File.Exists(database))
+                File.Delete(database);
+        }
+    }
+
+    [Fact]
+    public void Store_admission_exposes_safe_plan_authorization_to_consumers()
+    {
+        fixture.Deploy(HostingFixture.OrdersWithProfile);
+        using var connection = fixture.Provider.Create(fixture.ConnectionString);
+
+        var result = connection.Schema.InspectRuntimeAdmission(
+            HostingFixture.OrdersWithChangedProfile,
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
+
+        Assert.Equal(GroundworkRuntimeSchemaAdmissionStatus.Blocked, result.Status);
+        Assert.False(result.IsReady);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.AuthorizationRequired, result.Application!.Outcome);
+        Assert.Contains(result.Refusals, refusal => refusal.Code == "GW-SCHEMA-008");
+        Assert.False(connection.Schema.Diff(HostingFixture.OrdersWithChangedProfile).IsEmpty);
     }
 
     [Fact]
@@ -130,10 +214,8 @@ public sealed class StartupAdmissionTests
             unit.PendingChanges.Select(change => change.Kind).Distinct());
     }
 
-    // Providers emit UpdateAggregationProfile for a profile that already exists deployed as well as
-    // for a new one, so applying it can redefine how an aggregation behaves against stored data. The
-    // kernel calls that a semantic migration and requires explicit authorization; a startup switch is
-    // not that. This is the regression guard for a list that already drifted once.
+    // A changed profile is a semantic migration. The kernel requires explicit authorization, so the
+    // hosting layer must not start on a result the first runtime session would refuse.
     [Fact]
     public async Task A_changed_aggregation_profile_is_never_auto_applied()
     {
@@ -146,13 +228,15 @@ public sealed class StartupAdmissionTests
         });
         using var provider = services.BuildServiceProvider(validateScopes: true);
 
-        await HostingFixture.StartAsync(provider);
+        await Assert.ThrowsAsync<GroundworkHostingException>(
+            () => HostingFixture.StartAsync(provider));
 
         var unit = Assert.Single(Assert.Single(
             provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Connections).Units);
         Assert.Equal(
             SchemaChangeKind.UpdateAggregationProfile,
             Assert.Single(unit.PendingChanges).Kind);
+        Assert.Equal(GroundworkAdmissionStatus.Blocked, unit.Status);
         Assert.False(unit.Applied);
 
         // The deployed profile is still the one that was deployed: nothing was applied behind the host.
@@ -161,19 +245,20 @@ public sealed class StartupAdmissionTests
     }
 
     [Fact]
-    public async Task A_changed_aggregation_profile_degrades_rather_than_blocking_startup()
+    public async Task A_changed_aggregation_profile_blocks_startup_without_authorization()
     {
         fixture.Deploy(HostingFixture.OrdersWithProfile);
         var services = fixture.Services();
         services.AddGroundwork().AddConnection(fixture.Connect(HostingFixture.OrdersWithChangedProfile));
         using var provider = services.BuildServiceProvider(validateScopes: true);
 
-        // Reads and writes are unaffected; only the aggregation runs against the deployed profile.
-        await HostingFixture.StartAsync(provider);
+        var refusal = await Assert.ThrowsAsync<GroundworkHostingException>(
+            () => HostingFixture.StartAsync(provider));
 
-        Assert.Equal(GroundworkAdmissionStatus.Degraded,
+        Assert.Equal(GroundworkHostingDiagnostics.StartupAdmissionBlocked, refusal.Code);
+        Assert.Equal(GroundworkAdmissionStatus.Blocked,
             provider.GetRequiredService<GroundworkAdmissionRunner>().Latest!.Status);
-        Assert.Equal(HealthStatus.Degraded, (await Check(provider)).Status);
+        Assert.Equal(HealthStatus.Unhealthy, (await Check(provider)).Status);
     }
 
     [Fact]

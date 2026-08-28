@@ -44,6 +44,24 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         DbConnection? connection = null) =>
         admission.EnsureAdmitted(desired, observer, connection);
 
+    public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
+        StorageUnit desired,
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(desired);
+        var physical = Prepare(desired);
+        Remember(desired, physical);
+        var target = Target(physical);
+        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+            executor,
+            target,
+            options,
+            inspected: executor.InspectDeployedHistory(target));
+        if (result.AppliedOperationCount != 0)
+            admission.Invalidate(desired.Id);
+        return result;
+    }
+
     public SchemaDiff Diff(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);

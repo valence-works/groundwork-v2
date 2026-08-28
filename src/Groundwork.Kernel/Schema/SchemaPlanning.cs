@@ -109,8 +109,34 @@ public static class PhysicalSchemaDiffPlanner
             return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, [], applied.TargetFingerprint, phase);
 
         pending.Add(new ValidatePhysicalSchemaOperation(target));
-        pending.Add(new PublishAppliedStateOperation(target));
+        var publish = new PublishAppliedStateOperation(target);
+        if (publish.SemanticMigrationId is null && HasAggregationProfileDrift(target, applied))
+        {
+            // Aggregation profiles are part of the declaration fingerprint but have no physical
+            // operation of their own. Marking the publication keeps startup auto-apply from treating
+            // a changed profile as an additive schema change and silently changing query semantics.
+            publish.SemanticMigrationId = $"aggregation-profile:{target.Subject.Id.Value}";
+        }
+        pending.Add(publish);
         return PhysicalSchemaDiffPlan.Valid(target, plannedAt, snapshot, pending, applied?.TargetFingerprint, phase);
+    }
+
+    private static bool HasAggregationProfileDrift(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaAppliedState? applied)
+    {
+        var deployed = applied?.Snapshot.Subject.AggregationProfiles ?? [];
+        var desired = target.Subject.AggregationProfiles;
+        if (deployed.Length != desired.Length)
+            return true;
+
+        var deployedByName = deployed.ToDictionary(profile => profile.Name, StringComparer.Ordinal);
+        return desired.Any(profile =>
+            !deployedByName.TryGetValue(profile.Name, out var prior) ||
+            !string.Equals(
+                AggregationProfileCanonicalization.Canonicalize(prior),
+                AggregationProfileCanonicalization.Canonicalize(profile),
+                StringComparison.Ordinal));
     }
 
     /// <summary>

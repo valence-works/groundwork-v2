@@ -10,8 +10,8 @@ namespace Groundwork.Store;
 /// <remarks>
 /// The switch is deliberately total: an unmapped kind throws rather than falling into a default
 /// bucket. A default is how six operation kinds — including dropping a column — came to describe
-/// themselves as adding a derived column, which the weaker startup test in
-/// <c>GroundworkAdmissionRunner</c> then read as additive. Adding a kind must break here.
+/// themselves as adding a derived column. Adding a kind must break here; runtime admission uses the
+/// kernel result rather than this display vocabulary.
 /// </remarks>
 public static class SchemaChangeMapping
 {
@@ -53,8 +53,8 @@ public static class SchemaChangeMapping
             PhysicalSchemaOperationKind.DropIndex => SchemaChangeKind.DropIndex,
             PhysicalSchemaOperationKind.DropPrimaryStorage => SchemaChangeKind.DropStorageUnit,
             // A provider-owned definition has described itself as a derived column since it was
-            // introduced. It is the remaining inaccuracy in this vocabulary and belongs with #201,
-            // which replaces this mapping with the runtime's own admission verdict.
+            // introduced. It remains a display-vocabulary compromise; runtime admission uses the
+            // provider's kernel result rather than this mapping.
             PhysicalSchemaOperationKind.ApplyProviderDefinition => SchemaChangeKind.AddDerivedColumn,
             _ => throw new ArgumentOutOfRangeException(
                 nameof(operation),
