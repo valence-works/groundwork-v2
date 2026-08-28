@@ -67,6 +67,27 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Owned_session_rejects_reads_after_its_provider_is_disposed()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("owned-provider-lifetime"),
+            Name = "owned_provider_lifetime",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+
+        connection.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => owned.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-provider" })));
+    }
+
+    [Fact]
     public void Provider_composed_index_names_are_injective_for_underscore_components()
     {
         var left = SqliteDialect.PhysicalIndexName("a_", "b");

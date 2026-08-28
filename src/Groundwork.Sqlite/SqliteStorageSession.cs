@@ -1774,7 +1774,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         ThrowIfClosed();
         try
         {
-            if (transaction is not null || batchFallbackScope.Value || ownsConnection) return operation();
+            if (transaction is not null || batchFallbackScope.Value) return operation();
+            if (ownsConnection)
+            {
+                owner.ThrowIfDisposed();
+                return operation();
+            }
             lock (owner.Gate) { owner.ThrowIfDisposed(); return operation(); }
         }
         catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
