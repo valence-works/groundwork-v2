@@ -12,7 +12,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
 
-internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal sealed class SqlServerStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
@@ -42,6 +42,8 @@ internal sealed class SqlServerStorageSession : IStorageSession, IExactAppendSto
 
     public StorageUnit Unit { get; }
     public StorageAccess Access { get; }
+
+    IStorageProviderConnection IProviderBoundStorageSession.ProviderConnection => owner;
 
     /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
     private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(

@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using System.Threading;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
@@ -135,40 +134,5 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     }
 
     private RuntimeCoverageGate CreateGate()
-    {
-        var declared = StorageUnitCoverage.DeclaredIndexes(session.Unit);
-        var key = session.Unit.Key.Columns;
-        var profile = admission ?? connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
-        // The key joins both sides of the intersection rather than only the declared side. A
-        // declared index can be absent from the catalog mid-deploy, which is exactly what the
-        // intersection is for; the key cannot, because the coordinator emits it as the PRIMARY KEY
-        // of the CREATE TABLE itself. Reaching here at all means the unit was applied, so the table
-        // and its key exist together or neither does.
-        return new RuntimeCoverageGate(
-            CoverageCandidates.Derive(key, declared),
-            CoverageCandidates.Derive(key, DeployedIndexes(declared)),
-            options: new RuntimeCoverageGateOptions
-            {
-                ValueFence = new RuntimeValueFenceOptions
-                {
-                    MaximumParameters = profile.MaximumParameters,
-                    MaximumInValues = profile.MaximumInValues
-                }
-            });
-    }
-
-    /// <summary>
-    /// Keeps only the declared indexes the catalog reports as present. Every provider catalog reports
-    /// declared names, so an extra native index nobody declared is never a candidate — on MongoDB just
-    /// as on the relational providers.
-    /// </summary>
-    private ImmutableArray<CoverageIndex> DeployedIndexes(ImmutableArray<CoverageIndex> declared)
-    {
-        if (connection is null)
-            return declared;
-        var deployed = connection.Catalog.ReadIndexes(session.Unit.Id)
-            .Select(index => index.Name)
-            .ToHashSet(StringComparer.Ordinal);
-        return declared.Where(index => deployed.Contains(index.Name)).ToImmutableArray();
-    }
+        => RuntimeCoverage.ForQuery(session, connection, admission);
 }

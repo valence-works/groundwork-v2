@@ -1731,7 +1731,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ArgumentNullException.ThrowIfNull(assignments);
         ThrowIfDisposed();
         RefusePrivilegedOperation("update-where");
-        var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(where, Unit.Name);
+        var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(
+            where,
+            Unit.Name,
+            QueryRenderOptions.Default with
+            {
+                SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
+            });
         var set = new BsonDocument();
         foreach (var column in assignments.Keys.OrderBy(column => column, StringComparer.Ordinal))
             set[column] = MongoValueCodec.Encode(assignments[column], Unit.Columns.First(definition => definition.Name == column));
@@ -1763,7 +1769,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ArgumentNullException.ThrowIfNull(where);
         ThrowIfDisposed();
         RefusePrivilegedOperation("delete-where");
-        var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(where, Unit.Name);
+        var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(
+            where,
+            Unit.Name,
+            QueryRenderOptions.Default with
+            {
+                SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
+            });
         commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.delete-where",
             "MongoDB.DeleteMany(filter=predicate)",

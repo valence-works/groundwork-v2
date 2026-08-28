@@ -13,7 +13,7 @@ using NpgsqlTypes;
 
 namespace Groundwork.PostgreSql;
 
-internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
@@ -50,6 +50,8 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IExactAppendSt
     public StorageUnit Unit { get; }
 
     public StorageAccess Access { get; }
+
+    IStorageProviderConnection IProviderBoundStorageSession.ProviderConnection => owner;
 
     /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
     private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(

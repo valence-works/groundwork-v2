@@ -26,6 +26,7 @@ public static class SetMutationSessionExtensions
         IReadOnlyDictionary<string, object?> assignments,
         SetMutationOptions? options = null)
     {
+        EnsureAccess(session, "update-where");
         var (native, predicate, physical) = PrepareUpdate(session, where, assignments, options);
         return native.UpdateWhere(predicate, physical);
     }
@@ -37,6 +38,7 @@ public static class SetMutationSessionExtensions
         SetMutationOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        EnsureAccess(session, "update-where");
         var (native, predicate, physical) = PrepareUpdate(session, where, assignments, options);
         return native.UpdateWhereAsync(predicate, physical, cancellationToken);
     }
@@ -46,6 +48,7 @@ public static class SetMutationSessionExtensions
         Predicate where,
         SetMutationOptions? options = null)
     {
+        EnsureAccess(session, "delete-where");
         var (native, predicate) = PrepareDelete(session, where, options);
         return native.DeleteWhere(predicate);
     }
@@ -56,8 +59,15 @@ public static class SetMutationSessionExtensions
         SetMutationOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        EnsureAccess(session, "delete-where");
         var (native, predicate) = PrepareDelete(session, where, options);
         return native.DeleteWhereAsync(predicate, cancellationToken);
+    }
+
+    private static void EnsureAccess(IStorageSession session, string operation)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, operation);
     }
 
     private static (ISetMutationStorageSession Native, Predicate Where, IReadOnlyDictionary<string, object?> Assignments) PrepareUpdate(
@@ -68,7 +78,7 @@ public static class SetMutationSessionExtensions
     {
         var native = Require(session);
         var validated = SetMutationValidation.ValidateAssignments(session.Unit, assignments);
-        return (native, SetMutationAdmission.Admit(session.Unit, where, options), validated);
+        return (native, SetMutationAdmission.Admit(session, where, options), validated);
     }
 
     private static (ISetMutationStorageSession Native, Predicate Where) PrepareDelete(
@@ -77,15 +87,9 @@ public static class SetMutationSessionExtensions
         SetMutationOptions? options)
     {
         var native = Require(session);
-        return (native, SetMutationAdmission.Admit(session.Unit, where, options));
+        return (native, SetMutationAdmission.Admit(session, where, options));
     }
 
-    /// <summary>
-    /// There is deliberately no access check here. A privileged cross-scope session has no scope to
-    /// write to, and every provider session refuses one itself — which is also the refusal a caller
-    /// who reaches the capability interface directly meets, so restating it here would add a second
-    /// copy of a rule without adding a case it catches.
-    /// </summary>
     private static ISetMutationStorageSession Require(IStorageSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -108,6 +112,12 @@ internal static class SetMutationAdmission
     public static Predicate Admit(StorageUnit unit, Predicate where, SetMutationOptions? options = null) =>
         Admit(unit, where, options, DateTimeOffset.UtcNow);
 
+    public static Predicate Admit(
+        IStorageSession session,
+        Predicate where,
+        SetMutationOptions? options = null) =>
+        Admit(session, where, options, DateTimeOffset.UtcNow);
+
     /// <summary>Admits against an explicit clock so scan-acceptance expiry is testable.</summary>
     public static Predicate Admit(
         StorageUnit unit,
@@ -116,6 +126,26 @@ internal static class SetMutationAdmission
         DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(unit);
+        return AdmitCore(unit, session: null, where, options, now);
+    }
+
+    public static Predicate Admit(
+        IStorageSession session,
+        Predicate where,
+        SetMutationOptions? options,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return AdmitCore(session.Unit, session, where, options, now);
+    }
+
+    private static Predicate AdmitCore(
+        StorageUnit unit,
+        IStorageSession? session,
+        Predicate where,
+        SetMutationOptions? options,
+        DateTimeOffset now)
+    {
         ArgumentNullException.ThrowIfNull(where);
         var request = new QueryRequest(
             new TableId(unit.Name),
@@ -128,9 +158,12 @@ internal static class SetMutationAdmission
             acceptedScan: options?.AcceptedScan);
 
         // The order is the read path's order. Coverage decides on the predicate the caller wrote,
-        // as the query gate does; the search-key rewrite and the portability validation then run in
-        // the order a provider's full query renderer runs them.
-        QueryCoverageEnforcer.EnsureCovered(request, StorageUnitCoverage.PortableIndexes(unit), now);
+        // as the query gate does; the search-key rewrite and portability validation then run in the
+        // order a provider's full query renderer runs them.
+        (session is null
+                ? RuntimeCoverage.ForMutation(unit, null)
+                : RuntimeCoverage.ForMutation(session))
+            .EnsureCovered(request, now);
         var physical = QuerySearchKeyRewriter.Rewrite(request, SearchKeyQueryMappings.For(unit));
 
         // A relational RenderPredicateFragment and MongoDB's filter renderer both skip the
@@ -169,25 +202,32 @@ internal static class StorageUnitCoverage
     public static ImmutableArray<CoverageIndex> PortableIndexes(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
-        var indexes = DeclaredIndexes(unit, stripProviderOwnedColumns: true);
-        var key = unit.Key.Columns
-            .Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal));
-        return CoverageCandidates.Derive(key, indexes);
+        return CoverageCandidates.Derive(
+            unit.Key.Columns.Where(column => !column.StartsWith("__groundwork_", StringComparison.Ordinal)),
+            PortableDeclaredIndexes(unit));
+    }
+
+    internal static ImmutableArray<CoverageIndex> PortableDeclaredIndexes(StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        return DeclaredIndexes(unit, stripProviderOwnedColumns: true, includeLocaleSortKeys: false);
     }
 
     public static ImmutableArray<CoverageIndex> DeclaredIndexes(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
-        return DeclaredIndexes(unit, stripProviderOwnedColumns: false);
+        return DeclaredIndexes(unit, stripProviderOwnedColumns: false, includeLocaleSortKeys: true);
     }
 
     private static ImmutableArray<CoverageIndex> DeclaredIndexes(
         StorageUnit unit,
-        bool stripProviderOwnedColumns)
+        bool stripProviderOwnedColumns,
+        bool includeLocaleSortKeys)
     {
         var nullable = unit.Columns.ToDictionary(column => column.Name, column => column.IsNullable, StringComparer.Ordinal);
         var logicalByPhysical = unit.DerivedColumns
-            .Where(column => column.Projection is PortableProjection.BoundarySearchKey or PortableProjection.LocaleSortKey)
+            .Where(column => column.Projection is PortableProjection.BoundarySearchKey ||
+                             (includeLocaleSortKeys && column.Projection is PortableProjection.LocaleSortKey))
             .ToDictionary(column => column.Name, column => column.SourceColumn, StringComparer.Ordinal);
         return unit.Indexes
             .Select(index =>
@@ -218,5 +258,60 @@ internal static class StorageUnitCoverage
                     ? IndexMissingValueBehavior.Excluded
                     : IndexMissingValueBehavior.Included))
             .ToImmutableArray();
+    }
+}
+
+/// <summary>Builds the one runtime coverage gate shared by reads and set-based mutations.</summary>
+internal static class RuntimeCoverage
+{
+    public static RuntimeCoverageGate ForQuery(
+        IStorageSession session,
+        IStorageProviderConnection? connection,
+        QueryAdmissionProfile? admission)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return Create(session.Unit, StorageUnitCoverage.DeclaredIndexes(session.Unit), connection, admission);
+    }
+
+    public static RuntimeCoverageGate ForMutation(IStorageSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var connection = (session as IProviderBoundStorageSession)?.ProviderConnection;
+        return ForMutation(session.Unit, connection);
+    }
+
+    public static RuntimeCoverageGate ForMutation(StorageUnit unit, IStorageProviderConnection? connection)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        return Create(unit, StorageUnitCoverage.PortableDeclaredIndexes(unit), connection, admission: null);
+    }
+
+    private static RuntimeCoverageGate Create(
+        StorageUnit unit,
+        ImmutableArray<CoverageIndex> declared,
+        IStorageProviderConnection? connection,
+        QueryAdmissionProfile? admission)
+    {
+        var key = unit.Key.Columns;
+        var declaredCandidates = CoverageCandidates.Derive(key, declared);
+        var deployedNames = connection?.Catalog.ReadIndexes(unit.Id)
+            .Select(index => index.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        var deployed = connection is null
+            ? declared
+            : declared.Where(index => deployedNames!.Contains(index.Name))
+                .ToImmutableArray();
+        var profile = admission ?? connection?.GetQueryAdmission() ?? QueryAdmissionProfile.Default;
+        return new RuntimeCoverageGate(
+            declaredCandidates,
+            CoverageCandidates.Derive(key, deployed),
+            options: new RuntimeCoverageGateOptions
+            {
+                ValueFence = new RuntimeValueFenceOptions
+                {
+                    MaximumParameters = profile.MaximumParameters,
+                    MaximumInValues = profile.MaximumInValues
+                }
+            });
     }
 }

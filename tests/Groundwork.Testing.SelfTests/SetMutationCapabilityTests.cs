@@ -38,12 +38,43 @@ public sealed class SetMutationCapabilityTests
 
         Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?>(StringComparer.Ordinal) { ["id"] = "a" })));
 
-        // A unit-of-work session is a wrapper that always carries the capability interface, so the
-        // wrapper is where the refusal has to be named for a staged caller.
+        // A unit-of-work session must refuse before its staged write barrier. The unsupported provider cannot
+        // flush the staged row into a provider transaction merely to discover that it cannot mutate.
         using var work = connection.BeginUnitOfWork(StorageAccess.Global, unit);
         var staged = work.OpenSession(unit);
+        work.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "staged",
+            ["status"] = "open"
+        })));
         var wrapped = Assert.Throws<NotSupportedException>(() => staged.DeleteWhere(Status(unit, "open")));
         Assert.Contains("GW-SET-001", wrapped.Message, StringComparison.Ordinal);
+        work.Rollback();
+
+        Assert.Null(connection.OpenSession(unit, StorageAccess.Global).Read(
+            new StorageKey(new Dictionary<string, object?>(StringComparer.Ordinal) { ["id"] = "staged" })));
+    }
+
+    [Fact]
+    public async Task Privileged_set_mutation_refuses_access_before_capability_sync_and_async()
+    {
+        var unit = Unit() with
+        {
+            Id = new StorageUnitId("set_mutation_privileged"),
+            Name = "set_mutation_privileged",
+            Scope = ScopePolicy.Scoped
+        };
+        using var connection = new InMemoryProviderFactory().Create("memory://set-mutation-privileged");
+        connection.Schema.Apply(unit);
+        var access = StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("operator", "set mutation test"));
+        IStorageSession session = connection.OpenSession(unit, access);
+
+        var sync = Assert.Throws<InvalidOperationException>(() => session.DeleteWhere(Status(unit, "open")));
+        Assert.Contains("GW-ACCESS-003", sync.Message, StringComparison.Ordinal);
+
+        var asyncFailure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            session.DeleteWhereAsync(Status(unit, "open")).AsTask());
+        Assert.Contains("GW-ACCESS-003", asyncFailure.Message, StringComparison.Ordinal);
     }
 
     private static Predicate Status(StorageUnit unit, string value)

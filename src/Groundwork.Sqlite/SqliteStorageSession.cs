@@ -11,7 +11,7 @@ using Groundwork.Diagnostics;
 
 namespace Groundwork.Sqlite;
 
-internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStorageSession, IExactAppendStorageSession, IConcurrencyStorageSession, ICompareAndDeleteStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
@@ -44,6 +44,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     public StorageUnit Unit { get; }
     public StorageAccess Access { get; }
+
+    IStorageProviderConnection IProviderBoundStorageSession.ProviderConnection => owner;
 
     /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
     private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(

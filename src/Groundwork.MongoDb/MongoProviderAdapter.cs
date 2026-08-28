@@ -60,8 +60,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
     {
         var session = inner.OpenSession(unit, ToNative(access), observer);
         return inner.ProviderSequenceFit is ProviderFit.Supported
-            ? new MongoExactStoreSession(session, observer)
-            : new MongoStoreSession(session, commandObserver: observer);
+            ? new MongoExactStoreSession(session, commandObserver: observer, providerConnection: this)
+            : new MongoStoreSession(session, commandObserver: observer, providerConnection: this);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
@@ -84,7 +84,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
             inner.BeginUnitOfWork(ToNative(access), observer, units),
             options,
             inner.ProviderSequenceFit is ProviderFit.Supported,
-            observer);
+            observer,
+            this);
     }
 
     public void Dispose() => inner.Dispose();
@@ -129,9 +130,12 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
 internal class MongoStoreSession(
     IMongoStorageSession inner,
     Action<StorageKey>? beforeRead = null,
-    IProviderCommandObserver? commandObserver = null) : IStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
+    IProviderCommandObserver? commandObserver = null,
+    IStorageProviderConnection? providerConnection = null) : IStorageSession, IProviderBoundStorageSession, IConcurrencyStorageSession, IBatchedStorageSession, IRetentionStorageSession, IPrivilegedCrossScopeQuerySession, ISetMutationStorageSession
 {
     public StorageUnit Unit => inner.Unit;
+
+    IStorageProviderConnection? IProviderBoundStorageSession.ProviderConnection => providerConnection;
 
     public StorageAccess Access => inner.Access.IsPrivilegedAcrossScopes
         ? StorageAccess.PrivilegedAcrossScopes(inner.Access.Audit ?? throw new InvalidOperationException(
@@ -464,8 +468,11 @@ internal sealed class MongoExactStoreSession : MongoStoreSession, IExactAppendSt
 {
     private readonly IMongoStorageSession exactInner;
 
-    internal MongoExactStoreSession(IMongoStorageSession inner, IProviderCommandObserver? commandObserver = null)
-        : base(inner, commandObserver: commandObserver) => exactInner = inner;
+    internal MongoExactStoreSession(
+        IMongoStorageSession inner,
+        IProviderCommandObserver? commandObserver = null,
+        IStorageProviderConnection? providerConnection = null)
+        : base(inner, commandObserver: commandObserver, providerConnection: providerConnection) => exactInner = inner;
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
         ToStore(RequireExactAppend(values).AppendWithOutcomes(
@@ -568,15 +575,22 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
     private readonly BatchContext batch;
     private readonly bool exactAvailable;
     private readonly IProviderCommandObserver? commandObserver;
+    private readonly IStorageProviderConnection? providerConnection;
     private readonly Dictionary<StorageUnitId, BatchStorageSession> sessions = [];
     private bool terminal;
 
-    internal MongoStoreUnitOfWork(IMongoUnitOfWork inner, BatchWriteOptions options, bool exactAvailable, IProviderCommandObserver? commandObserver = null)
+    internal MongoStoreUnitOfWork(
+        IMongoUnitOfWork inner,
+        BatchWriteOptions options,
+        bool exactAvailable,
+        IProviderCommandObserver? commandObserver = null,
+        IStorageProviderConnection? providerConnection = null)
     {
         this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
         batch = new BatchContext(options ?? throw new ArgumentNullException(nameof(options)));
         this.exactAvailable = exactAvailable;
         this.commandObserver = commandObserver;
+        this.providerConnection = providerConnection;
     }
 
     public IStorageSession OpenSession(StorageUnit unit)
@@ -587,8 +601,8 @@ internal sealed class MongoStoreUnitOfWork : IUnitOfWork
             return existing;
         var native = inner.OpenSession(unit);
         var store = exactAvailable
-            ? new MongoExactStoreSession(native, commandObserver)
-            : new MongoStoreSession(native, commandObserver: commandObserver);
+            ? new MongoExactStoreSession(native, commandObserver: commandObserver, providerConnection: providerConnection)
+            : new MongoStoreSession(native, commandObserver: commandObserver, providerConnection: providerConnection);
         var session = BatchStorageSession.Create(store, batch);
         sessions.Add(unit.Id, session);
         batch.Register(session);
