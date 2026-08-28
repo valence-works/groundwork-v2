@@ -264,7 +264,7 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
-    public async Task Reduction_terminals_are_covered_for_sync_and_async_closed_surface_calls()
+    public async Task Reduction_terminals_are_covered_for_closed_surface_calls()
     {
         var source = WithSchema(
             SchemaWithIndex("ix_status_amount", "status ASC, amount ASC", "ix_status_created", "status ASC, created_at ASC")) +
@@ -272,9 +272,6 @@ public sealed class CoverageAnalyzerTests
                 var sum = db.Table<Ticket>().Where(t => t.Status == status).Sum(t => t.Amount);
                 var minimum = db.Table<Ticket>().Where(t => t.Status == status).Min(t => t.CreatedAt);
                 var maximum = db.Table<Ticket>().Where(t => t.Status == status).Max(t => t.Amount);
-                var asyncSum = db.Table<Ticket>().Where(t => t.Status == status).SumAsync(executor, t => t.Amount);
-                var asyncMinimum = db.Table<Ticket>().Where(t => t.Status == status).MinAsync(executor, t => t.CreatedAt);
-                var asyncMaximum = db.Table<Ticket>().Where(t => t.Status == status).MaxAsync(executor, t => t.Amount);
                 """);
 
         var diagnostics = await Analyze(source);
@@ -302,6 +299,36 @@ public sealed class CoverageAnalyzerTests
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
         Assert.Contains("reduction column", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reduction_selector_casts_and_nullable_value_match_runtime_lowering()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status_amount", "status ASC, amount ASC")) +
+            QuerySource("var casted = db.Table<Ticket>().Where(t => t.Status == status).Sum(t => (decimal)t.Amount.Value);"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id is "GW_LINQ_112" or "GW_LINQ_113");
+    }
+
+    [Fact]
+    public async Task Reduction_after_projection_is_rejected_like_runtime()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status_amount", "status ASC, amount ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Amount }).Sum(t => t.Amount);"));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_112");
+    }
+
+    [Fact]
+    public async Task Skip_without_take_is_rejected_in_static_resolution()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Skip(3).ToListAsync();"));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_113");
     }
 
     [Fact]
@@ -719,9 +746,6 @@ public sealed class CoverageAnalyzerTests
             public decimal Sum(Func<T, decimal?> selector) => 0;
             public DateTimeOffset Min(Func<T, DateTimeOffset> selector) => default;
             public decimal? Max(Func<T, decimal?> selector) => null;
-            public Task SumAsync(object executor, Func<T, decimal?> selector) => Task.CompletedTask;
-            public Task MinAsync(object executor, Func<T, DateTimeOffset> selector) => Task.CompletedTask;
-            public Task MaxAsync(object executor, Func<T, decimal?> selector) => Task.CompletedTask;
             public Task First() => Task.CompletedTask;
             public Task FirstOrDefault() => Task.CompletedTask;
             public Task FirstAsync() => Task.CompletedTask;

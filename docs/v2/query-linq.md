@@ -10,6 +10,8 @@ surface. The following diagnostic table is generated deterministically from the 
 decision rows and checked byte-for-byte by the corpus test; the test locks the ten predicate
 codes and 250 predicate cases together. The query-shape corpus below extends that versioned
 contract with projection, distinct, cardinality, and scalar-reduction terminals.
+The query-shape corpus and `QueryFingerprint.QueryShapeVersion` are currently `q2`; changing a
+lowered shape requires an intentional version bump.
 
 | Code | AST equivalent / fix |
 | --- | --- |
@@ -52,15 +54,16 @@ contract with projection, distinct, cardinality, and scalar-reduction terminals.
 | `Distinct` | `QueryRequest.Distinct = true`; duplicates are removed before paging/cardinality |
 | `First` / `FirstOrDefault` | `ResultShape.First` / `ResultShape.FirstOrDefault`, limit 1, explicit order required |
 | `Single` / `SingleOrDefault` | `ResultShape.Single` / `ResultShape.SingleOrDefault`, limit 2, over-one detection |
-| `Sum(selector)` | `ResultShape.Sum`, over a mapped `Int32`, `Int64`, or `Decimal` column; integer results are `Int64` and decimal results retain `Decimal` |
-| `Min(selector)` / `Max(selector)` | `ResultShape.Min` / `ResultShape.Max`, over a mapped orderable column; nulls are ignored and an empty/all-null input yields null |
+| `Sum(selector)` | `ResultShape.Sum`, over a mapped `Int32`, `Int64`, or `Decimal` column; results are nullable `Int64` or `Decimal` |
+| `Min(selector)` / `Max(selector)` | `ResultShape.Min` / `ResultShape.Max`, over closed overloads for mapped orderable columns; nulls are ignored and an empty/all-null input yields null |
 
 The query-shape diagnostics are versioned separately from the predicate corpus:
 
 | Code | Query-shape refusal | Fix |
 | --- | --- | --- |
 | GW-LINQ-111 | First/FirstOrDefault without deterministic order | Add an explicit `OrderBy` before `First` or `FirstOrDefault` |
-| GW-LINQ-112 | Sum/Min/Max selector is not a mapped portable column | Select a mapped numeric or orderable column |
+| GW-LINQ-112 | Sum/Min/Max selector is not a mapped portable column, or follows `Select` | Reduce a mapped source column before projection |
+| GW-LINQ-113 | `Skip` has no bounded `Take` | Add a bounded `Take`; offset-only pages are not portable |
 
 Closed terms are read from constants and closure fields without compiling an expression per query
 call. Unsupported expression nodes are rejected rather than evaluated on the client.

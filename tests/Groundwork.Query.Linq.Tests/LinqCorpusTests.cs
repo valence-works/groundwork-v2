@@ -60,6 +60,14 @@ public sealed class LinqCorpusTests
         Assert.Equal(GenerateDecisionTable(), string.Join('\n', corpusLines) + "\n");
     }
 
+    [Fact]
+    public void Query_shape_corpus_pins_the_fingerprint_version()
+    {
+        Assert.Equal("q2", QueryFingerprint.QueryShapeVersion);
+        var docs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../docs/v2/query-linq.md"));
+        Assert.Contains("`q2`", File.ReadAllText(docs), StringComparison.Ordinal);
+    }
+
     [Theory]
     [MemberData(nameof(Corpus))]
     public void Every_versioned_spelling_has_its_recorded_public_decision(CorpusCase item)

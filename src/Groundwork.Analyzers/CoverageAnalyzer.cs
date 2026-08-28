@@ -35,6 +35,7 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             AnalyzerDiagnostics.For("GW-COVER-009"),
             AnalyzerDiagnostics.For("GW-COVER-016"),
             AnalyzerDiagnostics.For("GW-LINQ-112"),
+            AnalyzerDiagnostics.For("GW-LINQ-113"),
             AnalyzerDiagnostics.For("GW-COVER-901"),
             AnalyzerDiagnostics.For("GW-COVER-902"),
             AnalyzerDiagnostics.For("GW-COVER-903"),

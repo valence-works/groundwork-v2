@@ -16,7 +16,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
     private static readonly string[] AnalyzerIds =
     {
         "GW-LINQ-101", "GW-LINQ-102", "GW-LINQ-103", "GW-LINQ-104", "GW-LINQ-105",
-        "GW-LINQ-106", "GW-LINQ-107", "GW-LINQ-108", "GW-LINQ-109", "GW-LINQ-110", "GW-LINQ-111", "GW-LINQ-112"
+        "GW-LINQ-106", "GW-LINQ-107", "GW-LINQ-108", "GW-LINQ-109", "GW-LINQ-110", "GW-LINQ-111", "GW-LINQ-112", "GW-LINQ-113"
     };
 
     public override void Initialize(AnalysisContext context)

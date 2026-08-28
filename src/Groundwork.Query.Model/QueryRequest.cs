@@ -256,12 +256,15 @@ public sealed record QueryResult<T>
 
 public static class QueryFingerprint
 {
+    /// <summary>Version of the provider-neutral query-shape encoding.</summary>
+    public const string QueryShapeVersion = "q2";
+
     public static string Create(QueryRequest request, bool includeResultShape = true, bool includePaging = true)
     {
         if (request is null)
             throw new ArgumentNullException(nameof(request));
         var builder = new StringBuilder();
-        builder.Append("q1|table=").Append(PredicateCanonicalizer.Escape(request.Table.Value));
+        builder.Append(QueryShapeVersion).Append("|table=").Append(PredicateCanonicalizer.Escape(request.Table.Value));
         builder.Append("|where=").Append(PredicateCanonicalizer.ToShapeString(request.Where));
         builder.Append("|order=");
         foreach (var term in request.Order)

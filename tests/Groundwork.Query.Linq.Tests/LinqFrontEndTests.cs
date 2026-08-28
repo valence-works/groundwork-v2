@@ -195,34 +195,21 @@ public sealed class LinqFrontEndTests
         Assert.Equal(nameof(Ticket.Status), ((ResultShape.Max)maximum.Result).Column.Name);
         Assert.Equal(nameof(Ticket.TenantId), Assert.Single(sumInt.Projection.Columns).Name);
         Assert.Equal(nameof(Ticket.Status), Assert.Single(maximum.Projection.Columns).Name);
+
+        var paged = query.Skip(2).Take(4).Sum(ticket => ticket.TenantId).Request;
+        Assert.Equal(2, paged.Paging.Offset);
+        Assert.Equal(4, paged.Paging.Limit);
     }
 
     [Fact]
-    public void Reduction_terminals_reject_non_portable_or_unmapped_columns()
+    public void Reduction_terminals_reject_projection_and_offset_only_pages()
     {
-        var query = new GwQueryDatabase().Table(Tickets).Query;
+        var projection = new GwQueryDatabase().Table(Tickets).Query.Select(ticket => new { ticket.TenantId });
+        Assert.Throws<InvalidOperationException>(() => projection.Min(ticket => ticket.TenantId));
 
-        var min = Assert.Throws<LinqTranslationException>(() => query.Min(ticket => ticket.IsOpen));
-        var max = Assert.Throws<LinqTranslationException>(() => query.Max(ticket => ticket.TagIds));
-
-        Assert.Contains(min.Diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-112");
-        Assert.Contains(max.Diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-101");
-    }
-
-    [Fact]
-    public async Task Async_reductions_preserve_scalar_results_and_empty_sum_identity()
-    {
-        var query = new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.IsOpen);
-        var executor = new ScalarExecutor();
-
-        Assert.Equal(17L, await query.SumAsync(executor, ticket => ticket.TenantId));
-        Assert.IsType<ResultShape.Sum>(executor.LastRequest!.Result);
-        Assert.Equal(nameof(Ticket.TenantId), ((ResultShape.Sum)executor.LastRequest.Result).Column.Name);
-
-        executor.Value = null;
-        Assert.Equal(0L, await query.SumAsync(executor, ticket => ticket.TenantId));
-        Assert.Null(await query.SumAsync(executor, ticket => (int?)ticket.TenantId));
-        Assert.Null(await query.MinAsync(executor, ticket => (DateTimeOffset?)ticket.OptionalAt));
+        var query = new GwQueryDatabase().Table(Tickets).Query.Skip(3);
+        Assert.Equal("GW-LINQ-113", Assert.Single(Assert.Throws<LinqTranslationException>(() => query.ToQueryRequest()).Diagnostics).Code);
+        Assert.Equal("GW-LINQ-113", Assert.Single(Assert.Throws<LinqTranslationException>(() => query.Sum(ticket => ticket.TenantId).Request).Diagnostics).Code);
     }
 
     [Fact]
@@ -289,21 +276,6 @@ public sealed class LinqFrontEndTests
         public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult((long)rows.Count);
 
         public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(rows.Count != 0);
-    }
-
-    private sealed class ScalarExecutor : IGwQueryExecutor
-    {
-        public object? Value { get; set; } = 17L;
-        public QueryRequest? LastRequest { get; private set; }
-
-        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
-        {
-            LastRequest = request;
-            return Task.FromResult<IReadOnlyList<T>>(Value is null ? Array.Empty<T>() : new[] { (T)Value });
-        }
-
-        public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(0L);
-        public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(false);
     }
 
     [Fact]

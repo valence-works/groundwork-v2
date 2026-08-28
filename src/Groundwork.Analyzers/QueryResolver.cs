@@ -47,7 +47,7 @@ internal static class QueryResolver
             "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync",
             "First", "FirstOrDefault", "Single", "SingleOrDefault",
             "FirstAsync", "FirstOrDefaultAsync", "SingleAsync", "SingleOrDefaultAsync",
-            "Sum", "Min", "Max", "SumAsync", "MinAsync", "MaxAsync");
+            "Sum", "Min", "Max");
 
     /// <summary>
     /// Gate that keeps LINQ-shaped terminals on unrelated types out of the analysis: the receiver
@@ -185,6 +185,7 @@ internal static class QueryResolver
                 if (state.HasProjection)
                     return QueryResolution.Unresolved("the query contains more than one Select projection", invocation);
                 state.Projection = projection;
+                state.HasProjection = true;
                 continue;
             }
 
@@ -206,6 +207,7 @@ internal static class QueryResolver
                 if (limit == 0)
                 {
                     state.IsEmpty = true;
+                    state.Offset = null;
                     state.Limit = null;
                 }
                 else
@@ -238,6 +240,10 @@ internal static class QueryResolver
             return QueryResolution.Unresolved($"method '{name}' is outside the closed query surface", invocation);
         }
 
+        if (state.Offset is not null && state.Limit is null && RequiresBoundedTake(terminal))
+            return QueryResolution.Unresolved("Skip requires Take because an offset-only page is not portable; add a bounded Take.", terminal, failureCode: "GW-LINQ-113");
+        if (state.HasProjection && IsReductionTerminal(terminal))
+            return QueryResolution.Unresolved("Sum, Min, and Max cannot follow Select; apply the reduction before projecting.", terminal, failureCode: "GW-LINQ-112");
         if (!TryTerminalShape(terminal, table, model, cancellationToken, out var result, out var pagingOverride, out var terminalFailure))
             return QueryResolution.Unresolved(terminalFailure!, terminal, failureCode: "GW-LINQ-112");
         return QueryResolution.Resolved(
@@ -326,6 +332,10 @@ internal static class QueryResolver
                 return QueryResolution.Unresolved("reassignment shape enumeration is bounded at 32 shapes; use WhereIf or runtime coverage", ifStatement, ifStatement);
         }
 
+        if (state.Offset is not null && state.Limit is null && RequiresBoundedTake(terminal))
+            return QueryResolution.Unresolved("Skip requires Take because an offset-only page is not portable; add a bounded Take.", terminal, failureCode: "GW-LINQ-113");
+        if (state.HasProjection && IsReductionTerminal(terminal))
+            return QueryResolution.Unresolved("Sum, Min, and Max cannot follow Select; apply the reduction before projecting.", terminal, failureCode: "GW-LINQ-112");
         if (!TryTerminalShape(terminal, table, model, cancellationToken, out var result, out var pagingOverride, out var terminalFailure))
             return QueryResolution.Unresolved(terminalFailure!, terminal, failureCode: "GW-LINQ-112");
         return QueryResolution.Resolved(BuildRequests(state, optional, result, pagingOverride), terminal);
@@ -392,19 +402,16 @@ internal static class QueryResolver
                 pagingOverride = Paging.OffsetLimit(0, 2);
                 return true;
             case "Sum":
-            case "SumAsync":
                 return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
                     static column => new ResultShape.Sum(column),
                     static type => type is QueryType.Int32 or QueryType.Int64 or QueryType.Decimal,
                     "Int32, Int64, or Decimal", out result, out failure);
             case "Min":
-            case "MinAsync":
                 return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
                     static column => new ResultShape.Min(column),
                     IsOrderable,
                     "orderable", out result, out failure);
             case "Max":
-            case "MaxAsync":
                 return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
                     static column => new ResultShape.Max(column),
                     IsOrderable,
@@ -449,6 +456,14 @@ internal static class QueryResolver
     private static bool IsOrderable(QueryType type) => type is
         QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or
         QueryType.DateTimeOffset or QueryType.Guid;
+
+    private static bool IsReductionTerminal(InvocationExpressionSyntax terminal) =>
+        terminal.Expression is MemberAccessExpressionSyntax member &&
+        member.Name.Identifier.ValueText is "Sum" or "Min" or "Max";
+
+    private static bool RequiresBoundedTake(InvocationExpressionSyntax terminal) =>
+        terminal.Expression is MemberAccessExpressionSyntax member &&
+        member.Name.Identifier.ValueText is "ToList" or "ToListAsync" or "Sum" or "Min" or "Max";
 
     private static IEnumerable<QueryRequest> BuildRequests(
         QueryShapeState state,
@@ -829,6 +844,9 @@ internal static class QueryResolver
         CancellationToken cancellationToken)
     {
         column = null!;
+        expression = Unwrap(expression);
+        if (expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "Value" } value)
+            return TryGetColumn(value.Expression, parameter, model, table, out column, cancellationToken);
         if (expression is not MemberAccessExpressionSyntax member ||
             model.GetSymbolInfo(member.Expression, cancellationToken).Symbol is not ISymbol receiver ||
             !SymbolEqualityComparer.Default.Equals(receiver, parameter))
@@ -905,8 +923,16 @@ internal static class QueryResolver
         column.Precision,
         column.Scale);
 
-    private static ExpressionSyntax Unwrap(ExpressionSyntax expression) =>
-        expression is ParenthesizedExpressionSyntax parenthesized ? Unwrap(parenthesized.Expression) : expression;
+    private static ExpressionSyntax Unwrap(ExpressionSyntax expression)
+    {
+        while (expression is ParenthesizedExpressionSyntax parenthesized)
+            expression = parenthesized.Expression;
+        if (expression is CastExpressionSyntax cast)
+            return Unwrap(cast.Expression);
+        if (expression is CheckedExpressionSyntax checkedExpression)
+            return Unwrap(checkedExpression.Expression);
+        return expression;
+    }
 
     private static string ToSnakeCase(string value)
     {

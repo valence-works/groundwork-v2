@@ -95,6 +95,7 @@ Raised by `PortableQuerySemantics.Validate`. See **[Portable Semantics](Portable
 | `GW-LINQ-110` | Decimal precision/scale | Value exceeds the declared decimal |
 | `GW-LINQ-111` | First/FirstOrDefault without deterministic order | Add an explicit `OrderBy` before `First` or `FirstOrDefault` |
 | `GW-LINQ-112` | Sum/Min/Max selector is not a mapped portable column | Select a mapped numeric or orderable column |
+| `GW-LINQ-113` | Skip without Take | Add a bounded Take; offset-only pages are not portable |
 
 ---
 

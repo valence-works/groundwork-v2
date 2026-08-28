@@ -33,6 +33,7 @@ internal static class AnalyzerDiagnostics
             ["GW-LINQ-110"] = Create("GW_LINQ_110", "Constant is outside the declared type", "{0}"),
             ["GW-LINQ-111"] = Create("GW_LINQ_111", "First/FirstOrDefault query requires deterministic order", "{0}"),
             ["GW-LINQ-112"] = Create("GW_LINQ_112", "Reduction terminal requires a mapped portable column", "{0}"),
+            ["GW-LINQ-113"] = Create("GW_LINQ_113", "Skip requires a bounded Take", "{0}"),
         };
 
     public static DiagnosticDescriptor Unresolvable { get; } = new(

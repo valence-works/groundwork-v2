@@ -62,7 +62,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
     {
         if (count < 0) throw new ArgumentOutOfRangeException(nameof(count));
         if (count == 0)
-            return New(state with { Where = Predicate.AlwaysFalse.Instance, Take = null });
+            return New(state with { Where = Predicate.AlwaysFalse.Instance, Skip = null, Take = null });
         return New(state with { Take = count });
     }
 
@@ -92,7 +92,11 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
 
     public LinqTerminal<long> Count() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.None, ResultShape.TotalCount.Instance, state.LatestPerKey, state.AcceptedScan, state.Distinct));
 
-    public LinqTerminal<bool> Any() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.OffsetLimit(0, 1), ResultShape.Rows.Instance, state.LatestPerKey, state.AcceptedScan, state.Distinct));
+    public LinqTerminal<bool> Any()
+    {
+        return new LinqTerminal<bool>(new QueryRequest(state.Table, state.Where, state.Order, state.Projection,
+            Paging.OffsetLimit(0, 1), ResultShape.Rows.Instance, state.LatestPerKey, state.AcceptedScan, state.Distinct));
+    }
 
     public LinqTerminal<T> First() => new(CardinalityRequest(ResultShape.First.Instance, 1));
 
@@ -102,29 +106,47 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
 
     public LinqTerminal<T> SingleOrDefault() => new(CardinalityRequest(ResultShape.SingleOrDefault.Instance, 2));
 
-    public LinqTerminal<long> Sum(Expression<Func<T, int>> selector) =>
+    public LinqTerminal<long?> Sum(Expression<Func<T, int>> selector) =>
         new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
 
     public LinqTerminal<long?> Sum(Expression<Func<T, int?>> selector) =>
         new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
 
-    public LinqTerminal<long> Sum(Expression<Func<T, long>> selector) =>
+    public LinqTerminal<long?> Sum(Expression<Func<T, long>> selector) =>
         new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
 
     public LinqTerminal<long?> Sum(Expression<Func<T, long?>> selector) =>
         new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
 
-    public LinqTerminal<decimal> Sum(Expression<Func<T, decimal>> selector) =>
+    public LinqTerminal<decimal?> Sum(Expression<Func<T, decimal>> selector) =>
         new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
 
     public LinqTerminal<decimal?> Sum(Expression<Func<T, decimal?>> selector) =>
         new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
 
-    public LinqTerminal<TResult> Min<TResult>(Expression<Func<T, TResult>> selector) =>
-        new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<int?> Min(Expression<Func<T, int>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<int?> Min(Expression<Func<T, int?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<long?> Min(Expression<Func<T, long>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<long?> Min(Expression<Func<T, long?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<decimal?> Min(Expression<Func<T, decimal>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<decimal?> Min(Expression<Func<T, decimal?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<string?> Min(Expression<Func<T, string?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<DateTimeOffset?> Min(Expression<Func<T, DateTimeOffset>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<DateTimeOffset?> Min(Expression<Func<T, DateTimeOffset?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<Guid?> Min(Expression<Func<T, Guid>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+    public LinqTerminal<Guid?> Min(Expression<Func<T, Guid?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
 
-    public LinqTerminal<TResult> Max<TResult>(Expression<Func<T, TResult>> selector) =>
-        new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<int?> Max(Expression<Func<T, int>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<int?> Max(Expression<Func<T, int?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<long?> Max(Expression<Func<T, long>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<long?> Max(Expression<Func<T, long?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<decimal?> Max(Expression<Func<T, decimal>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<decimal?> Max(Expression<Func<T, decimal?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<string?> Max(Expression<Func<T, string?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<DateTimeOffset?> Max(Expression<Func<T, DateTimeOffset>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<DateTimeOffset?> Max(Expression<Func<T, DateTimeOffset?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<Guid?> Max(Expression<Func<T, Guid>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+    public LinqTerminal<Guid?> Max(Expression<Func<T, Guid?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
 
     private GwTableModel<T> RequireModel() => model ?? throw new InvalidOperationException("A projection is terminal; apply filters and ordering before Select.");
     private GwQueryable<T> New(GwQueryState next) => new(model, executor, next);
@@ -160,10 +182,15 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
             });
         }
 
+        if (state.Skip is not null && state.Take is null)
+            throw OffsetRequiresTake();
+
         return new QueryRequest(state.Table, state.Where, state.Order, Projection.ColumnsOnly(column),
-            state.Skip is null && state.Take is null ? Paging.None : Paging.OffsetLimit(state.Skip ?? 0, state.Take ?? int.MaxValue),
+            state.Take is null ? Paging.None : Paging.OffsetLimit(state.Skip ?? 0, state.Take.Value),
             shape(column), state.LatestPerKey, state.AcceptedScan, state.Distinct);
     }
+
+    private static LinqTranslationException OffsetRequiresTake() => LinqTranslationErrors.OffsetRequiresTake();
 
     private OrderTerm Order<TKey>(Expression<Func<T, TKey>> selector, OrderDirection direction)
     {
@@ -226,7 +253,17 @@ internal sealed record GwQueryState(
             {
                 new LinqDiagnostic("GW-LINQ-103", "Column-to-column comparison is allowed, but never index-covered — add `.AcceptScan(...)`", Expression.Empty())
             });
-        var paging = Skip is null && Take is null ? Paging.None : Paging.OffsetLimit(Skip ?? 0, Take ?? int.MaxValue);
+        if (Skip is not null && Take is null)
+            throw LinqTranslationErrors.OffsetRequiresTake();
+        var paging = Take is null ? Paging.None : Paging.OffsetLimit(Skip ?? 0, Take.Value);
         return new QueryRequest(Table, Where, Order, Projection, paging, ResultShape.Rows.Instance, LatestPerKey, AcceptedScan, Distinct);
     }
+}
+
+internal static class LinqTranslationErrors
+{
+    internal static LinqTranslationException OffsetRequiresTake() => new(new[]
+    {
+        new LinqDiagnostic("GW-LINQ-113", "Skip requires Take because an offset-only page is not portable; add a bounded Take.", Expression.Empty())
+    });
 }

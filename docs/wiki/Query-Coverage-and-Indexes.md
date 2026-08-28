@@ -66,7 +66,7 @@ attribute, from referenced assemblies via `GroundworkSchemaMetadata`, or from a 
 The closed query surface it understands: `Table<T>()`, `Where`, `WhereIf`, ordering, `Skip`/`Take`,
 mapped-column `Select`, `Distinct`, and the terminals `ToList`, `ToListAsync`, `Count`,
 `CountAsync`, `Any`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, `SingleOrDefault`, `Sum`,
-`Min`, and `Max` (plus their async adapter forms). `First` and `FirstOrDefault` require an explicit
+`Min`, and `Max`. Async reduction adapters are deferred to #150. `First` and `FirstOrDefault` require an explicit
 deterministic order. A distinct projection is covered only when every projected column is present in
 the candidate index
 and an equality/range predicate bounds the unpaged provider read. Otherwise the query must carry an
