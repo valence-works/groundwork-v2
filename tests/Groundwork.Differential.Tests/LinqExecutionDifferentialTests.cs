@@ -24,6 +24,14 @@ namespace Groundwork.Differential.Tests;
 [Collection(NativeProviderDifferentialCollection.Name)]
 public sealed class LinqExecutionDifferentialTests
 {
+    [Fact]
+    public void Differential_descriptions_compare_decimal_values_without_scale()
+    {
+        Assert.Equal("24", Describe(24.00m));
+        Assert.Equal("24", Describe(24m));
+        Assert.NotEqual("24", Describe(24.01m));
+    }
+
     [SkippableFact]
     public async Task Linq_terminals_materialize_identical_rows_on_every_provider()
     {
@@ -328,6 +336,7 @@ public sealed class LinqExecutionDifferentialTests
     {
         IReadOnlyList<Ticket> tickets => string.Join(" | ", tickets),
         IReadOnlyList<string?> values => string.Join(" | ", values.Select(value => value ?? "<null>")),
+        decimal number => number.ToString("G29", System.Globalization.CultureInfo.InvariantCulture),
         null => "<null>",
         _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "<null>"
     };
