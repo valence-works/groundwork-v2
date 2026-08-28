@@ -80,7 +80,7 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
         var location = invocation.GetLocation();
         var arguments = invocation.ArgumentList.Arguments;
-        var id = ConstantString(arguments, 0);
+        var id = ConstantString(arguments, 0, "id");
         if (id is null)
             return;
         if (!acceptedAggregationsEnabled)
@@ -94,9 +94,9 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
         if (!inventory.TryAdd(id, 0))
             return;
-        var reason = ConstantString(arguments, 1) ?? "<runtime>";
-        var owner = ConstantString(arguments, 2) ?? "<runtime>";
-        var expiry = TryGetDate(arguments, 3);
+        var reason = ConstantString(arguments, 1, "reason") ?? "<runtime>";
+        var owner = ConstantString(arguments, 2, "owner") ?? "<runtime>";
+        var expiry = TryGetDate(arguments, 3, "expiresOn");
         if (expiry is DateTimeOffset expiresOn)
         {
             if (NormalizeDate(clock()) >= expiresOn)
@@ -119,8 +119,8 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
         if (acceptedAggregationsEnabled)
         {
-            var groups = ConstantInt(arguments, 4);
-            var inputRows = ConstantInt(arguments, 5);
+            var groups = ConstantInt(arguments, 4, "maxGroups");
+            var inputRows = ConstantInt(arguments, 5, "maxInputRows");
             context.ReportDiagnostic(Diagnostic.Create(
                 AnalyzerDiagnostics.For("GW-AGG-ADHOC-905"),
                 location,
@@ -134,17 +134,18 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
     private static string? ConstantString(
         SeparatedSyntaxList<ArgumentSyntax> arguments,
-        int index) => arguments.Count > index &&
-            arguments[index].Expression is LiteralExpressionSyntax literal &&
+        int index,
+        string name) => ArgumentExpression(arguments, index, name) is LiteralExpressionSyntax literal &&
             literal.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralExpression)
             ? literal.Token.ValueText
             : null;
 
     private static int? ConstantInt(
         SeparatedSyntaxList<ArgumentSyntax> arguments,
-        int index)
+        int index,
+        string name)
     {
-        if (arguments.Count <= index || arguments[index].Expression is not LiteralExpressionSyntax literal ||
+        if (ArgumentExpression(arguments, index, name) is not LiteralExpressionSyntax literal ||
             !literal.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NumericLiteralExpression))
             return null;
         return literal.Token.Value is int value ? value : null;
@@ -152,9 +153,10 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 
     private static DateTimeOffset? TryGetDate(
         SeparatedSyntaxList<ArgumentSyntax> arguments,
-        int index)
+        int index,
+        string name)
     {
-        if (arguments.Count <= index || arguments[index].Expression is not ObjectCreationExpressionSyntax creation ||
+        if (ArgumentExpression(arguments, index, name) is not ObjectCreationExpressionSyntax creation ||
             creation.ArgumentList is not { Arguments.Count: >= 3 } argumentList)
             return null;
         var values = argumentList.Arguments.Take(3)
@@ -172,6 +174,16 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         {
             return null;
         }
+    }
+
+    private static ExpressionSyntax? ArgumentExpression(
+        SeparatedSyntaxList<ArgumentSyntax> arguments,
+        int index,
+        string name)
+    {
+        var named = arguments.FirstOrDefault(argument =>
+            string.Equals(argument.NameColon?.Name.Identifier.ValueText, name, StringComparison.Ordinal));
+        return named?.Expression ?? (arguments.Count > index ? arguments[index].Expression : null);
     }
 
     private static DateTimeOffset NormalizeDate(DateTimeOffset value) =>
