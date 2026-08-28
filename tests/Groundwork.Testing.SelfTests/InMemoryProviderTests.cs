@@ -374,6 +374,25 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Schema_apply_renames_primary_storage_and_preserves_its_rows()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-storage-rename");
+        var initial = EvolutionUnit("schema-storage-rename");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var renamed = initial with { Name = "schema_storage_renamed" };
+
+        var change = Assert.Single(connection.Schema.Diff(renamed).Changes);
+        Assert.Equal(SchemaChangeKind.RenameStorageUnit, change.Kind);
+        Assert.Equal("schema_storage_renamed", change.Identity);
+        Assert.True(connection.Schema.Apply(renamed).Applied);
+
+        var stored = ReadEvolutionRow(connection, renamed);
+        Assert.Equal("Ada", stored.Values.Values["name"]);
+        Assert.True(connection.Schema.Diff(renamed).IsEmpty);
+    }
+
+    [Fact]
     public void Schema_apply_widens_a_string_column_and_preserves_its_value()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://schema-widen");
