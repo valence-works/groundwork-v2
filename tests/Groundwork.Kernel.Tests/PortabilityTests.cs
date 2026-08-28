@@ -102,10 +102,30 @@ public sealed class PortabilityTests
     }
 
     [Theory]
+    [InlineData("{\"state\":\"pending\",\"state\":\"complete\"}")]
+    [InlineData("{\"payload\":{\"state\":\"pending\",\"state\":\"complete\"}}")]
+    public void Json_document_defaults_with_duplicate_properties_are_refused_with_portability_diagnostics(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with { Default = new PortableDefault(document) }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Equal("columns.payload.default", refusal.Path);
+        Assert.Contains("payload", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("Json", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(JsonDocument), refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("pending", false)]
     [InlineData("\"pending\"", true)]
     [InlineData("{\"state\":\"pending\"}", true)]
     [InlineData("[true,2]", true)]
+    [InlineData("{\"state\":1,\"state\":2}", false)]
+    [InlineData("{\"payload\":{\"state\":1,\"state\":2}}", false)]
     public void Top_level_json_strings_are_validated_as_raw_json_text(string value, bool expectedPortable)
     {
         var result = PortabilityValidator.ValidatePortableDefaults(Unit([

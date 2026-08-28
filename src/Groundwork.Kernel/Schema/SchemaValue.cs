@@ -162,12 +162,27 @@ internal static class SchemaValue
         JsonValueKind.Number when element.TryGetDecimal(out var decimalValue) => decimalValue,
         JsonValueKind.Number => element.GetDouble(),
         JsonValueKind.Array => element.EnumerateArray().Select(item => SnapshotJsonElement(item, topLevel: false)).ToList(),
-        JsonValueKind.Object => element.EnumerateObject().ToDictionary(
-            property => property.Name,
-            property => SnapshotJsonElement(property.Value, topLevel: false),
-            StringComparer.Ordinal),
+        JsonValueKind.Object => SnapshotJsonObject(element),
         _ => throw new ArgumentException($"Unsupported JSON schema default token '{element.ValueKind}'.", nameof(element))
     };
+
+    private static Dictionary<string, object?> SnapshotJsonObject(JsonElement element)
+    {
+        var snapshot = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!snapshot.TryAdd(property.Name, null))
+            {
+                throw new ArgumentException(
+                    $"GW-PORT-013: JSON schema defaults cannot contain duplicate object property '{property.Name}'.",
+                    nameof(element));
+            }
+
+            snapshot[property.Name] = SnapshotJsonElement(property.Value, topLevel: false);
+        }
+
+        return snapshot;
+    }
 
     private static bool IsPortableJsonValue(object value, ISet<object> active, bool topLevel)
     {
@@ -178,9 +193,9 @@ internal static class SchemaValue
         if (value is double number)
             return double.IsFinite(number);
         if (value is JsonDocument document)
-            return document.RootElement.ValueKind != JsonValueKind.Undefined;
+            return IsPortableJsonElement(document.RootElement);
         if (value is JsonElement element)
-            return element.ValueKind != JsonValueKind.Undefined;
+            return IsPortableJsonElement(element);
         if (PortableJsonScalarTypes.Contains(value.GetType()))
             return true;
 
@@ -225,12 +240,36 @@ internal static class SchemaValue
         return false;
     }
 
+    private static bool IsPortableJsonElement(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+            {
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (!names.Add(property.Name) || !IsPortableJsonElement(property.Value))
+                        return false;
+                }
+
+                return true;
+            }
+            case JsonValueKind.Array:
+                return element.EnumerateArray().All(IsPortableJsonElement);
+            case JsonValueKind.Undefined:
+                return false;
+            default:
+                return true;
+        }
+    }
+
     private static bool IsSerializedJsonText(string text)
     {
         try
         {
             using var document = JsonDocument.Parse(text);
-            return document.RootElement.ValueKind != JsonValueKind.Undefined;
+            return IsPortableJsonElement(document.RootElement);
         }
         catch (JsonException)
         {

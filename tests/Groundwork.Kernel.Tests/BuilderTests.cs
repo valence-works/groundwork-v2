@@ -122,6 +122,27 @@ public sealed class BuilderTests
         Assert.Equal([true, null], Assert.IsType<List<object?>>(payload["items"]));
     }
 
+    [Theory]
+    [InlineData("{\"state\":\"pending\",\"state\":\"complete\"}")]
+    [InlineData("{\"payload\":{\"state\":\"pending\",\"state\":\"complete\"}}")]
+    public void Fluent_build_refuses_duplicate_json_document_properties_at_the_declaration_boundary(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+
+        var exception = Assert.Throws<StorageDeclarationException>(() =>
+            Groundwork.Records.StorageUnit
+                .Declare("duplicate-json-default", "duplicate_json_default")
+                .Guid("id", column => column.Required())
+                .Json("payload", column => column.Default(document))
+                .Key("id")
+                .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-013");
+        Assert.Equal("columns.payload.default", diagnostic.Path);
+        Assert.Contains("payload", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(JsonDocument), diagnostic.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Fluent_build_preserves_raw_json_text_for_root_json_string_defaults()
     {

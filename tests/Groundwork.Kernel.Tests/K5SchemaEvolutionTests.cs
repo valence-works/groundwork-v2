@@ -771,6 +771,32 @@ public sealed class K5SchemaEvolutionTests
         }
     }
 
+    [Theory]
+    [InlineData("{\"state\":\"pending\",\"state\":\"complete\"}")]
+    [InlineData("{\"payload\":{\"state\":\"pending\",\"state\":\"complete\"}}")]
+    public void Schema_subject_refuses_duplicate_json_properties_with_structured_diagnostic(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var exception = Assert.Throws<ArgumentException>(() => new SchemaSubject(new StorageUnit
+            {
+                Id = new StorageUnitId("duplicate-json-element"),
+                Name = "DuplicateJsonElement",
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            }));
+
+            Assert.Contains("GW-PORT-013", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("duplicate object property 'state'", exception.Message, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Applied_history_rejects_an_identity_that_does_not_match_its_payload()
     {
