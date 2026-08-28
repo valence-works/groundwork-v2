@@ -1377,6 +1377,55 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public async Task Batched_aggregate_validates_ad_hoc_acceptance_before_flushing_staged_writes()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://batched-adhoc-validation");
+        var unit = TestingFixture.GlobalUnit("batched-adhoc-validation") with
+        {
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "by-value",
+                    GroupByColumns = ["value"],
+                    Aggregates = [new Aggregate.Count("count")],
+                    AllowedPredicates = []
+                }
+            ]
+        };
+        connection.Schema.Apply(unit);
+        var observer = new ProviderCommandObserver();
+        using var work = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, observer, unit);
+        work.Stage(RowWrite.Insert(unit, TestingFixture.Values("pending", "staged")));
+        var refused = AggregationQuery.ForAdHoc(
+            new AggregationProfile
+            {
+                Name = "ad-hoc",
+                GroupByColumns = ["value"],
+                Aggregates = [new Aggregate.Count("count")],
+                AllowedPredicates = []
+            },
+            AggregationAcceptance.Refuse);
+
+        var error = Assert.Throws<AggregationValidationException>(() => work.OpenSession(unit).Aggregate(refused));
+        Assert.Contains(error.Errors, item => item.Code == "GW-AGG-ADHOC-001");
+        Assert.Equal(0, observer.RoundTrips);
+
+        var expired = AggregationQuery.ForAdHoc(
+            refused.AdHocProfile!,
+            AggregationAcceptance.Allow(
+                "GW-AGG-0012", "expired report", "operations", DateTimeOffset.UtcNow.AddDays(-1), 5, 10));
+        var expiryError = await Assert.ThrowsAsync<AggregationValidationException>(() =>
+            work.OpenSession(unit).AggregateAsync(expired).AsTask());
+        Assert.Contains(expiryError.Errors, item => item.Code == "GW-AGG-ADHOC-002");
+        Assert.Equal(0, observer.RoundTrips);
+
+        var result = work.OpenSession(unit).Aggregate(AggregationQuery.For("by-value"));
+        Assert.Equal(1L, Assert.Single(result.Rows)["count"]);
+        Assert.True(observer.RoundTrips > 0);
+    }
+
+    [Fact]
     public void Aggregate_mode_rejects_exact_commit_after_cap_flush()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://batched-aggregate-cap");

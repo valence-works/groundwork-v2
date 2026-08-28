@@ -1,9 +1,12 @@
 using System.Collections.Immutable;
+using System.Collections.Concurrent;
+using System.Globalization;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Operations;
 
 namespace Groundwork.Analyzers;
 
@@ -15,6 +18,14 @@ namespace Groundwork.Analyzers;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 {
+    private readonly record struct AggregationInventoryKey(
+        string Id,
+        string Reason,
+        string Owner,
+        DateTimeOffset ExpiresOn,
+        int MaxGroups,
+        int MaxInputRows);
+
     private readonly Func<DateTimeOffset> clock;
 
     public CoverageAnalyzer()
@@ -38,7 +49,12 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             AnalyzerDiagnostics.For("GW-COVER-902"),
             AnalyzerDiagnostics.For("GW-COVER-903"),
             AnalyzerDiagnostics.For("GW-COVER-904"),
-            AnalyzerDiagnostics.For("GW-COVER-905")
+            AnalyzerDiagnostics.For("GW-COVER-905"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-902"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-903"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-904"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-905"),
+            AnalyzerDiagnostics.For("GW-AGG-ADHOC-906")
         ];
 
     public override void Initialize(AnalysisContext context)
@@ -49,16 +65,194 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         {
             var schema = AnalyzerSchema.Read(start.Compilation, start.Options);
             var acceptedScansEnabled = HasAcceptedScanOptIn(start.Compilation);
+            var acceptedAggregationsEnabled = HasAcceptedAggregationOptIn(start.Compilation);
+            // Identical metadata is one inventory entry; a changed expiry, owner, reason, or
+            // budget is a distinct entry and must not be hidden by an ID-only deduplication key.
+            var aggregationInventory = new ConcurrentDictionary<AggregationInventoryKey, byte>();
+            var now = clock();
+            var aggregationNow = NormalizeDate(now);
             start.RegisterSyntaxNodeAction(
-                action => AnalyzeInvocation(action, schema, acceptedScansEnabled),
+                action => AnalyzeInvocation(action, schema, acceptedScansEnabled, now),
+                Microsoft.CodeAnalysis.CSharp.SyntaxKind.InvocationExpression);
+            start.RegisterSyntaxNodeAction(
+                action => AnalyzeAggregationAcceptance(
+                    action, acceptedAggregationsEnabled, aggregationInventory, aggregationNow),
                 Microsoft.CodeAnalysis.CSharp.SyntaxKind.InvocationExpression);
         });
     }
 
+    private void AnalyzeAggregationAcceptance(
+        SyntaxNodeAnalysisContext context,
+        bool acceptedAggregationsEnabled,
+        ConcurrentDictionary<AggregationInventoryKey, byte> inventory,
+        DateTimeOffset now)
+    {
+        if (context.Node is not InvocationExpressionSyntax invocation ||
+            context.SemanticModel.GetSymbolInfo(invocation, context.CancellationToken).Symbol is not IMethodSymbol method ||
+            method.Name != "Allow" ||
+            method.ContainingType?.ToDisplayString() != "Groundwork.Kernel.AggregationAcceptance")
+            return;
+
+        var location = invocation.GetLocation();
+        var id = ConstantString(context.SemanticModel, invocation, 0, "id", out var idResolved);
+        if (!acceptedAggregationsEnabled)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-902"),
+                location,
+                "GW-AGG-ADHOC-902: AggregationAcceptance '" + (id ?? "<unresolved>") +
+                "' requires [assembly: GwAllowAcceptedAggregations]."));
+        }
+
+        var reason = ConstantString(context.SemanticModel, invocation, 1, "reason", out var reasonResolved);
+        var owner = ConstantString(context.SemanticModel, invocation, 2, "owner", out var ownerResolved);
+        var expiry = TryGetDate(context.SemanticModel, invocation, 3, "expiresOn", out var expiryResolved);
+        var groups = ConstantInt(context.SemanticModel, invocation, 4, "maxGroups", out var groupsResolved);
+        var inputRows = ConstantInt(context.SemanticModel, invocation, 5, "maxInputRows", out var inputRowsResolved);
+        if (!idResolved || !reasonResolved || !ownerResolved || !expiryResolved || expiry is not DateTimeOffset expiresOn ||
+            !groupsResolved || !inputRowsResolved)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-906"),
+                location,
+                "GW-AGG-ADHOC-906: AggregationAcceptance metadata must be statically resolvable for inventory; " +
+                "use constants for id, reason, owner, expiresOn, maxGroups, and maxInputRows."));
+            return;
+        }
+
+        if (now >= expiresOn)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-903"),
+                location,
+                "GW-AGG-ADHOC-903: accepted aggregation '" + id + "' expired on " +
+                expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "."));
+        }
+        else if (expiresOn - now <= TimeSpan.FromDays(30))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-904"),
+                location,
+                "GW-AGG-ADHOC-904: accepted aggregation '" + id + "' expires on " +
+                expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) +  "."));
+        }
+
+        if (!inventory.TryAdd(new AggregationInventoryKey(
+                id!, reason!, owner!, expiresOn, groups!.Value, inputRows!.Value), 0))
+            return;
+
+        if (acceptedAggregationsEnabled)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-905"),
+                location,
+                "GW-AGG-ADHOC-905: accepted aggregation '" + id + "' reason='" + reason +
+                "' owner='" + owner + "' expiresOn='" +
+                expiry!.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) +
+                "' maxGroups='" + groups!.Value.ToString(CultureInfo.InvariantCulture) +
+                "' maxInputRows='" + inputRows!.Value.ToString(CultureInfo.InvariantCulture) + "'."));
+        }
+    }
+
+    private static string? ConstantString(
+        SemanticModel semanticModel,
+        InvocationExpressionSyntax invocation,
+        int index,
+        string name,
+        out bool resolved)
+    {
+        var expression = ArgumentExpression(semanticModel, invocation, index, name);
+        var constant = expression is null ? default : semanticModel.GetConstantValue(expression);
+        resolved = constant.HasValue && constant.Value is string;
+        return resolved ? (string)constant.Value! : null;
+    }
+
+    private static int? ConstantInt(
+        SemanticModel semanticModel,
+        InvocationExpressionSyntax invocation,
+        int index,
+        string name,
+        out bool resolved)
+    {
+        var expression = ArgumentExpression(semanticModel, invocation, index, name);
+        var constant = expression is null ? default : semanticModel.GetConstantValue(expression);
+        resolved = constant.HasValue && constant.Value is int;
+        return resolved ? (int)constant.Value! : null;
+    }
+
+    private static DateTimeOffset? TryGetDate(
+        SemanticModel semanticModel,
+        InvocationExpressionSyntax invocation,
+        int index,
+        string name,
+        out bool resolved)
+    {
+        resolved = false;
+        if (ArgumentExpression(semanticModel, invocation, index, name) is not ObjectCreationExpressionSyntax creation ||
+            semanticModel.GetOperation(creation) is not IObjectCreationOperation operation ||
+            operation.Constructor is not IMethodSymbol constructor ||
+            constructor.ContainingType.ToDisplayString() != "System.DateTimeOffset")
+            return null;
+
+        // A calendar changes the meaning of year/month/day. Unless its complete calendar
+        // semantics are proven here, treating the values as Gregorian would inventory a
+        // different expiry from the one the acceptance constructs at runtime.
+        if (constructor.Parameters.Any(parameter =>
+                parameter.Type.ToDisplayString() == "System.Globalization.Calendar"))
+            return null;
+
+        var values = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var argument in operation.Arguments)
+        {
+            var parameter = argument.Parameter;
+            var constant = semanticModel.GetConstantValue(argument.Value.Syntax);
+            if (parameter is not null && constant.HasValue && constant.Value is int value)
+                values[parameter.Name] = value;
+        }
+        if (!values.TryGetValue("year", out var year) ||
+            !values.TryGetValue("month", out var month) ||
+            !values.TryGetValue("day", out var day))
+            return null;
+        try
+        {
+            resolved = true;
+            return new DateTimeOffset(year, month, day, 0, 0, 0, TimeSpan.Zero);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static ExpressionSyntax? ArgumentExpression(
+        SemanticModel semanticModel,
+        InvocationExpressionSyntax invocation,
+        int index,
+        string name)
+    {
+        if (semanticModel.GetOperation(invocation) is not IInvocationOperation operation)
+            return null;
+
+        foreach (var argument in operation.Arguments)
+        {
+            var parameter = argument.Parameter;
+            if (parameter is not null &&
+                parameter.Ordinal == index &&
+                string.Equals(parameter.Name, name, StringComparison.Ordinal))
+                return argument.Value.Syntax as ExpressionSyntax;
+        }
+
+        return null;
+    }
+
+    private static DateTimeOffset NormalizeDate(DateTimeOffset value) =>
+        new(value.Year, value.Month, value.Day, 0, 0, 0, TimeSpan.Zero);
+
     private void AnalyzeInvocation(
         SyntaxNodeAnalysisContext context,
         AnalyzerSchema schema,
-        bool acceptedScansEnabled)
+        bool acceptedScansEnabled,
+        DateTimeOffset now)
     {
         if (context.Node is not InvocationExpressionSyntax invocation)
             return;
@@ -89,7 +283,6 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         }
 
         var inventory = new HashSet<string>(StringComparer.Ordinal);
-        var now = clock();
         for (var index = 0; index < resolution.Requests.Length; index++)
         {
             var request = resolution.Requests[index];
@@ -169,6 +362,13 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             string.Equals(
                 attribute.AttributeClass?.ToDisplayString(),
                 "Groundwork.Query.Model.GwAllowAcceptedScansAttribute",
+                StringComparison.Ordinal));
+
+    private static bool HasAcceptedAggregationOptIn(Compilation compilation) =>
+        compilation.Assembly.GetAttributes().Any(attribute =>
+            string.Equals(
+                attribute.AttributeClass?.ToDisplayString(),
+                "Groundwork.Kernel.GwAllowAcceptedAggregationsAttribute",
                 StringComparison.Ordinal));
 
     private static bool IsTerminal(string name) => QueryResolver.TerminalNames.Contains(name);

@@ -14,7 +14,7 @@ public static class AggregationSessionExecutor
         if (session.Access.Scope is not StorageScope scope)
             return result;
 
-        var profile = AggregationProfileValidator.ResolveOrThrow(session.Unit, query.ProfileName);
+        var profile = AggregationProfileValidator.ResolveOrThrow(session.Unit, query);
         return new AggregationResult(
             result.Rows,
             result.ShapeFingerprint,
@@ -30,7 +30,7 @@ public static class AggregationSessionExecutor
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(queryRows);
         ArgumentNullException.ThrowIfNull(query);
-        var profile = AggregationProfileValidator.ResolveOrThrow(unit, query.ProfileName);
+        var profile = AggregationProfileValidator.ResolveOrThrow(unit, query);
         AggregationProfileValidator.Validate(unit, profile);
         // Admit the complete query before handing its predicate to a provider renderer. This keeps
         // the closed aggregation surface's refusal codes provider-neutral (for example, a
