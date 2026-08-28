@@ -80,8 +80,16 @@ internal static class LiveSqlServer
     /// <c>create_date</c> and <c>GETDATE()</c> are read from the same server round trip, so the
     /// age comparison in <see cref="SelectStale"/> sidesteps whatever time zone the server's clock
     /// happens to be in, and never depends on this process's own clock.
+    /// <para>
+    /// <paramref name="onlyName"/>, when given, narrows discovery to that one database name in
+    /// addition to the usual pattern. Production never sets it. It exists so a test can prove the
+    /// query-and-drop path end to end with a lowered <paramref name="olderThan"/> — <c>create_date</c>
+    /// cannot be backdated, so that is the only way to manufacture staleness — while the exact-name
+    /// filter makes it structurally impossible for that lowered threshold to also match a sibling
+    /// process's database, whatever its age.
+    /// </para>
     /// </summary>
-    internal static void ReclaimStale(string configured, TimeSpan olderThan)
+    internal static void ReclaimStale(string configured, TimeSpan olderThan, string? onlyName = null)
     {
         var candidates = new List<(string Name, DateTime CreateDate)>();
         var now = DateTime.MinValue;
@@ -92,8 +100,9 @@ internal static class LiveSqlServer
             using var command = connection.CreateCommand();
             command.CommandText = """
                 SELECT name, create_date, GETDATE() AS server_now FROM sys.databases
-                WHERE name LIKE 'groundwork\_run\_%' ESCAPE '\';
+                WHERE name LIKE 'groundwork\_run\_%' ESCAPE '\' AND (@onlyName IS NULL OR name = @onlyName);
                 """;
+            command.Parameters.AddWithValue("@onlyName", (object?)onlyName ?? DBNull.Value);
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {

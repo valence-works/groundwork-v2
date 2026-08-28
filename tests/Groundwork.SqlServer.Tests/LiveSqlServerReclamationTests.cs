@@ -92,6 +92,25 @@ public sealed class LiveSqlServerReclamationTests
         }
     }
 
+    /// <summary>
+    /// Exercises the same query-and-drop path with a zero threshold — <c>create_date</c> is set by
+    /// the server and cannot be backdated, so a lowered threshold is the only way to manufacture a
+    /// database this test can prove gets dropped. Scoping the call to the exact name this test just
+    /// created makes that safe: the query can only ever match this one row, so the lowered threshold
+    /// has no way to reach a sibling process's database regardless of its age.
+    /// </summary>
+    [SkippableFact]
+    public void Reclamation_discovers_and_drops_a_database_scoped_to_its_exact_name()
+    {
+        var connectionString = LiveSqlServer.Required();
+        var name = "groundwork_run_" + Guid.NewGuid().ToString("N");
+        Execute(connectionString, $"CREATE DATABASE [{name}];");
+
+        LiveSqlServer.ReclaimStale(connectionString, TimeSpan.Zero, onlyName: name);
+
+        Assert.False(DatabaseExists(connectionString, name));
+    }
+
     private static bool DatabaseExists(string connectionString, string name)
     {
         using var connection = new SqlConnection(connectionString);

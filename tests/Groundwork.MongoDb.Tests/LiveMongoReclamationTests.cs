@@ -70,4 +70,27 @@ public sealed class LiveMongoReclamationTests
             client.DropDatabase(name);
         }
     }
+
+    /// <summary>
+    /// Exercises the listing, marker-reading and drop plumbing end to end with a genuinely stale
+    /// marker and the real production threshold. Unlike SQL Server's server-set <c>create_date</c>,
+    /// Mongo's marker timestamp is written by the client, so it can be backdated for real rather
+    /// than requiring a lowered threshold. Scoping the call to a prefix unique to this test run
+    /// makes it safe regardless: no sibling process's database — claimed under the real
+    /// <c>&lt;configuredName&gt;_run_</c> prefix — can ever match this one's, whatever its age.
+    /// </summary>
+    [SkippableFact]
+    public void Reclamation_discovers_and_drops_a_database_with_a_stale_marker()
+    {
+        var connectionString = LiveMongo.Required();
+        var client = new MongoClient(connectionString);
+        var prefix = "groundwork_run_rt_" + Guid.NewGuid().ToString("N") + "_";
+        var name = prefix + "t";
+        client.GetDatabase(name).GetCollection<BsonDocument>(MarkerCollection)
+            .InsertOne(new BsonDocument { { "_id", "marker" }, { "claimedAtUtc", DateTime.UtcNow - TimeSpan.FromHours(3) } });
+
+        LiveMongo.ReclaimStale(connectionString, prefix, LiveMongo.StaleAfter);
+
+        Assert.DoesNotContain(name, client.ListDatabaseNames().ToList());
+    }
 }
