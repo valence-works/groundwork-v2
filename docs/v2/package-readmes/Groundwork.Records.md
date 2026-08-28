@@ -1,7 +1,9 @@
 # Groundwork.Records
 
 Typed rows. `RecordTable<T>` maps a CLR type to a kernel `StorageUnit` — key, columns, indexes,
-concurrency, scope — and exposes the `IRecordStore` seam.
+concurrency, scope — and exposes the `IRecordStore` seam. It also binds typed
+`AggregationRow` selectors to declared aggregation profiles; the binding preserves the profile's
+fixed grouping, reducers, and budgets and never creates an ad-hoc shape.
 
 This package deliberately has **no provider dependency**, which means it also has no
 `table.Open(connection)`. That is the point: a library can declare its storage and stay

@@ -282,6 +282,9 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
         .Column(customer => customer.Email, column => column.MaxLength(320).Required())
         .Column(customer => customer.Name, column => column.MaxLength(200).Required())
         .Index("by_email", customer => customer.Email)
+        .Aggregate("by-name", aggregation => aggregation
+            .GroupBy("name")
+            .Count("count"))
         .Build();
 
     var applied = connection.Schema.Apply(table.Definition);
@@ -314,6 +317,13 @@ static void RunRecordsJourney(IStorageProviderConnection connection)
     var query = table.Query.Where(customer => customer.Email == "ada@example.test");
     var matches = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));
     Require(matches.Count == 1 && matches[0].Name == "Ada Byron", "The covered typed query did not return the updated customer.");
+
+    var summaries = records.Aggregate(table.Aggregate(
+        "by-name",
+        row => row.Get<string>("name"),
+        row => row.Get<long>("count")));
+    Require(summaries.Count == 3 && summaries.Any(summary => summary.Group == "Ada Byron" && summary.Result == 1),
+        "The typed declared aggregation binding did not preserve group and reducer results.");
 
     var uncovered = new RuntimeCoverageGate(
         [new CoverageIndex("by_email", [new CoverageIndexColumn("email")])],

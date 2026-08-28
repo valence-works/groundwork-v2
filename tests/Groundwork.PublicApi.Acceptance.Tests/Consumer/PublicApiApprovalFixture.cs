@@ -39,6 +39,11 @@ internal static class PublicApiApprovalFixture
         _ = typeof(AggregationTimeBucketCalculator);
         _ = typeof(AggregationBuilder);
         _ = typeof(Aggregate.Count);
+        _ = typeof(AggregationProfile);
+        _ = typeof(RecordAggregationBinding<,>);
+        _ = typeof(RecordAggregationResult<,>);
+        _ = typeof(AggregationRowExtensions);
+        _ = typeof(IRecordAggregationStore);
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
@@ -91,6 +96,7 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Aggregate("summary", aggregation => aggregation.GroupBy("group").Count("count")));
+        _ = new Func<string, Action<AggregationBuilder>, AggregationProfile>(AggregationProfile.Create);
         _ = new AggregationQuery("summary")
         {
             OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending)]
@@ -160,6 +166,10 @@ internal static class PublicApiApprovalFixture
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));
         _ = new Func<DocumentUnit<ApprovalDocument>, RowValues, DocumentReadResult<ApprovalDocument>>((unit, values) => unit.Read(values, null));
         _ = new Func<RecordTable<ApprovalRecord>, IGwQueryable<ApprovalRecord>>(table => table.Query.Where(row => row.Value == "approved"));
+        _ = new Func<RecordTable<ApprovalRecord>, RecordAggregationBinding<string, long>>(table => table.Aggregate<string, long>(
+            "summary",
+            "value",
+            row => row.Get<long>("count")));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<long?>>(query => query.Sum(row => row.Count));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<decimal?>>(query => query.Sum(row => row.Amount));
         _ = new Func<IGwQueryable<ApprovalMetric>, LinqTerminal<string?>>(query => query.Min(row => row.Label));
