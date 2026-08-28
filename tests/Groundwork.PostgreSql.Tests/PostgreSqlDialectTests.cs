@@ -807,7 +807,7 @@ public sealed class PostgreSqlDialectTests
 
         observer.Release.Set();
         var outcomes = await first;
-        Assert.Equal(WriteOutcomeStatus.Inserted, outcomes.Single().Outcome.Status);
+        Assert.Equal(WriteOutcomeStatus.Upserted, outcomes.Single().Outcome.Status);
         Assert.Null(await second);
     }
 
