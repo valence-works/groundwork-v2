@@ -864,7 +864,9 @@ public sealed class PostgreSqlDialectTests
                 return;
             }
 
-            if (!Release.IsSet && command.Kind == ProviderCommandKind.Read)
+            // The fallback may issue its own write probe before the blocked command. Only a
+            // non-probe read can be the independent caller this test is measuring.
+            if (!Release.IsSet && command.Kind == ProviderCommandKind.Read && !command.IsProbe)
                 Interlocked.Exchange(ref overlapped, 1);
         }
     }
