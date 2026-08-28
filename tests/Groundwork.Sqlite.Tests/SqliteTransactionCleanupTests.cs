@@ -37,11 +37,7 @@ public sealed class SqliteTransactionCleanupTests
         using (var connection = new SqliteConnection(store.ConnectionString))
         {
             connection.Open();
-            using (var create = connection.CreateCommand())
-            {
-                create.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
-                create.ExecuteNonQuery();
-            }
+            CreateMarker(connection);
 
             var transaction = connection.BeginTransaction();
             transaction.Commit();
@@ -53,15 +49,7 @@ public sealed class SqliteTransactionCleanupTests
                 () => SqliteTransactionCleanup.RollbackOrClearPool(transaction, connection));
         } // Dispose(): without the guard this returns a perfectly healthy connection to the pool.
 
-        using var reused = new SqliteConnection(store.ConnectionString);
-        reused.Open();
-        using var probe = reused.CreateCommand();
-        probe.CommandText = "SELECT COUNT(*) FROM marker;";
-
-        // A pooled native handle would still carry the temp table. Discarding the connection instead
-        // means this one is brand new and never saw the CREATE TEMP TABLE, so the query fails.
-        var failure = Assert.Throws<SqliteException>(() => probe.ExecuteScalar());
-        Assert.Contains("no such table", failure.Message, StringComparison.OrdinalIgnoreCase);
+        AssertMarkerMissing(store.ConnectionString);
     }
 
     [Fact]
@@ -72,23 +60,13 @@ public sealed class SqliteTransactionCleanupTests
         using (var connection = new SqliteConnection(store.ConnectionString))
         {
             connection.Open();
-            using (var create = connection.CreateCommand())
-            {
-                create.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
-                create.ExecuteNonQuery();
-            }
+            CreateMarker(connection);
 
             var transaction = connection.BeginTransaction();
             SqliteTransactionCleanup.RollbackOrClearPool(transaction, connection);
         } // Dispose(): a clean rollback leaves pooling untouched, so this connection is recyclable.
 
-        using var reused = new SqliteConnection(store.ConnectionString);
-        reused.Open();
-        using var probe = reused.CreateCommand();
-        probe.CommandText = "SELECT COUNT(*) FROM marker;";
-
-        // The pool was never cleared, so the same native handle — and its temp table — comes back out.
-        Assert.Equal(0L, probe.ExecuteScalar());
+        AssertMarkerPresent(store.ConnectionString);
     }
 
     /// <summary>
@@ -105,11 +83,7 @@ public sealed class SqliteTransactionCleanupTests
         using (var connection = new SqliteConnection(store.ConnectionString))
         {
             connection.Open();
-            using (var create = connection.CreateCommand())
-            {
-                create.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
-                create.ExecuteNonQuery();
-            }
+            CreateMarker(connection);
 
             var transaction = connection.BeginTransaction();
             transaction.Commit();
@@ -127,12 +101,7 @@ public sealed class SqliteTransactionCleanupTests
             Assert.Throws<InvalidOperationException>(unitOfWork.Rollback);
         } // Rollback() already completed and disposed the connection; this using is now redundant.
 
-        using var reused = new SqliteConnection(store.ConnectionString);
-        reused.Open();
-        using var probe = reused.CreateCommand();
-        probe.CommandText = "SELECT COUNT(*) FROM marker;";
-        var failure = Assert.Throws<SqliteException>(() => probe.ExecuteScalar());
-        Assert.Contains("no such table", failure.Message, StringComparison.OrdinalIgnoreCase);
+        AssertMarkerMissing(store.ConnectionString);
     }
 
     /// <summary>
@@ -156,11 +125,7 @@ public sealed class SqliteTransactionCleanupTests
         var sessionConnection = providerConnection.CreateIndependentConnection();
         try
         {
-            using (var marker = sessionConnection.CreateCommand())
-            {
-                marker.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
-                marker.ExecuteNonQuery();
-            }
+            CreateMarker(sessionConnection);
 
             var observer = new CloseConnectionOnWrite(sessionConnection);
             var session = new SqliteStorageSession(
@@ -179,12 +144,38 @@ public sealed class SqliteTransactionCleanupTests
             sessionConnection.Dispose();
         }
 
-        using var reused = new SqliteConnection(store.ConnectionString);
-        reused.Open();
-        using var probe = reused.CreateCommand();
-        probe.CommandText = "SELECT COUNT(*) FROM marker;";
-        var failure = Assert.Throws<SqliteException>(() => probe.ExecuteScalar());
+        AssertMarkerMissing(store.ConnectionString);
+    }
+
+    private static void CreateMarker(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
+        command.ExecuteNonQuery();
+    }
+
+    private static void AssertMarkerMissing(string connectionString)
+    {
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM marker;";
+
+        // A pooled native handle would still carry the temp table. A cleared pool gives us a new
+        // native connection that never saw the marker, so the query fails.
+        var failure = Assert.Throws<SqliteException>(() => command.ExecuteScalar());
         Assert.Contains("no such table", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertMarkerPresent(string connectionString)
+    {
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM marker;";
+
+        // A successful rollback does not clear the pool, so the same native handle comes back out.
+        Assert.Equal(0L, command.ExecuteScalar());
     }
 
     private static StorageUnit Unit() => new()
@@ -233,8 +224,9 @@ public sealed class SqliteTransactionCleanupTests
 
         public void Dispose()
         {
-            try { Directory.Delete(directory, recursive: true); }
-            catch (IOException) { }
+            using var connection = new SqliteConnection(ConnectionString);
+            SqliteConnection.ClearPool(connection);
+            Directory.Delete(directory, recursive: true);
         }
     }
 }
