@@ -134,6 +134,34 @@ public interface IGwQueryable<T>
     LinqTerminal<T> FirstOrDefault();
     LinqTerminal<T> Single();
     LinqTerminal<T> SingleOrDefault();
+    LinqTerminal<long?> Sum(Expression<Func<T, int>> selector);
+    LinqTerminal<long?> Sum(Expression<Func<T, int?>> selector);
+    LinqTerminal<long?> Sum(Expression<Func<T, long>> selector);
+    LinqTerminal<long?> Sum(Expression<Func<T, long?>> selector);
+    LinqTerminal<decimal?> Sum(Expression<Func<T, decimal>> selector);
+    LinqTerminal<decimal?> Sum(Expression<Func<T, decimal?>> selector);
+    LinqTerminal<int?> Min(Expression<Func<T, int>> selector);
+    LinqTerminal<int?> Min(Expression<Func<T, int?>> selector);
+    LinqTerminal<long?> Min(Expression<Func<T, long>> selector);
+    LinqTerminal<long?> Min(Expression<Func<T, long?>> selector);
+    LinqTerminal<decimal?> Min(Expression<Func<T, decimal>> selector);
+    LinqTerminal<decimal?> Min(Expression<Func<T, decimal?>> selector);
+    LinqTerminal<string?> Min(Expression<Func<T, string?>> selector);
+    LinqTerminal<DateTimeOffset?> Min(Expression<Func<T, DateTimeOffset>> selector);
+    LinqTerminal<DateTimeOffset?> Min(Expression<Func<T, DateTimeOffset?>> selector);
+    LinqTerminal<Guid?> Min(Expression<Func<T, Guid>> selector);
+    LinqTerminal<Guid?> Min(Expression<Func<T, Guid?>> selector);
+    LinqTerminal<int?> Max(Expression<Func<T, int>> selector);
+    LinqTerminal<int?> Max(Expression<Func<T, int?>> selector);
+    LinqTerminal<long?> Max(Expression<Func<T, long>> selector);
+    LinqTerminal<long?> Max(Expression<Func<T, long?>> selector);
+    LinqTerminal<decimal?> Max(Expression<Func<T, decimal>> selector);
+    LinqTerminal<decimal?> Max(Expression<Func<T, decimal?>> selector);
+    LinqTerminal<string?> Max(Expression<Func<T, string?>> selector);
+    LinqTerminal<DateTimeOffset?> Max(Expression<Func<T, DateTimeOffset>> selector);
+    LinqTerminal<DateTimeOffset?> Max(Expression<Func<T, DateTimeOffset?>> selector);
+    LinqTerminal<Guid?> Max(Expression<Func<T, Guid>> selector);
+    LinqTerminal<Guid?> Max(Expression<Func<T, Guid?>> selector);
 }
 
 /// <summary>A query terminal carrying the provider-neutral request, ready for a runtime adapter.</summary>
@@ -264,4 +292,32 @@ public sealed class GwQueryTable<T> : IGwQueryable<T>
     public LinqTerminal<T> FirstOrDefault() => Root.FirstOrDefault();
     public LinqTerminal<T> Single() => Root.Single();
     public LinqTerminal<T> SingleOrDefault() => Root.SingleOrDefault();
+    public LinqTerminal<long?> Sum(Expression<Func<T, int>> selector) => Root.Sum(selector);
+    public LinqTerminal<long?> Sum(Expression<Func<T, int?>> selector) => Root.Sum(selector);
+    public LinqTerminal<long?> Sum(Expression<Func<T, long>> selector) => Root.Sum(selector);
+    public LinqTerminal<long?> Sum(Expression<Func<T, long?>> selector) => Root.Sum(selector);
+    public LinqTerminal<decimal?> Sum(Expression<Func<T, decimal>> selector) => Root.Sum(selector);
+    public LinqTerminal<decimal?> Sum(Expression<Func<T, decimal?>> selector) => Root.Sum(selector);
+    public LinqTerminal<int?> Min(Expression<Func<T, int>> selector) => Root.Min(selector);
+    public LinqTerminal<int?> Min(Expression<Func<T, int?>> selector) => Root.Min(selector);
+    public LinqTerminal<long?> Min(Expression<Func<T, long>> selector) => Root.Min(selector);
+    public LinqTerminal<long?> Min(Expression<Func<T, long?>> selector) => Root.Min(selector);
+    public LinqTerminal<decimal?> Min(Expression<Func<T, decimal>> selector) => Root.Min(selector);
+    public LinqTerminal<decimal?> Min(Expression<Func<T, decimal?>> selector) => Root.Min(selector);
+    public LinqTerminal<string?> Min(Expression<Func<T, string?>> selector) => Root.Min(selector);
+    public LinqTerminal<DateTimeOffset?> Min(Expression<Func<T, DateTimeOffset>> selector) => Root.Min(selector);
+    public LinqTerminal<DateTimeOffset?> Min(Expression<Func<T, DateTimeOffset?>> selector) => Root.Min(selector);
+    public LinqTerminal<Guid?> Min(Expression<Func<T, Guid>> selector) => Root.Min(selector);
+    public LinqTerminal<Guid?> Min(Expression<Func<T, Guid?>> selector) => Root.Min(selector);
+    public LinqTerminal<int?> Max(Expression<Func<T, int>> selector) => Root.Max(selector);
+    public LinqTerminal<int?> Max(Expression<Func<T, int?>> selector) => Root.Max(selector);
+    public LinqTerminal<long?> Max(Expression<Func<T, long>> selector) => Root.Max(selector);
+    public LinqTerminal<long?> Max(Expression<Func<T, long?>> selector) => Root.Max(selector);
+    public LinqTerminal<decimal?> Max(Expression<Func<T, decimal>> selector) => Root.Max(selector);
+    public LinqTerminal<decimal?> Max(Expression<Func<T, decimal?>> selector) => Root.Max(selector);
+    public LinqTerminal<string?> Max(Expression<Func<T, string?>> selector) => Root.Max(selector);
+    public LinqTerminal<DateTimeOffset?> Max(Expression<Func<T, DateTimeOffset>> selector) => Root.Max(selector);
+    public LinqTerminal<DateTimeOffset?> Max(Expression<Func<T, DateTimeOffset?>> selector) => Root.Max(selector);
+    public LinqTerminal<Guid?> Max(Expression<Func<T, Guid>> selector) => Root.Max(selector);
+    public LinqTerminal<Guid?> Max(Expression<Func<T, Guid?>> selector) => Root.Max(selector);
 }

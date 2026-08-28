@@ -11,6 +11,10 @@ LINQ contract family — a provider never knows a contract family exists, and CI
 probe; neither materializes matching rows, and a result without a provider-side total count is
 refused rather than counted client-side.
 
+`Sum`, `Min`, and `Max` use the same adapter seam and issue a scalar reduction request over the
+selected mapped column. Their provider rendering and cross-provider result conformance are tracked
+by issue #150; this package documents the adapter entry point without duplicating provider logic.
+
 Full adapter notes, including how the async terminals behave:
 [docs/query-linq-sqlite.md](https://github.com/valence-works/groundwork-v2/blob/main/docs/query-linq-sqlite.md).
 

@@ -172,6 +172,47 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
+    public void Reduction_terminals_lower_to_the_covered_column_and_preserve_result_type()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query
+            .Where(ticket => ticket.IsOpen);
+
+        var sumInt = query.Sum(ticket => ticket.TenantId).Request;
+        var sumLong = query.Sum(ticket => ticket.LongValue).Request;
+        var sumDecimal = query.Sum(ticket => ticket.Amount).Request;
+        var minimum = query.Min(ticket => ticket.CreatedAt).Request;
+        var maximum = query.Max(ticket => ticket.Status).Request;
+
+        Assert.IsType<ResultShape.Sum>(sumInt.Result);
+        Assert.IsType<ResultShape.Sum>(sumLong.Result);
+        Assert.IsType<ResultShape.Sum>(sumDecimal.Result);
+        Assert.IsType<ResultShape.Min>(minimum.Result);
+        Assert.IsType<ResultShape.Max>(maximum.Result);
+        Assert.Equal(nameof(Ticket.TenantId), ((ResultShape.Sum)sumInt.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.LongValue), ((ResultShape.Sum)sumLong.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.Amount), ((ResultShape.Sum)sumDecimal.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.CreatedAt), ((ResultShape.Min)minimum.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.Status), ((ResultShape.Max)maximum.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.TenantId), Assert.Single(sumInt.Projection.Columns).Name);
+        Assert.Equal(nameof(Ticket.Status), Assert.Single(maximum.Projection.Columns).Name);
+
+        var paged = query.Skip(2).Take(4).Sum(ticket => ticket.TenantId).Request;
+        Assert.Equal(2, paged.Paging.Offset);
+        Assert.Equal(4, paged.Paging.Limit);
+    }
+
+    [Fact]
+    public void Reduction_terminals_reject_projection_and_offset_only_pages()
+    {
+        var projection = new GwQueryDatabase().Table(Tickets).Query.Select(ticket => new { ticket.TenantId });
+        Assert.Throws<InvalidOperationException>(() => projection.Min(ticket => ticket.TenantId));
+
+        var query = new GwQueryDatabase().Table(Tickets).Query.Skip(3);
+        Assert.Equal("GW-LINQ-113", Assert.Single(Assert.Throws<LinqTranslationException>(() => query.ToQueryRequest()).Diagnostics).Code);
+        Assert.Equal("GW-LINQ-113", Assert.Single(Assert.Throws<LinqTranslationException>(() => query.Sum(ticket => ticket.TenantId).Request).Diagnostics).Code);
+    }
+
+    [Fact]
     public async Task Async_single_detects_an_over_one_result_from_the_adapter()
     {
         var query = new GwQueryDatabase().Table(Tickets).Query

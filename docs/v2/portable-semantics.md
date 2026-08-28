@@ -61,6 +61,11 @@ which `Validate` returns no refusals.
 - `First` and `FirstOrDefault` cardinality queries require a caller-supplied deterministic order. The
   model refuses an un-ordered cardinality request with `GW-SEM-ORDER-006`; `First` reads at most
   one row, while `Single` reads at most two so an over-one result can be detected.
+- Scalar reductions are column-bound. `Sum` accepts only `Int32`, `Int64`, and `Decimal` columns;
+  integer sums produce nullable `Int64`, decimal sums retain nullable `Decimal`, and all reductions
+  return null when no non-null input exists.
+  `Min` and `Max` accept orderable columns, ignore null input, and return null when no non-null value
+  exists. A reduction target is part of the query shape and must be present in the covering index.
 
 The accepted #230 gate records the UTC-tick and network-GUID decisions. They
 intentionally supersede the earlier exploratory wording that proposed BSON
