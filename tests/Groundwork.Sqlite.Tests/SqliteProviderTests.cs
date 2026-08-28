@@ -67,6 +67,40 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public async Task Provider_disposal_cannot_miss_a_registering_legacy_session()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("session-registration-race"),
+            Name = "session_registration_race",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var observer = new RegistrationBarrierObserver();
+
+        var opening = Task.Run(() => connection.OpenSession(unit, StorageAccess.Global, observer));
+        Assert.True(observer.EligibilityChecked.Wait(TimeSpan.FromSeconds(5)), "Session registration did not reach the eligibility check.");
+        using var disposalStarted = new ManualResetEventSlim();
+        var disposing = Task.Run(() =>
+        {
+            disposalStarted.Set();
+            connection.Dispose();
+        });
+        Assert.True(disposalStarted.Wait(TimeSpan.FromSeconds(5)), "Provider disposal did not start.");
+
+        observer.Release.Set();
+        var session = Assert.IsType<SqliteStorageSession>(await opening);
+        await disposing;
+
+        Assert.False(session.IsConnectionOpen);
+        Assert.Throws<ObjectDisposedException>(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-provider" })));
+    }
+
+    [Fact]
     public void Owned_session_rejects_reads_after_its_provider_is_disposed()
     {
         using var store = TemporaryStore.Create();
@@ -2098,6 +2132,27 @@ public sealed class SqliteProviderTests
 
     private static StorageKey Key(long sequence) => new(
         new Dictionary<string, object?> { ["sequence"] = sequence });
+
+    private sealed class RegistrationBarrierObserver : ISessionRegistrationObserver, IDisposable
+    {
+        internal ManualResetEventSlim EligibilityChecked { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command) { }
+
+        public void OnSessionRegistrationEligibilityChecked()
+        {
+            EligibilityChecked.Set();
+            Release.Wait(TimeSpan.FromSeconds(5));
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            EligibilityChecked.Dispose();
+            Release.Dispose();
+        }
+    }
 
     private sealed class TemporaryStore : IDisposable
     {

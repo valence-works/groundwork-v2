@@ -47,6 +47,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     /// core directly rather than through a funnel.
     /// </remarks>
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly object connectionRegistryGate = new();
 
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
 
@@ -71,7 +72,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     }
     private readonly ConcurrentBag<NpgsqlConnection> ownedConnections = [];
     private readonly PostgreSqlSchemaCoordinator schemaCoordinator;
-    private bool disposed;
+    private volatile bool disposed;
 
     public PostgreSqlProviderConnection(string connectionString)
     {
@@ -122,13 +123,13 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            OwnConnection(connection, observer);
         }
         catch
         {
             connection.Dispose();
             throw;
         }
-        OwnConnection(connection);
         return new PostgreSqlStorageSession(this, physicalUnit, access, connection, null, observer);
     }
 
@@ -220,15 +221,22 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         }
     }
 
-    internal void OwnConnection(NpgsqlConnection connection)
+    internal void OwnConnection(
+        NpgsqlConnection connection,
+        IProviderCommandObserver? observer = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        if (disposed)
+        lock (connectionRegistryGate)
         {
-            connection.Dispose();
-            throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
+            if (disposed)
+            {
+                connection.Dispose();
+                throw new ObjectDisposedException(nameof(PostgreSqlProviderConnection));
+            }
+            if (observer is ISessionRegistrationObserver registrationObserver)
+                registrationObserver.OnSessionRegistrationEligibilityChecked();
+            ownedConnections.Add(connection);
         }
-        ownedConnections.Add(connection);
     }
 
     internal void ThrowIfDisposed()
@@ -239,10 +247,16 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
 
     public void Dispose()
     {
-        if (disposed)
-            return;
-        disposed = true;
-        while (ownedConnections.TryTake(out var connection))
+        List<NpgsqlConnection> connections = [];
+        lock (connectionRegistryGate)
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            while (ownedConnections.TryTake(out var connection))
+                connections.Add(connection);
+        }
+        foreach (var connection in connections)
             connection.Dispose();
     }
 }

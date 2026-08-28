@@ -69,6 +69,47 @@ public sealed class PostgreSqlDialectTests
         }
     }
 
+    [SkippableFact]
+    public async Task Provider_disposal_cannot_miss_a_registering_legacy_session()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var pool = new NpgsqlConnectionStringBuilder(database.ConnectionString)
+        {
+            MaxPoolSize = 1,
+            Timeout = 2
+        };
+        using var connection = new PostgreSqlProviderFactory().Create(pool.ConnectionString);
+        var name = "pg_session_registration_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var observer = new RegistrationBarrierObserver();
+
+        var opening = Task.Run(() => connection.OpenSession(unit, StorageAccess.Global, observer));
+        Assert.True(observer.EligibilityChecked.Wait(TimeSpan.FromSeconds(5)), "Session registration did not reach the eligibility check.");
+        using var disposalStarted = new ManualResetEventSlim();
+        var disposing = Task.Run(() =>
+        {
+            disposalStarted.Set();
+            connection.Dispose();
+        });
+        Assert.True(disposalStarted.Wait(TimeSpan.FromSeconds(5)), "Provider disposal did not start.");
+
+        observer.Release.Set();
+        var session = await opening;
+        await disposing;
+
+        Assert.Throws<ObjectDisposedException>(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-provider" })));
+        using var returned = new NpgsqlConnection(pool.ConnectionString);
+        returned.Open();
+    }
+
     [Fact]
     public void Physicalization_refuses_an_invalid_raw_json_string_default_before_provider_work()
     {
@@ -1187,4 +1228,25 @@ public sealed class PostgreSqlDialectTests
         ],
         Key = new KeyDefinition { Columns = ["id"] }
     };
+
+    private sealed class RegistrationBarrierObserver : ISessionRegistrationObserver, IDisposable
+    {
+        internal ManualResetEventSlim EligibilityChecked { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command) { }
+
+        public void OnSessionRegistrationEligibilityChecked()
+        {
+            EligibilityChecked.Set();
+            Release.Wait(TimeSpan.FromSeconds(5));
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            EligibilityChecked.Dispose();
+            Release.Dispose();
+        }
+    }
 }

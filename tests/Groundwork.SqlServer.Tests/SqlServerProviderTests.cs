@@ -3,6 +3,7 @@ using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.LiveDatabases;
 using Groundwork.SqlServer;
+using Groundwork.Substrate.Relational;
 using Groundwork.Testing;
 using Groundwork.Store;
 using Xunit;
@@ -63,6 +64,47 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
             using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
             Assert.IsAssignableFrom<IOwnedStorageSession>(owned);
         }
+    }
+
+    [SkippableFact]
+    public async Task Provider_disposal_cannot_miss_a_registering_legacy_session()
+    {
+        var source = fixture.Reset();
+        var pool = new SqlConnectionStringBuilder(source)
+        {
+            MaxPoolSize = 1,
+            ConnectTimeout = 2
+        };
+        using var connection = new SqlServerProviderFactory().Create(pool.ConnectionString);
+        var name = "sql_session_registration_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var observer = new RegistrationBarrierObserver();
+
+        var opening = Task.Run(() => connection.OpenSession(unit, StorageAccess.Global, observer));
+        Assert.True(observer.EligibilityChecked.Wait(TimeSpan.FromSeconds(5)), "Session registration did not reach the eligibility check.");
+        using var disposalStarted = new ManualResetEventSlim();
+        var disposing = Task.Run(() =>
+        {
+            disposalStarted.Set();
+            connection.Dispose();
+        });
+        Assert.True(disposalStarted.Wait(TimeSpan.FromSeconds(5)), "Provider disposal did not start.");
+
+        observer.Release.Set();
+        var session = await opening;
+        await disposing;
+
+        Assert.Throws<ObjectDisposedException>(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-provider" })));
+        using var returned = new SqlConnection(pool.ConnectionString);
+        returned.Open();
     }
 
     [SkippableFact]
@@ -736,6 +778,27 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         {
             Release.Set();
             ReadEntered.Dispose();
+            Release.Dispose();
+        }
+    }
+
+    private sealed class RegistrationBarrierObserver : ISessionRegistrationObserver, IDisposable
+    {
+        internal ManualResetEventSlim EligibilityChecked { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Observe(ProviderCommandEvent command) { }
+
+        public void OnSessionRegistrationEligibilityChecked()
+        {
+            EligibilityChecked.Set();
+            Release.Wait(TimeSpan.FromSeconds(5));
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            EligibilityChecked.Dispose();
             Release.Dispose();
         }
     }

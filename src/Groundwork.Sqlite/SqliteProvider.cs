@@ -3,6 +3,7 @@ using System.Globalization;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Store;
+using Groundwork.Substrate.Relational;
 using Groundwork.Diagnostics;
 using System.Text;
 
@@ -33,7 +34,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     private readonly List<SqliteConnection> sessionConnections = [];
     private readonly bool isMemory;
     private readonly SqliteSchemaCoordinator schemaCoordinator;
-    private bool disposed;
+    private volatile bool disposed;
 
     public SqliteProviderConnection(string connectionString)
     {
@@ -109,6 +110,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, sessionConnection);
+            RegisterSessionConnection(sessionConnection, observer);
         }
         catch
         {
@@ -116,8 +118,6 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
                 sessionConnection.Dispose();
             throw;
         }
-        if (!isMemory)
-            lock (gate) sessionConnections.Add(sessionConnection);
         return new SqliteStorageSession(this, physicalUnit, access, sessionConnection, null, observer);
     }
 
@@ -202,14 +202,31 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
 
     public void Dispose()
     {
-        if (disposed)
-            return;
-        disposed = true;
-        connection.Dispose();
-        foreach (var sessionConnection in sessionConnections)
-            sessionConnection.Dispose();
-        sessionConnections.Clear();
-        schemaLock?.Dispose();
+        lock (gate)
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            connection.Dispose();
+            foreach (var sessionConnection in sessionConnections)
+                sessionConnection.Dispose();
+            sessionConnections.Clear();
+            schemaLock?.Dispose();
+        }
+    }
+
+    private void RegisterSessionConnection(
+        SqliteConnection sessionConnection,
+        IProviderCommandObserver? observer)
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (observer is ISessionRegistrationObserver registrationObserver)
+                registrationObserver.OnSessionRegistrationEligibilityChecked();
+            if (!isMemory)
+                sessionConnections.Add(sessionConnection);
+        }
     }
 
     internal static string QuoteIdentifier(string identifier) =>

@@ -35,7 +35,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
     private readonly SqlServerSchemaCoordinator schemaCoordinator;
-    private bool disposed;
+    private volatile bool disposed;
 
     public SqlServerProviderConnection(string connectionString)
     {
@@ -114,14 +114,13 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            RegisterSessionConnection(connection, observer);
         }
         catch
         {
             connection.Dispose();
             throw;
         }
-        using (EnterGate())
-            sessionConnections.Add(connection);
         return new SqlServerStorageSession(this, physicalUnit, access, connection, null, observer);
     }
 
@@ -204,14 +203,28 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
 
     public void Dispose()
     {
-        if (disposed)
-            return;
-        disposed = true;
         using (EnterGate())
         {
+            if (disposed)
+                return;
+            disposed = true;
             foreach (var connection in sessionConnections)
                 connection.Dispose();
             sessionConnections.Clear();
+        }
+    }
+
+    private void RegisterSessionConnection(
+        SqlConnection connection,
+        IProviderCommandObserver? observer)
+    {
+        using (EnterGate())
+        {
+            if (disposed)
+                throw new ObjectDisposedException(nameof(SqlServerProviderConnection));
+            if (observer is ISessionRegistrationObserver registrationObserver)
+                registrationObserver.OnSessionRegistrationEligibilityChecked();
+            sessionConnections.Add(connection);
         }
     }
 

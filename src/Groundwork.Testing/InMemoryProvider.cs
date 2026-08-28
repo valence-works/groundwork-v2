@@ -41,7 +41,7 @@ public sealed class SchemaConflictException : InvalidOperationException
 public sealed class InMemoryProviderConnection : IStorageProviderConnection
 {
     private readonly InMemoryDatabase database;
-    private bool disposed;
+    private volatile bool disposed;
 
     internal InMemoryProviderConnection(InMemoryDatabase database)
     {
@@ -124,7 +124,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
 
     public void Dispose() => disposed = true;
 
-    private void ThrowIfDisposed()
+    internal void ThrowIfDisposed()
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(InMemoryProviderConnection));
@@ -1586,6 +1586,8 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(InMemoryStorageSession));
+        if (ProviderConnection is InMemoryProviderConnection providerConnection)
+            providerConnection.ThrowIfDisposed();
     }
 }
 

@@ -34,6 +34,26 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Legacy_session_rejects_reads_after_its_provider_is_disposed()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://legacy-provider-lifetime");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("legacy-provider-lifetime"),
+            Name = "legacy_provider_lifetime",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        connection.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-provider" })));
+    }
+
+    [Fact]
     public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://physical-name-boundary");
