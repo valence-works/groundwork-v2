@@ -514,10 +514,10 @@ internal sealed class StorageDeclarationState
             Retention = retention
         };
 
-        var declarationFindings = ValidateReferences(unit, key is null).ToList();
+        var declarationFindings = StorageDeclarationReferenceValidation.Validate(unit, key is null).ToList();
         try
         {
-            ProviderOwnedColumns.ValidateLogicalDeclaration(unit);
+            ProviderOwnedColumns.ValidateReservedLogicalNames(unit);
         }
         catch (ArgumentException exception)
         {
@@ -565,48 +565,6 @@ internal sealed class StorageDeclarationState
         AggregationProfileValidator.ValidateUnit(unit);
         appendIdempotency?.Validate(unit);
         return unit;
-    }
-
-    private static IReadOnlyList<DeclarationFinding> ValidateReferences(StorageUnit unit, bool missingKey)
-    {
-        var diagnostics = new List<DeclarationFinding>();
-        if (missingKey)
-            diagnostics.Add(new("GW-DECL-KEY-001", "A storage declaration requires a key before Build().", "key"));
-
-        var declaredColumns = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
-        var keyColumns = unit.Key.Columns ?? [];
-        var seenKeyColumns = new HashSet<string>(StringComparer.Ordinal);
-        for (var index = 0; index < keyColumns.Count; index++)
-        {
-            var column = keyColumns[index];
-            if (string.IsNullOrWhiteSpace(column) || !declaredColumns.Contains(column))
-                diagnostics.Add(new("GW-DECL-KEY-002", $"Key column '{column}' is not declared on the storage unit.", $"key.columns[{index}]"));
-            if (!string.IsNullOrWhiteSpace(column) && !seenKeyColumns.Add(column))
-                diagnostics.Add(new("GW-DECL-KEY-003", $"Key column '{column}' is listed more than once.", "key.columns"));
-        }
-
-        foreach (var index in unit.Indexes)
-        {
-            var seenIndexColumns = new HashSet<string>(StringComparer.Ordinal);
-            for (var columnIndex = 0; columnIndex < index.Columns.Count; columnIndex++)
-            {
-                var indexColumn = index.Columns[columnIndex];
-                var column = indexColumn.Column;
-                if (string.IsNullOrWhiteSpace(column) || !declaredColumns.Contains(column))
-                    diagnostics.Add(new("GW-DECL-INDEX-001", $"Index '{index.Name}' column '{column}' is not declared on the storage unit.", $"indexes.{index.Name}.columns[{columnIndex}]"));
-                if (!string.IsNullOrWhiteSpace(column) && !seenIndexColumns.Add(column))
-                    diagnostics.Add(new("GW-DECL-INDEX-002", $"Index '{index.Name}' column '{column}' is listed more than once.", $"indexes.{index.Name}.columns"));
-                var declaration = unit.Columns.FirstOrDefault(candidate =>
-                    string.Equals(candidate.Name, column, StringComparison.Ordinal));
-                if (declaration?.Type == PortableType.Json)
-                    diagnostics.Add(new(
-                        "GW-DECL-INDEX-003",
-                        $"Index '{index.Name}' column '{column}' is JSON and cannot be represented as a portable query index key. Leave the JSON column unindexed or index a declared scalar projection instead.",
-                        $"indexes.{index.Name}.columns[{columnIndex}]"));
-            }
-        }
-
-        return diagnostics;
     }
 
     private static IReadOnlyList<string> SnapshotNames(IEnumerable<string> names, string parameterName)
