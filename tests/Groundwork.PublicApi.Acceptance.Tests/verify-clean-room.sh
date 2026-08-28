@@ -8,9 +8,9 @@ package_cache="$(mktemp -d)"
 build_root="$(mktemp -d)"
 trap 'rm -rf "$package_cache" "$build_root"' EXIT
 
-feed="${GROUNDWORK_PUBLIC_API_PACKAGES:-$repo_root/artifacts/packages}"
+feed="${GROUNDWORK_PUBLIC_API_PACKAGES:-$repo_root/artifacts/acceptance-packages}"
 test -d "$feed" || {
-  echo "Missing packed artifacts at '$feed'. Run 'dotnet pack Groundwork.slnx --configuration Release --output artifacts/packages' first." >&2
+  echo "Missing packed artifacts at '$feed'. Run 'dotnet pack Groundwork.slnx --configuration Release --output artifacts/acceptance-packages' first." >&2
   exit 1
 }
 

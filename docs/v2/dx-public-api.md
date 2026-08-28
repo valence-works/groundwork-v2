@@ -61,7 +61,7 @@ the consumer; `friction-log.md` records the remaining ergonomic decisions.
 Run the same proof used by CI:
 
 ```sh
-dotnet pack Groundwork.slnx --configuration Release --output artifacts/packages
+dotnet pack Groundwork.slnx --configuration Release --output artifacts/acceptance-packages
 dotnet test tests/Groundwork.PublicApi.Acceptance.Tests --configuration Release
 ```
 
