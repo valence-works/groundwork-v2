@@ -2,6 +2,7 @@ using Groundwork.Documents;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Planning;
 using Groundwork.Records;
 using Groundwork.Store;
@@ -108,6 +109,16 @@ internal static class PublicApiApprovalFixture
                 "groundwork",
                 DateTimeOffset.UtcNow.AddMinutes(5))
         });
+        _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, SetMutationResult>(
+            (session, predicate, assignments, options) => session.UpdateWhere(predicate, assignments, options));
+        _ = new Func<IStorageSession, Predicate, IReadOnlyDictionary<string, object?>, SetMutationOptions?, CancellationToken, ValueTask<SetMutationResult>>(
+            (session, predicate, assignments, options, cancellationToken) =>
+                session.UpdateWhereAsync(predicate, assignments, options, cancellationToken));
+        _ = new Func<IStorageSession, Predicate, SetMutationOptions?, SetMutationResult>(
+            (session, predicate, options) => session.DeleteWhere(predicate, options));
+        _ = new Func<IStorageSession, Predicate, SetMutationOptions?, CancellationToken, ValueTask<SetMutationResult>>(
+            (session, predicate, options, cancellationToken) =>
+                session.DeleteWhereAsync(predicate, options, cancellationToken));
         _ = new Func<IStorageSession, StorageInspection>(session => session.Inspect());
         _ = new Func<StorageAccessAudit, StorageAccess>(StorageAccess.PrivilegedAcrossScopes);
         _ = new Func<IStorageSession, QueryRequest, CrossScopeQueryResult>(

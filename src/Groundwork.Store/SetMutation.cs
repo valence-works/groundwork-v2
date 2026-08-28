@@ -54,7 +54,7 @@ public interface ISetMutationStorageSession
     ValueTask<SetMutationResult> DeleteWhereAsync(Predicate where, CancellationToken cancellationToken = default);
 }
 
-public static class SetMutationValidation
+internal static class SetMutationValidation
 {
     /// <summary>
     /// Refuses an assignment set that no provider could apply faithfully, and expands it into the

@@ -96,7 +96,7 @@ public static class SetMutationSessionExtensions
 }
 
 /// <summary>The coverage decision one set-based mutation is admitted under.</summary>
-public static class SetMutationAdmission
+internal static class SetMutationAdmission
 {
     /// <summary>
     /// Runs the portability and coverage decisions a read of the same predicate would take, then
@@ -153,7 +153,7 @@ public static class SetMutationAdmission
 /// shape. Reads and set-based mutations run the same checker over the same conversion, so a
 /// mutation cannot be admitted under a rule the equivalent query is not.
 /// </summary>
-public static class StorageUnitCoverage
+internal static class StorageUnitCoverage
 {
     /// <summary>
     /// The index shape as the caller declared it, with provider-owned index columns removed.

@@ -188,12 +188,23 @@ public sealed class SetMutationDifferentialTests
         Assert.Equal(2L, session.Read(Key("o1"))!.Version);
         Assert.Equal(1L, session.Read(Key("a1"))!.Version);
 
+        // Set mutation does not use the append idempotency ledger. Repeating an update stores the
+        // same application value but advances the optimistic token again, so callers must resolve
+        // an unknown acknowledgement before retrying when token stability matters.
+        Assert.Equal(3L, session.UpdateWhere(
+            Status(unit, "old"),
+            new Dictionary<string, object?> { ["label"] = "archived" }).MatchedRows);
+        Assert.Equal(3L, session.Read(Key("o1"))!.Version);
+
         Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, session.Update(
             Row("o1", "old", "stale", 1L),
             WriteOptions.IfVersion(1)).Status);
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, session.Update(
+            Row("o1", "old", "stale", 1L),
+            WriteOptions.IfVersion(2)).Status);
         Assert.Equal(WriteOutcomeStatus.Updated, session.Update(
             Row("o1", "old", "fresh", 1L),
-            WriteOptions.IfVersion(2)).Status);
+            WriteOptions.IfVersion(3)).Status);
 
         var systemOwned = Assert.Throws<InvalidOperationException>(() => session.UpdateWhere(
             Status(unit, "old"),

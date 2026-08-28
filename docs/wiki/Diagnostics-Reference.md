@@ -184,10 +184,12 @@ same `AcceptScan` a read would need. The codes below cover what is specific to m
 | `GW-SET-003` | A set-based update was issued with no column assignments. |
 | `GW-SET-004` | Assignment to a `PortableType.Json` column. Assign a portable scalar or binary column instead. |
 
-Assignments are values, never column-relative expressions, so a set-based mutation is naturally
-replay-safe: re-issuing one after a lost acknowledgement reaches the same rows with the same result.
-Assigning the optimistic token is refused as `GW-WRITE-CONCURRENCY-003`, by the same rule that
-refuses supplying it to a keyed write; a set-based update bumps the token itself.
+Assignments are values, never column-relative expressions. Repeating an update stores the same
+application values, but set mutation does not participate in the append idempotency ledger and a
+repeat on an optimistic-concurrency unit bumps every matched token again. Resolve an unknown
+acknowledgement before retrying when token stability matters. Assigning the optimistic token is
+refused as `GW-WRITE-CONCURRENCY-003`, by the same rule that refuses supplying it to a keyed write;
+a set-based update bumps the token itself.
 
 ---
 
