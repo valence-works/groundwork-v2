@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -21,4 +21,7 @@
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="../Groundwork.LiveDatabases/LiveMongo.cs" Link="LiveMongo.cs" />
+  </ItemGroup>
 </Project>

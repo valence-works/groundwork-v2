@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>$(GroundworkBuildTaskTargetFramework)</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -9,6 +9,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.skippablefact" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.Build.Framework" />
@@ -17,5 +18,11 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj" />
     <ProjectReference Include="../../src/Groundwork.SchemaTool.MSBuild/Groundwork.SchemaTool.MSBuild.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
+    <ProjectReference Include="../../src/Groundwork.MongoDb/Groundwork.MongoDb.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Groundwork.LiveDatabases/LiveMongo.cs" Link="LiveMongo.cs" />
   </ItemGroup>
 </Project>

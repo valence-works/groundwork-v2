@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Store;
@@ -14,8 +15,17 @@ public sealed class SqliteProviderFactory : IStorageProviderFactory
         new SqliteProviderConnection(connectionString);
 }
 
-public sealed class SqliteProviderConnection : IStorageProviderConnection
+public sealed class SqliteProviderConnection : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
+    /// <summary>
+    /// SQLite's parameter ceiling is a compile-time option of the library this process loaded, so it is
+    /// advertised here rather than assumed by callers.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission { get; } = new()
+    {
+        MaximumParameters = SqliteQueryRenderer.ParameterBudget
+    };
+
     private readonly object gate = new();
     private readonly SqliteConnection connection;
     private readonly FileStream? schemaLock;
@@ -36,7 +46,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             opened = CreateOpenConnection(builder.ConnectionString);
             schemaLock = acquiredLock;
             connection = opened;
-            isMemory = builder.Mode == SqliteOpenMode.Memory || builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase);
+            isMemory = SqliteDataSource.IsMemory(builder);
             schemaCoordinator = new SqliteSchemaCoordinator(this);
             Schema = schemaCoordinator;
             Catalog = new SqliteProviderCatalog(this);
@@ -85,18 +95,27 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         }
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var sessionConnection = isMemory ? connection : CreateIndependentConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, sessionConnection);
+        }
+        catch
+        {
+            if (!isMemory)
+                sessionConnection.Dispose();
+            throw;
+        }
         if (!isMemory)
             lock (gate) sessionConnections.Add(sessionConnection);
-        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null);
+        return new SqliteStorageSession(this, SqliteSchemaCoordinator.Physicalize(unit), access, sessionConnection, null, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -105,6 +124,13 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
     public IUnitOfWork BeginUnitOfWork(
         StorageAccess access,
         BatchWriteOptions options,
+        params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
         params StorageUnit[] units)
     {
         ThrowIfDisposed();
@@ -116,19 +142,19 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
-        foreach (var unit in units)
-        {
-            ArgumentNullException.ThrowIfNull(unit);
-            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
-            SqliteSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
-        }
-
         var transactional = CreateIndependentConnection();
         try
         {
+            foreach (var unit in units)
+            {
+                ArgumentNullException.ThrowIfNull(unit);
+                PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+                SqliteSchemaCoordinator.ValidateAccess(unit, access);
+                schemaCoordinator.EnsureRuntimeAdmission(unit, observer, transactional);
+            }
+
             var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options);
+            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options, observer);
         }
         catch
         {
@@ -176,15 +202,10 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
 
     private static FileStream? AcquireSchemaLock(SqliteConnectionStringBuilder builder)
     {
-        if (builder.Mode == SqliteOpenMode.Memory ||
-            string.IsNullOrWhiteSpace(builder.DataSource) ||
-            builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase))
+        if (SqliteDataSource.IsMemory(builder))
             return null;
 
-        var dataSource = builder.DataSource;
-        if (dataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
-            dataSource = dataSource[5..].Split('?', 2)[0];
-        var fullPath = Path.GetFullPath(dataSource);
+        var fullPath = SqliteDataSource.FullPath(builder.DataSource);
         var directory = Path.GetDirectoryName(fullPath);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
@@ -195,8 +216,17 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
         }
         catch (IOException exception)
         {
+            // The lock is held for the whole life of a connection, so this is just as likely to be a
+            // second connection inside this process — the reflex an ASP.NET Core developer brings from
+            // per-request data-access libraries — as it is a second process. Name both, and name the fix.
             throw new InvalidOperationException(
-                $"SQLite store '{fullPath}' is already in use by another Groundwork process.", exception);
+                $"GW-SQLITE-LIFETIME-001: SQLite store '{fullPath}' already has an open Groundwork connection " +
+                "holding its schema lock, in this process or another one. A SQLite store allows exactly one " +
+                "IStorageProviderConnection per database file, held for the life of the process. Keep the one " +
+                "connection and open a session or unit of work per request from it — under a host, register it " +
+                "with AddGroundwork().AddConnection(...), which registers connections as process singletons. " +
+                "In tests, give each test its own database file or use 'Data Source=:memory:'.",
+                exception);
         }
     }
 
@@ -210,6 +240,25 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection
             connection.CreateFunction<string, string>(
                 "groundwork_scope_token",
                 static scope => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scope))),
+                isDeterministic: true);
+            connection.CreateFunction<string?, long, int, string?, long?, string?>(
+                "groundwork_time_bucket",
+                static (value, widthTicks, kind, timeZoneId, originTicks) =>
+                {
+                    if (value is null)
+                        return null;
+                    var timestamp = DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                    var origin = originTicks is long ticks
+                        ? new DateTimeOffset(ticks, TimeSpan.Zero)
+                        : (DateTimeOffset?)null;
+                    var bucket = AggregationTimeBucketCalculator.Bucket(
+                        timestamp,
+                        (AggregationTimeBucketKind)kind,
+                        TimeSpan.FromTicks(widthTicks),
+                        timeZoneId,
+                        origin);
+                    return bucket.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+                },
                 isDeterministic: true);
             connection.CreateCollation("GROUNDWORK_DECIMAL_18_4", static (left, right) =>
             {

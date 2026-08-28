@@ -564,6 +564,11 @@ public interface IBatchedStorageSession
     IReadOnlyList<RowWriteOutcome> ApplyBatch(
         IReadOnlyList<RowWrite> writes,
         bool exactOutcomes) => ApplyBatch(writes);
+
+    ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Shared staging, grouping, coalescing, and flush-on-read behavior.</summary>
@@ -608,21 +613,42 @@ internal sealed class BatchContext
         ordinals.Add(write, nextOrdinal++);
     }
 
-    internal IReadOnlyList<RowWriteOutcome> FlushFor(StorageUnit unit, StorageKey key)
+    internal IReadOnlyList<RowWriteOutcome> FlushFor(StorageUnit unit, StorageKey key) =>
+        FlushForAsync(unit, key, isAsync: false, CancellationToken.None).GetAwaiter().GetResult();
+
+    internal ValueTask<IReadOnlyList<RowWriteOutcome>> FlushForAsync(
+        StorageUnit unit,
+        StorageKey key,
+        CancellationToken cancellationToken) =>
+        FlushForAsync(unit, key, isAsync: true, cancellationToken);
+
+    private ValueTask<IReadOnlyList<RowWriteOutcome>> FlushForAsync(
+        StorageUnit unit,
+        StorageKey key,
+        bool isAsync,
+        CancellationToken cancellationToken)
     {
         EnsureHealthy();
         var writes = staged.Where(write =>
             write.Unit.Id == unit.Id &&
             (write.HasUnassignedProviderSequenceKey || write.Matches(key))).ToArray();
-        return writes.Length == 0 ? [] : Flush(writes);
+        return writes.Length == 0
+            ? new ValueTask<IReadOnlyList<RowWriteOutcome>>([])
+            : Flush(writes, isAsync, cancellationToken);
     }
 
-    internal IReadOnlyList<RowWriteOutcome> FlushAll()
+    internal IReadOnlyList<RowWriteOutcome> FlushAll() =>
+        FlushAllAsync(isAsync: false, CancellationToken.None).GetAwaiter().GetResult();
+
+    internal ValueTask<IReadOnlyList<RowWriteOutcome>> FlushAllAsync(CancellationToken cancellationToken) =>
+        FlushAllAsync(isAsync: true, cancellationToken);
+
+    private ValueTask<IReadOnlyList<RowWriteOutcome>> FlushAllAsync(bool isAsync, CancellationToken cancellationToken)
     {
         EnsureHealthy();
-        if (staged.Count == 0)
-            return [];
-        return Flush(staged.ToArray());
+        return staged.Count == 0
+            ? new ValueTask<IReadOnlyList<RowWriteOutcome>>([])
+            : Flush(staged.ToArray(), isAsync, cancellationToken);
     }
 
     internal IReadOnlyList<RowWriteOutcome> DrainCompleted()
@@ -634,7 +660,10 @@ internal sealed class BatchContext
 
     internal bool ReachedCap => staged.Count >= options.MaxRowsPerFlush;
 
-    private IReadOnlyList<RowWriteOutcome> Flush(IReadOnlyList<RowWrite> writes)
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> Flush(
+        IReadOnlyList<RowWrite> writes,
+        bool isAsync,
+        CancellationToken cancellationToken)
     {
         EnsureHealthy();
         try
@@ -656,7 +685,9 @@ internal sealed class BatchContext
 
                 var groupItems = group.ToArray();
                 var finalWrites = groupItems.Select(item => item.Final).ToArray();
-                var groupOutcomes = session.ApplyBatch(finalWrites, exactOutcomes);
+                var groupOutcomes = isAsync
+                    ? await session.ApplyBatchAsync(finalWrites, exactOutcomes, cancellationToken).ConfigureAwait(false)
+                    : session.ApplyBatch(finalWrites, exactOutcomes);
                 if (groupOutcomes.Count != finalWrites.Length)
                     throw new InvalidOperationException(
                         $"The provider returned {groupOutcomes.Count} outcomes for a batch of {finalWrites.Length} writes.");
@@ -778,6 +809,12 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
         return inner.Read(key);
     }
 
+    public async ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default)
+    {
+        await context.FlushForAsync(Unit, key, cancellationToken).ConfigureAwait(false);
+        return await inner.ReadAsync(key, cancellationToken).ConfigureAwait(false);
+    }
+
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
         // A query can observe any key in the unit, so its read barrier is the whole
@@ -786,19 +823,60 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
         return inner.Query(request, options);
     }
 
+    public async ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.QueryAsync(request, options, cancellationToken).ConfigureAwait(false);
+    }
+
     public AggregationResult Aggregate(AggregationQuery query)
     {
         context.FlushAll();
         return inner.Aggregate(query);
     }
 
+    public async ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.AggregateAsync(query, cancellationToken).ConfigureAwait(false);
+    }
+
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
+
+    public ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        inner.InsertAsync(values, options, cancellationToken);
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => inner.Update(values, options);
 
+    public ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        inner.UpdateAsync(values, options, cancellationToken);
+
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
 
+    public ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        inner.UpsertAsync(values, options, cancellationToken);
+
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
+
+    public ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        inner.DeleteAsync(key, options, cancellationToken);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
     {
@@ -806,6 +884,15 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
         return inner is IRetentionStorageSession native
             ? native.ApplyRetention(options)
             : RetentionSessionExtensions.ApplyRetention(inner, options);
+    }
+
+    public async ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null)
+    {
+        var cancellationToken = options?.CancellationToken ?? CancellationToken.None;
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return inner is IRetentionStorageSession native
+            ? await native.ApplyRetentionAsync(options).ConfigureAwait(false)
+            : await RetentionSessionExtensions.ApplyRetentionAsync(inner, options).ConfigureAwait(false);
     }
 
     public StorageInspection Inspect()
@@ -817,6 +904,15 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
             : throw new NotSupportedException("GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
     }
 
+    public async ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default)
+    {
+        StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
+        await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+        return inner is IStorageInspectionSession inspection
+            ? await inspection.InspectAsync(cancellationToken).ConfigureAwait(false)
+            : throw new NotSupportedException("GW-INSPECT-001: this provider session does not advertise durable high-water inspection.");
+    }
+
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
     {
         context.FlushAll();
@@ -825,12 +921,36 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
             : throw new NotSupportedException("GW-RETENTION-003: this provider session does not advertise exact retention operations.");
     }
 
+    public async ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null)
+    {
+        await context.FlushAllAsync(options?.CancellationToken ?? CancellationToken.None).ConfigureAwait(false);
+        return inner is IExactRetentionStorageSession exact
+            ? await exact.ApplyRetentionAsync(operationId, options).ConfigureAwait(false)
+            : throw new NotSupportedException("GW-RETENTION-003: this provider session does not advertise exact retention operations.");
+    }
+
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) =>
         inner.Append(operationId, values);
+
+    public ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        inner.AppendAsync(operationId, values, cancellationToken);
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
         inner is IExactAppendStorageSession exact
             ? exact.AppendWithOutcomes(operationId, values)
+            : throw new NotSupportedException("GW-APPEND-003: this provider session does not advertise exact append outcomes.");
+
+    public ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        inner is IExactAppendStorageSession exact
+            ? exact.AppendWithOutcomesAsync(operationId, values, cancellationToken)
             : throw new NotSupportedException("GW-APPEND-003: this provider session does not advertise exact append outcomes.");
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
@@ -838,8 +958,49 @@ internal class BatchStorageSession : IStorageSession, IExactAppendStorageSession
             ? concurrency.ConditionalUpsert(values, options)
             : throw new NotSupportedException("The provider session does not support conditional upsert.");
 
+    public ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        inner is IConcurrencyStorageSession concurrency
+            ? concurrency.ConditionalUpsertAsync(values, options, cancellationToken)
+            : throw new NotSupportedException("The provider session does not support conditional upsert.");
+
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
         => ApplyBatch(writes, exactOutcomes: false);
+
+    public ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        CancellationToken cancellationToken = default) =>
+        inner is IBatchedStorageSession batched
+            ? batched.ApplyBatchAsync(writes, exactOutcomes, cancellationToken)
+            : ApplyFallbackAsync(writes, cancellationToken);
+
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyFallbackAsync(
+        IReadOnlyList<RowWrite> writes,
+        CancellationToken cancellationToken)
+    {
+        var outcomes = new List<RowWriteOutcome>(writes.Count);
+        foreach (var write in writes)
+        {
+            outcomes.Add(new RowWriteOutcome(write, write.Mode switch
+            {
+                RowWriteMode.Insert => await inner.InsertAsync(write.Values!, write.Options, cancellationToken).ConfigureAwait(false),
+                RowWriteMode.Update => await inner.UpdateAsync(write.Values!, write.Options, cancellationToken).ConfigureAwait(false),
+                RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
+                    await ConditionalUpsertAsync(write.Values!, write.Options, cancellationToken).ConfigureAwait(false),
+                RowWriteMode.Upsert => await inner.UpsertAsync(write.Values!, write.Options, cancellationToken).ConfigureAwait(false),
+                RowWriteMode.ConditionalUpsert => await ConditionalUpsertAsync(write.Values!, write.Options, cancellationToken).ConfigureAwait(false),
+                RowWriteMode.Delete => await inner.DeleteAsync(write.Key!, write.Options, cancellationToken).ConfigureAwait(false),
+                RowWriteMode.CompareAndDelete => inner is ICompareAndDeleteStorageSession compareAndDelete
+                    ? await compareAndDelete.CompareAndDeleteAsync(write.Key!, write.ExpectedValues, write.Options, cancellationToken).ConfigureAwait(false)
+                    : throw new NotSupportedException("The provider session does not support compare-and-delete."),
+                _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
+            }));
+        }
+        return outcomes;
+    }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
     {
@@ -886,5 +1047,22 @@ internal sealed class BatchCompareAndDeleteStorageSession : BatchStorageSession,
         var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
         context.FlushFor(Unit, canonicalKey);
         return compareAndDelete.CompareAndDelete(canonicalKey, validated, options);
+    }
+
+    public async ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (inner is not ICompareAndDeleteStorageSession compareAndDelete)
+            throw new NotSupportedException(
+                "GW-COMPARE-DELETE-001: this provider does not advertise atomic compare-and-delete.");
+
+        var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
+        var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
+        await context.FlushForAsync(Unit, canonicalKey, cancellationToken).ConfigureAwait(false);
+        return await compareAndDelete.CompareAndDeleteAsync(canonicalKey, validated, options, cancellationToken)
+            .ConfigureAwait(false);
     }
 }

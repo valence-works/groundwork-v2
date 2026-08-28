@@ -17,6 +17,25 @@ public static class PhysicalSchemaTargetCompiler
     }
 }
 
+/// <summary>
+/// Signals applied schema state that this build cannot reproduce: the recorded target fingerprint
+/// disagrees with the one its own subject snapshot now yields, which a release note marks as a
+/// persisted schema boundary. The catalog is not migrated in place — it is discarded.
+/// </summary>
+public sealed class GroundworkSchemaBoundaryException : InvalidOperationException
+{
+    public const string Code = "GW-SCHEMA-006";
+
+    public GroundworkSchemaBoundaryException(PhysicalSchemaTargetIdentity target)
+        : base($"{Code}: applied schema state for '{target}' was recorded under a different persisted " +
+               "schema boundary, so its target fingerprint no longer matches its own subject snapshot. " +
+               "Discard that catalog and create a fresh one from the current declarations; Groundwork " +
+               "ships no in-place migration, compatibility alias, dual-write, or fallback between them.") =>
+        Target = target;
+
+    public PhysicalSchemaTargetIdentity Target { get; }
+}
+
 /// <summary>Canonical JSON persistence for the CAS schema history snapshot.</summary>
 public static class PhysicalSchemaAppliedStateSerializer
 {
@@ -24,7 +43,7 @@ public static class PhysicalSchemaAppliedStateSerializer
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false,
-        Converters = { new PortableDefaultJsonConverter(), new JsonStringEnumConverter() }
+        Converters = { new PortableDefaultJsonConverter(), new ReadOnlySetJsonConverterFactory(), new JsonStringEnumConverter() }
     };
 
     public static string Serialize(PhysicalSchemaAppliedState state)
@@ -56,7 +75,7 @@ public static class PhysicalSchemaAppliedStateSerializer
         var subject = new SchemaSubject(payload.Definition, payload.Evolution);
         var target = new PhysicalSchemaTarget(subject, payload.Provider, payload.ProviderDefinitions ?? []);
         if (!string.Equals(target.Fingerprint, payload.TargetFingerprint, StringComparison.Ordinal))
-            throw new InvalidOperationException("Applied schema state target fingerprint does not match its subject snapshot.");
+            throw new GroundworkSchemaBoundaryException(target.Identity);
         var snapshot = new PhysicalSchemaAppliedSnapshot(
             subject,
             payload.SemanticOperations ?? [],
@@ -91,6 +110,37 @@ public static class PhysicalSchemaAppliedStateSerializer
         public ProviderPhysicalSchemaDefinition[]? ProviderDefinitions { get; set; }
 
         public PhysicalSchemaAppliedOperation[]? AppliedOperations { get; set; }
+    }
+
+    private sealed class ReadOnlySetJsonConverterFactory : JsonConverterFactory
+    {
+        public override bool CanConvert(Type typeToConvert) =>
+            typeToConvert.IsGenericType && typeToConvert.GetGenericTypeDefinition() == typeof(IReadOnlySet<>);
+
+        public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options) =>
+            (JsonConverter)Activator.CreateInstance(
+                typeof(ReadOnlySetJsonConverter<>).MakeGenericType(typeToConvert.GetGenericArguments()[0]))!;
+    }
+
+    private sealed class ReadOnlySetJsonConverter<T> : JsonConverter<IReadOnlySet<T>>
+    {
+        public override IReadOnlySet<T> Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options) =>
+            JsonSerializer.Deserialize<HashSet<T>>(ref reader, options)
+                ?? throw new JsonException("A set cannot be null.");
+
+        public override void Write(
+            Utf8JsonWriter writer,
+            IReadOnlySet<T> value,
+            JsonSerializerOptions options)
+        {
+            writer.WriteStartArray();
+            foreach (var item in value)
+                JsonSerializer.Serialize(writer, item, options);
+            writer.WriteEndArray();
+        }
     }
 
     private sealed class PortableDefaultJsonConverter : JsonConverter<PortableDefault>

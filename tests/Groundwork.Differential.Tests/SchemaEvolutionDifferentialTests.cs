@@ -1,0 +1,226 @@
+using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
+using Xunit;
+
+namespace Groundwork.Differential.Tests;
+
+/// <summary>
+/// One authorized evolution — rename primary storage, rename a column, widen a column, drop a
+/// column, drop an index — run against every relational provider through the same public schema
+/// machinery the deployment tool uses. Each case asserts on the rows themselves, because the point
+/// of a rename is that the data is still there afterwards.
+///
+/// These share one live SQL Server and one live MongoDB with every other differential class, and
+/// provider infrastructure DDL is created on first use rather than per test. Running alongside the
+/// other live-provider classes therefore races that creation, so this class joins the collection
+/// that already serializes them.
+/// </summary>
+[Collection(NativeProviderDifferentialCollection.Name)]
+public sealed class SchemaEvolutionDifferentialTests
+{
+    [Fact]
+    public void Sqlite_carries_rows_through_an_authorized_rename_alter_and_drop() =>
+        RunEvolution(RelationalSchemaProvider.Sqlite("gw_evo"));
+
+    [SkippableFact]
+    public void PostgreSql_carries_rows_through_an_authorized_rename_alter_and_drop() =>
+        RunEvolution(RelationalSchemaProvider.PostgreSql("gw_evo"));
+
+    [SkippableFact]
+    public void SqlServer_carries_rows_through_an_authorized_rename_alter_and_drop() =>
+        RunEvolution(RelationalSchemaProvider.SqlServer("gw_evo"));
+
+    [Fact]
+    public void Sqlite_retires_primary_storage_under_authorization() =>
+        RunRetirement(RelationalSchemaProvider.Sqlite("gw_evo"));
+
+    [SkippableFact]
+    public void PostgreSql_retires_primary_storage_under_authorization() =>
+        RunRetirement(RelationalSchemaProvider.PostgreSql("gw_evo"));
+
+    [SkippableFact]
+    public void SqlServer_retires_primary_storage_under_authorization() =>
+        RunRetirement(RelationalSchemaProvider.SqlServer("gw_evo"));
+
+    private static void RunEvolution(RelationalSchemaProvider provider)
+    {
+        using var store = provider.Open();
+        var initial = Orders(store.Table, store.Table, includeLegacyTotal: true);
+        Apply(store, initial);
+        // The folded "code" column expands into a derived search-key column, so every relational
+        // provider records a provider-owned definition whose identity embeds the storage name.
+        // Without one, only SQL Server would exercise DropProviderDefinition through the rename
+        // below, and the PostgreSQL and SQLite implementations of it would never run.
+        Assert.NotEmpty(Inspect(store, initial).History.AppliedState!.Snapshot.ProviderDefinitions);
+        store.Execute(
+            $"INSERT INTO {store.Quote(store.Table)} ({store.Quote("id")}, {store.Quote("customer")}, " +
+            $"{store.Quote("total")}, {store.Quote("legacy_total")}) VALUES ('o-1', 'ada', 10, 7);");
+
+        // Rename the storage and one column, widen another, and drop the legacy one — all at once.
+        var renamedTable = store.Table + "_v2";
+        var evolved = Orders(store.Table, renamedTable, includeLegacyTotal: false) with
+        {
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 200, IsNullable = false },
+                new() { Name = "code", Type = PortableType.String, MaxLength = 32, Collation = PortableCollation.OrdinalIgnoreCase },
+                new() { Name = "total", Type = PortableType.Decimal, Precision = 18, Scale = 4 }
+            ],
+            // by_total survives the storage rename. Every relational dialect Groundwork ships
+            // derives its physical index name from the storage name, so an index that does not move
+            // with its table stops being addressable by its declaration.
+            Indexes = [new IndexDefinition { Name = "by_total", Columns = [new IndexColumn("total")] }]
+        };
+
+        var plan = Plan(store, evolved);
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        Assert.Single(plan.Operations.OfType<RenamePrimaryStorageOperation>());
+        var renamedColumn = Assert.Single(plan.Operations.OfType<RenameColumnOperation>());
+        Assert.Equal("customer", renamedColumn.FromName);
+        Assert.Equal("buyer", renamedColumn.ToName);
+        Assert.Equal(ColumnAlterationKind.Widening, Assert.Single(plan.Operations.OfType<AlterColumnOperation>()).Alteration);
+        Assert.Equal("legacy_total", Assert.Single(plan.Operations.OfType<DropColumnOperation>()).Column.Name);
+        Assert.Equal("by_customer", Assert.Single(plan.Operations.OfType<DropPhysicalIndexOperation>()).Index.Name);
+        // Unauthorized, the same plan refuses rather than dropping anything.
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.AuthorizationRequired,
+            Apply(store, evolved, authorize: false).Outcome);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, Apply(store, evolved).Outcome);
+
+        // The row survived the rename, under its new storage name and its new column name.
+        Assert.Equal(
+            "ada",
+            store.Scalar($"SELECT {store.Quote("buyer")} FROM {store.Quote(renamedTable)} WHERE {store.Quote("id")}='o-1';"));
+        Assert.Equal(
+            10m,
+            Convert.ToDecimal(store.Scalar(
+                $"SELECT {store.Quote("total")} FROM {store.Quote(renamedTable)} WHERE {store.Quote("id")}='o-1';")));
+
+        // The provider definitions moved with the storage instead of being left behind under the
+        // old name. A stale row or type per rename is exactly the residue this must not leave.
+        Assert.Equal(0L, Convert.ToInt64(store.Scalar(
+            $"SELECT count(*) FROM {store.Quote("__groundwork_search_key_algorithms")} " +
+            $"WHERE {store.Quote("table_name")}='{store.Table}';")));
+        Assert.NotEqual(0L, Convert.ToInt64(store.Scalar(
+            $"SELECT count(*) FROM {store.Quote("__groundwork_search_key_algorithms")} " +
+            $"WHERE {store.Quote("table_name")}='{renamedTable}';")));
+
+        // Replanning the same declaration finds nothing left to do, and the ledger has shrunk.
+        Assert.Empty(Plan(store, evolved).Operations);
+        var inspection = Inspect(store, evolved);
+        Assert.True(inspection.IsAppliedSchemaValid);
+        Assert.False(inspection.HasColumnDrift);
+        // The surviving index moved with its storage instead of being stranded under the old name.
+        Assert.False(inspection.HasIndexDrift, string.Join("; ", inspection.IndexDrift.Select(refusal => refusal.Message)));
+        var applied = inspection.History.AppliedState!;
+        Assert.DoesNotContain(applied.Snapshot.SemanticOperations,
+            operation => operation.SubjectIdentity is "legacy_total" or "customer" or "by_customer");
+        Assert.Contains(applied.Snapshot.SemanticOperations, operation => operation.SubjectIdentity == "buyer");
+    }
+
+    private static void RunRetirement(RelationalSchemaProvider provider)
+    {
+        using var store = provider.Open();
+        Apply(store, Orders(store.Table, store.Table, includeLegacyTotal: false));
+        Assert.True(store.TableExists(store.Table));
+
+        var retired = Orders(store.Table, store.Table, includeLegacyTotal: false);
+        var plan = Plan(store, retired, retires: true);
+        Assert.True(plan.IsApplicable, string.Join("; ", plan.Refusals.Select(refusal => refusal.Message)));
+        Assert.Single(plan.Operations.OfType<DropPrimaryStorageOperation>());
+        Assert.Equal(
+            PhysicalSchemaApplicationOutcome.AuthorizationRequired,
+            Apply(store, retired, authorize: false, retires: true).Outcome);
+
+        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, Apply(store, retired, retires: true).Outcome);
+
+        Assert.False(store.TableExists(store.Table));
+        // Retiring a unit removes its provider-owned definitions too. Leaving them is the same
+        // residue a rename would leave, and nothing would ever come back to collect them.
+        Assert.Equal(0L, Convert.ToInt64(store.Scalar(
+            $"SELECT count(*) FROM {store.Quote("__groundwork_search_key_algorithms")} " +
+            $"WHERE {store.Quote("table_name")}='{store.Table}';")));
+        Assert.Empty(Plan(store, retired, retires: true).Operations);
+    }
+
+    /// <summary>
+    /// The logical id is per store, not the constant "orders". Schema history is keyed on
+    /// (logical id, provider), and every SQL Server case in this suite shares one database — so a
+    /// constant id makes two tests with different physical tables claim one history row, and the
+    /// second one legitimately plans a rename away from a table the first already dropped. The
+    /// physical name still varies independently, which is what the rename case needs.
+    /// </summary>
+    private static StorageUnit Orders(string id, string table, bool includeLegacyTotal) => new()
+    {
+        Id = new StorageUnitId(id),
+        Name = table,
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "customer", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            // Folded, so every relational provider records a search-key provider definition whose
+            // identity embeds the storage name. Without one, only SQL Server (which always emits a
+            // batch type) exercises provider definitions through a rename.
+            new() { Name = "code", Type = PortableType.String, MaxLength = 32, Collation = PortableCollation.OrdinalIgnoreCase },
+            new() { Name = "total", Type = PortableType.Decimal, Precision = 18, Scale = 4 },
+            ..(includeLegacyTotal
+                ? new[] { new ColumnDefinition { Name = "legacy_total", Type = PortableType.Decimal, Precision = 18, Scale = 4 } }
+                : [])
+        ],
+        Key = new KeyDefinition { Columns = ["id"] },
+        Indexes = includeLegacyTotal
+            ?
+            [
+                new IndexDefinition { Name = "by_customer", Columns = [new IndexColumn("customer")] },
+                new IndexDefinition { Name = "by_total", Columns = [new IndexColumn("total")] }
+            ]
+            : []
+    };
+
+    private static PhysicalSchemaTarget Target(RelationalSchemaStore store, StorageUnit unit, bool retires)
+    {
+        var target = store.Session.Targets.Compile(unit);
+        return retires
+            ? new PhysicalSchemaTarget(
+                new SchemaSubject(target.Subject.Definition, new SchemaEvolutionMetadata(retiresPrimaryStorage: true)),
+                target.Provider,
+                target.ProviderDefinitions)
+            : target;
+    }
+
+    private static PhysicalSchemaDiffPlan Plan(RelationalSchemaStore store, StorageUnit unit, bool retires = false)
+    {
+        var target = Target(store, unit, retires);
+        return PhysicalSchemaDiffPlanner.Plan(target, Inspect(store, unit, retires).History, DateTimeOffset.UnixEpoch);
+    }
+
+    private static PhysicalSchemaInspectionResult Inspect(RelationalSchemaStore store, StorageUnit unit, bool retires = false) =>
+        store.Session.Inspector.InspectHistory(Target(store, unit, retires));
+
+    private static PhysicalSchemaApplicationResult Apply(
+        RelationalSchemaStore store,
+        StorageUnit unit,
+        bool authorize = true,
+        bool retires = false)
+    {
+        var target = Target(store, unit, retires);
+        return PhysicalSchemaApplication.Apply(
+            target,
+            store.Session.Executor,
+            planAuthorization: plan =>
+            {
+                var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+                if (protection.IsSafe)
+                    return PhysicalSchemaPlanAuthorization.Allow;
+                if (authorize)
+                    return PhysicalSchemaPlanAuthorization.Allow;
+                return PhysicalSchemaPlanAuthorization.Deny(protection.DestructiveOperations
+                    .Select(operation => new SchemaRefusal(
+                        "GW-CLI-008",
+                        $"Destructive operation '{operation.Address ?? operation.Identity}' requires explicit authorization.",
+                        "authorization.destructive")));
+            });
+    }
+}

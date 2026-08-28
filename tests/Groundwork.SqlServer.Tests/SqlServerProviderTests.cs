@@ -1,6 +1,8 @@
 using Microsoft.Data.SqlClient;
 using Testcontainers.MsSql;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
+using Groundwork.LiveDatabases;
 using Groundwork.SqlServer;
 using Groundwork.Testing;
 using Groundwork.Store;
@@ -8,17 +10,62 @@ using Xunit;
 
 namespace Groundwork.SqlServer.Tests;
 
-[Collection("SQL Server provider")]
+[Collection(SqlServerLiveDatabase.Name)]
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [Fact]
-    public void Provider_passes_provider_neutral_conformance()
+    public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
+    {
+        fixture.Reset();
+        using (new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            // Both surfaces run against the one live database, without a reset between them:
+            // each proves the whole contract on its own storage units.
+            var synchronous = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
+            Assert.True(synchronous.Passed, Describe(synchronous));
+
+            var asynchronous = await ConformanceSuite.RunAsync(new SqlServerProviderFactory(), fixture.ConnectionString);
+            Assert.True(asynchronous.Passed, Describe(asynchronous));
+        }
+    }
+
+    private static string Describe(ConformanceReport report) => string.Join(Environment.NewLine,
+        report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}"));
+
+    [Fact]
+    public async Task Nested_write_is_refused_rather_than_blocking()
     {
         fixture.Reset();
         using var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString);
-        var report = ConformanceSuite.Run(new SqlServerProviderFactory(), fixture.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+        var name = "nested_write_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction. The gate is a non-reentrant semaphore, so
+        // a regression here hangs rather than throwing; the timeout turns that into a failure.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -392,16 +439,71 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
         Assert.Contains("bounded String key column", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Live_dropped_column_on_a_plain_unit_is_fatal_at_session_open()
+    {
+        fixture.Reset();
+        var name = "w2_sqlserver_admission_drop_" + Guid.NewGuid().ToString("N");
+        var unit = AdmissionUnit(name);
+        using (var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using (var sql = new SqlConnection(fixture.ConnectionString))
+        {
+            sql.Open();
+            using var alter = sql.CreateCommand();
+            alter.CommandText = $"ALTER TABLE [{name}] DROP COLUMN [payload];";
+            alter.ExecuteNonQuery();
+        }
+
+        using var reopened = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Live_admission_inspects_once_per_unit_per_connection()
+    {
+        fixture.Reset();
+        var name = "w2_sqlserver_admission_cache_" + Guid.NewGuid().ToString("N");
+        var unit = AdmissionUnit(name);
+        using (var connection = new SqlServerProviderFactory().Create(fixture.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using var reopened = new SqlServerProviderFactory().Create(fixture.ConnectionString);
+        var firstObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, firstObserver);
+        var admissionEvent = Assert.Single(firstObserver.Commands);
+        Assert.Equal("sqlserver.schema-admission", admissionEvent.Operation);
+        Assert.Equal(ProviderCommandKind.Read, admissionEvent.Kind);
+
+        var secondObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, secondObserver);
+        Assert.Equal(0, secondObserver.RoundTrips);
+    }
+
+    private static StorageUnit AdmissionUnit(string name) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 100, IsNullable = false },
+            new ColumnDefinition { Name = "payload", Type = PortableType.String, MaxLength = 200 }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
     private static string Describe(ConcurrencyHarnessReport report) =>
         string.Join(Environment.NewLine, report.Scenarios.SelectMany(scenario =>
             scenario.Invariants.Select(invariant =>
                 $"seed={scenario.Seed} {invariant.Name}: {invariant.Passed} ({invariant.Detail})")));
 
-}
-
-[CollectionDefinition("SQL Server provider", DisableParallelization = true)]
-public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>
-{
 }
 
 public sealed class SqlServerFixture : IAsyncLifetime
@@ -431,8 +533,10 @@ public sealed class SqlServerFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        ConnectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION") ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(ConnectionString)) return;
+        // A configured server hands out a database this process owns; without one the suite starts
+        // a container that is already its own.
+        ConnectionString = LiveSqlServer.ConnectionString ?? string.Empty;
+        if (ConnectionString.Length != 0) return;
 
         container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU21-ubuntu-22.04")
             .WithPassword("Groundwork!2026")

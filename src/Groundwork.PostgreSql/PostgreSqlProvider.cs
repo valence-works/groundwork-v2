@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data;
+using System.Data.Common;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Substrate.Relational;
@@ -16,8 +17,17 @@ public sealed class PostgreSqlProviderFactory : IStorageProviderFactory
         new PostgreSqlProviderConnection(connectionString);
 }
 
-public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
+public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
+    /// <summary>
+    /// The budget PostgreSqlQueryRenderer enforces, so the pre-execution fence and the renderer cannot
+    /// disagree about it.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission { get; } = new()
+    {
+        MaximumParameters = PostgreSqlQueryRenderer.ParameterBudget
+    };
+
     private readonly string connectionString;
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly ConcurrentBag<NpgsqlConnection> ownedConnections = [];
@@ -60,17 +70,25 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
             : PostgreSqlSchemaCoordinator.Physicalize(source);
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = OpenConnection();
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
         OwnConnection(connection);
-        return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null);
+        return new PostgreSqlStorageSession(this, Resolve(unit), access, connection, null, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -79,6 +97,13 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
     public IUnitOfWork BeginUnitOfWork(
         StorageAccess access,
         BatchWriteOptions options,
+        params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
         params StorageUnit[] units)
     {
         ThrowIfDisposed();
@@ -90,20 +115,20 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
-        foreach (var unit in units)
-        {
-            ArgumentNullException.ThrowIfNull(unit);
-            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
-            PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
-        }
-
         var connection = OpenConnection();
         try
         {
+            foreach (var unit in units)
+            {
+                ArgumentNullException.ThrowIfNull(unit);
+                PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+                PostgreSqlSchemaCoordinator.ValidateAccess(unit, access);
+                schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            }
+
             var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
             OwnConnection(connection);
-            return new PostgreSqlUnitOfWork(this, connection, transaction, units, access, options);
+            return new PostgreSqlUnitOfWork(this, connection, transaction, units, access, options, observer);
         }
         catch
         {
@@ -159,37 +184,33 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
 {
     internal const string ScopeColumn = "__groundwork_scope";
     internal const string VersionColumn = "__groundwork_version";
+    internal static readonly ProviderIdentity Identity = new("PostgreSQL", "1.0");
+    internal static readonly ProviderOwnedColumnPolicy ColumnPolicy = new() { ProviderName = "PostgreSQL" };
     private readonly PostgreSqlProviderConnection owner;
     private readonly RelationalSchemaExecutor executor;
     private readonly PostgreSqlDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
+    private readonly RelationalRuntimeAdmission admission;
 
     internal PostgreSqlSchemaCoordinator(PostgreSqlProviderConnection owner)
     {
         this.owner = owner;
         executor = new RelationalSchemaExecutor(owner.OpenConnection, dialect);
+        admission = new RelationalRuntimeAdmission(
+            "postgresql.schema-admission",
+            desired => Target(Physicalize(desired)),
+            (target, connection) => connection is null
+                ? executor.InspectDeployedHistory(target)
+                : executor.InspectDeployedHistory(target, connection));
     }
 
     internal StorageUnit? Find(StorageUnitId id) => units.TryGetValue(id, out var unit) ? unit : null;
 
-    internal void EnsureRuntimeAdmission(StorageUnit desired)
-    {
-        var physical = Physicalize(desired);
-        if (physical.DerivedColumns.Count == 0)
-            return;
-        var target = Target(physical);
-        var inspection = executor.InspectHistory(target);
-        var applied = inspection.History.AppliedState;
-        if (applied is null)
-            return;
-        if (!string.Equals(applied.TargetFingerprint, target.Fingerprint, StringComparison.Ordinal) ||
-            !inspection.IsAppliedSchemaValid || inspection.HasColumnDrift)
-        {
-            throw new InvalidOperationException(
-                $"Storage unit '{desired.Name}' has folded search-key schema drift. Apply the exact schema and rebuild the derived search-key column before opening a session." +
-                (inspection.ColumnDrift.Length == 0 ? string.Empty : " " + string.Join(" ", inspection.ColumnDrift.Select(refusal => refusal.Message))));
-        }
-    }
+    internal void EnsureRuntimeAdmission(
+        StorageUnit desired,
+        IProviderCommandObserver? observer = null,
+        DbConnection? connection = null) =>
+        admission.EnsureAdmitted(desired, observer, connection);
 
     public SchemaDiff Diff(StorageUnit desired)
     {
@@ -200,7 +221,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         using var lease = executor.AcquireApplicationLock(target.Identity);
         var history = executor.ReadHistory(target.Identity, lease);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(MapChanges(plan.Operations));
+        return new SchemaDiff(SchemaChangeMapping.Describe(plan.Operations));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -209,16 +230,23 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         var physical = Physicalize(desired);
         Remember(desired, physical);
         var target = Target(physical);
-        var result = PhysicalSchemaApplication.Apply(target, executor);
-        owner.Remember(desired);
-        return new SchemaApplyResult(new SchemaDiff(MapChanges(result.Plan.Operations)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        try
+        {
+            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
+            owner.Remember(desired);
+            return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(result.Plan.Operations)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
+        finally
+        {
+            admission.Invalidate(desired.Id);
+        }
     }
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
         new(
             new SchemaSubject(physical),
-            new ProviderIdentity("PostgreSQL", "1.0"),
+            Identity,
             physical.DerivedColumns.Select(derived => new ProviderPhysicalSchemaDefinition(
                 "PostgreSQL",
                 physical.Id,
@@ -241,8 +269,6 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         ArgumentNullException.ThrowIfNull(source);
         PortabilityValidator.EnsurePhysicalIdentifiers(source);
         EnsurePhysicalIndexNames(source);
-        ProviderOwnedColumns.ValidateLogicalDeclaration(source);
-        ConcurrencyDeclaration.ValidateDeclaration(source);
         if (source.Retention is not null)
         {
             var portability = PortabilityValidator.Validate(source);
@@ -261,47 +287,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
                     portability.Refusals.Select(refusal =>
                         $"{refusal.Code} at {refusal.Path}: {refusal.Message}")));
         }
-        source = SearchKeyProjection.Expand(source);
-        var columns = source.Columns.ToList();
-        var key = source.Key.Columns.ToList();
-        var indexes = source.Indexes.ToList();
-        if (columns.Any(column => column.Name is ScopeColumn or VersionColumn))
-            throw new ArgumentException($"'{ScopeColumn}' and '{VersionColumn}' are reserved PostgreSQL columns.", nameof(source));
-        if (source.Scope == ScopePolicy.Scoped)
-        {
-            columns.Add(new ColumnDefinition { Name = ScopeColumn, Type = PortableType.String, IsNullable = false, Default = new PortableDefault(string.Empty) });
-            key.Insert(0, ScopeColumn);
-            indexes = indexes.Select(index => new IndexDefinition
-            {
-                Name = index.Name,
-                Columns = [new IndexColumn(ScopeColumn), .. index.Columns],
-                IsUnique = index.IsUnique,
-                MissingValues = index.MissingValues,
-                SchemaVersion = index.SchemaVersion
-            }).ToList();
-        }
-        if (source.Concurrency.IsOptimistic)
-        {
-            RemoveDeclaredToken(source, columns);
-            columns.Add(new ColumnDefinition { Name = VersionColumn, Type = PortableType.Int64, IsNullable = false, Default = new PortableDefault(0L) });
-        }
-        return new StorageUnit
-        {
-            Id = source.Id,
-            Name = source.Name,
-            Columns = columns,
-            Key = new KeyDefinition { Columns = key },
-            DerivedColumns = source.DerivedColumns,
-            Indexes = indexes,
-            AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray(),
-            Scope = source.Scope,
-            AppendIdempotency = source.AppendIdempotency,
-            RetentionIdempotency = source.RetentionIdempotency,
-            Concurrency = source.Concurrency,
-            Timestamps = source.Timestamps,
-            Retention = source.Retention,
-            SchemaVersion = source.SchemaVersion
-        };
+        return ProviderOwnedColumns.Physicalize(source, ColumnPolicy);
     }
 
     private static void EnsurePhysicalIndexNames(StorageUnit source)
@@ -325,37 +311,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         }
     }
 
-    private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)
-    {
-        var token = source.Concurrency.TokenColumn!;
-        var declared = columns.FirstOrDefault(column => column.Name == token);
-        if (declared is null) return;
-        if (declared.Type != PortableType.Int64 || declared.IsNullable ||
-            declared.Default?.Value is not long defaultValue || defaultValue != 0)
-        {
-            throw new ArgumentException(
-                $"Optimistic token column '{token}' must be a non-null Int64 with default 0.", nameof(source));
-        }
-        columns.Remove(declared);
-    }
-
     private void Remember(StorageUnit original, StorageUnit physical) => units[original.Id] = physical;
-
-    private static IReadOnlyList<SchemaChange> MapChanges(IEnumerable<PhysicalSchemaOperation> operations) =>
-        operations.Where(operation => operation.Kind is not PhysicalSchemaOperationKind.ValidatePhysicalSchema and
-                                      not PhysicalSchemaOperationKind.PublishAppliedState and
-                                      not PhysicalSchemaOperationKind.BackfillColumn and
-                                      not PhysicalSchemaOperationKind.FinalizeColumn)
-            .Select(operation => new SchemaChange(
-                operation.Kind switch
-                {
-                    PhysicalSchemaOperationKind.CreatePrimaryStorage => SchemaChangeKind.CreateStorageUnit,
-                    PhysicalSchemaOperationKind.AddColumn => operation.SubjectIdentity.StartsWith("__groundwork_", StringComparison.Ordinal)
-                        ? SchemaChangeKind.AddDerivedColumn : SchemaChangeKind.AddColumn,
-                    PhysicalSchemaOperationKind.CreatePhysicalIndex or PhysicalSchemaOperationKind.RebuildPhysicalIndex => SchemaChangeKind.CreateIndex,
-                    _ => SchemaChangeKind.AddDerivedColumn
-                }, operation.SubjectIdentity))
-            .ToArray();
 }
 
 internal sealed class PostgreSqlProviderCatalog
@@ -375,7 +331,7 @@ internal sealed class PostgreSqlProviderCatalog
         var indexes = new List<ProviderIndex>();
         foreach (var index in unit.Indexes)
         {
-            var metadata = dialect.ReadIndex(connection, null!, unit.Name, index.Name);
+            var metadata = dialect.ReadIndex(connection, null, unit.Name, index.Name);
             if (metadata is null)
                 continue;
             indexes.Add(new ProviderIndex(index.Name,

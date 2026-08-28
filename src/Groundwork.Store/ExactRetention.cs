@@ -62,6 +62,10 @@ public sealed class RetentionIdempotencyConflictException : InvalidOperationExce
 public interface IExactRetentionStorageSession
 {
     RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null);
+
+    ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null);
 }
 
 /// <summary>Public exact-retention entry points that fail clearly when a provider lacks the capability.</summary>
@@ -84,6 +88,25 @@ public static class ExactRetentionSessionExtensions
         }
 
         return exact.ApplyRetention(operationId, options);
+    }
+
+    public static ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        this IStorageSession session,
+        OperationId operationId,
+        RetentionExecutionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        StorageAccessValidation.EnsurePointOperation(session.Access, "retention");
+        options ??= new RetentionExecutionOptions();
+        RetentionSessionExtensions.ValidateExecutionOptions(options);
+        if (session is not IExactRetentionStorageSession exact)
+        {
+            throw new NotSupportedException(
+                "GW-RETENTION-003: this provider session does not advertise exact retention operations; " +
+                "inspect IExactRetentionStorageSession before using operation-identified retention.");
+        }
+
+        return exact.ApplyRetentionAsync(operationId, options);
     }
 }
 
@@ -109,7 +132,7 @@ internal static class RetentionOperationCodec
             .. retention.PartitionColumns,
             options.MaxRowsPerBatch.ToString(CultureInfo.InvariantCulture)
         ]);
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        return PortableHex.Lower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     internal static string SerializeResult(RetentionOperationResult result) => string.Join(

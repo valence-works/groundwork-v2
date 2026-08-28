@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   architecture-boundaries:
     runs-on: ubuntu-latest
@@ -15,7 +19,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - run: dotnet test tests/Groundwork.Architecture.Tests/Groundwork.Architecture.Tests.csproj --no-restore --configuration Release
 
@@ -25,7 +31,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - run: dotnet test Groundwork.slnx --no-restore --configuration Release
 
@@ -35,7 +43,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Build Documents from a local package feed only
         run: tests/Groundwork.Documents.External/verify-local-package.sh
 
@@ -45,7 +55,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Restore the full solution
         run: dotnet restore Groundwork.slnx --nologo
       - name: Pack the public artifacts used by the acceptance consumer
@@ -92,7 +104,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.Differential.Tests/Groundwork.Differential.Tests.csproj
       - name: Run four-provider query differential suite
         env:
@@ -117,7 +131,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
       - run: dotnet test tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj --no-restore --configuration Release
 
@@ -151,7 +167,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set
         run: |
           docker run --detach --name groundwork-event-log-mongo --publish 27017:27017 \
@@ -211,7 +229,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj
       - name: Run typed Records proof across all four providers
         env:
@@ -242,7 +262,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
       - name: Run SQL Server conformance suite
         env:
@@ -294,7 +316,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set
         run: |
           docker run --detach --name groundwork-mongo --publish 27017:27017 \
@@ -313,6 +337,56 @@ jobs:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p1ci?replicaSet=p1rs&directConnection=true
         run: dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-restore --configuration Release
 
+  mongo-schema-tool:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Initialize MongoDB replica set
+        run: |
+          docker run --detach --name groundwork-schema-tool-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet p35rs --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec groundwork-schema-tool-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"p35rs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec groundwork-schema-tool-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+      - run: dotnet restore Groundwork.slnx
+      - name: Run the schema tool against a replica set
+        env:
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p35ci?replicaSet=p35rs&directConnection=true
+        run: >-
+          dotnet test tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj
+          --no-restore --configuration Release
+          --logger "trx;LogFileName=schema-tool.trx"
+          --results-directory artifacts/schema-tool
+      # A suite whose live-provider proofs skip is green and proves nothing: unconfigured, this
+      # project reports 45 passed, 7 skipped and exit 0. The job asserts the proofs executed rather
+      # than trusting the exit code.
+      - name: Refuse a run whose MongoDB proofs did not execute
+        run: |
+          results="artifacts/schema-tool/schema-tool.trx"
+          outcomes() {
+            grep -o "testName=\"Groundwork.SchemaTool.Tests.$1[^\"]*\"[^>]*outcome=\"[A-Za-z]*\"" \
+              "$results" | grep -c "outcome=\"$2\"" || true
+          }
+          executed=$(outcomes SchemaToolMongoEndToEndTests Passed)
+          notExecuted=$(outcomes SchemaToolMongoEndToEndTests NotExecuted)
+          skipped=$(grep -c 'outcome="NotExecuted"' "$results" || true)
+          echo "SchemaToolMongoEndToEndTests passed: $executed, not executed: $notExecuted"
+          echo "Tests not executed in the whole suite: $skipped"
+          if [ "$executed" -lt 7 ] || [ "$notExecuted" -ne 0 ] || [ "$skipped" -ne 0 ]; then
+            echo "::error::The MongoDB schema-tool proofs did not run against the replica set." >&2
+            exit 1
+          fi
+
   mongo-standalone-exact-append:
     runs-on: ubuntu-latest
     services:
@@ -329,7 +403,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - name: Run standalone MongoDB exact-append capability refusal
         env:
@@ -341,6 +417,7 @@ jobs:
 
   concurrency-conformance:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17.6-alpine3.22
@@ -369,7 +446,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set
         run: |
           docker run --detach --name groundwork-w2-mongo --publish 27017:27017 \
@@ -398,17 +477,42 @@ jobs:
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w2ci?replicaSet=w2rs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-        run: dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj --no-restore --configuration Release
+        # The trx is what makes a *fast* failure here readable. --blame-hang produces a dump only
+        # when a test stalls, and this job's own service containers flood the end of the log, so a
+        # plain assertion failure leaves nothing anyone can retrieve afterwards — which is exactly
+        # what happened on main at fd08d2a (see #210).
+        run: >-
+          dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj
+          --no-restore --configuration Release
+          --logger "trx;LogFileName=w2-concurrency.trx"
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type full
+      - name: Upload W2 diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w2-diagnostics
+          path: tests/Groundwork.Concurrency.Tests/TestResults/**
+          if-no-files-found: ignore
       - name: Run SQL Server W2 concurrency conformance
         env:
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj --no-restore --configuration Release --filter "W2"
-      - name: Run W1 native write-path proof across all providers
+        run: >-
+          dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
+          --no-restore --configuration Release --filter "W2"
+          --logger "trx;LogFileName=w2-sqlserver.trx"
+      - name: Upload SQL Server W2 diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w2-sqlserver-diagnostics
+          path: tests/Groundwork.SqlServer.Tests/TestResults/**
+          if-no-files-found: ignore
+      - name: Run W1 native provider-command proof across all providers
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w1ci?replicaSet=w2rs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.WritePath.Tests/Groundwork.WritePath.Tests.csproj --no-restore --configuration Release
+        run: dotnet test tests/Groundwork.ProviderCommands.Tests/Groundwork.ProviderCommands.Tests.csproj --no-restore --configuration Release
       - name: Run S2 idempotency proof across all providers
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s2ci?replicaSet=w2rs&directConnection=true
@@ -433,6 +537,11 @@ jobs:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
         run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Aggregation
+      - name: Run S11 unit-of-work query proof across relational providers
+        env:
+          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter UnitOfWorkQueryConformanceTests
       - name: Measure W1 SQLite round trips
         run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --workload upsert --n 1
       - name: Measure W1 PostgreSQL round trips
@@ -466,7 +575,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - run: dotnet restore Groundwork.slnx
       - name: Run PostgreSQL provider conformance
         env:
@@ -503,7 +614,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Initialize MongoDB replica set for native retention
         run: |
           docker run --detach --name groundwork-s3-mongo --publish 27017:27017 \

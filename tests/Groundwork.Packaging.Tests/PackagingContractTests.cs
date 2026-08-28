@@ -10,10 +10,12 @@ public sealed class PackagingContractTests
         "src/Groundwork.Analyzers/Groundwork.Analyzers.csproj",
         "src/Groundwork.Diagnostics/Groundwork.Diagnostics.csproj",
         "src/Groundwork.Documents/Groundwork.Documents.csproj",
+        "src/Groundwork.Extensions.DependencyInjection/Groundwork.Extensions.DependencyInjection.csproj",
         "src/Groundwork.Kernel/Groundwork.Kernel.csproj",
         "src/Groundwork.MongoDb/Groundwork.MongoDb.csproj",
         "src/Groundwork.PostgreSql/Groundwork.PostgreSql.csproj",
         "src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj",
+        "src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj",
         "src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj",
         "src/Groundwork.Query.Model/Groundwork.Query.Model.csproj",
         "src/Groundwork.Query.Planning/Groundwork.Query.Planning.csproj",
@@ -34,7 +36,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Public_package_allowlist_is_explicit_and_excludes_non_release_projects()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var allowlist = File.ReadAllLines(Path.Combine(root, "eng", "public-packages.txt"))
             .Where(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#'))
             .Select(line => line.Split('|', 2)[1])
@@ -48,24 +50,31 @@ public sealed class PackagingContractTests
     [Fact]
     public void Release_contract_has_version_source_link_and_symbols()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var props = File.ReadAllText(Path.Combine(root, "Directory.Build.props"));
-        Assert.Contains("<VersionPrefix>0.1.0</VersionPrefix>", props, StringComparison.Ordinal);
-        Assert.Contains("<VersionSuffix>preview.1</VersionSuffix>", props, StringComparison.Ordinal);
+        Assert.Matches(@"<VersionPrefix>\d+\.\d+\.\d+</VersionPrefix>", props);
+        Assert.Matches(@"<VersionSuffix>[0-9a-z.-]+</VersionSuffix>", props);
         Assert.Contains("<PublishRepositoryUrl>true</PublishRepositoryUrl>", props, StringComparison.Ordinal);
         Assert.Contains("<EmbedUntrackedSources>true</EmbedUntrackedSources>", props, StringComparison.Ordinal);
         Assert.Contains("<SymbolPackageFormat>snupkg</SymbolPackageFormat>", props, StringComparison.Ordinal);
-        Assert.Contains("Microsoft.SourceLink.GitHub", File.ReadAllText(Path.Combine(root, "Directory.Packages.props")), StringComparison.Ordinal);
+
+        // Source Link and the readme are wired once for every packable project rather than repeated
+        // per project. That the wiring actually reaches the artifacts is asserted by
+        // PackedArtifactTests against real packed output; a project property is not evidence.
+        var targets = File.ReadAllText(Path.Combine(root, "Directory.Build.targets"));
+        Assert.Contains("Microsoft.SourceLink.GitHub", targets, StringComparison.Ordinal);
+        Assert.Contains("docs/v2/package-readmes/$(PackageId).md", targets, StringComparison.Ordinal);
 
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/versioning.md")));
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/support-matrix.md")));
         Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-feedz.yml")));
+        Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-nuget.yml")));
     }
 
     [Fact]
     public void Public_tool_identity_is_groundwork_tool_while_project_identity_stays_schema_tool()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var project = XDocument.Load(Path.Combine(root, "src/Groundwork.SchemaTool/Groundwork.SchemaTool.csproj"));
         var packageId = project.Descendants("PackageId").Single().Value;
         Assert.Equal("Groundwork.Tool", packageId);
@@ -78,7 +87,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Publication_workflow_requires_a_release_key_and_never_publishes_unvalidated_packages()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
         Assert.Contains("FEEDZ_API_KEY", workflow, StringComparison.Ordinal);
         Assert.Contains("https://f.feedz.io/valence-works/groundwork/nuget/index.json", workflow, StringComparison.Ordinal);
@@ -98,7 +107,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Publication_workflow_runs_the_exact_clean_room_proof_after_layout_validation()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
         var layout = workflow.IndexOf("eng/verify-package-layout.sh", StringComparison.Ordinal);
         var cleanRoom = workflow.IndexOf("tests/Groundwork.PublicApi.Acceptance.Tests/verify-clean-room.sh", StringComparison.Ordinal);
@@ -114,7 +123,7 @@ public sealed class PackagingContractTests
     [Fact]
     public void Publication_workflow_verifies_the_exact_version_from_feedz_after_push()
     {
-        var root = FindRepositoryRoot();
+        var root = RepositoryRoot.Find();
         var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-feedz.yml"));
         var push = workflow.IndexOf("dotnet nuget push", StringComparison.Ordinal);
         var verifyJob = workflow.IndexOf("verify-feed:", StringComparison.Ordinal);
@@ -141,11 +150,4 @@ public sealed class PackagingContractTests
         Assert.Contains("Groundwork.Tool $version", cleanRoomVerifier, StringComparison.Ordinal);
     }
 
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Groundwork.slnx")))
-            directory = directory.Parent;
-        return directory?.FullName ?? throw new InvalidOperationException("Could not locate the Groundwork repository root.");
-    }
 }

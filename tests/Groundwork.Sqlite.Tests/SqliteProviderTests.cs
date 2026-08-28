@@ -7,6 +7,8 @@ using Groundwork.Sqlite;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq.Sqlite;
+using Groundwork.Query.Planning;
+using Groundwork.Substrate.Relational;
 using Xunit;
 
 namespace Groundwork.Sqlite.Tests;
@@ -39,6 +41,81 @@ public sealed class SqliteProviderTests
         Assert.True(connection.Schema.Apply(unit).Applied);
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
     }
+
+    /// <summary>
+    /// The runtime convenience apply takes no authorization callback, so it is the one path where a
+    /// declaration edit could reach a live catalog unreviewed. It performs what re-applying could
+    /// put back and refuses what it could not, by name — the rows stay put either way.
+    /// </summary>
+    [Fact]
+    public void Schema_apply_refuses_a_drop_it_cannot_undo_and_leaves_the_column_and_its_rows()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = OrdersUnit(includeLegacyTotal: true);
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Upsert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "o-1",
+            ["customer"] = "ada",
+            ["legacy_total"] = 7m
+        }));
+
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            connection.Schema.Apply(OrdersUnit(includeLegacyTotal: false)));
+
+        Assert.Contains("GW-SCHEMA-010", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("drop-column:orders.legacy_total", failure.Message, StringComparison.Ordinal);
+        // Refused before any provider work: the column and the row it holds are untouched.
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "o-1" }));
+        Assert.NotNull(stored);
+        Assert.Equal(7m, stored!.Values.Values["legacy_total"]);
+        Assert.Contains(
+            connection.Schema.Diff(OrdersUnit(includeLegacyTotal: false)).Changes,
+            change => change.Kind == SchemaChangeKind.DropColumn && change.Identity == "legacy_total");
+    }
+
+    /// <summary>The same apply still performs a rename, because renaming carries the rows.</summary>
+    [Fact]
+    public void Schema_apply_performs_a_rename_and_carries_the_rows()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = OrdersUnit(includeLegacyTotal: false);
+        connection.Schema.Apply(unit);
+        connection.OpenSession(unit, StorageAccess.Global).Upsert(new StorageValues(
+            new Dictionary<string, object?> { ["id"] = "o-1", ["customer"] = "ada" }));
+
+        var renamed = OrdersUnit(includeLegacyTotal: false) with
+        {
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new() { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(renamed).Applied);
+
+        var stored = connection.OpenSession(renamed, StorageAccess.Global).Read(new StorageKey(new Dictionary<string, object?> { ["id"] = "o-1" }));
+        Assert.NotNull(stored);
+        Assert.Equal("ada", stored!.Values.Values["buyer"]);
+    }
+
+    private static StorageUnit OrdersUnit(bool includeLegacyTotal) => new()
+    {
+        Id = new StorageUnitId("orders"),
+        Name = "gw_apply_orders",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+            new() { Name = "customer", Type = PortableType.String, MaxLength = 64 },
+            ..(includeLegacyTotal
+                ? new[] { new ColumnDefinition { Name = "legacy_total", Type = PortableType.Decimal, Precision = 18, Scale = 4 } }
+                : [])
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
 
     [Fact]
     public void Native_aggregation_predicates_preserve_typed_null_bool_datetime_guid_and_binary_values()
@@ -124,6 +201,104 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Native_time_bucket_aggregation_is_one_sql_grouping_with_exact_range_semantics()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-time-bucket"),
+            Name = "s10_time_bucket",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset },
+                new() { Name = "amount", Type = PortableType.Int64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "hourly",
+                    GroupByExpressions = [AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))],
+                    Aggregates = [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")],
+                    MaxInputRows = 20,
+                    MaxGroups = 10
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var from = new DateTimeOffset(2026, 8, 16, 10, 30, 0, TimeSpan.Zero);
+        var to = from.AddHours(2);
+        foreach (var row in new[]
+        {
+            ("first", from, 3L),
+            ("second", from.AddMinutes(15), 4L),
+            ("upper", to, 99L),
+            ("null", (DateTimeOffset?)null, 100L)
+        })
+        {
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = row.Item1, ["createdAt"] = row.Item2, ["amount"] = row.Item3
+            })).Status);
+        }
+
+        var result = session.Aggregate(new AggregationQuery("hourly")
+        {
+            TimeRange = new AggregationTimeRange(from, to)
+        });
+
+        var output = Assert.Single(result.Rows);
+        Assert.Equal(from, output["bucket"]);
+        Assert.Equal(2L, output["count"]);
+        Assert.Equal(7L, output["total"]);
+    }
+
+    [Fact]
+    public void Native_local_calendar_day_bucket_handles_the_spring_forward_boundary()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-local-day"),
+            Name = "s10_local_day",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "daily",
+                    GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+                    Aggregates = [new Aggregate.Count("count")]
+                }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var from = new DateTimeOffset(2026, 3, 29, 0, 30, 0, TimeSpan.Zero);
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "before", ["createdAt"] = from }));
+        session.Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "after", ["createdAt"] = from.AddHours(20) }));
+
+        var output = Assert.Single(session.Aggregate(new AggregationQuery("daily")
+        {
+            TimeRange = new AggregationTimeRange(from, from.AddDays(1)),
+            TimeZoneId = "Europe/Amsterdam"
+        }).Rows);
+
+        Assert.Equal(new DateTimeOffset(2026, 3, 28, 23, 0, 0, TimeSpan.Zero), output["day"]);
+        Assert.Equal(2L, output["count"]);
+    }
+
+    [Fact]
     public void Native_aggregation_preserves_separator_values_and_independent_FirstBy_orders()
     {
         using var store = TemporaryStore.Create();
@@ -165,6 +340,85 @@ public sealed class SqliteProviderTests
 
         Assert.Equal(4_000_000_000L, Assert.IsType<long>(row["integerTotal"]));
         Assert.Equal(12_345_678_901_234_567_890.1235m, Assert.IsType<decimal>(row["decimalTotal"]));
+    }
+
+    [Fact]
+    public void Native_aggregation_orders_string_group_and_aggregate_aliases_by_utf16_ordinal()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit(
+            "aggregation-string-order",
+            [new Aggregate.Count("count"), new Aggregate.Min("minimum", "label")]);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var supplementary = char.ConvertFromUtf32(0x10000);
+        var privateUse = "\uE000";
+        InsertAggregationRow(session, "1", "z", 0, 0m, supplementary, 1, 1);
+        InsertAggregationRow(session, "2", "a", 0, 0m, privateUse, 2, 2);
+
+        var rows = session.Aggregate(new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("minimum", SortDirection.Ascending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)]
+        }).Rows;
+
+        Assert.Equal(["z", "a"], rows.Select(row => row["group"]));
+        Assert.Equal([supplementary, privateUse], rows.Select(row => row["minimum"]));
+    }
+
+    [Fact]
+    public void Native_aggregation_count_alias_reusing_string_source_orders_as_Int64()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit(
+            "aggregation-count-source-alias",
+            [new Aggregate.Count("label")]);
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        InsertAggregationRow(session, "a-1", "a", 0, 0m, "first", 1, 1);
+        InsertAggregationRow(session, "a-2", "a", 0, 0m, "second", 2, 2);
+        InsertAggregationRow(session, "b-1", "b", 0, 0m, "third", 3, 3);
+
+        var rows = session.Aggregate(new AggregationQuery("summary")
+        {
+            OrderByTerms =
+            [
+                new AggregationOrderTerm("label", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)
+            ]
+        }).Rows;
+
+        Assert.Equal(["a", "b"], rows.Select(row => row["group"]));
+        Assert.Equal([2L, 1L], rows.Select(row => Assert.IsType<long>(row["label"])));
+    }
+
+    [Fact]
+    public void Renderer_resolves_count_alias_before_string_source_column_for_order_type()
+    {
+        var unit = AggregationUnit(
+            "aggregation-count-source-alias-render",
+            [new Aggregate.Count("label")]) with
+        {
+            Columns = AggregationUnit("aggregation-count-source-alias-render-group", [])
+                .Columns.Select(column => column.Name == "group"
+                    ? column with { Type = PortableType.Int64 }
+                    : column).ToArray()
+        };
+        var profile = unit.AggregationProfiles.Single();
+        var sql = RelationalAggregationRenderer.Render(
+            new SqliteDialect(),
+            unit,
+            profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [new AggregationOrderTerm("label", SortDirection.Ascending)]
+            }).CommandText;
+
+        Assert.Contains("CASE WHEN \"label\" IS NULL THEN 0 ELSE 1 END, \"label\" ASC", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUNDWORK_UTF16_ORDINAL", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -325,6 +579,104 @@ public sealed class SqliteProviderTests
         Assert.Equal("y", a["first"]);
         var c = Assert.Single(result.Rows, item => Equals(item["group"], "c"));
         Assert.Null(c["total"]);
+    }
+
+    [Fact]
+    public void Scoped_aggregation_is_native_and_isolated_before_grouping()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = AggregationUnit("aggregation-scoped-native", [
+            new Aggregate.Count("count"),
+            new Aggregate.Sum("total", "integerAmount")]);
+        unit = unit with
+        {
+            Scope = ScopePolicy.Scoped,
+            AggregationProfiles = [unit.AggregationProfiles.Single() with
+            {
+                AllowedPredicates = [new AggregationPredicateAllowance
+                {
+                    Alias = "count",
+                    SupportedPredicates = new HashSet<AggregationPredicateOperator>
+                    {
+                        AggregationPredicateOperator.Equal
+                    }
+                }]
+            }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var first = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")));
+        var second = connection.OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-b")));
+        InsertAggregationRow(first, "same-key", "same-group", 2, 0m, "a", 1, 1);
+        InsertAggregationRow(first, "only-a", "same-group", 3, 0m, "b", 2, 2);
+        InsertAggregationRow(second, "same-key", "same-group", 11, 0m, "c", 1, 1);
+
+        var scopedQuery = new AggregationQuery("summary")
+        {
+            OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending), new AggregationOrderTerm("group", SortDirection.Ascending)]
+        };
+        var aResult = first.Aggregate(scopedQuery);
+        var bResult = second.Aggregate(scopedQuery);
+        var countFiltered = first.Aggregate(scopedQuery with
+        {
+            PostPredicate = new AggregationPredicate.Comparison("count", AggregationPredicateOperator.Equal, [2L])
+        });
+        var a = Assert.Single(aResult.Rows);
+        var b = Assert.Single(bResult.Rows);
+
+        Assert.Equal("same-group", a["group"]);
+        Assert.Equal(2L, a["count"]);
+        Assert.Equal(5L, a["total"]);
+        Assert.Equal(1L, b["count"]);
+        Assert.Equal(11L, b["total"]);
+        Assert.Equal(2L, Assert.Single(countFiltered.Rows)["count"]);
+        var aFingerprint = first.Aggregate(new AggregationQuery("summary")).ValueFingerprint;
+        var bFingerprint = second.Aggregate(new AggregationQuery("summary")).ValueFingerprint;
+        Assert.NotEqual(aFingerprint, bFingerprint);
+        Assert.Equal(aResult.ShapeFingerprint, bResult.ShapeFingerprint);
+    }
+
+    [Fact]
+    public void Scoped_native_sql_artifacts_inject_scope_before_grouping_and_budget_probe()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-scoped-artifact"),
+            Name = "aggregation_scoped_artifact",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")],
+            AllowedPredicates = []
+        };
+        var scope = new ColumnRef(new TableId(unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String, isNullable: false);
+        var providerPredicate = new Predicate.Equal(scope, QueryConstant.Of(scope, "tenant-a"));
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)],
+            Take = 5
+        };
+
+        var command = RelationalAggregationRenderer.RenderWithProviderPredicate(new SqliteDialect(), unit, profile, query, providerPredicate).CommandText;
+        var probe = RelationalAggregationRenderer.RenderBudgetProbeWithProviderPredicate(new SqliteDialect(), unit, profile, query, providerPredicate).CommandText;
+
+        Assert.StartsWith("WITH ", command, StringComparison.Ordinal);
+        Assert.Contains(SqliteSchemaCoordinator.ScopeColumn, command, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS \"count\"", command, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", command, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 5", command, StringComparison.Ordinal);
+        Assert.Contains(SqliteSchemaCoordinator.ScopeColumn, probe, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", probe, StringComparison.Ordinal);
     }
 
     private static StorageUnit AggregationUnit(string identity, IReadOnlyList<Aggregate> aggregates) => new()
@@ -538,7 +890,8 @@ public sealed class SqliteProviderTests
         {
             Id = new StorageUnitId("linq-tickets"), Name = "linq_tickets",
             Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }, new() { Name = "code_col", Type = PortableType.String }],
-            Key = new KeyDefinition { Columns = ["Id"] }
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
         };
         Assert.True(connection.Schema.Apply(unit).Applied);
         var session = connection.OpenSession(unit, StorageAccess.Global);
@@ -559,11 +912,426 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
-    public void Provider_passes_provider_neutral_conformance()
+    public async Task Configured_linq_executor_counts_and_probes_provider_side_with_honest_cancellation()
     {
         using var store = TemporaryStore.Create();
-        var report = ConformanceSuite.Run(new SqliteProviderFactory(), store.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine, report.Checks.Where(check => !check.Passed).Select(check => $"{check.Name}: {check.Failure}")));
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-counts"), Name = "linq_counts",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var (id, value) in new[] { ("a", "hit"), ("b", "hit"), ("c", "miss") })
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = id, ["value_col"] = value })).Status);
+
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_counts", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Display), "value_col", QueryType.String)
+            ]));
+
+        Assert.Equal(2, await table.Query.Where(ticket => ticket.Display == "hit").CountAsync(executor));
+        Assert.Equal(0, await table.Query.Where(ticket => ticket.Display == "absent").CountAsync(executor));
+        Assert.True(await table.Query.Where(ticket => ticket.Display == "miss").AnyAsync(executor));
+        Assert.False(await table.Query.Where(ticket => ticket.Display == "absent").AnyAsync(executor));
+
+        var cancelled = new CancellationToken(canceled: true);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.ToListAsync(executor, cancelled));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.CountAsync(executor, cancelled));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.AnyAsync(executor, cancelled));
+    }
+
+    [Fact]
+    public async Task Configured_linq_executor_reads_through_a_unit_of_work_session()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-uow"), Name = "linq_uow",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var unitOfWork = connection.BeginUnitOfWork(StorageAccess.Global, unit);
+        var session = unitOfWork.OpenSession(unit);
+        unitOfWork.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["value_col"] = "staged" })));
+
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_uow", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Display), "value_col", QueryType.String)
+            ]));
+
+        Assert.Equal(1, await table.Query.Where(ticket => ticket.Display == "staged").CountAsync(executor));
+        var row = Assert.Single(await table.Query.Where(ticket => ticket.Display == "staged").ToListAsync(executor));
+        Assert.Equal("a", row.Id);
+        unitOfWork.Commit();
+    }
+
+    [Fact]
+    public async Task Concurrent_writes_and_async_counts_on_one_session_stay_serialized()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-serial"), Name = "linq_serial",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }, new() { Name = "value_col", Type = PortableType.String }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_value", Columns = [new IndexColumn("value_col")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_serial", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false),
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Display), "value_col", QueryType.String)
+            ]));
+
+        var writes = Task.Run(() =>
+        {
+            for (var iteration = 0; iteration < 200; iteration++)
+                session.Upsert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "row-" + iteration % 10, ["value_col"] = "v" + iteration }));
+        });
+        while (!writes.IsCompleted)
+            Assert.InRange(await Scanned(table).CountAsync(executor), 0, 10);
+        await writes;
+        Assert.Equal(10, await Scanned(table).CountAsync(executor));
+    }
+
+    [Fact]
+    public async Task Configured_linq_executor_completes_synchronously_over_an_in_process_provider()
+    {
+        using var database = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-foreign"), Name = "linq_foreign",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            // The declared key is physically indexed by every provider, but is not a coverage
+            // candidate, so `Where(t => t.Id == ...)` below needs this second declaration over the
+            // same column to be admitted at all. Tracked in #203; an application should use the
+            // point read instead of querying by key.
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+        };
+        Assert.True(database.Schema.Apply(unit).Applied);
+        var session = database.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).Status);
+
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_foreign", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
+            ]));
+
+        var pending = table.Query.Where(ticket => ticket.Id == "a").CountAsync(executor);
+        Assert.True(pending.IsCompleted);
+        Assert.Equal(1, await pending);
+        Assert.True(await table.Query.Where(ticket => ticket.Id == "a").AnyAsync(executor));
+        Assert.Equal("a", Assert.Single(await Scanned(table).ToListAsync(executor)).Id);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            table.Query.CountAsync(executor, new CancellationToken(canceled: true)));
+    }
+
+    [Fact]
+    public async Task Configured_linq_executor_reads_through_a_consumer_session_decorator()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-decorated"), Name = "linq_decorated",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).Status);
+
+        var decorated = new PassThroughStorageSession(session);
+        var executor = new SqliteLinqExecutor(decorated);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_decorated", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
+            ]));
+
+        Assert.Equal(1, await Scanned(table).CountAsync(executor));
+        Assert.Equal("a", Assert.Single(await Scanned(table).ToListAsync(executor)).Id);
+
+        // The executor reaches storage through the session contract's asynchronous member, which is
+        // the only one that carries the caller's token. Reading through the synchronous member would
+        // still return these rows, so the counters are what distinguish the two routes.
+        Assert.Equal(0, decorated.SynchronousQueries);
+        Assert.Equal(2, decorated.AsynchronousQueries);
+    }
+
+    private sealed class PassThroughStorageSession(IStorageSession inner) : IStorageSession
+    {
+        internal int SynchronousQueries { get; private set; }
+
+        internal int AsynchronousQueries { get; private set; }
+
+        public StorageUnit Unit => inner.Unit;
+        public StorageAccess Access => inner.Access;
+        public StoredEntry? Read(StorageKey key) => inner.Read(key);
+        public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) => inner.ReadAsync(key, cancellationToken);
+        public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+        {
+            SynchronousQueries++;
+            return inner.Query(request, options);
+        }
+
+        public ValueTask<QueryMaterializedResult> QueryAsync(QueryRequest request, QueryRenderOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            AsynchronousQueries++;
+            return inner.QueryAsync(request, options, cancellationToken);
+        }
+        public AggregationResult Aggregate(AggregationQuery query) => inner.Aggregate(query);
+        public ValueTask<AggregationResult> AggregateAsync(AggregationQuery query, CancellationToken cancellationToken = default) => inner.AggregateAsync(query, cancellationToken);
+        public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) => inner.Insert(values, options);
+        public ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.InsertAsync(values, options, cancellationToken);
+        public WriteOutcome Update(StorageValues values, WriteOptions? options = null) => inner.Update(values, options);
+        public ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.UpdateAsync(values, options, cancellationToken);
+        public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) => inner.Upsert(values, options);
+        public ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.UpsertAsync(values, options, cancellationToken);
+        public WriteOutcome Delete(StorageKey key, WriteOptions? options = null) => inner.Delete(key, options);
+        public ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options = null, CancellationToken cancellationToken = default) => inner.DeleteAsync(key, options, cancellationToken);
+        public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) => inner.Append(operationId, values);
+        public ValueTask<WriteOutcome> AppendAsync(OperationId operationId, IReadOnlyList<StorageValues> values, CancellationToken cancellationToken = default) => inner.AppendAsync(operationId, values, cancellationToken);
+    }
+
+    [Fact]
+    public async Task Async_query_cancelled_while_waiting_for_the_provider_gate_is_refused()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-gate"), Name = "linq_gate",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqCountTicket>(
+            new GwTableModel<LinqCountTicket>("linq_gate", [
+                new GwColumn<LinqCountTicket>(nameof(LinqCountTicket.Id), "Id", QueryType.String, false)
+            ]));
+
+        using var cancellation = new CancellationTokenSource();
+        Task<long> pending;
+        lock (((SqliteProviderConnection)connection).Gate)
+        {
+            pending = Task.Run(() => Scanned(table).CountAsync(executor, cancellation.Token));
+            Thread.Sleep(250);
+            cancellation.Cancel();
+        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+    }
+
+    [Fact]
+    public async Task Existence_probe_on_a_continuation_request_answers_the_remaining_window()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-window"), Name = "linq_window",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var id in new[] { "a", "b", "c" })
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(new Dictionary<string, object?> { ["Id"] = id })).Status);
+
+        var tableId = new TableId("linq_window");
+        var idColumn = new ColumnRef(tableId, "Id", QueryType.String, isNullable: false);
+        var order = System.Collections.Immutable.ImmutableArray.Create(new OrderTerm(idColumn, OrderDirection.Ascending, NullOrder.Last));
+        var firstPage = session.Query(new QueryRequest(tableId, Predicate.AlwaysTrue.Instance, order, Projection.All, Paging.Keyset(2)));
+        Assert.Equal(2, firstPage.Rows.Count);
+        Assert.NotNull(firstPage.NextContinuationToken);
+
+        var executor = new SqliteLinqExecutor(session);
+        var remaining = new QueryRequest(tableId, Predicate.AlwaysTrue.Instance, order, Projection.All,
+            Paging.Continuation(firstPage.NextContinuationToken!, 2));
+        Assert.True(await executor.AnyAsync(remaining));
+
+        var endToken = QueryContinuationToken.Encode(remaining, QueryRenderOptions.Default, [QueryConstant.Of(idColumn, "c")]);
+        var exhausted = new QueryRequest(tableId, Predicate.AlwaysTrue.Instance, order, Projection.All,
+            Paging.Continuation(endToken, 2));
+        Assert.False(await executor.AnyAsync(exhausted));
+        Assert.Equal(3, await executor.CountAsync(exhausted));
+    }
+
+    /// <summary>
+    /// Marks a deliberately unfiltered read. These tests are about execution mechanics, not coverage,
+    /// and an unbounded read is a scan on every provider — so it says so explicitly rather than
+    /// slipping past the gate.
+    /// </summary>
+    private static IGwQueryable<LinqCountTicket> Scanned(GwQueryTable<LinqCountTicket> table) =>
+        table.AcceptScan("GW-SCAN-0001", "provider execution mechanics", "groundwork-tests",
+            DateTimeOffset.UtcNow.AddYears(10));
+
+    [Fact]
+    public async Task Session_only_executor_still_admits_under_sqlites_own_parameter_budget()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-budget"), Name = "linq_budget",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes = [new() { Name = "ix_id", Columns = [new IndexColumn("Id")] }]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        // No connection is handed over, so there is nothing to advertise a budget. The adapter is
+        // bound to SQLite at compile time and supplies SQLite's own 999 anyway, so a request SQLite
+        // cannot bind is refused at admission rather than reaching the renderer.
+        var table = new TableId("linq_budget");
+        var id = new ColumnRef(table, "Id", QueryType.String, isNullable: false, maxLength: 64);
+        var request = new QueryRequest(
+            table,
+            new Predicate.In(id, Enumerable.Range(0, 1_000).Select(value => QueryConstant.Of(id, "id" + value))),
+            [],
+            Projection.All,
+            Paging.OffsetLimit(0, 1));
+
+        var refusal = await Assert.ThrowsAsync<RuntimeValueFenceException>(
+            () => new SqliteLinqExecutor(session).ToListAsync<LinqCountTicket>(request));
+
+        Assert.Equal("GW-RUNTIME-011", refusal.Code);
+        Assert.Contains("999", refusal.Message, StringComparison.Ordinal);
+    }
+
+    private sealed class LinqCountTicket
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Display { get; set; } = string.Empty;
+    }
+
+    [Fact]
+    public async Task Async_write_waits_for_the_provider_gate()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("async-gate"), Name = "async_gate",
+            Columns = [new() { Name = "Id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+
+        Task<WriteOutcome> pending;
+        lock (((SqliteProviderConnection)connection).Gate)
+        {
+            pending = Task.Run(() =>
+                session.InsertAsync(new StorageValues(new Dictionary<string, object?> { ["Id"] = "a" })).AsTask());
+            Thread.Sleep(250);
+            Assert.False(pending.IsCompleted);
+        }
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, (await pending).Status);
+        Assert.NotNull(await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" })));
+    }
+
+    [Fact]
+    public async Task Async_unit_of_work_commit_stages_flushes_and_reads_back()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("async-uow"), Name = "async_uow",
+            Columns =
+            [
+                new() { Name = "Id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "Value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["Id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+
+        using (var unitOfWork = connection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit))
+        {
+            var staged = unitOfWork.OpenSession(unit);
+            unitOfWork.Stage(RowWrite.Insert(unit, new StorageValues(new Dictionary<string, object?>
+            {
+                ["Id"] = "a", ["Value"] = "staged"
+            })));
+            var flushed = await staged.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
+            Assert.Equal("staged", flushed?.Values.Values["Value"]);
+            var report = await unitOfWork.CommitWithOutcomesAsync();
+            Assert.Equal(1, report.Succeeded);
+        }
+
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var committed = await session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["Id"] = "a" }));
+        Assert.Equal("staged", committed?.Values.Values["Value"]);
+    }
+
+    [Fact]
+    public async Task Nested_write_is_refused_rather_than_blocking()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("nested-write"), Name = "nested_write",
+            Columns =
+            [
+                new() { Name = "Id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "Value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["Id"] = "a", ["Value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
+    {
+        using var store = TemporaryStore.Create();
+
+        // One store, both surfaces: each run proves the whole contract on its own storage units.
+        var synchronous = ConformanceSuite.Run(new SqliteProviderFactory(), store.ConnectionString);
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine, synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+
+        var asynchronous = await ConformanceSuite.RunAsync(new SqliteProviderFactory(), store.ConnectionString);
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine, asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
     }
 
     [Fact]
@@ -661,10 +1429,9 @@ public sealed class SqliteProviderTests
             new Groundwork.Query.Model.TableId(folded.Name),
             new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
             [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None),
-            new QueryRenderOptions(
-                [new QueryIndexDeclaration("by_status", [new QueryIndexColumn("status", false, QueryType.String)], QueryIndexPinning.Pinned)],
-                selectedIndex: "by_status"));
+            folded.CreateQueryRenderOptions("by_status"));
         Assert.Equal("by_status", indexed.SelectedIndex);
+        Assert.False(indexed.IndexHintApplied);
         Assert.Equal([1], indexed.Rows.Select(row => Assert.IsType<int>(row["id"])));
 
         Assert.Equal(WriteOutcomeStatus.Updated, session.Update(new StorageValues(new Dictionary<string, object?> { ["id"] = 1 })).Status);
@@ -681,6 +1448,7 @@ public sealed class SqliteProviderTests
             new Groundwork.Query.Model.Predicate.StartsWith(status, "OP"),
             [], Groundwork.Query.Model.Projection.All, Groundwork.Query.Model.Paging.None)).Rows);
 
+        connection.Dispose();
         using (var tamper = new SqliteConnection(store.ConnectionString))
         {
             tamper.Open();
@@ -688,8 +1456,10 @@ public sealed class SqliteProviderTests
             command.CommandText = "UPDATE __groundwork_search_key_algorithms SET algorithm_id='stale-search-key-v0' WHERE table_name='folded_migration' AND column_name='__groundwork_search_status';";
             command.ExecuteNonQuery();
         }
-        var admission = Assert.Throws<InvalidOperationException>(() => connection.OpenSession(folded, StorageAccess.Global));
-        Assert.Contains("rebuild", admission.Message, StringComparison.OrdinalIgnoreCase);
+        using var reopened = new SqliteProviderFactory().Create(store.ConnectionString);
+        var admission = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(folded, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", admission.Message, StringComparison.Ordinal);
+        Assert.Contains("search-key algorithm", admission.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -698,7 +1468,8 @@ public sealed class SqliteProviderTests
         using var store = TemporaryStore.Create();
         using var first = new SqliteProviderFactory().Create(store.ConnectionString);
         var error = Assert.Throws<InvalidOperationException>(() => new SqliteProviderFactory().Create(store.ConnectionString));
-        Assert.Contains("already in use", error.Message, StringComparison.Ordinal);
+        Assert.Contains("GW-SQLITE-LIFETIME-001", error.Message, StringComparison.Ordinal);
+        Assert.Contains("one IStorageProviderConnection per database file", error.Message, StringComparison.Ordinal);
         first.Dispose();
         using var second = new SqliteProviderFactory().Create(store.ConnectionString);
     }
@@ -710,10 +1481,12 @@ public sealed class SqliteProviderTests
         using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
         var unit = Model(includePriority: false, includeUniqueIndex: false);
         connection.Schema.Apply(unit);
-        var observer = new WritePathObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global);
+        var observer = new ProviderCommandObserver();
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
             new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },
+            observer,
             unit);
 
         for (var index = 0; index < 1_000; index++)
@@ -723,7 +1496,7 @@ public sealed class SqliteProviderTests
                 ["id"] = $"id-{index}",
                 ["value"] = $"value-{index}",
                 ["uniqueValue"] = $"unique-{index}"
-            }), new WriteOptions { Observer = observer }));
+            })));
         }
 
         var summary = work.CommitWithOutcomes();
@@ -841,10 +1614,12 @@ public sealed class SqliteProviderTests
             Key = new KeyDefinition { Columns = ["id"] }
         };
         connection.Schema.Apply(unit);
-        var observer = new WritePathObserver();
+        _ = connection.OpenSession(unit, StorageAccess.Global);
+        var observer = new ProviderCommandObserver();
         using var work = connection.BeginUnitOfWork(
             StorageAccess.Global,
             new BatchWriteOptions { MaxRowsPerFlush = 1_000, OutcomeMode = BatchOutcomeMode.Exact },
+            observer,
             unit);
         for (var row = 0; row < 1_000; row++)
         {
@@ -852,7 +1627,7 @@ public sealed class SqliteProviderTests
                 column => column.Name,
                 column => (object?)$"{column.Name}-{row}",
                 StringComparer.Ordinal);
-            work.Stage(RowWrite.Upsert(unit, new StorageValues(values), new WriteOptions { Observer = observer }));
+            work.Stage(RowWrite.Upsert(unit, new StorageValues(values)));
         }
 
         var report = work.CommitWithOutcomes();

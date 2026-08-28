@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.PostgreSql;
+using Groundwork.Query.Model;
 using Groundwork.Substrate.Relational;
 using Groundwork.Testing;
 using Groundwork.Store;
@@ -44,6 +46,95 @@ public sealed class PostgreSqlDialectTests
 
         Assert.Contains("= ANY(\"labels\")", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSTR(", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Aggregation_string_order_wraps_aliases_in_a_result_relation()
+    {
+        var unit = AggregationUnit();
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count"), new Aggregate.Min("minimum", "label")]
+        };
+
+        var sql = dialect.RenderAggregation(unit, profile, new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("minimum", SortDirection.Ascending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)]
+        }).CommandText;
+
+        Assert.Contains("SELECT * FROM \"__groundwork_aggregation_result\"", sql, StringComparison.Ordinal);
+        Assert.Contains("string_to_array(\"minimum\", NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN \"minimum\" IS NULL", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_uses_native_utc_and_iana_calendar_bucket_expressions()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-time-bucket-pg"),
+            Name = "aggregation_time_bucket_pg",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "daily",
+            GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var from = new DateTimeOffset(2026, 3, 29, 0, 0, 0, TimeSpan.Zero);
+        var sql = dialect.RenderAggregation(unit, profile, new AggregationQuery("daily")
+        {
+            TimeRange = new AggregationTimeRange(from, from.AddDays(2)),
+            TimeZoneId = "Europe/Amsterdam"
+        }).CommandText;
+
+        Assert.Contains("date_trunc('day'", sql, StringComparison.Ordinal);
+        Assert.Contains("FLOOR", sql, StringComparison.Ordinal);
+        Assert.Contains("Europe/Amsterdam", sql, StringComparison.Ordinal);
+        Assert.Contains("createdAt", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Scoped_native_sql_artifacts_inject_scope_before_grouping_and_budget_probe()
+    {
+        var unit = AggregationUnit();
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var scope = new ColumnRef(new TableId(unit.Name), PostgreSqlSchemaCoordinator.ScopeColumn, QueryType.String, isNullable: false);
+        var providerPredicate = new Predicate.Equal(scope, QueryConstant.Of(scope, "tenant-a"));
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)],
+            Take = 5
+        };
+
+        var command = RelationalAggregationRenderer.RenderWithProviderPredicate(dialect, unit, profile, query, providerPredicate).CommandText;
+        var probe = RelationalAggregationRenderer.RenderBudgetProbeWithProviderPredicate(dialect, unit, profile, query, providerPredicate).CommandText;
+
+        Assert.StartsWith("WITH ", command, StringComparison.Ordinal);
+        Assert.Contains(PostgreSqlSchemaCoordinator.ScopeColumn, command, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS \"count\"", command, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", command, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 5", command, StringComparison.Ordinal);
+        Assert.Contains(PostgreSqlSchemaCoordinator.ScopeColumn, probe, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", probe, StringComparison.Ordinal);
     }
 
     private static StorageUnit AggregationUnit() => new()
@@ -190,6 +281,74 @@ public sealed class PostgreSqlDialectTests
         Assert.Contains($"\"{expected}\"", sql, StringComparison.Ordinal);
         Assert.Equal(PortabilityValidator.MaximumPortableIdentifierLength, expected.Length);
     }
+
+    /// <summary>
+    /// A JSON column has to reach PostgreSQL as <c>jsonb</c> however it is written. The parameters of a
+    /// batched statement cannot be named after their columns — one row per staged write, so the names are
+    /// prefixed to stay unique — and typing them from the placeholder rather than the column silently sent
+    /// every batched JSON value as text, which PostgreSQL rejects with 42804.
+    /// <para>
+    /// Single and batched writes are asserted together and in that order: the single write is the control,
+    /// and the defect this pins was invisible precisely because that control passed.
+    /// </para>
+    /// </summary>
+    [SkippableTheory]
+    [InlineData(RowWriteMode.Insert)]
+    [InlineData(RowWriteMode.Upsert)]
+    public void Json_columns_reach_the_database_as_jsonb_however_they_are_written(RowWriteMode mode)
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var unit = JsonDocumentUnit();
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var access = StorageAccess.Global;
+
+        // Control: one row at a time already worked, and is what made the batch defect hard to see.
+        var single = connection.OpenSession(unit, access)
+            .Upsert(JsonRow("single", "{\"kind\":\"single\"}"), WriteOptions.Unconditional);
+        Assert.True(single.Succeeded, $"Single write did not succeed: {single.Status}.");
+
+        // The path that failed: both batch shapes go through the same parameter binding.
+        using (var unitOfWork = connection.BeginUnitOfWork(access, BatchWriteOptions.Exact, [unit]))
+        {
+            unitOfWork.Stage(mode == RowWriteMode.Insert
+                ? RowWrite.Insert(unit, JsonRow("batch-a", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional)
+                : RowWrite.Upsert(unit, JsonRow("batch-a", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional));
+            unitOfWork.Stage(mode == RowWriteMode.Insert
+                ? RowWrite.Insert(unit, JsonRow("batch-b", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional)
+                : RowWrite.Upsert(unit, JsonRow("batch-b", "{\"kind\":\"batch\"}"), WriteOptions.Unconditional));
+            unitOfWork.CommitWithOutcomes();
+        }
+
+        // Committed, not merely accepted: read the rows back through a fresh session.
+        var session = connection.OpenSession(unit, access);
+        foreach (var id in new[] { "single", "batch-a", "batch-b" })
+        {
+            Assert.NotNull(session.Read(new StorageKey(new Dictionary<string, object?>
+            {
+                ["id"] = id
+            })));
+        }
+    }
+
+    private static StorageUnit JsonDocumentUnit() => new()
+    {
+        Id = new StorageUnitId("logical.json.document"),
+        Name = "json_documents",
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+            new ColumnDefinition { Name = "content", Type = PortableType.Json, IsNullable = false }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    private static StorageValues JsonRow(string id, string content) =>
+        new(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = id,
+            ["content"] = content
+        });
 
     [SkippableFact]
     public void Provider_applies_a_63_byte_storage_unit_name_without_rewriting()
@@ -488,12 +647,96 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
-    public void Provider_passes_the_shipped_conformance_suite()
+    public async Task Nested_write_is_refused_rather_than_blocking()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();
-        var report = ConformanceSuite.Run(new PostgreSqlProviderFactory(), database.ConnectionString);
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var name = "pg_nested_write_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var batched = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
+
+        // A non-unconditional precondition takes the batch fallback, which re-enters the write
+        // path from inside the batch's own transaction.
+        var write = RowWrite.Upsert(
+            unit,
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "a", ["value"] = "nested" }),
+            WriteOptions.CreateOnly);
+
+        var pending = Task.Run(() => batched.ApplyBatch([write]));
+        Assert.Same(pending, await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(30))));
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => pending);
+        Assert.Contains("GW-WRITE-NESTED-001", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public async Task Provider_passes_the_shipped_conformance_suite_on_both_surfaces()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+
+        // One database, both surfaces: each run proves the whole contract on its own storage units.
+        var synchronous = ConformanceSuite.Run(new PostgreSqlProviderFactory(), database.ConnectionString);
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine,
+            synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+
+        var asynchronous = await ConformanceSuite.RunAsync(new PostgreSqlProviderFactory(), database.ConnectionString);
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine,
+            asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+    }
+
+    [SkippableFact]
+    public void Async_writes_hold_every_named_concurrency_invariant_under_contention()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("postgresql", new PostgreSqlProviderFactory()),
+            database.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 16,
+                KeyCount = 1,
+                RepeatCount = 1,
+                Seed = 8245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, report.ToString());
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+    }
+
+    [SkippableFact]
+    public void Async_unit_of_work_commits_hold_every_named_concurrency_invariant_under_contention()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory(
+                "postgresql", new PostgreSqlProviderFactory(), commitThroughUnitOfWork: true),
+            database.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 8,
+                KeyCount = 1,
+                RepeatCount = 1,
+                Seed = 9245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, report.ToString());
     }
 
     [SkippableFact]
@@ -543,21 +786,21 @@ public sealed class PostgreSqlDialectTests
             session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-decimal" }),
                 new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
-        var mismatchObserver = new WritePathObserver();
+        var mismatchObserver = new ProviderCommandObserver();
+        var mismatchSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, mismatchObserver);
         Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
-            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
-                new WriteOptions { Observer = mismatchObserver }).Status);
+            mismatchSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L }).Status);
         Assert.Equal(1, mismatchObserver.RoundTrips);
         Assert.Contains(mismatchObserver.Commands, command => command.Operation == "postgresql.compare-and-delete-read");
         Assert.Equal(2L, session.Update(new StorageValues(new Dictionary<string, object?>
         {
             ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
         }), WriteOptions.IfVersion(1)).Version);
-        var deleteObserver = new WritePathObserver();
-        var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
-            new WriteOptions { Observer = deleteObserver });
+        var deleteObserver = new ProviderCommandObserver();
+        var deleteSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, deleteObserver);
+        var deleted = deleteSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
         Assert.Equal(WriteOutcomeStatus.Deleted, deleted.Status);
         Assert.Equal(2L, deleted.Version);
         Assert.Equal(2, deleteObserver.RoundTrips);
@@ -618,55 +861,6 @@ public sealed class PostgreSqlDialectTests
 
     }
 
-    private sealed class PostgreSqlFixture : IDisposable
-    {
-        private readonly string adminConnectionString;
-        private readonly string schema;
-
-        private PostgreSqlFixture(string adminConnectionString, string schema, string connectionString)
-        {
-            this.adminConnectionString = adminConnectionString;
-            this.schema = schema;
-            ConnectionString = connectionString;
-        }
-
-        public string ConnectionString { get; }
-
-        public static PostgreSqlFixture OpenOrSkip()
-        {
-            var baseConnection = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
-            Skip.If(string.IsNullOrWhiteSpace(baseConnection),
-                "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL integration tests.");
-            var schema = "w2_" + Guid.NewGuid().ToString("N");
-            using var admin = new NpgsqlConnection(baseConnection);
-            try
-            {
-                admin.Open();
-            }
-            catch (Exception exception)
-            {
-                Skip.If(true, $"PostgreSQL is unavailable: {exception.Message}");
-                throw;
-            }
-            using (var command = admin.CreateCommand())
-            {
-                command.CommandText = $"CREATE SCHEMA \"{schema}\";";
-                command.ExecuteNonQuery();
-            }
-            var builder = new NpgsqlConnectionStringBuilder(baseConnection) { SearchPath = schema };
-            return new PostgreSqlFixture(baseConnection, schema, builder.ConnectionString);
-        }
-
-        public void Dispose()
-        {
-            using var admin = new NpgsqlConnection(adminConnectionString);
-            admin.Open();
-            using var command = admin.CreateCommand();
-            command.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE;";
-            command.ExecuteNonQuery();
-        }
-    }
-
     private static StorageUnit NullOrderingUnit(string id) => new()
     {
         Id = new StorageUnitId(id),
@@ -693,4 +887,89 @@ public sealed class PostgreSqlDialectTests
 
     private static string PhysicalIndexName(string table, string index) =>
         $"__groundwork_ix_{table.Length}_{table}_{index.Length}_{index}";
+
+    [SkippableFact]
+    public void Live_dropped_column_on_a_plain_unit_is_fatal_at_session_open()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var unit = AdmissionUnit("pg_admission_drop");
+        using (var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using (var raw = new NpgsqlConnection(database.ConnectionString))
+        {
+            raw.Open();
+            using var command = raw.CreateCommand();
+            command.CommandText = $"ALTER TABLE \"{unit.Name}\" DROP COLUMN \"payload\";";
+            command.ExecuteNonQuery();
+        }
+
+        using var reopened = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() => reopened.OpenSession(unit, StorageAccess.Global));
+        Assert.Contains("GW-RUNTIME-001", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("payload", failure.Message, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void Live_dropped_index_degrades_instead_of_blocking_session_open()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var unit = AdmissionUnit("pg_admission_index") with
+        {
+            Indexes = [new IndexDefinition { Name = "by_payload", Columns = [new IndexColumn("payload")] }]
+        };
+        using (var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using (var raw = new NpgsqlConnection(database.ConnectionString))
+        {
+            raw.Open();
+            using var command = raw.CreateCommand();
+            command.CommandText = $"DROP INDEX \"{PhysicalIndexName(unit.Name, "by_payload")}\";";
+            command.ExecuteNonQuery();
+        }
+
+        using var reopened = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var session = reopened.OpenSession(unit, StorageAccess.Global);
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(
+            new Dictionary<string, object?> { ["id"] = "one", ["payload"] = "first" })).Status);
+    }
+
+    [SkippableFact]
+    public void Live_admission_inspects_once_per_unit_per_connection()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var unit = AdmissionUnit("pg_admission_cache");
+        using (var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString))
+        {
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        }
+
+        using var reopened = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var firstObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, firstObserver);
+        var admissionEvent = Assert.Single(firstObserver.Commands);
+        Assert.Equal("postgresql.schema-admission", admissionEvent.Operation);
+        Assert.Equal(ProviderCommandKind.Read, admissionEvent.Kind);
+
+        var secondObserver = new ProviderCommandObserver();
+        _ = reopened.OpenSession(unit, StorageAccess.Global, secondObserver);
+        Assert.Equal(0, secondObserver.RoundTrips);
+    }
+
+    private static StorageUnit AdmissionUnit(string id) => new()
+    {
+        Id = new StorageUnitId(id),
+        Name = id,
+        Columns =
+        [
+            new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+            new ColumnDefinition { Name = "payload", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
 }

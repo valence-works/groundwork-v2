@@ -57,28 +57,66 @@ public static class RelationalQueryResultReader
     public static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
         DbConnection connection,
         RelationalQueryCommand query,
-        Func<string, object?, object?> decode)
+        Func<string, object?, object?> decode) =>
+        Read(connection, query, decode, transaction: null);
+
+    /// <summary>Reads a rendered query using the caller-owned transaction, when one exists.</summary>
+    internal static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
+        DbConnection connection,
+        RelationalQueryCommand query,
+        Func<string, object?, object?> decode,
+        DbTransaction? transaction) =>
+        Read(connection, query, decode, transaction, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
+
+    public static Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadAsync(
+        DbConnection connection,
+        RelationalQueryCommand query,
+        Func<string, object?, object?> decode,
+        CancellationToken cancellationToken = default) =>
+        Read(connection, query, decode, transaction: null,
+            RelationalExecution.Asynchronous(cancellationToken)).AsTask();
+
+    /// <summary>Reads a rendered query on the surface the caller selected, with its transaction when one exists.</summary>
+    internal static async ValueTask<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Read(
+        DbConnection connection,
+        RelationalQueryCommand query,
+        Func<string, object?, object?> decode,
+        DbTransaction? transaction,
+        RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(decode);
-        using var command = connection.CreateCommand();
+        mode.CancellationToken.ThrowIfCancellationRequested();
+        using var command = CreateCommand(connection, query, transaction);
+        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
+        var reader = readerScope.Reader;
+        var rows = new List<IReadOnlyDictionary<string, object?>>();
+        while (await mode.Read(reader).ConfigureAwait(false))
+            rows.Add(MaterializeRow(reader, decode));
+        return rows;
+    }
+
+    private static DbCommand CreateCommand(DbConnection connection, RelationalQueryCommand query, DbTransaction? transaction)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = query.CommandText;
         AddParameters(command, query);
-        using var reader = command.ExecuteReader();
-        var rows = new List<IReadOnlyDictionary<string, object?>>();
-        while (reader.Read())
+        return command;
+    }
+
+    private static IReadOnlyDictionary<string, object?> MaterializeRow(DbDataReader reader, Func<string, object?, object?> decode)
+    {
+        var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+        for (var index = 0; index < reader.FieldCount; index++)
         {
-            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
-            for (var index = 0; index < reader.FieldCount; index++)
-            {
-                var name = reader.GetName(index);
-                var value = reader.IsDBNull(index) ? null : reader.GetValue(index);
-                row[name] = decode(name, value);
-            }
-            rows.Add(row);
+            var name = reader.GetName(index);
+            var value = reader.IsDBNull(index) ? null : reader.GetValue(index);
+            row[name] = decode(name, value);
         }
-        return rows;
+        return row;
     }
 
     /// <summary>Adds the rendered values to a native command, including explain commands.</summary>
@@ -169,19 +207,20 @@ public abstract class RelationalQueryRenderer
                 where = $"({where}) AND ({RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex)})";
         }
 
-        var selectedIndex = options.FindPinnedIndex();
-        var indexHintApplied = selectedIndex is not null && supportsIndexHints;
-        if (selectedIndex is not null && !selectedIndex.IncludesNulls)
+        var pinnedIndex = options.FindPinnedIndex();
+        var expectedIndex = options.FindSelectedIndex();
+        var indexHintApplied = pinnedIndex is not null && supportsIndexHints;
+        if (pinnedIndex is not null && !pinnedIndex.IncludesNulls)
         {
             if (matchNone)
             {
                 // A contradiction matches no row, but SQL Server still requires a query using a
                 // filtered index to restate that index's filter. Keep the logical contradiction and
                 // make the null exclusion visible to the optimizer.
-                where = $"({where}) AND ({string.Join(" AND ", selectedIndex.Columns.Select(column => dialect.QuoteIdentifier(column) + " IS NOT NULL"))})";
+                where = $"({where}) AND ({string.Join(" AND ", pinnedIndex.Columns.Select(column => dialect.QuoteIdentifier(column) + " IS NOT NULL"))})";
             }
-            var unproven = selectedIndex.Columns
-                .Where(column => selectedIndex.NullableColumns.Contains(column) && CanMatchNull(request.Where, column))
+            var unproven = pinnedIndex.Columns
+                .Where(column => pinnedIndex.NullableColumns.Contains(column) && CanMatchNull(request.Where, column))
                 .ToArray();
             if (unproven.Length != 0)
                 throw new QueryRenderException(
@@ -218,7 +257,7 @@ public abstract class RelationalQueryRenderer
 
         var from = dialect.QuoteIdentifier(request.Table.Value);
         if (indexHintApplied)
-            from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(selectedIndex!.Name));
+            from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(pinnedIndex!.Name));
         string sql;
         if (request.Result.IncludesTotalCount)
         {
@@ -271,7 +310,7 @@ public abstract class RelationalQueryRenderer
             parameters,
             request.Result.IncludesTotalCount,
             matchNone,
-            selectedIndex?.Name,
+            expectedIndex?.Name,
             indexHintApplied,
             effectiveOrder.Select(term => term.Column.Name).ToArray());
     }

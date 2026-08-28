@@ -36,6 +36,30 @@ identity; the same identities are available through `AggregationQueryFingerprint
 cache diagnostics. The legacy rows-only `AggregationResult` constructor leaves these nullable
 fingerprints unset.
 
+The public query surface also supports deterministic multi-term ordering:
+
+```csharp
+var query = new AggregationQuery("diagnostic-summary")
+{
+    OrderByTerms =
+    [
+        new AggregationOrderTerm("count", SortDirection.Descending),
+        new AggregationOrderTerm("service", SortDirection.Ascending)
+    ],
+    Take = 100
+};
+```
+
+Terms name only declared group or aggregate aliases. Missing group columns are appended as
+ascending tie-breakers, and duplicate aliases or invalid directions are refused at admission.
+`Aggregate.Count` is a source-free `Int64` count and is rendered by each provider's native
+grouping operation.
+
+Scoped sessions add the provider-owned physical scope restriction before source filtering and
+reduction. A scope is never exposed as a caller-visible column or predicate. Scope values bind the
+operation's `ValueFingerprint`, while `ShapeFingerprint` intentionally remains the same for the
+same profile and query shape across scopes. Privileged cross-scope aggregation is refused.
+
 ## Portable reducers
 
 `Min` and `Max` ignore null input and return null when a group has no non-null values. `Sum` accepts
@@ -50,7 +74,34 @@ may declare multiple `FirstBy` reducers with independent order columns and direc
 `MaxInputRows` and `MaxGroups` are refusal budgets, not page sizes. Exceeding either budget fails
 the operation; rows or groups are never silently truncated. Native providers cap the input at one
 row beyond `MaxInputRows` and run bounded group/set cardinality evidence before materializing
-aggregate values.
+aggregate values. A native operation intentionally consists of one or more bounded budget-evidence
+commands followed by the final grouped-result command; all commands are provider-native and none
+materializes source rows or calls the ordinary `Query` path. This is not a promise of one network
+round trip.
 
 Profiles are part of the schema subject fingerprint, so changing a reducer, alias, allowance, or
 budget is schema semantic drift and cannot be hidden behind a query.
+
+## Calendar buckets
+
+The closed grouping surface also admits a declared time bucket over a `DateTimeOffset` column:
+
+```csharp
+GroupByExpressions =
+[
+    AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))
+]
+```
+
+`AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")` uses the invocation's named
+IANA zone (`TimeZoneId = "Europe/Amsterdam"`) and returns the UTC instant of local midnight, so
+spring-forward days are 23 hours and fall-back days are 25 hours without collapsing or duplicating
+bucket identities. If a zone advances at local midnight, the bucket is the earliest valid instant
+on that local calendar date; if midnight is ambiguous, the first occurrence is selected. A query
+may add `TimeRange = new AggregationTimeRange(from, to)`; `from` is
+inclusive and `to` is exclusive. Fixed-width requests may set `TimeBucketOrigin` explicitly; when
+omitted, a bounded request anchors at `TimeRange.From`, while an unbounded request uses Unix epoch.
+Null input timestamps are excluded from the derived grouping. The range, width/kind, invocation
+zone/origin, and ordered terms are all part of the query identity, and native providers render the
+grouping in one bounded aggregation operation rather than materializing source rows or generating
+one call per requested bucket.

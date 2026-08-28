@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Groundwork.Kernel;
 using Groundwork.Store;
+using Groundwork.Substrate.Relational;
 using Groundwork.Diagnostics;
 
 namespace Groundwork.SqlServer;
@@ -15,9 +16,18 @@ public sealed class SqlServerProviderFactory : IStorageProviderFactory
         new SqlServerProviderConnection(connectionString);
 }
 
-public sealed class SqlServerProviderConnection : IStorageProviderConnection
+public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
-    private readonly object gate = new();
+    /// <summary>
+    /// The budget SqlServerQueryRenderer enforces, so the pre-execution fence and the renderer cannot
+    /// disagree about it.
+    /// </summary>
+    public QueryAdmissionProfile QueryAdmission { get; } = new()
+    {
+        MaximumParameters = SqlServerQueryRenderer.ParameterBudget
+    };
+
+    private readonly SemaphoreSlim gate = new(1, 1);
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
     private readonly SqlServerSchemaCoordinator schemaCoordinator;
@@ -46,7 +56,30 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         atomicCommit: true,
         compareAndDelete: true);
 
-    internal object Gate => gate;
+    /// <summary>
+    /// Serializes the writes and connection bookkeeping of every session this connection owns.
+    /// The gate is a semaphore rather than a monitor because the asynchronous write path holds it
+    /// across an await, which a monitor cannot do.
+    /// </summary>
+    internal IDisposable EnterGate()
+    {
+        gate.Wait();
+        return new GateScope(gate);
+    }
+
+    internal ValueTask<IDisposable> EnterGate(RelationalExecution mode) =>
+        mode.IsAsync ? EnterGateAsync(mode.CancellationToken) : new(EnterGate());
+
+    private async ValueTask<IDisposable> EnterGateAsync(CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new GateScope(gate);
+    }
+
+    private sealed class GateScope(SemaphoreSlim gate) : IDisposable
+    {
+        public void Dispose() => gate.Release();
+    }
 
     internal SqlConnection CreateIndependentConnection()
     {
@@ -64,18 +97,26 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         }
     }
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-        schemaCoordinator.EnsureRuntimeAdmission(unit);
         var connection = CreateIndependentConnection();
-        lock (gate)
+        try
+        {
+            schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+        using (EnterGate())
             sessionConnections.Add(connection);
-        return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null);
+        return new SqlServerStorageSession(this, SqlServerSchemaCoordinator.Physicalize(unit), access, connection, null, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -84,6 +125,13 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
     public IUnitOfWork BeginUnitOfWork(
         StorageAccess access,
         BatchWriteOptions options,
+        params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
         params StorageUnit[] units)
     {
         ThrowIfDisposed();
@@ -97,18 +145,18 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
             throw new ArgumentException("A unit of work cannot contain a null storage unit.", nameof(units));
         if (units.Select(unit => unit.Id).Distinct().Count() != units.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
-        foreach (var unit in units)
-        {
-            PortabilityValidator.EnsurePhysicalIdentifiers(unit);
-            SqlServerSchemaCoordinator.ValidateAccess(unit, access);
-            schemaCoordinator.EnsureRuntimeAdmission(unit);
-        }
-
         var connection = CreateIndependentConnection();
         try
         {
+            foreach (var unit in units)
+            {
+                PortabilityValidator.EnsurePhysicalIdentifiers(unit);
+                SqlServerSchemaCoordinator.ValidateAccess(unit, access);
+                schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            }
+
             var transaction = connection.BeginTransaction(IsolationLevel.Serializable);
-            return new SqlServerUnitOfWork(this, connection, transaction, units, access, options);
+            return new SqlServerUnitOfWork(this, connection, transaction, units, access, options, observer);
         }
         catch
         {
@@ -128,7 +176,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection
         if (disposed)
             return;
         disposed = true;
-        lock (gate)
+        using (EnterGate())
         {
             foreach (var connection in sessionConnections)
                 connection.Dispose();

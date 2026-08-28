@@ -13,6 +13,23 @@ internal sealed class SqlServerDialect : RelationalDialect
 {
     public override string ProviderName => "SQLServer";
 
+    protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        if (type == PortableType.Guid)
+        {
+            var descendingGuid = direction == SortDirection.Descending;
+            var guidOrder = descendingGuid ? "DESC" : "ASC";
+            var guidKey = SqlServerQueryRenderer.RenderGuidOrderKey(expression);
+            return $"CASE WHEN {expression} IS NULL THEN {(descendingGuid ? 1 : 0)} ELSE {(descendingGuid ? 0 : 1)} END, {guidKey} {guidOrder}";
+        }
+        if (type != PortableType.String)
+            return base.RenderAggregationOrder(expression, type, direction);
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        var ordinal = expression + " COLLATE Latin1_General_100_BIN2";
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {ordinal} {order}, DATALENGTH({expression}) {order}";
+    }
+
     public override RelationalQueryRenderer CreateQueryRenderer() => new SqlServerQueryRenderer();
 
     public override string RenderAggregationContains(string expression, string literal) =>
@@ -109,6 +126,37 @@ internal sealed class SqlServerDialect : RelationalDialect
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// A batch table type names itself after its storage, so a renamed or retired unit leaves the
+    /// old type behind unless it is dropped here. The search-key row is metadata about a column that
+    /// travels with its table, so removing it deletes a record and no stored value.
+    /// </summary>
+    public override void DropProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+        {
+            RelationalSearchKeyCatalog.Drop(
+                connection,
+                transaction,
+                definition,
+                "DELETE FROM [__groundwork_search_key_algorithms] WHERE [table_name]=@table AND [column_name]=@column;");
+            return;
+        }
+        if (!string.Equals(definition.Kind, SqlServerSchemaCoordinator.BatchTypeKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported SQL Server provider definition '{definition.Kind}'.");
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            $"IF TYPE_ID(N'dbo.{definition.SubjectIdentity.Replace("'", "''", StringComparison.Ordinal)}') IS NOT NULL " +
+            $"DROP TYPE [dbo].{SqlServerProviderConnection.QuoteIdentifier(definition.SubjectIdentity)};";
+        command.ExecuteNonQuery();
+    }
+
     private static int? ReadNullableInt(JsonElement element, string name) =>
         element.TryGetProperty(name, out var property) && property.ValueKind != JsonValueKind.Null
             ? property.GetInt32()
@@ -139,6 +187,8 @@ internal sealed class SqlServerDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         ((SqlConnection)connection).BeginTransaction(IsolationLevel.Serializable);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.Serializable;
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;
@@ -150,7 +200,57 @@ internal sealed class SqlServerDialect : RelationalDialect
     }
 
     public override string DropIndexSql(string table, string index) =>
-        $"DROP INDEX {QuoteIdentifier(PhysicalIndexName(table, index))} ON {QuoteIdentifier(table)};";
+        $"DROP INDEX IF EXISTS {QuoteIdentifier(PhysicalIndexName(table, index))} ON {QuoteIdentifier(table)};";
+
+    /// <summary>
+    /// SQL Server binds a column default to an auto-named constraint and then refuses to drop the
+    /// column while that constraint exists, so the constraint is looked up and dropped by name in
+    /// the same statement batch. The drop is composed into a variable and run through
+    /// <c>sp_executesql</c> because <c>EXEC(...)</c> concatenates only string literals and
+    /// variables — a function call such as <c>QUOTENAME</c> does not parse there.
+    /// </summary>
+    public override string DropColumnSql(string table, string column) =>
+        $"""
+        DECLARE @constraint sysname;
+        SELECT @constraint = dc.name
+        FROM sys.default_constraints AS dc
+        INNER JOIN sys.columns AS c
+            ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+        WHERE dc.parent_object_id = OBJECT_ID(N'{Escape(table)}') AND c.name = N'{Escape(column)}';
+        IF @constraint IS NOT NULL
+        BEGIN
+            DECLARE @dropDefault nvarchar(max) =
+                N'ALTER TABLE {Escape(QuoteIdentifier(table))} DROP CONSTRAINT ' + QUOTENAME(@constraint);
+            EXEC sp_executesql @dropDefault;
+        END;
+        ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(column)};
+        """;
+
+    /// <summary>SQL Server renames objects through sp_rename rather than an ALTER clause.</summary>
+    public override string RenameTableSql(string table, string renamed) =>
+        $"EXEC sp_rename N'{Escape(table)}', N'{Escape(renamed)}';";
+
+    public override string RenameColumnSql(string table, string column, string renamed) =>
+        $"EXEC sp_rename N'{Escape(table)}.{Escape(column)}', N'{Escape(renamed)}', N'COLUMN';";
+
+    /// <summary>SQL Server renames an index in place rather than rebuilding it.</summary>
+    public override void RenameIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string fromTable,
+        string toTable,
+        IndexDefinition index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        // sp_rename addresses the index through its table, which already carries the new name.
+        Execute(
+            connection,
+            transaction,
+            $"EXEC sp_rename N'{Escape(toTable)}.{Escape(PhysicalIndexName(fromTable, index.Name))}', " +
+            $"N'{Escape(PhysicalIndexName(toTable, index.Name))}', N'INDEX';");
+    }
+
+    private static string Escape(string identifier) => identifier.Replace("'", "''", StringComparison.Ordinal);
 
     public override string ConditionalUpsertSql(RelationalWriteShape shape)
     {
@@ -173,6 +273,32 @@ internal sealed class SqlServerDialect : RelationalDialect
 
     public override object? ConvertValue(object? value, ColumnDefinition definition) =>
         SqlServerProviderConnection.ToSqlServerValue(value, definition);
+
+    public override object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is null ? null : ReadPortableValue(value, definition);
+
+    /// <summary>
+    /// Maps one stored SQL Server value back to the portable CLR shape its declaration names. The
+    /// storage session and the data-migration scan share this one definition, so a host transform
+    /// sees the declared type rather than the driver's native representation.
+    /// </summary>
+    public static object? ReadPortableValue(object value, ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (value is DBNull) return null;
+        return definition.Type switch
+        {
+            PortableType.Boolean => Convert.ToBoolean(value, CultureInfo.InvariantCulture),
+            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
+            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
+            PortableType.Decimal => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+            PortableType.Guid => (Guid)value,
+            PortableType.DateTimeOffset => ((DateTimeOffset)value).ToUniversalTime(),
+            PortableType.Binary => ((byte[])value).ToArray(),
+            PortableType.Json => JsonDocument.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!).RootElement.Clone(),
+            _ => value
+        };
+    }
 
     public override void Validate(ColumnDefinition definition)
     {
@@ -281,6 +407,23 @@ internal sealed class SqlServerDialect : RelationalDialect
             throw new InvalidOperationException($"SQL Server schema fence for '{target}' is no longer owned by this operation.");
     }
 
+    public override int ParameterBudget => SqlServerQueryRenderer.ParameterBudget;
+
+    public override string LimitClause(int rows) => $" OFFSET 0 ROWS FETCH NEXT {rows} ROWS ONLY";
+
+    public override string? DataMigrationLedgerUpsertSql =>
+        "MERGE [__groundwork_data_migrations] WITH (HOLDLOCK) AS target " +
+        "USING (SELECT @subject AS subject_id, @provider AS provider_name, @migration AS migration_id) AS source " +
+        "ON target.subject_id=source.subject_id AND target.provider_name=source.provider_name " +
+        "AND target.migration_id=source.migration_id " +
+        "WHEN MATCHED THEN UPDATE SET unit_name=@unit, request_fingerprint=@fingerprint, state=@state, " +
+        "[cursor]=@cursor, rows_scanned=@scanned, rows_changed=@changed, batches=@batches, " +
+        "updated_at=@updated, completed_at=@completed " +
+        "WHEN NOT MATCHED THEN INSERT (subject_id,provider_name,migration_id,unit_name,request_fingerprint," +
+        "state,[cursor],rows_scanned,rows_changed,batches,started_at,updated_at,completed_at) " +
+        "VALUES (@subject,@provider,@migration,@unit,@fingerprint,@state,@cursor,@scanned,@changed,@batches," +
+        "@started,@updated,@completed);";
+
     public override void EnsureInfrastructure(DbConnection connection)
     {
         using var command = connection.CreateCommand();
@@ -305,13 +448,29 @@ internal sealed class SqlServerDialect : RelationalDialect
                 column_name nvarchar(450) NOT NULL,
                 algorithm_id nvarchar(512) NOT NULL,
                 CONSTRAINT [PK___groundwork_search_key_algorithms] PRIMARY KEY NONCLUSTERED (table_name, column_name));
+            IF OBJECT_ID(N'[__groundwork_data_migrations]', N'U') IS NULL
+            CREATE TABLE [__groundwork_data_migrations] (
+                subject_id nvarchar(300) NOT NULL,
+                provider_name nvarchar(128) NOT NULL,
+                migration_id nvarchar(300) NOT NULL,
+                unit_name nvarchar(450) NOT NULL,
+                request_fingerprint nvarchar(128) NOT NULL,
+                state nvarchar(16) NOT NULL,
+                [cursor] nvarchar(max) NULL,
+                rows_scanned bigint NOT NULL,
+                rows_changed bigint NOT NULL,
+                batches int NOT NULL,
+                started_at nvarchar(40) NOT NULL,
+                updated_at nvarchar(40) NOT NULL,
+                completed_at nvarchar(40) NULL,
+                CONSTRAINT [PK___groundwork_data_migrations] PRIMARY KEY NONCLUSTERED (subject_id, provider_name, migration_id));
             """;
         command.ExecuteNonQuery();
     }
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table)
         => RelationalSearchKeyCatalog.Read(
             connection,
@@ -354,16 +513,16 @@ internal sealed class SqlServerDialect : RelationalDialect
             throw new InvalidOperationException($"SQL Server schema history publish affected an unexpected number of rows for '{target}'.");
     }
 
-    public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+    public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT 1 FROM sys.tables WHERE schema_id=SCHEMA_ID(N'dbo') AND name=@name;";
-        AddParameter(command, "@name", table);
-        return command.ExecuteScalar() is not null;
+        command.CommandText = "SELECT OBJECT_ID(@name, N'U');";
+        AddParameter(command, "@name", QuoteIdentifier(table));
+        return command.ExecuteScalar() is not (null or DBNull);
     }
 
-    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction transaction, string table)
+    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -398,7 +557,7 @@ internal sealed class SqlServerDialect : RelationalDialect
         return result;
     }
 
-    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction transaction, string table, string index)
+    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index)
     {
         var physical = PhysicalIndexName(table, index);
         using var command = connection.CreateCommand();
@@ -425,7 +584,7 @@ internal sealed class SqlServerDialect : RelationalDialect
     public override string? BackfillColumnSql(string table, ColumnDefinition column) =>
         column.Default is null ? null : $"UPDATE {QuoteIdentifier(table)} SET {QuoteIdentifier(column.Name)}={MapDefault(column)} WHERE {QuoteIdentifier(column.Name)} IS NULL;";
 
-    public override void ValidateTarget(DbConnection connection, DbTransaction transaction, PhysicalSchemaTarget target) =>
+    public override void ValidateTarget(DbConnection connection, DbTransaction? transaction, PhysicalSchemaTarget target) =>
         SqlServerIndexKeyBudgetValidator.Validate(target.Subject.Definition);
 
     internal static string PhysicalIndexName(string table, string logicalName) =>

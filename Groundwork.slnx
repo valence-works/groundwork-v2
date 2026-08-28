@@ -13,6 +13,9 @@
   <Folder Name="/src/Groundwork.Documents/">
     <Project Path="src/Groundwork.Documents/Groundwork.Documents.csproj" />
   </Folder>
+  <Folder Name="/src/Groundwork.Extensions.DependencyInjection/">
+    <Project Path="src/Groundwork.Extensions.DependencyInjection/Groundwork.Extensions.DependencyInjection.csproj" />
+  </Folder>
   <Folder Name="/src/Groundwork.Testing/">
     <Project Path="src/Groundwork.Testing/Groundwork.Testing.csproj" />
   </Folder>
@@ -33,6 +36,9 @@
   </Folder>
   <Folder Name="/src/Groundwork.Query.Linq/">
     <Project Path="src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
+  </Folder>
+  <Folder Name="/src/Groundwork.Query.Linq.Execution/">
+    <Project Path="src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj" />
   </Folder>
   <Folder Name="/src/Groundwork.Query.Linq.Sqlite/">
     <Project Path="src/Groundwork.Query.Linq.Sqlite/Groundwork.Query.Linq.Sqlite.csproj" />
@@ -62,6 +68,9 @@
     <Project Path="src/Groundwork.Analyzers/Groundwork.Analyzers.csproj" />
   </Folder>
   <Folder Name="/samples/" />
+  <Folder Name="/samples/Groundwork.Samples.Api/">
+    <Project Path="samples/Groundwork.Samples.Api/Groundwork.Samples.Api.csproj" />
+  </Folder>
   <Folder Name="/samples/Groundwork.Samples.EventLog/">
     <Project Path="samples/Groundwork.Samples.EventLog/Groundwork.Samples.EventLog.csproj" />
   </Folder>
@@ -133,11 +142,14 @@
   <Folder Name="/tests/Groundwork.Runtime.Tests/">
     <Project Path="tests/Groundwork.Runtime.Tests/Groundwork.Runtime.Tests.csproj" />
   </Folder>
-  <Folder Name="/tests/Groundwork.WritePath.Tests/">
-    <Project Path="tests/Groundwork.WritePath.Tests/Groundwork.WritePath.Tests.csproj" />
+  <Folder Name="/tests/Groundwork.ProviderCommands.Tests/">
+    <Project Path="tests/Groundwork.ProviderCommands.Tests/Groundwork.ProviderCommands.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.StreamCapabilities.Tests/">
     <Project Path="tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Samples.Api.Tests/">
+    <Project Path="tests/Groundwork.Samples.Api.Tests/Groundwork.Samples.Api.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/Groundwork.Samples.EventLog.Tests/">
     <Project Path="tests/Groundwork.Samples.EventLog.Tests/Groundwork.Samples.EventLog.Tests.csproj" />
@@ -147,5 +159,8 @@
   </Folder>
   <Folder Name="/tests/Groundwork.Documents.Tests/">
     <Project Path="tests/Groundwork.Documents.Tests/Groundwork.Documents.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Groundwork.Extensions.DependencyInjection.Tests/">
+    <Project Path="tests/Groundwork.Extensions.DependencyInjection.Tests/Groundwork.Extensions.DependencyInjection.Tests.csproj" />
   </Folder>
 </Solution>

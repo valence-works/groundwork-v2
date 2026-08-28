@@ -1,0 +1,159 @@
+name: Publish wiki
+
+# Publishes docs/wiki/ to this repository's GitHub wiki.
+#
+# The wiki is a separate git repository (<repo>.wiki.git). This workflow mirrors
+# docs/wiki/ into it, so the wiki is generated from source and reviewed through
+# ordinary pull requests. Direct edits made in the wiki UI are overwritten.
+#
+# Prerequisite (one time): the wiki must already exist. GitHub only creates
+# <repo>.wiki.git after the first page is saved, so open
+# https://github.com/<owner>/<repo>/wiki and click "Create the first page",
+# save anything, then run this workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/wiki/**'
+      - '.github/workflows/publish-wiki.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Render and diff the wiki without pushing
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the source repository
+        # Pinned to an immutable commit SHA rather than the mutable v4 tag: this
+        # workflow holds contents: write, so a moved tag could run unreviewed code
+        # against the wiki with the workflow token.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: source
+
+      - name: Verify the wiki source directory
+        run: |
+          set -euo pipefail
+          test -d source/docs/wiki
+          test -f source/docs/wiki/Home.md
+          count=$(find source/docs/wiki -name '*.md' | wc -l | tr -d ' ')
+          echo "Found $count wiki pages."
+          test "$count" -gt 0
+
+      - name: Check every internal wiki link resolves
+        run: |
+          set -euo pipefail
+          cd source/docs/wiki
+          broken=0
+          # Collect the page names GitHub will expose (basename without .md).
+          find . -name '*.md' | sed 's|.*/||; s/\.md$//' | sort -u > /tmp/pages.txt
+          # Extract markdown link targets that are neither absolute URLs, anchors, nor mailto.
+          grep -ohE '\]\([^)#][^)]*\)' *.md \
+            | sed -E 's/^\]\(//; s/\)$//' \
+            | grep -vE '^(https?:|mailto:|#|\.\./)' \
+            | sed -E 's/#.*$//' \
+            | sort -u > /tmp/links.txt || true
+          while read -r link; do
+            [ -z "$link" ] && continue
+            if ! grep -qxF "$link" /tmp/pages.txt; then
+              echo "::error::Broken wiki link target: $link"
+              broken=1
+            fi
+          done < /tmp/links.txt
+          exit $broken
+
+      - name: Check out the wiki repository
+        id: wiki
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git clone \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" \
+            wiki
+          # Wikis use `master` or `main` depending on when they were created.
+          branch=$(git -C wiki rev-parse --abbrev-ref HEAD)
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "Wiki default branch: $branch"
+
+      - name: Explain a missing wiki
+        if: steps.wiki.outcome == 'failure'
+        run: |
+          echo "::error::Could not clone ${{ github.repository }}.wiki.git."
+          echo "GitHub creates the wiki repository only after the first page is saved."
+          echo "Open https://github.com/${{ github.repository }}/wiki, create and save any page, then re-run."
+          exit 1
+
+      - name: Publish to the wiki
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          WIKI_BRANCH: ${{ steps.wiki.outputs.branch }}
+        run: |
+          set -euo pipefail
+          cd wiki
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # docs/wiki is authoritative, but the wiki stays editable in the UI. Rebase
+          # onto whatever the remote holds now, re-apply the mirror, and retry, so an
+          # intervening edit cannot leave a documentation update unpublished. The
+          # workflow-level concurrency group already serializes our own runs.
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin "$WIKI_BRANCH"
+            git reset --quiet --hard "origin/$WIKI_BRANCH"
+
+            # Replace tracked content wholesale so deletions propagate, but keep .git.
+            find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+            cp -R ../source/docs/wiki/. .
+            git add --all
+
+            if git diff --cached --quiet; then
+              echo "The wiki already matches docs/wiki; nothing to publish."
+              exit 0
+            fi
+
+            git diff --cached --stat
+
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "Dry run requested; not pushing."
+              exit 0
+            fi
+
+            git commit --quiet \
+              -m "Publish wiki from ${GITHUB_SHA::7}" \
+              -m "Source: ${{ github.repository }}@${GITHUB_SHA}" \
+              -m "Generated by the publish-wiki workflow. Edit docs/wiki/ in the source repository; direct wiki edits are overwritten."
+
+            if git push --quiet origin "HEAD:$WIKI_BRANCH"; then
+              echo "Published to the wiki."
+              exit 0
+            fi
+
+            echo "::warning::The wiki advanced during publication; reconciling and retrying ($attempt/5)."
+            sleep $(( attempt * 3 ))
+          done
+
+          echo "::error::Could not publish to the wiki after 5 attempts; the wiki is being edited concurrently."
+          exit 1
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Wiki publish"
+            echo
+            echo "- Source: \`docs/wiki/\` at \`${GITHUB_SHA::7}\`"
+            echo "- Target: https://github.com/${{ github.repository }}/wiki"
+          } >> "$GITHUB_STEP_SUMMARY"

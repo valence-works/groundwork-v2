@@ -560,7 +560,7 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
 
         Assert.Equal(
             "3206f759667cb9cc764ec243dfb3d322a39970184efab619e80163c36d86818f",
-            Convert.ToHexStringLower(SHA256.HashData(bytes)));
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
         Assert.DoesNotContain(0x0131, pairs.ToArray());
         Assert.DoesNotContain(0x017F, pairs.ToArray());
         Assert.Contains(0xA7CF, pairs.ToArray());

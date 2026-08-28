@@ -24,6 +24,16 @@ internal static class PublicApiApprovalFixture
         _ = typeof(IndexBuilder);
         _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
         _ = typeof(PortabilityValidator);
+        _ = typeof(AggregationOrderTerm);
+        _ = typeof(AggregationQuery);
+        _ = typeof(AggregationGroup);
+        _ = typeof(AggregationGroup.Column);
+        _ = typeof(AggregationGroup.TimeBucket);
+        _ = typeof(AggregationTimeBucketKind);
+        _ = typeof(AggregationTimeRange);
+        _ = typeof(AggregationTimeBucketCalculator);
+        _ = typeof(AggregationBuilder);
+        _ = typeof(Aggregate.Count);
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
@@ -51,6 +61,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(CrossScopeQueryRow);
         _ = typeof(StorageKey);
         _ = typeof(StorageValues);
+        _ = typeof(StorageUnitQueryRenderOptions);
         _ = typeof(SqliteProviderFactory);
         _ = typeof(InMemoryProviderFactory);
     }
@@ -62,6 +73,14 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
+        _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
+            builder.Aggregate("summary", aggregation => aggregation.GroupBy("group").Count("count")));
+        _ = new AggregationQuery("summary")
+        {
+            OrderByTerms = [new AggregationOrderTerm("count", SortDirection.Descending)]
+        };
+        _ = AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1));
+        _ = AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt");
         _ = PortabilityValidator.MaximumPortableIdentifierLength;
         _ = new Func<string, string, PortabilityValidationResult>((identifier, path) =>
             PortabilityValidator.ValidatePhysicalIdentifier(identifier, path));
@@ -79,6 +98,8 @@ internal static class PublicApiApprovalFixture
         _ = new Func<StorageAccessAudit, StorageAccess>(StorageAccess.PrivilegedAcrossScopes);
         _ = new Func<IStorageSession, QueryRequest, CrossScopeQueryResult>(
             (session, request) => session.QueryAcrossScopes(request));
+        _ = new Func<Groundwork.Kernel.StorageUnit, string, QueryRenderOptions>(
+            (unit, selectedIndex) => unit.CreateQueryRenderOptions(selectedIndex));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableStoreUnitOfWork<ApprovalRecord>>((table, connection) => table.BeginUnitOfWork(connection, BatchWriteOptions.Exact));
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));

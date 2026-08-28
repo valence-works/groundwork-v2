@@ -192,7 +192,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Uncovered_query_reports_the_q3_code_and_suggested_index()
     {
-        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) + QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).QueryAsync();"));
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) + QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).ToListAsync();"));
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
         Assert.Contains("GwIndex", diagnostic.GetMessage(), StringComparison.Ordinal);
@@ -203,7 +203,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task WhereIf_enumerates_shapes_and_the_all_filters_absent_shape_fails()
     {
-        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QuerySource("var result = db.Table<Ticket>().WhereIf(enabled, t => t.Status == status).QueryAsync();"));
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QuerySource("var result = db.Table<Ticket>().WhereIf(enabled, t => t.Status == status).ToListAsync();"));
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_005"));
         Assert.Contains("shape 1 of 2", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
@@ -215,7 +215,7 @@ public sealed class CoverageAnalyzerTests
     {
         var diagnostics = await Analyze(WithSchema(
             SchemaWithIndex("ix_status", "status ASC", "ix_status_created", "status ASC, created_at DESC")) +
-            QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).WhereIf(enabled, t => t.CreatedAt >= from).QueryAsync();"));
+            QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).WhereIf(enabled, t => t.CreatedAt >= from).ToListAsync();"));
 
         Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
     }
@@ -223,7 +223,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Reassignment_dataflow_enumerates_conditional_where()
     {
-        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QueryInfrastructure + " public static class Reassignment { public static void Run() { var q = db.Table<Ticket>(); if (enabled) q = q.Where(t => t.Status == status); var result = q.QueryAsync(); } }");
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QueryInfrastructure + " public static class Reassignment { public static void Run() { var q = db.Table<Ticket>(); if (enabled) q = q.Where(t => t.Status == status); var result = q.ToListAsync(); } }");
 
         Assert.True(diagnostics.Any(item => item.Id == "GW_COVER_005"), string.Join(Environment.NewLine, diagnostics));
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_005"));
@@ -234,7 +234,7 @@ public sealed class CoverageAnalyzerTests
     public async Task Reassignment_that_escapes_into_a_collection_is_unresolvable()
     {
         var source = WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QueryInfrastructure +
-                     " using System.Collections.Generic; public static class Escape { public static void Run() { var q = db.Table<Ticket>(); var values = new List<object>(); values.Add(q); var result = q.QueryAsync(); } }";
+                     " using System.Collections.Generic; public static class Escape { public static void Run() { var q = db.Table<Ticket>(); var values = new List<object>(); values.Add(q); var result = q.ToListAsync(); } }";
 
         var diagnostics = await Analyze(source);
 
@@ -246,7 +246,7 @@ public sealed class CoverageAnalyzerTests
     public async Task More_than_six_conditional_filters_are_unresolvable_by_the_blessed_bound()
     {
         var filters = string.Join("", Enumerable.Range(0, 7).Select(index => $".WhereIf(c{index}, t => t.Status == status)"));
-        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QuerySource($"var result = db.Table<Ticket>(){filters}.QueryAsync();"));
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QuerySource($"var result = db.Table<Ticket>(){filters}.ToListAsync();"));
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_900"));
         Assert.Contains("six", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
@@ -255,7 +255,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Additional_file_schema_fallback_is_consumed()
     {
-        var diagnostics = await Analyze(QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).QueryAsync();"),
+        var diagnostics = await Analyze(QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).ToListAsync();"),
             new InMemoryAdditionalText("groundwork.schema.json", SchemaWithIndex("ix_other", "other ASC")));
 
         Assert.Contains(diagnostics, item => item.Id == "GW_COVER_006");
@@ -273,7 +273,7 @@ public sealed class CoverageAnalyzerTests
         Assert.True(referenceCompilation.Emit(stream).Success);
         stream.Position = 0;
 
-        var diagnostics = await Analyze(QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).QueryAsync();"),
+        var diagnostics = await Analyze(QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).ToListAsync();"),
             references: [MetadataReference.CreateFromStream(stream)]);
 
         Assert.Contains(diagnostics, item => item.Id == "GW_COVER_006");
@@ -286,7 +286,7 @@ public sealed class CoverageAnalyzerTests
             QueryInfrastructure.Replace(
                 "public Query<T> Take(int count) => this;",
                 "public Query<T> Take(int count) => this; public Query<T> Custom() => this;") +
-            " public static class UnknownOperation { public static void Run() { var result = db.Table<Ticket>().Custom().QueryAsync(); } }");
+            " public static class UnknownOperation { public static void Run() { var result = db.Table<Ticket>().Custom().ToListAsync(); } }");
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_900"));
         Assert.Contains("closed query surface", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
@@ -295,7 +295,7 @@ public sealed class CoverageAnalyzerTests
     [Fact]
     public async Task Unrelated_methods_with_the_same_terminal_name_are_ignored()
     {
-        const string source = "public sealed class Client { public System.Threading.Tasks.Task QueryAsync() => System.Threading.Tasks.Task.CompletedTask; } public static class Use { public static void Run(Client client) { _ = client.QueryAsync(); } }";
+        const string source = "public sealed class Client { public System.Threading.Tasks.Task ToListAsync() => System.Threading.Tasks.Task.CompletedTask; } public static class Use { public static void Run(Client client) { _ = client.ToListAsync(); } }";
 
         var diagnostics = await Analyze(source);
 
@@ -303,10 +303,52 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Linq_shaped_terminals_on_non_groundwork_tables_are_ignored()
+    {
+        const string usings = "using System.Collections.Generic; using System.Linq; ";
+        const string foreign = "public sealed class Row { public string Status { get; set; } = \"\"; } " +
+            "public sealed class Sheet { public IEnumerable<T> Table<T>() => new List<T>(); } " +
+            "public static class Spreadsheet { public static List<Row> Run(Sheet sheet) { var rows = sheet.Table<Row>().Where(r => r.Status == \"open\").ToList(); _ = rows.Count(); _ = rows.Any(); return rows; } }";
+
+        var bare = await Analyze(usings + foreign);
+        var withSchema = await Analyze(usings + WithSchema(SchemaWithIndex("ix_status", "status ASC")) + foreign);
+
+        Assert.DoesNotContain(bare, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+        Assert.DoesNotContain(withSchema, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Plain_linq_over_a_materialized_schema_row_collection_is_ignored()
+    {
+        const string usings = "using System.Collections.Generic; using System.Linq; ";
+        const string members = "[GwTable(\"tickets\")] public sealed class Ticket { public string Status { get; set; } = \"\"; } " +
+            "public sealed class Db { public Rows<T> Table<T>() => new Rows<T>(); } " +
+            "public sealed class Rows<T> { public Rows<T> Where(System.Func<T, bool> predicate) => this; public List<T> ToList() => new List<T>(); } " +
+            "public static class Report { public static int Run(Db db, string status) { var rows = db.Table<Ticket>().Where(t => t.Status == status).ToList(); return rows.Count(t => t.Status == status); } }";
+
+        var diagnostics = await Analyze(usings + WithSchema(SchemaWithIndex("ix_status", "status ASC")) + members);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Non_generic_query_facades_are_still_analyzed()
+    {
+        const string members = "[GwTable(\"tickets\")] public sealed class Ticket { public string Status { get; set; } = \"\"; } " +
+            "public sealed class Db { public TicketQuery Table<T>() => new TicketQuery(); } " +
+            "public sealed class TicketQuery { public TicketQuery Where(System.Func<Ticket, bool> predicate) => this; public System.Threading.Tasks.Task ToListAsync() => System.Threading.Tasks.Task.CompletedTask; } " +
+            "public static class Report { public static void Run(Db db, string status) { _ = db.Table<Ticket>().Where(t => t.Status == status).ToListAsync(); } }";
+
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) + members);
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_006");
+    }
+
+    [Fact]
     public async Task Unresolvable_reassignment_has_a_working_where_if_code_fix()
     {
         var source = WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QueryInfrastructure +
-                     " public static class Reassignment { public static void Run() { var q = db.Table<Ticket>(); for (var i = 0; i < 1; i++) if (enabled) q = q.Where(t => t.Status == status); var result = q.QueryAsync(); } }";
+                     " public static class Reassignment { public static void Run() { var q = db.Table<Ticket>(); for (var i = 0; i < 1; i++) if (enabled) q = q.Where(t => t.Status == status); var result = q.ToListAsync(); } }";
         var allDiagnostics = await Analyze(source);
         Assert.True(allDiagnostics.Any(item => item.Id == "GW_COVER_900"), string.Join(Environment.NewLine, allDiagnostics));
         var diagnostic = Assert.Single(allDiagnostics.Where(item => item.Id == "GW_COVER_900"));
@@ -331,7 +373,7 @@ public sealed class CoverageAnalyzerTests
     public async Task Large_compilation_analysis_stays_within_the_bounded_editor_budget()
     {
         var queries = string.Join(Environment.NewLine, Enumerable.Range(0, 500).Select(index =>
-            $"public static void Query{index}() {{ var result = db.Table<Ticket>().Where(t => t.Status == status).QueryAsync(); }}"));
+            $"public static void Query{index}() {{ var result = db.Table<Ticket>().Where(t => t.Status == status).ToListAsync(); }}"));
         var source = WithSchema(SchemaWithIndex("ix_status", "status ASC")) + QueryInfrastructure +
                      " public static class LargeQuerySurface { " + queries + " }";
         var stopwatch = Stopwatch.StartNew();
@@ -348,7 +390,7 @@ public sealed class CoverageAnalyzerTests
     public async Task AcceptScan_uncovered_query_emits_inventory_with_reason_and_owner()
     {
         var source = WithSchema(SchemaWithIndex("ix_other", "other ASC"), allowAcceptedScans: true) +
-                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", reason: \"admin report\", owner: \"billing\", expiresOn: \"2027-01-01\").QueryAsync();");
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", reason: \"admin report\", owner: \"billing\", expiresOn: \"2027-01-01\").ToListAsync();");
 
         var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
 
@@ -363,7 +405,7 @@ public sealed class CoverageAnalyzerTests
     public async Task AcceptScan_on_covered_query_is_a_build_error()
     {
         var source = WithSchema(SchemaWithIndex("ix_status", "status ASC"), allowAcceptedScans: true) +
-                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").ToListAsync();");
 
         var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
 
@@ -374,7 +416,7 @@ public sealed class CoverageAnalyzerTests
     public async Task AcceptScan_without_assembly_opt_in_is_a_build_error()
     {
         var source = WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
-                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").ToListAsync();");
 
         var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
 
@@ -386,7 +428,7 @@ public sealed class CoverageAnalyzerTests
     public async Task AcceptScan_expiry_warns_then_errors_at_the_expiry_date()
     {
         var source = WithSchema(SchemaWithIndex("ix_other", "other ASC"), allowAcceptedScans: true) +
-                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").QueryAsync();");
+                     QuerySource("var result = db.Table<Ticket>().Where(t => t.Status.Contains(\"open\")).AcceptScan(\"GW-SCAN-0007\", \"admin report\", \"billing\", \"2027-01-01\").ToListAsync();");
 
         var warning = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
         Assert.Contains(warning, item => item.Id == "GW_COVER_904" && item.Severity == DiagnosticSeverity.Warning);
@@ -521,7 +563,7 @@ public sealed class CoverageAnalyzerTests
             public Query<T> AcceptScan(string id, string reason, string owner, string expiresOn) => this;
             public Query<T> OrderByDescending<TKey>(Func<T, TKey> selector) => this;
             public Query<T> Take(int count) => this;
-            public Task QueryAsync() => Task.CompletedTask;
+            public Task ToListAsync() => Task.CompletedTask;
         }
         public static class QueryHost { public static Db db = new Db(); public static bool enabled; public static bool c0, c1, c2, c3, c4, c5, c6; public static string status = "open"; public const string term = "open"; public static DateTimeOffset from; }
         """;

@@ -24,8 +24,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         StorageUnit unit,
         StorageAccess access,
         SqliteConnection connection,
-        SqliteTransaction? transaction)
+        SqliteTransaction? transaction,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.owner = owner;
         Unit = unit;
         Access = access;
@@ -33,10 +35,151 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         this.transaction = transaction;
     }
 
+    /// <summary>
+    /// Counts every provider command this session issues. It belongs to the session because the session is
+    /// what issues commands; it used to be read off an individual write's options, so a batch observed only
+    /// whatever happened to be staged first.
+    /// </summary>
+    private readonly IProviderCommandObserver? commandObserver;
+
     public StorageUnit Unit { get; }
     public StorageAccess Access { get; }
 
+    /// <summary>Maps every declared logical index name to the physical name the catalog carries.</summary>
+    private IReadOnlyDictionary<string, string> PhysicalIndexNames() => Unit.Indexes.ToDictionary(
+        index => index.Name,
+        index => SqliteDialect.PhysicalIndexName(Unit.Name, index.Name),
+        StringComparer.Ordinal);
+
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
+    {
+        var (executionSource, renderOptions, command) = PrepareQuery(request, options);
+        var rows = RelationalQueryResultReader.Read(connection, command, DecodeQueryValue, activeTransaction ?? transaction);
+        AssertExplainPlan(command, renderOptions);
+        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+            sourceIncludesRequestedOffset: true,
+            sourceIncludesContinuation: true);
+    });
+
+    /// <summary>
+    /// Reads the page on the async ADO.NET surface so the token still interrupts the native
+    /// statement mid-execution, inside the gate that serializes every session command.
+    /// </summary>
+    public ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Execute(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (executionSource, renderOptions, command) = PrepareQuery(request, options);
+            var rows = RelationalQueryResultReader.Read(
+                    connection, command, DecodeQueryValue, activeTransaction ?? transaction,
+                    RelationalExecution.Asynchronous(cancellationToken))
+                .GetAwaiter().GetResult();
+            AssertExplainPlan(command, renderOptions);
+            return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
+                sourceIncludesRequestedOffset: true,
+                sourceIncludesContinuation: true);
+        }));
+
+    public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Read(key));
+
+    public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => QueryAcrossScopes(request, options));
+
+    public ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Aggregate(query));
+
+    public ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Insert(values, options));
+
+    public ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Update(values, options));
+
+    public ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Upsert(values, options));
+
+    public ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Delete(key, options));
+
+    public ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => ConditionalUpsert(values, options));
+
+    public ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => CompareAndDelete(key, expectedValues, options));
+
+    public ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Append(operationId, values));
+
+    public ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => AppendWithOutcomes(operationId, values));
+
+    public ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken,
+            () => ((IBatchedStorageSession)this).ApplyBatch(writes, exactOutcomes));
+
+    public ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, Inspect);
+
+    public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None, () => ApplyRetention(options));
+
+    public ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None,
+            () => ApplyRetention(operationId, options));
+
+    /// <summary>
+    /// Microsoft.Data.Sqlite completes its asynchronous ADO.NET surface synchronously, and this
+    /// provider serializes every session command on a gate that a suspended continuation cannot
+    /// hold. The asynchronous surface therefore observes cancellation, runs the same gated body on
+    /// the calling thread, and returns an already-completed task: it never yields the thread.
+    /// </summary>
+    private static ValueTask<T> Completed<T>(CancellationToken cancellationToken, Func<T> operation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(operation());
+    }
+
+    private (QueryRequest ExecutionSource, QueryRenderOptions RenderOptions, RelationalQueryCommand Command) PrepareQuery(
+        QueryRequest request,
+        QueryRenderOptions? options)
     {
         ArgumentNullException.ThrowIfNull(request);
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
@@ -48,25 +191,21 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         {
             Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
                 .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(
-                index => index.Name,
-                index => SqliteDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal),
+            PhysicalIndexNames = PhysicalIndexNames(),
             SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
-        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-        });
-        AssertExplainPlan(command, renderOptions);
-        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-    });
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
+        return (executionSource, renderOptions, command);
+    }
+
+    private object? DecodeQueryValue(string name, object? value)
+    {
+        if (name == "__groundwork_total_count") return value;
+        var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+        return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
+    }
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
@@ -103,10 +242,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                     column => QueryTypeOf(column.Type),
                     StringComparer.Ordinal)))
                 .ToImmutableArray(),
-            PhysicalIndexNames = Unit.Indexes.ToDictionary(
-                index => index.Name,
-                index => SqliteDialect.PhysicalIndexName(Unit.Name, index.Name),
-                StringComparer.Ordinal),
+            PhysicalIndexNames = PhysicalIndexNames(),
             SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
             LatestPartitionColumns = [scopeToken]
         };
@@ -117,6 +253,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         var executionRequest = EnsureScopeProjection(
             QueryRequestExecution.ForPage(executionSource, renderOptions));
         var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
@@ -142,20 +279,38 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        if (Unit.Scope != ScopePolicy.Global)
-            return AggregationSessionExecutor.Execute(this, query);
-        return RelationalAggregationExecutor.Execute(
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        var mode = RelationalExecution.Synchronous;
+        var decode = (string name, object? value) =>
+        {
+            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+            return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
+        };
+        return (Unit.Scope == ScopePolicy.Scoped
+            ? RelationalAggregationExecutor.ExecuteScoped(
+                connection,
+                activeTransaction ?? transaction,
+                new SqliteDialect(),
+                Unit,
+                profile,
+                query,
+                decode,
+                SqliteSchemaCoordinator.ScopeColumn,
+                Access.Scope!,
+                mode,
+                commandObserver,
+                "sqlite.aggregate")
+            : RelationalAggregationExecutor.Execute(
             connection,
             activeTransaction ?? transaction,
             new SqliteDialect(),
             Unit,
-            AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName),
+            profile,
             query,
-            (name, value) =>
-            {
-                var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-                return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-            });
+            decode,
+            mode,
+            commandObserver,
+            "sqlite.aggregate")).GetAwaiter().GetResult();
     });
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
@@ -186,7 +341,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     public StoredEntry? Read(StorageKey key)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => PublicEntry(ReadCore(key)));
+        return Execute(() => PublicEntry(ReadCore(key, observerOperation: "sqlite.read", isProbe: false)));
     }
 
     private QueryRequest EnsureScopeProjection(QueryRequest request)
@@ -242,10 +397,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted, options?.Observer);
+        CompleteOnAppend(registration, onAppend && outcome.Status == WriteOutcomeStatus.Inserted);
         return outcome;
     }
 
@@ -260,13 +415,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        IWritePathObserver? observer = null;
-        var succeeded = nativeOnAppend &&
-            OnAppendRetentionCoordinator.TryGetObserver(outcomes, out observer);
-        CompleteOnAppend(registration, succeeded, observer);
+        var succeeded = nativeOnAppend && OnAppendRetentionCoordinator.ContainsAppend(outcomes);
+        CompleteOnAppend(registration, succeeded);
         return outcomes;
     }
 
@@ -279,6 +432,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             {
                 var (noneWhere, noneParameters) = KeyPredicate(key.Values);
                 using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+                commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
                 AddParameters(noneCommand, noneParameters);
                 return noneCommand.ExecuteNonQuery() == 0
                     ? new WriteOutcome(WriteOutcomeStatus.NotFound)
@@ -296,6 +450,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 parameters["@expected"] = options.Precondition.Version!.Value;
             }
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             AddParameters(command, parameters);
             command.ExecuteNonQuery();
             return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
@@ -334,7 +489,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             var returning = VersionColumnDefinition is null ? string.Empty : $" RETURNING {Quote(VersionColumnDefinition.Name)};";
             using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where}{returning}");
             AddParameters(command, parameters);
-            options?.Observer?.Observe(new WritePathEvent("sqlite.compare-and-delete", command.CommandText, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.compare-and-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (VersionColumnDefinition is not null)
             {
                 using (var reader = command.ExecuteReader())
@@ -348,7 +503,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 return new WriteOutcome(WriteOutcomeStatus.Deleted);
             }
 
-            var existing = ReadCore(canonicalKey, options?.Observer, "sqlite.compare-and-delete-read");
+            var existing = ReadCore(canonicalKey, "sqlite.compare-and-delete-read");
             if (existing is null)
                 return new WriteOutcome(WriteOutcomeStatus.NotFound);
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
@@ -517,7 +672,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             if (Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
                 command.Parameters.AddWithValue("@__groundwork_scope", Access.Scope!.Value);
             var affected = command.ExecuteNonQuery();
-            options.Observer?.Observe(new WritePathEvent("sqlite.retention-delete", command.CommandText, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.retention-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
             if (affected == 0)
                 break;
             deleted += affected;
@@ -543,10 +698,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed, observer: null);
+        CompleteOnAppend(registration, onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
         return new WriteOutcome(execution.Status);
     }
 
@@ -565,13 +720,12 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, observer: null);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
         CompleteOnAppend(
             registration,
-            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
-            observer: null);
+            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
         return outcome;
     }
 
@@ -843,7 +997,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
             VersionColumnDefinition is null ? [] : [Quote(VersionColumnDefinition.Name)]));
         command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)} ON CONFLICT DO NOTHING RETURNING {returning};";
-        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-insert", "SQLite multi-row INSERT", IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.batch-insert", "SQLite multi-row INSERT", ProviderCommandKind.Write, IsProbe: false));
         try
         {
             var inserted = ReadReturnedRows(command, writes[0].Unit);
@@ -913,7 +1067,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         var returning = string.Join(", ", Unit.Key.Columns.Select(Quote).Concat(
             VersionColumnDefinition is null ? [] : [Quote(VersionColumnDefinition.Name)]));
         command.CommandText = $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES {string.Join(", ", valuesSql)} ON CONFLICT ({string.Join(", ", Unit.Key.Columns.Select(Quote))}) DO UPDATE SET {string.Join(", ", updateColumns)} RETURNING {returning};";
-        writes[0].Options.Observer?.Observe(new WritePathEvent("sqlite.batch-upsert", "SQLite multi-row INSERT ON CONFLICT", IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.batch-upsert", "SQLite multi-row INSERT ON CONFLICT", ProviderCommandKind.Write, IsProbe: false));
         try
         {
             var returned = ReadReturnedRows(command, writes[0].Unit);
@@ -1025,10 +1179,10 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         }
         catch
         {
-            CompleteOnAppend(registration, cleanupRequired: false, options?.Observer);
+            CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && outcome.Succeeded, options?.Observer);
+        CompleteOnAppend(registration, onAppend && outcome.Succeeded);
         return outcome;
     }
 
@@ -1042,8 +1196,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     private void CompleteOnAppend(
         OnAppendRetentionCoordinator.AppendRegistration? registration,
-        bool cleanupRequired,
-        IWritePathObserver? observer)
+        bool cleanupRequired)
     {
         void Cleanup()
         {
@@ -1052,13 +1205,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 lock (owner.Gate)
                 {
                     owner.ThrowIfDisposed();
-                    ApplyRetentionCore(new RetentionExecutionOptions { Observer = observer });
+                    ApplyRetentionCore(new RetentionExecutionOptions());
                 }
                 return;
             }
 
             owner.ThrowIfDisposed();
-            ApplyRetentionCore(new RetentionExecutionOptions { Observer = observer });
+            ApplyRetentionCore(new RetentionExecutionOptions());
         }
         if (registration is not null)
         {
@@ -1125,6 +1278,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             var returning = SequenceColumnDefinition is null ? string.Empty : $" RETURNING {Quote(SequenceColumnDefinition.Name)};";
             using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}){returning}");
             AddParameters(insert, parameters);
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.insert", insert.CommandText, ProviderCommandKind.Write, IsProbe: false));
             try
             {
                 if (SequenceColumnDefinition is null)
@@ -1172,7 +1326,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         using var update = Command(sql);
         AddParameters(update, parameters);
         if (Unit.Concurrency.IsNone)
-            options?.Observer?.Observe(new WritePathEvent("sqlite.update", sql, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.update", sql, ProviderCommandKind.Write, IsProbe: false));
         var affected = update.ExecuteNonQuery();
         if (affected == 0)
             return new WriteOutcome(Unit.Concurrency.IsNone
@@ -1251,12 +1405,12 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                   $"RETURNING {returning};";
         using var command = Command(sql);
         AddParameters(command, parameters);
-        options?.Observer?.Observe(new WritePathEvent("sqlite.conditional-upsert", sql, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.conditional-upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             using var reader = command.ExecuteReader();
             if (!reader.Read())
-                return DeferredConflict(key, options?.Observer);
+                return DeferredConflict(key);
 
             var inserted = ActionColumnDefinition is not null
                 ? string.Equals(reader.GetString(0), "I", StringComparison.Ordinal)
@@ -1273,13 +1427,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
         }
     }
 
-    private WriteOutcome DeferredConflict(StorageKey key, IWritePathObserver? observer) =>
+    private WriteOutcome DeferredConflict(StorageKey key) =>
         WriteOutcome.Deferred(
             WriteOutcomeStatus.ConcurrencyConflict,
             null,
             () =>
             {
-                var existing = ReadCore(key, observer);
+                var existing = ReadCore(key);
                 return existing is null
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
                     : new WriteOutcomeDetail(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
@@ -1322,6 +1476,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             : $"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}){returning}";
         using var command = Command(sql);
         AddParameters(command, parameters);
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.insert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             if (SequenceColumnDefinition is null)
@@ -1383,8 +1538,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
             parameters["@expected"] = options.Precondition.Version!.Value;
         using var command = Command(sql);
         AddParameters(command, parameters);
-        if (Unit.Concurrency.IsNone)
-            options?.Observer?.Observe(new WritePathEvent("sqlite.upsert", sql, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.upsert", sql, ProviderCommandKind.Write, IsProbe: false));
         try
         {
             command.ExecuteNonQuery();
@@ -1400,14 +1554,14 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
 
     private StoredEntry? ReadCore(
         StorageKey key,
-        IWritePathObserver? observer = null,
-        string? observerOperation = null)
+        string? observerOperation = null,
+        bool isProbe = true)
     {
         var (where, parameters) = KeyPredicate(key.Values);
         var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
         using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
         AddParameters(command, parameters);
-        observer?.Observe(new WritePathEvent(observerOperation ?? "sqlite.write-probe", command.CommandText, IsProbe: true));
+        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlite.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         var values = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -1511,6 +1665,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
         if (transaction is not null) return Translate(operation);
+        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
         lock (owner.Gate)
         {
             owner.ThrowIfDisposed();
@@ -1522,9 +1677,9 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
                 writeTransaction.Commit();
                 return result;
             }
-            catch
+            catch (Exception failure)
             {
-                writeTransaction.Rollback();
+                WriteFailureCleanup.Run(failure, writeTransaction.Rollback);
                 throw;
             }
             finally
@@ -1561,22 +1716,8 @@ internal sealed class SqliteStorageSession : IStorageSession, IExactAppendStorag
     private static string Quote(string value) => SqliteProviderConnection.QuoteIdentifier(value);
     private static object? ToSqlite(object? value, ColumnDefinition definition) => SqliteProviderConnection.ToSqliteValue(value, definition);
 
-    private static object? FromSqlite(object value, ColumnDefinition definition)
-    {
-        if (value is DBNull) return null;
-        return definition.Type switch
-        {
-            PortableType.Boolean => Convert.ToInt64(value, CultureInfo.InvariantCulture) != 0,
-            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
-            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
-            PortableType.Decimal => decimal.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture),
-            PortableType.Guid => Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)! ),
-            PortableType.DateTimeOffset => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            PortableType.Binary => ((byte[])value).ToArray(),
-            PortableType.Json => value is string json ? JsonDocument.Parse(json).RootElement.Clone() : value,
-            _ => value
-        };
-    }
+    private static object? FromSqlite(object value, ColumnDefinition definition) =>
+        SqliteDialect.ReadPortableValue(value, definition);
 
     private void ThrowIfClosed()
     {

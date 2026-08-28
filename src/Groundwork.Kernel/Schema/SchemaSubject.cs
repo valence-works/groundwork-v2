@@ -8,18 +8,91 @@ namespace Groundwork.Kernel.Schema;
 /// </summary>
 public sealed record SchemaEvolutionMetadata
 {
-    public SchemaEvolutionMetadata(bool isDestructive = false, string? semanticMigrationId = null)
+    public SchemaEvolutionMetadata(
+        bool isDestructive = false,
+        string? semanticMigrationId = null,
+        bool retiresPrimaryStorage = false,
+        ImmutableArray<ColumnSupersession> supersessions = default,
+        TimeSpan dualPresenceWindow = default)
     {
         if (semanticMigrationId is not null && string.IsNullOrWhiteSpace(semanticMigrationId))
             throw new ArgumentException("A semantic migration id cannot be empty.", nameof(semanticMigrationId));
+        if (dualPresenceWindow < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(dualPresenceWindow), dualPresenceWindow, "A dual-presence window cannot run backwards.");
+        }
 
         IsDestructive = isDestructive;
         SemanticMigrationId = semanticMigrationId;
+        RetiresPrimaryStorage = retiresPrimaryStorage;
+        // The parameter is an ImmutableArray rather than an IEnumerable so that its name and type
+        // bind to the property of the same name: this record is round-tripped through
+        // System.Text.Json by PhysicalSchemaAppliedStateSerializer, which refuses a constructor
+        // parameter it cannot match to a property.
+        Supersessions = supersessions.IsDefaultOrEmpty
+            ? []
+            : [.. supersessions
+                .Select(supersession => supersession ?? throw new ArgumentException(
+                    "A column supersession cannot be null.", nameof(supersessions)))
+                .OrderBy(supersession => supersession.Name, StringComparer.Ordinal)];
+        DualPresenceWindow = dualPresenceWindow;
+        if (Supersessions.IsEmpty)
+            return;
+
+        if (Supersessions.Select(supersession => supersession.Name)
+                .Distinct(StringComparer.Ordinal).Count() != Supersessions.Length)
+        {
+            throw new ArgumentException(
+                "A column can be superseded only once in one declaration.", nameof(supersessions));
+        }
+        // Every supersession is completed by a backfill, and the readiness gate is that backfill's
+        // recorded completion. A supersession with nothing to populate its replacement column is a
+        // data-loss trap wearing the workflow's name, so it is refused rather than documented.
+        if (string.IsNullOrWhiteSpace(semanticMigrationId))
+        {
+            throw new ArgumentException(
+                "A declaration that supersedes a column requires a semantic migration id: the data migration " +
+                "recorded under it is what populates the replacement column, and its recorded completion is " +
+                "what opens the contract gate.",
+                nameof(semanticMigrationId));
+        }
+        if (retiresPrimaryStorage)
+        {
+            throw new ArgumentException(
+                "A retired subject drops its whole primary storage, so superseding one of its columns describes " +
+                "work that cannot happen.",
+                nameof(supersessions));
+        }
     }
 
     public bool IsDestructive { get; }
 
     public string? SemanticMigrationId { get; }
+
+    /// <summary>
+    /// Declares that this subject's primary storage is retired. Planning then produces a single
+    /// authorized <c>DropPrimaryStorage</c> operation instead of creating or evolving the unit,
+    /// and the applied ledger shrinks to that removal. The declaration is kept and marked rather
+    /// than deleted so the removal is a reviewable authorized plan instead of an inference drawn
+    /// from an absent declaration.
+    /// </summary>
+    public bool RetiresPrimaryStorage { get; }
+
+    /// <summary>
+    /// Columns this declaration replaces across a dual-presence window, in superseded-column order.
+    /// A superseded column is deliberately absent from <see cref="SchemaSubject.Columns"/>: the
+    /// declaration that supersedes it cannot then read it, write it, alter it, or rename it, which
+    /// is what makes the expand plan invisible to the application version that still owns it.
+    /// </summary>
+    public ImmutableArray<ColumnSupersession> Supersessions { get; }
+
+    /// <summary>
+    /// How long a superseded column must stay in place before the contract plan may remove it,
+    /// measured from the later of the retention being recorded and its backfill being recorded
+    /// complete. It bounds how long a pre-expand application version may still be writing.
+    /// </summary>
+    public TimeSpan DualPresenceWindow { get; }
 }
 
 /// <summary>
@@ -54,11 +127,24 @@ public sealed class SchemaSubject
                 .. Columns.Select(CanonicalColumn),
                 .. Key.Columns.Select(column => $"key:{column}"),
                 .. DerivedColumns.Select(CanonicalDerivedColumn),
-                .. Indexes.Select(CanonicalIndex),
-                .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile),
+                // Indexes and aggregation profiles are sets, not sequences: naming the same ones
+                // in a different order describes the same subject.
+                .. Indexes.Select(CanonicalIndex).OrderBy(canonical => canonical, StringComparer.Ordinal),
+                .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile)
+                    .OrderBy(canonical => canonical, StringComparer.Ordinal),
                 Evolution.IsDestructive ? "destructive" : "safe",
-                Evolution.SemanticMigrationId
+                Evolution.SemanticMigrationId,
+                // Appended only when set, so an already-deployed subject keeps the exact
+                // fingerprint it was recorded under instead of hitting a persisted boundary.
+                .. Evolution.RetiresPrimaryStorage ? (string?[])["retired"] : [],
+                .. Evolution.Supersessions.IsEmpty
+                    ? (string?[])[]
+                    : [
+                        .. Evolution.Supersessions.Select(supersession => "supersedes:" + supersession.Canonical),
+                        "dual-presence:" + Evolution.DualPresenceWindow.Ticks.ToString(CultureInfo.InvariantCulture)
+                    ]
             ]);
+        ValidateSupersessions(definition, Evolution);
     }
 
     public StorageUnitId Id => definition.Id;
@@ -88,6 +174,13 @@ public sealed class SchemaSubject
     public RetentionIdempotencyDeclaration? RetentionIdempotency => definition.RetentionIdempotency;
 
     public int SchemaVersion => definition.SchemaVersion;
+
+    /// <summary>
+    /// How deployed columns this subject does not describe are treated. Read from the live
+    /// declaration, never from persisted applied state, and deliberately not part of
+    /// <see cref="Fingerprint"/> — see <see cref="StorageUnit.ForeignColumns"/>.
+    /// </summary>
+    public ForeignColumnPolicy ForeignColumns => definition.ForeignColumns;
 
     public SchemaEvolutionMetadata Evolution { get; }
 
@@ -149,6 +242,36 @@ public sealed class SchemaSubject
 
     public override string ToString() => Id.Value;
 
+    /// <summary>
+    /// A supersession names a column that is leaving and one that is arriving. The arriving column
+    /// has to be declared, and the leaving one must not be: a column that is still declared is not
+    /// superseded, it is simply present, and the expand plan would keep maintaining it.
+    /// </summary>
+    private static void ValidateSupersessions(StorageUnit unit, SchemaEvolutionMetadata evolution)
+    {
+        if (evolution.Supersessions.IsEmpty)
+            return;
+        var declared = unit.Columns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var supersession in evolution.Supersessions)
+        {
+            if (declared.Contains(supersession.Name))
+            {
+                throw new ArgumentException(
+                    $"Superseded column '{supersession.Name}' is still declared by '{unit.Name}'. " +
+                    "Remove it from the declaration: a superseded column is retained physically and read by " +
+                    "nothing the declaration owns.",
+                    nameof(unit));
+            }
+            if (!declared.Contains(supersession.ReplacementColumn))
+            {
+                throw new ArgumentException(
+                    $"Replacement column '{supersession.ReplacementColumn}' for superseded column " +
+                    $"'{supersession.Name}' is not declared by '{unit.Name}'.",
+                    nameof(unit));
+            }
+        }
+    }
+
     private static void Validate(StorageUnit unit)
     {
         ConcurrencyDeclaration.ValidateDeclaration(unit);
@@ -163,6 +286,14 @@ public sealed class SchemaSubject
         var columnNames = columns.Select(column => column.Name).ToArray();
         if (columnNames.Any(string.IsNullOrWhiteSpace) || columnNames.Distinct(StringComparer.Ordinal).Count() != columnNames.Length)
             throw new ArgumentException("Schema subject columns must have unique non-empty names.", nameof(unit));
+
+        var logicalIds = columns.Select(column => column.LogicalId).ToArray();
+        if (logicalIds.Any(string.IsNullOrWhiteSpace) ||
+            logicalIds.Distinct(StringComparer.Ordinal).Count() != logicalIds.Length)
+        {
+            throw new ArgumentException(
+                "Schema subject columns must have unique non-empty logical ids.", nameof(unit));
+        }
 
         var columnSet = columnNames.ToHashSet(StringComparer.Ordinal);
         if (unit.Key.Columns is null || unit.Key.Columns.Count == 0 ||
@@ -249,6 +380,7 @@ public sealed class SchemaSubject
         }).ToImmutableArray(),
         AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
+        ForeignColumns = source.ForeignColumns,
         AppendIdempotency = source.AppendIdempotency is null ? null : source.AppendIdempotency with { },
         RetentionIdempotency = source.RetentionIdempotency is null ? null : source.RetentionIdempotency with { },
         Concurrency = source.Concurrency,
@@ -274,7 +406,8 @@ public sealed class SchemaSubject
         Collation = source.Collation,
         LogicalCollation = source.LogicalCollation,
         Default = source.Default is null ? null : new PortableDefault(SchemaValue.Snapshot(source.Default.Value, source.Type)),
-        Generation = source.Generation
+        Generation = source.Generation,
+        Id = source.Id
     };
 
     private static string CanonicalColumn(ColumnDefinition column) =>
@@ -289,8 +422,20 @@ public sealed class SchemaSubject
             column.Collation?.ToString(),
             column.LogicalCollation?.ToString(),
             column.Generation.ToString(),
-            column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type)
+            column.Default is null ? null : SchemaValue.Canonicalize(column.Default.Value, column.Type),
+            .. LogicalIdentity(column)
         ]);
+
+    /// <summary>
+    /// A column that has never been renamed is planned under its own name, so its logical id
+    /// describes nothing extra. Appending the id only once it diverges from the physical name
+    /// keeps every already-deployed subject fingerprint byte-identical, so adding rename support
+    /// is not itself a persisted schema boundary.
+    /// </summary>
+    internal static string?[] LogicalIdentity(ColumnDefinition column) =>
+        string.Equals(column.LogicalId, column.Name, StringComparison.Ordinal)
+            ? []
+            : [column.LogicalId];
 
     private static string CanonicalDerivedColumn(DerivedColumnDefinition column) =>
         SchemaFingerprint.Canonicalize([column.Name, column.SourceColumn, column.Projection.ToString(), column.AlgorithmId]);
@@ -418,7 +563,7 @@ public static class SchemaFingerprint
             $"{(part?.Length ?? -1).ToString(CultureInfo.InvariantCulture)}:{part ?? string.Empty};"));
 
     public static string CreateCanonical(string canonical) =>
-        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+        PortableHex.Lower(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(canonical)));
 
     internal static bool TryParseCanonical(string canonical, out ImmutableArray<string?> parts)

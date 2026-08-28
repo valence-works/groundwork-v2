@@ -8,7 +8,6 @@
     <IsRoslynComponent>true</IsRoslynComponent>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);NU5128;RS1036;RS1042;RS1032;RS1038;RS2008;1591</NoWarn>
   </PropertyGroup>
@@ -26,6 +25,5 @@
     <None Include="$(TargetDir)Groundwork.Query.Model.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="$(TargetDir)Groundwork.Schema.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="$(TargetDir)Groundwork.Schema.Generator.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
-    <None Include="../../docs/query-coverage-analyzer.md" Pack="true" PackagePath="README.md" />
   </ItemGroup>
 </Project>

@@ -7,6 +7,7 @@ using Groundwork.Testing;
 using Groundwork.Store;
 using MongoDB.Driver;
 using Npgsql;
+using Groundwork.LiveDatabases;
 using Xunit;
 
 namespace Groundwork.Concurrency.Tests;
@@ -85,6 +86,54 @@ public sealed class ConcurrencyHarnessTests
         Assert.True(report.Passed, Describe(report));
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1000)]
+    public void Sqlite_holds_every_named_invariant_on_the_async_surface(int keyCount)
+    {
+        using var store = TemporarySqliteStore.Create();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory("sqlite", new SqliteProviderFactory()),
+            store.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 32,
+                KeyCount = keyCount,
+                RepeatCount = 2,
+                Seed = 5245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                IncludePartialUniqueIndex = true,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, Describe(report));
+        Assert.All(report.Scenarios.SelectMany(scenario => scenario.Invariants), invariant =>
+            Assert.True(invariant.Passed, $"{invariant.Name}: {invariant.Detail}"));
+        Assert.Contains(report.Scenarios.SelectMany(scenario => scenario.Outcomes),
+            outcome => outcome.Status == ConcurrencyWriteOutcomeStatus.ConcurrencyConflict);
+    }
+
+    [Fact]
+    public void Sqlite_holds_every_named_invariant_when_writes_commit_through_an_async_unit_of_work()
+    {
+        using var store = TemporarySqliteStore.Create();
+        var report = ConcurrencyHarness.Run(
+            new StorageProviderConcurrencyFactory(
+                "sqlite", new SqliteProviderFactory(), commitThroughUnitOfWork: true),
+            store.ConnectionString,
+            new ConcurrencyProbeOptions
+            {
+                WriterCount = 8,
+                KeyCount = 1,
+                RepeatCount = 2,
+                Seed = 6245,
+                Concurrency = ConcurrencyKind.Optimistic,
+                Surface = ConcurrencySurface.Asynchronous
+            });
+
+        Assert.True(report.Passed, Describe(report));
+    }
+
     [Fact]
     public void In_memory_batched_upsert_preserves_atomic_concurrency_and_created_at()
     {
@@ -110,10 +159,8 @@ public sealed class ConcurrencyHarnessTests
     [SkippableFact]
     public void SqlServer_batched_upsert_preserves_atomic_concurrency_and_created_at()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString),
-            "Set GROUNDWORK_SQLSERVER_CONNECTION to run the live SQL Server batched W3 proof.");
-        AssertBatchedProvider(new SqlServerProviderFactory(), connectionString!, "sqlserver");
+        var connectionString = LiveSqlServer.Required();
+        AssertBatchedProvider(new SqlServerProviderFactory(), connectionString, "sqlserver");
     }
 
     [SkippableFact]
@@ -393,6 +440,16 @@ internal sealed class PostgreSqlStore : IDisposable
 
     public void Dispose()
     {
+        // Npgsql pools per connection string, and every store here gets its own SearchPath, so this
+        // store's pool is one no later test can ever reuse. Returning the sessions is not enough:
+        // disposing an NpgsqlConnection hands it back to that pool rather than closing the socket, so
+        // without this the idle physical connections survive for the life of the process. Nine
+        // PostgreSQL tests at WriterCount = 32 exhaust a default max_connections = 100 that way, which
+        // surfaces as 53300 in whichever tests happen to run once the budget is gone (#62).
+        // Clearing before the drop also releases anything still holding a lock on the schema.
+        using (var pooled = new NpgsqlConnection(ConnectionString))
+            NpgsqlConnection.ClearPool(pooled);
+
         using var admin = new NpgsqlConnection(adminConnectionString);
         admin.Open();
         using var command = admin.CreateCommand();
@@ -435,11 +492,19 @@ internal sealed class BrokenConcurrencySession(Dictionary<string, ConcurrencySto
         }
     }
 
+    public ValueTask<ConcurrencyWriteOutcome> ConditionalUpsertAsync(
+        ConcurrencyWriteRequest request,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(ConditionalUpsert(request));
+
     public ConcurrencyStoredRow? Read(string key)
     {
         lock (rows)
             return rows.TryGetValue(key, out var row) ? row : null;
     }
+
+    public ValueTask<ConcurrencyStoredRow?> ReadAsync(string key, CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(Read(key));
 
     public void Dispose()
     {

@@ -8,6 +8,211 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class AggregationSqlRenderingTests
 {
     [Fact]
+    public void Renderer_uses_big_count_and_portable_multi_term_output_order()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-count-order"),
+            Name = "aggregation_count_order",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count"), new Aggregate.Min("minimum", "group")],
+            AllowedPredicates = []
+        };
+
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [
+                    new AggregationOrderTerm("count", SortDirection.Descending),
+                    new AggregationOrderTerm("minimum", SortDirection.Ascending)]
+            }).CommandText;
+
+        Assert.Contains("COUNT_BIG(*) AS [count]", sql, StringComparison.Ordinal);
+        Assert.Contains("[count] DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("COLLATE Latin1_General_100_BIN2", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_uses_one_native_time_bucket_expression_and_range_before_grouping()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-time-bucket"),
+            Name = "aggregation_time_bucket",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset },
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "hourly",
+            GroupByExpressions = [AggregationGroup.TimeBucket.FixedUtc("bucket", "createdAt", TimeSpan.FromHours(1))],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var from = new DateTimeOffset(2026, 8, 16, 0, 0, 0, TimeSpan.Zero);
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("hourly") { TimeRange = new AggregationTimeRange(from, from.AddDays(31)) }).CommandText;
+
+        Assert.Contains("DATEDIFF_BIG(NANOSECOND", sql, StringComparison.Ordinal);
+        Assert.Contains("[bucket]", sql, StringComparison.Ordinal);
+        Assert.Contains("[createdAt] >=", sql, StringComparison.Ordinal);
+        Assert.Contains("[createdAt] <", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("Query(", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_converts_any_iana_zone_and_uses_at_time_zone_for_local_midnight()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-local-zone"),
+            Name = "aggregation_local_zone",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "daily",
+            GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var instant = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("daily")
+            {
+                TimeRange = new AggregationTimeRange(instant, instant.AddDays(1)),
+                TimeZoneId = "Asia/Kathmandu"
+            }).CommandText;
+
+        Assert.Contains("Nepal Standard Time", sql, StringComparison.Ordinal);
+        Assert.Contains("AT TIME ZONE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SWITCHOFFSET", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_accepts_the_utc_iana_id_and_maps_it_for_sql_server()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-utc-zone"),
+            Name = "aggregation_utc_zone",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "createdAt", Type = PortableType.DateTimeOffset, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "daily",
+            GroupByExpressions = [AggregationGroup.TimeBucket.LocalCalendarDay("day", "createdAt")],
+            Aggregates = [new Aggregate.Count("count")]
+        };
+        var instant = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("daily")
+            {
+                TimeRange = new AggregationTimeRange(instant, instant.AddDays(1)),
+                TimeZoneId = "UTC"
+            }).CommandText;
+
+        Assert.Contains("AT TIME ZONE 'UTC'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Renderer_uses_the_query_guid_order_key_for_aggregation_output()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-guid-order"),
+            Name = "aggregation_guid_order",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.Guid, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")],
+            AllowedPredicates = []
+        };
+
+        var sql = RelationalAggregationRenderer.Render(new SqlServerDialect(), unit, profile,
+            new AggregationQuery("summary")
+            {
+                OrderByTerms = [new AggregationOrderTerm("group", SortDirection.Ascending)]
+            }).CommandText;
+
+        Assert.Contains("CONVERT(char(36), [group]) COLLATE Latin1_General_100_BIN2 ASC", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Scoped_native_sql_artifacts_inject_scope_before_grouping_and_budget_probe()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("aggregation-scoped-artifact"),
+            Name = "aggregation_scoped_artifact",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        var profile = new AggregationProfile
+        {
+            Name = "summary",
+            GroupByColumns = ["group"],
+            Aggregates = [new Aggregate.Count("count")],
+            AllowedPredicates = []
+        };
+        var scope = new ColumnRef(new TableId(unit.Name), SqlServerSchemaCoordinator.ScopeColumn, QueryType.String, isNullable: false);
+        var providerPredicate = new Predicate.Equal(scope, QueryConstant.Of(scope, "tenant-a"));
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms = [
+                new AggregationOrderTerm("count", SortDirection.Descending),
+                new AggregationOrderTerm("group", SortDirection.Ascending)],
+            Take = 5
+        };
+
+        var command = RelationalAggregationRenderer.RenderWithProviderPredicate(new SqlServerDialect(), unit, profile, query, providerPredicate).CommandText;
+        var probe = RelationalAggregationRenderer.RenderBudgetProbeWithProviderPredicate(new SqlServerDialect(), unit, profile, query, providerPredicate).CommandText;
+
+        Assert.StartsWith("WITH ", command, StringComparison.Ordinal);
+        Assert.Contains(SqlServerSchemaCoordinator.ScopeColumn, command, StringComparison.Ordinal);
+        Assert.Contains("COUNT_BIG(*) AS [count]", command, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", command, StringComparison.Ordinal);
+        Assert.Contains("FETCH NEXT 5 ROWS ONLY", command, StringComparison.Ordinal);
+        Assert.Contains(SqlServerSchemaCoordinator.ScopeColumn, probe, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY", probe, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Renderer_uses_typed_literals_and_null_aware_membership()
     {
         var unit = new StorageUnit

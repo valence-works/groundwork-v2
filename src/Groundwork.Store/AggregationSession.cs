@@ -10,7 +10,15 @@ public static class AggregationSessionExecutor
     public static AggregationResult Execute(IStorageSession session, AggregationQuery query)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return Execute(session.Unit, request => session.Query(request), query);
+        var result = Execute(session.Unit, request => session.Query(request), query);
+        if (session.Access.Scope is not StorageScope scope)
+            return result;
+
+        var profile = AggregationProfileValidator.ResolveOrThrow(session.Unit, query.ProfileName);
+        return new AggregationResult(
+            result.Rows,
+            result.ShapeFingerprint,
+            AggregationQueryFingerprint.Create(session.Unit, profile, query, scope));
     }
 
     /// <summary>Adapter overload for provider-native session contracts.</summary>
@@ -28,7 +36,9 @@ public static class AggregationSessionExecutor
         // the closed aggregation surface's refusal codes provider-neutral (for example, a
         // StartsWith source predicate must not reach a provider's search-key renderer first).
         AggregationExecutor.ValidateQuery(unit, profile, query);
-        var requiredColumns = profile.GroupByColumns
+        var groups = AggregationGrouping.EffectiveGroups(profile);
+        var requiredColumns = groups
+            .Select(AggregationGrouping.SourceColumn)
             .Concat(profile.Aggregates.SelectMany(aggregate => aggregate switch
             {
                 Aggregate.Min min => [min.Column],
@@ -36,6 +46,7 @@ public static class AggregationSessionExecutor
                 Aggregate.Sum sum => [sum.Column],
                 Aggregate.SetUnion set => [set.Column],
                 Aggregate.FirstBy first => [first.Column, first.OrderColumn],
+                Aggregate.Count => Array.Empty<string>(),
                 _ => Array.Empty<string>()
             }))
             .Concat(unit.Key.Columns)
@@ -50,7 +61,7 @@ public static class AggregationSessionExecutor
         var probeLimit = profile.MaxInputRows == int.MaxValue ? int.MaxValue : profile.MaxInputRows + 1;
         var request = new QueryRequest(
             new TableId(unit.Name),
-            query.SourcePredicate ?? Predicate.AlwaysTrue.Instance,
+            AggregationGrouping.EffectiveSourcePredicate(unit, profile, query),
             order,
             Projection.All,
             Paging.OffsetLimit(0, probeLimit));

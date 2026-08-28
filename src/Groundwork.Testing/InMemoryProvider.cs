@@ -66,14 +66,14 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         atomicCommit: true,
         compareAndDelete: true);
 
-    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access)
+    public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
-        return new InMemoryStorageSession(database, state, access, liveState: true);
+        return new InMemoryStorageSession(database, state, access, liveState: true, observer: observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -82,6 +82,13 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
     public IUnitOfWork BeginUnitOfWork(
         StorageAccess access,
         BatchWriteOptions options,
+        params StorageUnit[] units)
+        => BeginUnitOfWork(access, options, observer: null, units);
+
+    public IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
         params StorageUnit[] units)
     {
         ThrowIfDisposed();
@@ -101,7 +108,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         if (states.Select(state => state.Unit.Id).Distinct().Count() != states.Length)
             throw new ArgumentException("A unit of work cannot list the same storage unit twice.", nameof(units));
 
-        return new InMemoryUnitOfWork(database, states, access, options);
+        return new InMemoryUnitOfWork(database, states, access, options, observer);
     }
 
     public void Dispose() => disposed = true;
@@ -596,8 +603,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         bool liveState = false,
         Dictionary<IdempotencyLedgerKey, IdempotencyLedgerEntry>? stagedLedger = null,
         Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits = null,
-        Dictionary<RetentionLedgerKey, RetentionLedgerEntry>? stagedRetentionLedger = null)
+        Dictionary<RetentionLedgerKey, RetentionLedgerEntry>? stagedRetentionLedger = null,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.database = database;
         this.state = state;
         this.liveState = liveState;
@@ -608,6 +617,14 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         Unit = StorageDeclaration.Clone(state.Unit);
         partition = access.Scope?.Value ?? "<global>";
     }
+
+    /// <summary>
+    /// Counts every provider command this session issues. It belongs to the session because the session is
+    /// what issues commands; it used to be read off an individual write's options, so a batch observed only
+    /// whatever happened to be staged first.
+    /// </summary>
+    private readonly IProviderCommandObserver? commandObserver;
+    private bool suppressQueryObservation;
 
     public StorageUnit Unit { get; }
 
@@ -620,6 +637,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
+            commandObserver?.Observe(new ProviderCommandEvent("in-memory.read", null, ProviderCommandKind.Read, IsProbe: false));
             var entry = Mutation.Read(CurrentState(), partition, key);
             return entry is null
                 ? null
@@ -649,6 +667,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
+            if (!suppressQueryObservation)
+                commandObserver?.Observe(new ProviderCommandEvent("in-memory.query", null, ProviderCommandKind.Read, IsProbe: false));
             var rows = CurrentState().Partitions.TryGetValue(partition, out var entries)
                 ? entries.Values
                     .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
@@ -742,6 +762,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         lock (database.Gate)
         {
             ThrowIfDisposed();
+            commandObserver?.Observe(new ProviderCommandEvent("in-memory.query-across-scopes", null, ProviderCommandKind.Read, IsProbe: false));
             var values = CurrentState().Partitions
                 .SelectMany(partition => partition.Value.Values
                     .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
@@ -784,7 +805,23 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
     public AggregationResult Aggregate(AggregationQuery query)
     {
         RefusePrivilegedPointOperation("aggregate");
-        return AggregationSessionExecutor.Execute(this, query);
+        ArgumentNullException.ThrowIfNull(query);
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        AggregationExecutor.ValidateQuery(Unit, profile, query);
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
+        // The executor scans through this session's public Query. That scan is the aggregate's own work,
+        // already represented by the event above — letting it also raise in-memory.query would count one
+        // logical operation twice, which is the exact failure the Kind/probe distinctions exist to avoid.
+        // Sessions are single-caller (they are not thread-safe), so a field suffices.
+        suppressQueryObservation = true;
+        try
+        {
+            return AggregationSessionExecutor.Execute(this, query);
+        }
+        finally
+        {
+            suppressQueryObservation = false;
+        }
     }
 
     private ColumnRef? QueryColumn(string name)
@@ -976,7 +1013,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("insert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return Mutate(values, options, MutationKind.Insert);
+        return Mutate(values, options, MutationKind.Insert, "in-memory.insert");
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
@@ -984,7 +1021,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("update");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return Mutate(values, options, MutationKind.Update);
+        return Mutate(values, options, MutationKind.Update, "in-memory.update");
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
@@ -992,7 +1029,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("upsert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return Mutate(values, options, MutationKind.Upsert, preserveCreatedAt: true);
+        return Mutate(values, options, MutationKind.Upsert, "in-memory.upsert", preserveCreatedAt: true);
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
@@ -1000,8 +1037,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("conditional upsert");
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, options);
-        options?.Observer?.Observe(new WritePathEvent("in-memory.conditional-upsert", null, IsProbe: false));
-        return Mutate(values, options, MutationKind.Upsert, exactOutcome: true, preserveCreatedAt: true);
+        return Mutate(values, options, MutationKind.Upsert, "in-memory.conditional-upsert", exactOutcome: true, preserveCreatedAt: true);
     }
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
@@ -1009,11 +1045,14 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("delete");
         ArgumentNullException.ThrowIfNull(key);
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
+        WriteOutcome deleteOutcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.Delete(CurrentState(), partition, key, options);
+            deleteOutcome = Mutation.Delete(CurrentState(), partition, key, options);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.delete", null, ProviderCommandKind.Write, IsProbe: false));
+        return deleteOutcome;
     }
 
     public WriteOutcome CompareAndDelete(
@@ -1024,12 +1063,14 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
         RefusePrivilegedPointOperation("compare-and-delete");
         var canonicalKey = CompareAndDeleteValidation.CanonicalizeKey(Unit, key);
         var validated = CompareAndDeleteValidation.Validate(Unit, canonicalKey, expectedValues, options);
-        options?.Observer?.Observe(new WritePathEvent("in-memory.compare-and-delete", null, IsProbe: false));
+        WriteOutcome compareOutcome;
         lock (database.Gate)
         {
             ThrowIfDisposed();
-            return Mutation.CompareAndDelete(CurrentState(), partition, canonicalKey, validated, options);
+            compareOutcome = Mutation.CompareAndDelete(CurrentState(), partition, canonicalKey, validated, options);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.compare-and-delete", null, ProviderCommandKind.Write, IsProbe: false));
+        return compareOutcome;
     }
 
     public StorageInspection Inspect()
@@ -1162,7 +1203,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             }
 
             batches++;
-            options.Observer?.Observe(new WritePathEvent("in-memory.retention", null, IsProbe: false));
+            commandObserver?.Observe(new ProviderCommandEvent("in-memory.retention", null, ProviderCommandKind.Write, IsProbe: false));
         }
 
         return new RetentionResult(deleted, batches);
@@ -1179,9 +1220,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ThrowIfDisposed();
             outcome = AppendCore(operationId, values, declaration, exactOutcomes: false);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.append", null, ProviderCommandKind.Write, IsProbe: false));
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return new(outcome.Status);
     }
 
@@ -1196,9 +1238,10 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ThrowIfDisposed();
             outcome = AppendCore(operationId, values, declaration, exactOutcomes: true);
         }
+        commandObserver?.Observe(new ProviderCommandEvent("in-memory.append", null, ProviderCommandKind.Write, IsProbe: false));
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
@@ -1283,12 +1326,105 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ledger.Remove(key);
     }
 
+    /// <summary>
+    /// The reference provider keeps every unit in process behind a monitor, so it has no I/O to
+    /// yield a thread for. The asynchronous surface observes cancellation, runs the same guarded
+    /// body on the calling thread, and returns an already-completed task.
+    /// </summary>
+    private static ValueTask<T> Completed<T>(CancellationToken cancellationToken, Func<T> operation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(operation());
+    }
+
+    public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Read(key));
+
+    public ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Query(request, options));
+
+    public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => QueryAcrossScopes(request, options));
+
+    public ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Aggregate(query));
+
+    public ValueTask<WriteOutcome> InsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Insert(values, options));
+
+    public ValueTask<WriteOutcome> UpdateAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Update(values, options));
+
+    public ValueTask<WriteOutcome> UpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Upsert(values, options));
+
+    public ValueTask<WriteOutcome> DeleteAsync(
+        StorageKey key,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Delete(key, options));
+
+    public ValueTask<WriteOutcome> ConditionalUpsertAsync(
+        StorageValues values,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => ConditionalUpsert(values, options));
+
+    public ValueTask<WriteOutcome> CompareAndDeleteAsync(
+        StorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        WriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => CompareAndDelete(key, expectedValues, options));
+
+    public ValueTask<WriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => Append(operationId, values));
+
+    public ValueTask<AppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<StorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, () => AppendWithOutcomes(operationId, values));
+
+    public ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default) =>
+        Completed(cancellationToken, Inspect);
+
+    public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None, () => ApplyRetention(options));
+
+    public ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null) =>
+        Completed(options?.CancellationToken ?? CancellationToken.None,
+            () => ApplyRetention(operationId, options));
+
     internal void Close() => disposed = true;
 
     private WriteOutcome Mutate(
         StorageValues values,
         WriteOptions? options,
         MutationKind kind,
+        string operation,
         bool exactOutcome = false,
         bool preserveCreatedAt = false)
     {
@@ -1300,21 +1436,23 @@ internal sealed class InMemoryStorageSession : IStorageSession, IExactAppendStor
             ThrowIfDisposed();
             outcome = Mutation.Apply(CurrentState(), partition, values, options, kind, exactOutcome, preserveCreatedAt);
         }
+        // Observed after the provider work ran: an admission failure that throws above issued no command,
+        // and a NotFound/conflict outcome is still one executed command.
+        commandObserver?.Observe(new ProviderCommandEvent(operation, null, ProviderCommandKind.Write, IsProbe: false));
 
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             kind is MutationKind.Insert or MutationKind.Upsert)
-            ApplyOnAppendRetention(options?.Observer);
+            ApplyOnAppendRetention();
         return outcome;
     }
 
-    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    private void ApplyOnAppendRetention()
     {
         // Retention runs after the write lock is released. Providers with native post-commit
         // retention follow the same shape, so concurrent appends do not queue behind a scan.
         void Cleanup() => ApplyRetention(new RetentionExecutionOptions
         {
-            MaxRowsPerBatch = 512,
-            Observer = observer
+            MaxRowsPerBatch = 512
         });
         if (liveState)
             OnAppendRetentionCoordinator.Run(database, Unit, Access.Scope?.Value, Cleanup);
@@ -1351,6 +1489,7 @@ internal sealed record RetentionLedgerEntry(
 
 internal sealed class InMemoryUnitOfWork : IUnitOfWork
 {
+    private readonly IProviderCommandObserver? commandObserver;
     private readonly InMemoryDatabase database;
     private readonly StorageAccess access;
     private readonly Dictionary<StorageUnitId, InMemoryUnitState> staged;
@@ -1365,8 +1504,10 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         InMemoryDatabase database,
         IReadOnlyList<InMemoryUnitState> states,
         StorageAccess access,
-        BatchWriteOptions options)
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.database = database;
         this.access = access;
         batch = new BatchContext(options);
@@ -1387,7 +1528,7 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
             throw new InvalidOperationException(
                 $"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
 
-        var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged, stagedRetentionLedger: stagedRetentionLedger);
+        var session = new InMemoryStorageSession(database, state, access, stagedLedger: stagedLedger, stagedUnits: staged, stagedRetentionLedger: stagedRetentionLedger, observer: commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);
@@ -1455,6 +1596,10 @@ internal sealed class InMemoryUnitOfWork : IUnitOfWork
         return batch.DrainCompleted();
     }
 
+    /// <summary>
+    /// The reference provider commits in process, so an asynchronous commit runs the same body on
+    /// the calling thread and returns an already-completed task.
+    /// </summary>
     public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

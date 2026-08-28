@@ -118,6 +118,18 @@ public sealed class StorageDeclarationBuilder
         return this;
     }
 
+    /// <summary>
+    /// Coexists with a catalog another tool extends: a deployed column this declaration does not
+    /// describe stops being fatal at admission and is reported as a warning instead — but only when
+    /// the database supplies a value for it, so a column Groundwork could never write around stays
+    /// a refusal. Nothing else about drift changes.
+    /// </summary>
+    public StorageDeclarationBuilder TolerateForeignColumns()
+    {
+        state.SetForeignColumns(ForeignColumnPolicy.TolerateDatabaseSupplied);
+        return this;
+    }
+
     public StorageDeclarationBuilder UniqueIndex(string name, params string[] columns)
     {
         state.AddIndex(name, columns.Select(column => new IndexColumn(column)), unique: true);
@@ -189,6 +201,7 @@ public sealed class ColumnBuilder
     private object? defaultValue;
     private bool hasDefault;
     private ColumnGeneration generation = ColumnGeneration.Supplied;
+    private string? logicalId;
 
     public ColumnBuilder Required() { isNullable = false; return this; }
 
@@ -214,6 +227,13 @@ public sealed class ColumnBuilder
 
     public ColumnBuilder ProviderSequence() { generation = ColumnGeneration.ProviderSequence; return this; }
 
+    /// <summary>
+    /// Pins the column's stable logical identity, which defaults to its physical name. Spell it
+    /// only when renaming the column, keeping the original name as the id, so schema planning
+    /// recognises the change as a rename rather than a drop and an add.
+    /// </summary>
+    public ColumnBuilder LogicalId(string value) { logicalId = value; return this; }
+
     internal ColumnBuilder InferNullable(bool value)
     {
         isNullable ??= value;
@@ -230,7 +250,8 @@ public sealed class ColumnBuilder
         Scale = scale,
         Collation = collation,
         Default = hasDefault ? new PortableDefault(DefaultValueSnapshot.Create(defaultValue, type)) : null,
-        Generation = generation
+        Generation = generation,
+        Id = logicalId
     };
 
     private static string RequireName(string value) =>
@@ -276,6 +297,7 @@ public sealed class AggregationBuilder
 {
     private readonly string name;
     private readonly List<string> groupBy = [];
+    private readonly List<AggregationGroup> groupByExpressions = [];
     private readonly List<Aggregate> aggregates = [];
 
     internal AggregationBuilder(string name) => this.name = name;
@@ -286,6 +308,19 @@ public sealed class AggregationBuilder
         return this;
     }
 
+    public AggregationBuilder GroupBy(AggregationGroup expression)
+    {
+        ArgumentNullException.ThrowIfNull(expression);
+        groupByExpressions.Add(expression);
+        return this;
+    }
+
+    public AggregationBuilder FixedUtcBucket(string alias, string column, TimeSpan width) =>
+        GroupBy(AggregationGroup.TimeBucket.FixedUtc(alias, column, width));
+
+    public AggregationBuilder LocalCalendarDayBucket(string alias, string column) =>
+        GroupBy(AggregationGroup.TimeBucket.LocalCalendarDay(alias, column));
+
     public AggregationBuilder Min(string alias, string column)
     {
         aggregates.Add(new Aggregate.Min(alias, column));
@@ -295,6 +330,12 @@ public sealed class AggregationBuilder
     public AggregationBuilder Max(string alias, string column)
     {
         aggregates.Add(new Aggregate.Max(alias, column));
+        return this;
+    }
+
+    public AggregationBuilder Count(string alias)
+    {
+        aggregates.Add(new Aggregate.Count(alias));
         return this;
     }
 
@@ -324,6 +365,7 @@ public sealed class AggregationBuilder
     {
         Name = RequireName(name, nameof(name)),
         GroupByColumns = Array.AsReadOnly(groupBy.ToArray()),
+        GroupByExpressions = Array.AsReadOnly(groupByExpressions.ToArray()),
         Aggregates = Array.AsReadOnly(aggregates.ToArray()),
         AllowedPredicates = []
     };
@@ -344,6 +386,7 @@ internal sealed class StorageDeclarationState
     private KeyDefinition? key;
     private ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.None;
     private ScopePolicy scope = ScopePolicy.Global;
+    private ForeignColumnPolicy foreignColumns = ForeignColumnPolicy.Refuse;
     private RetentionDeclaration? retention;
     private AppendIdempotencyDeclaration? appendIdempotency;
     private RetentionIdempotencyDeclaration? retentionIdempotency;
@@ -423,6 +466,8 @@ internal sealed class StorageDeclarationState
 
     public void SetScope(ScopePolicy value) => scope = value;
 
+    public void SetForeignColumns(ForeignColumnPolicy value) => foreignColumns = value;
+
     public void SetRetention(RetentionDeclaration declaration) => retention = declaration ?? throw new ArgumentNullException(nameof(declaration));
 
     public void SetAppendIdempotency(AppendIdempotencyDeclaration declaration) =>
@@ -442,6 +487,7 @@ internal sealed class StorageDeclarationState
             Indexes = Array.AsReadOnly(indexes.ToArray()),
             AggregationProfiles = Array.AsReadOnly(aggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()),
             Scope = scope,
+            ForeignColumns = foreignColumns,
             Concurrency = concurrency,
             AppendIdempotency = appendIdempotency,
             RetentionIdempotency = retentionIdempotency,

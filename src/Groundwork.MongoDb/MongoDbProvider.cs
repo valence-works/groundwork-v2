@@ -67,6 +67,9 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
 
     public IMongoSchemaCoordinator Schema { get; }
 
+    /// <summary>Data-migration execution for this connection's database.</summary>
+    public MongoDataMigrationExecutor DataMigrations => new(state.Context);
+
     public ProviderFit ProviderSequenceFit => state.Context.SupportsTransactions()
         ? new ProviderFit.Supported()
         : new ProviderFit.Unsupported([MongoCapabilities.ProviderSequence]);
@@ -81,7 +84,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
         return MongoSchemaCoordinator.InspectAdmission(state, applied, access);
     }
 
-    public IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access)
+    public IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         var applied = state.Resolve(unit, access);
@@ -90,10 +93,13 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
             : MongoSchemaCoordinator.EnsureAdmission(state, applied, access);
         if (!access.IsPrivilegedAcrossScopes)
             state.RegisterScope(applied, access);
-        return new MongoStorageSession(state, applied, access, collection, null);
+        return new MongoStorageSession(state, applied, access, collection, null, observer: observer);
     }
 
     public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, params StorageUnit[] units)
+        => BeginUnitOfWork(access, observer: null, units);
+
+    public IMongoUnitOfWork BeginUnitOfWork(MongoStorageAccess access, IProviderCommandObserver? observer, params StorageUnit[] units)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(access);
@@ -112,7 +118,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
             .ToArray();
         foreach (var unit in applied)
             state.RegisterScope(unit, access);
-        return new MongoUnitOfWork(state, applied, collections, access);
+        return new MongoUnitOfWork(state, applied, collections, access, observer);
     }
 
     public void Dispose()
@@ -399,6 +405,12 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         return new MongoSchemaApplyResult(new MongoSchemaDiff(changes), changes.Count != 0);
     }
 
+    /// <summary>
+    /// Rows per bulk write. MongoDB has no multi-document update that carries a different value per
+    /// document, so a batch is one <c>bulkWrite</c> command rather than one command per document.
+    /// </summary>
+    private const int SearchKeyBackfillBatchSize = 512;
+
     private static void BackfillSearchKeys(
         IMongoCollection<BsonDocument> collection,
         StorageUnit desired,
@@ -410,28 +422,38 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         if (pending.Length == 0)
             return;
 
+        // The same host-process transform the chunked data-migration runner drives, so a search key
+        // written by a schema apply and one written by a resumable migration are one definition.
+        var transform = new DerivedColumnTransform(desired, pending);
         var columns = desired.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        var batch = new List<WriteModel<BsonDocument>>(SearchKeyBackfillBatchSize);
         foreach (var document in collection.Find(new BsonDocument()).ToEnumerable())
         {
-            var updates = new BsonDocument();
-            foreach (var derived in pending)
+            var row = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var source in transform.SourceColumns)
             {
-                var source = columns[derived.SourceColumn];
-                var hidden = columns[derived.Name];
-                var value = document.TryGetValue(source.Name, out var stored)
-                    ? MongoValueCodec.Decode(stored, source)
+                row[source] = document.TryGetValue(source, out var stored) && !stored.IsBsonNull
+                    ? MongoValueCodec.Decode(stored, columns[source])
                     : null;
-                var projected = SearchKeyProjection.Populate(desired,
-                    new Dictionary<string, object?>(StringComparer.Ordinal) { [source.Name] = value });
-                projected.TryGetValue(derived.Name, out var searchKey);
-                updates[hidden.Name] = MongoValueCodec.Encode(searchKey, hidden);
             }
 
-            if (updates.ElementCount != 0)
-                collection.UpdateOne(
-                    BuildBackfillFilter(document, pending),
-                    new BsonDocument("$set", updates));
+            var produced = transform.Transform(new DataMigrationRow(row));
+            if (!produced.HasValues)
+                continue;
+            var updates = new BsonDocument();
+            foreach (var pair in produced.Values!)
+                updates[pair.Key] = MongoValueCodec.Encode(pair.Value, columns[pair.Key]);
+            batch.Add(new UpdateOneModel<BsonDocument>(
+                BuildBackfillFilter(document, pending),
+                new BsonDocument("$set", updates)));
+            if (batch.Count < SearchKeyBackfillBatchSize)
+                continue;
+            collection.BulkWrite(batch, new BulkWriteOptions { IsOrdered = false });
+            batch.Clear();
         }
+
+        if (batch.Count != 0)
+            collection.BulkWrite(batch, new BulkWriteOptions { IsOrdered = false });
     }
 
     internal static BsonDocument BuildBackfillFilter(
@@ -602,7 +624,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         return new MongoSchemaAdmissionReport(applied.Declaration.Id, columnDrift, indexDrift);
     }
 
-    private static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
+    internal static string ProjectionAlgorithmId(DerivedColumnDefinition definition) => definition.AlgorithmId ?? definition.Projection switch
     {
         PortableProjection.UnicodeFold => PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId,
         PortableProjection.BoundarySearchKey => PortableStringComparison.SearchKeyAlgorithmId,
@@ -857,7 +879,44 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             "The native _id field order is part of the route and cannot be reordered.");
     }
 
+    /// <summary>
+    /// The declaration rules this in-process coordinator adds to the shared ones. The rename
+    /// refusal is the only one that is specific to this path: it plans from the fingerprint in
+    /// <c>__groundwork_metadata</c> rather than from the applied schema ledger, so it still cannot
+    /// tell a renamed field from a new one.
+    /// </summary>
     private static void ValidateDeclaration(StorageUnit unit)
+    {
+        MongoDeclarationRules.Validate(unit);
+        // The deployment tool reads the applied schema ledger and plans a RenameColumn against it;
+        // this path has no ledger to read, so declaring a diverged logical id here would read
+        // documents that still store the old field as null. Deploy the rename with
+        // 'groundwork apply', which carries the logical id across the rename.
+        if (unit.Columns.FirstOrDefault(column =>
+                !string.Equals(column.LogicalId, column.Name, StringComparison.Ordinal)) is { } renamed)
+        {
+            throw new InvalidOperationException(
+                $"GW-SCHEMA-009 at schema.columns.{renamed.Name}.id: this in-process MongoDB schema apply does " +
+                $"not read the applied schema ledger, so declaring '{renamed.Name}' under logical id " +
+                $"'{renamed.LogicalId}' would read documents that still store the old field as null. Deploy the " +
+                "rename with 'groundwork apply', which plans it against that ledger, or keep the physical name.");
+        }
+    }
+
+    private static bool HasProviderSequence(StorageUnit unit) =>
+        unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence);
+
+    private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
+}
+
+/// <summary>
+/// The declaration rules every MongoDB schema path enforces, whichever entry point compiled the
+/// declaration: the in-process coordinator and the deployment tool's target compiler both call this
+/// so a declaration MongoDB refuses is refused identically either way.
+/// </summary>
+internal static class MongoDeclarationRules
+{
+    internal static void Validate(StorageUnit unit)
     {
         ArgumentNullException.ThrowIfNull(unit);
         ConcurrencyDeclaration.ValidateDeclaration(unit);
@@ -901,11 +960,6 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             if (column.Precision is not (>= 1 and <= 34) || column.Scale is not (>= 0) || column.Scale > column.Precision)
                 throw new ArgumentException($"MongoDB Decimal128 requires Decimal column '{column.Name}' to declare Precision 1..34 and Scale 0..Precision.", nameof(unit));
     }
-
-    private static bool HasProviderSequence(StorageUnit unit) =>
-        unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence);
-
-    private static string Escape(string value) => value.Replace("'", "\\'", StringComparison.Ordinal);
 }
 
 internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession
@@ -918,14 +972,23 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     private readonly MongoUnitOfWork? unitOfWork;
     private bool disposed;
 
+    // A wrapper-owned transaction must let transient failures escape so the wrapper can
+    // replay the complete body. Explicit unit-of-work sessions have no body replay boundary
+    // here, so they normalize the provider error at the write; direct writes preserve an
+    // unknown transient infrastructure failure rather than misclassifying it as uniqueness.
+    private bool ShouldNormalizeTransientWriteConflict =>
+        unitOfWork is not null;
+
     internal MongoStorageSession(
         MongoProviderState state,
         MongoAppliedUnit applied,
         MongoStorageAccess access,
         IMongoCollection<BsonDocument> collection,
         IClientSessionHandle? transactionSession,
-        MongoUnitOfWork? unitOfWork = null)
+        MongoUnitOfWork? unitOfWork = null,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.state = state;
         this.applied = applied;
         this.collection = collection;
@@ -935,11 +998,30 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         Unit = MongoDeclarationSnapshot.Clone(applied.Declaration);
     }
 
+    /// <summary>
+    /// Counts every provider command this session issues. It belongs to the session because the session is
+    /// what issues commands; it used to be read off an individual write's options, so a batch observed only
+    /// whatever happened to be staged first.
+    /// </summary>
+    private readonly IProviderCommandObserver? commandObserver;
+
     public StorageUnit Unit { get; }
 
     public MongoStorageAccess Access { get; }
 
-    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
+    public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) =>
+        QueryCore(request, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<QueryMaterializedResult> QueryAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        QueryCore(request, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<QueryMaterializedResult> QueryCore(
+        QueryRequest request,
+        QueryRenderOptions? options,
+        MongoExecution mode)
     {
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfDisposed();
@@ -948,6 +1030,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.query", "MongoDB.Aggregate(page)", ProviderCommandKind.Read, IsProbe: false));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var executionSource = Access.Policy == ScopePolicy.Scoped
             ? QueryRequestExecution.WithProviderPredicate(request, request.Where,
@@ -978,15 +1061,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 var union = command.Pipeline[unionIndex]["$unionWith"].AsBsonDocument;
                 var countPipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(
                     union["pipeline"].AsBsonArray.Select(value => value.AsBsonDocument).ToArray());
-                documents = collection.Aggregate(transactionSession, dataPipeline, new AggregateOptions { Hint = command.Hint }).ToList();
-                documents.AddRange(collection.Aggregate(transactionSession, countPipeline, new AggregateOptions { Hint = command.Hint }).ToList());
+                documents = await mode.Aggregate(collection, transactionSession, dataPipeline,
+                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false);
+                documents.AddRange(await mode.Aggregate(collection, transactionSession, countPipeline,
+                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false));
             }
             else
             {
                 var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
-                documents = (transactionSession is null
-                    ? collection.Aggregate(pipeline, new AggregateOptions { Hint = command.Hint })
-                    : collection.Aggregate(transactionSession, pipeline, new AggregateOptions { Hint = command.Hint })).ToList();
+                documents = await mode.Aggregate(collection, transactionSession, pipeline,
+                    new AggregateOptions { Hint = command.Hint }).ConfigureAwait(false);
             }
             if (command.IncludesTotalCount && documents.Count == 1 && documents[0].Contains("metadata") && documents[0].Contains("data"))
             {
@@ -1006,9 +1090,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 Limit = command.Limit,
                 Hint = command.Hint
             };
-            documents = (transactionSession is null
-                ? collection.FindSync(command.Filter, findOptions)
-                : collection.FindSync(transactionSession, command.Filter, findOptions)).ToList();
+            documents = await mode.Find(collection, transactionSession, command.Filter, findOptions)
+                .ConfigureAwait(false);
         }
 
         var rows = documents.Select(document =>
@@ -1049,7 +1132,18 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 rows[0] = first;
             }
         }
-        AssertExplainPlan(command, renderOptions);
+        if (command.IncludesTotalCount && facetTotalCount is null && rows.Length == 0)
+        {
+            rows =
+            [
+                new Dictionary<string, object?>
+                {
+                    ["__groundwork_total_count"] = 0L,
+                    ["__groundwork_count_only"] = 1L
+                }
+            ];
+        }
+        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
         return QueryResultMaterializer.Materialize(
             executionSource,
             renderOptions,
@@ -1062,7 +1156,19 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
-        QueryRenderOptions? options = null)
+        QueryRenderOptions? options = null) =>
+        QueryAcrossScopesCore(request, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<CrossScopeQueryResult> QueryAcrossScopesAsync(
+        QueryRequest request,
+        QueryRenderOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        QueryAcrossScopesCore(request, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<CrossScopeQueryResult> QueryAcrossScopesCore(
+        QueryRequest request,
+        QueryRenderOptions? options,
+        MongoExecution mode)
     {
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfDisposed();
@@ -1112,7 +1218,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             collection.CollectionNamespace.CollectionName,
             sourcePrefix);
         var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
-        var documents = collection.Aggregate(pipeline).ToList();
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.query-across-scopes", "MongoDB.Aggregate(cross-scope)", ProviderCommandKind.Read, IsProbe: false));
+        var documents = await mode.Aggregate(collection, session: null, pipeline).ConfigureAwait(false);
         var rows = documents.Select(ToCrossScopeQueryRow).ToArray();
         var materialized = QueryResultMaterializer.Materialize(
             executionSource,
@@ -1194,19 +1301,25 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return row;
     }
 
-    public AggregationResult Aggregate(AggregationQuery query)
+    public AggregationResult Aggregate(AggregationQuery query) =>
+        AggregateCore(query, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<AggregationResult> AggregateAsync(
+        AggregationQuery query,
+        CancellationToken cancellationToken = default) =>
+        AggregateCore(query, MongoExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, MongoExecution mode)
     {
         RefusePrivilegedOperation("aggregate");
         ArgumentNullException.ThrowIfNull(query);
         ThrowIfDisposed();
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
         AggregationProfileValidator.Validate(Unit, profile);
-        if (Access.Policy != ScopePolicy.Global)
-            return AggregationSessionExecutor.Execute(Unit, request => Query(request), query);
-        return ExecuteNativeAggregation(profile, query);
+        return ExecuteNativeAggregation(profile, query, mode);
     }
 
-    private void AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options)
+    private async ValueTask AssertExplainPlan(MongoQueryCommand query, QueryRenderOptions options, MongoExecution mode)
     {
         var logicalIndex = query.ExpectedIndex;
         if (query.IsMatchNone || !ExplainAssertionMode.ShouldAssert(logicalIndex)) return;
@@ -1237,7 +1350,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             { "explain", native },
             { "verbosity", "executionStats" }
         };
-        var explain = state.Context.Database.RunCommand(new BsonDocumentCommand<BsonDocument>(explainCommand));
+        var explain = await mode.Run(
+            token => state.Context.Database.RunCommandAsync(new BsonDocumentCommand<BsonDocument>(explainCommand), cancellationToken: token),
+            () => state.Context.Database.RunCommand(new BsonDocumentCommand<BsonDocument>(explainCommand)))
+            .ConfigureAwait(false);
         var rawPlan = explain.ToJson(new JsonWriterSettings { Indent = true });
         var physicalIndex = options.ResolvePhysicalIndexName(logicalIndex!);
         ExplainAssertionMode.AssertChosenIndex(
@@ -1279,60 +1395,121 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         _ => null
     };
 
-    public MongoStoredEntry? Read(MongoStorageKey key)
+    public MongoStoredEntry? Read(MongoStorageKey key) =>
+        ReadCore(key, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoStoredEntry?> ReadAsync(MongoStorageKey key, CancellationToken cancellationToken = default) =>
+        ReadCore(key, MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<MongoStoredEntry?> ReadCore(MongoStorageKey key, MongoExecution mode)
     {
         RefusePrivilegedOperation("read");
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
-        var document = FindOne(identity);
-        return document is null ? null : MongoDocumentMapper.DecodeEntry(Unit, document, Version(identity, document));
+        var document = await FindOne(identity, mode, "mongodb.read", isProbe: false).ConfigureAwait(false);
+        return document is null
+            ? null
+            : MongoDocumentMapper.DecodeEntry(Unit, document,
+                await Version(identity, mode, document).ConfigureAwait(false));
     }
 
-    public MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null)
+    public MongoWriteOutcome Insert(MongoStorageValues values, MongoWriteOptions? options = null) =>
+        InsertAsync(values, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoWriteOutcome> InsertAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        InsertAsync(values, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<MongoWriteOutcome> InsertAsync(MongoStorageValues values, MongoWriteOptions? options, MongoExecution mode)
     {
         RefusePrivilegedOperation("insert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
-        return Mutate(values, options, MutationKind.Insert);
+        return Mutate(values, options, MutationKind.Insert, mode);
     }
 
-    public MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null)
+    public MongoWriteOutcome Update(MongoStorageValues values, MongoWriteOptions? options = null) =>
+        UpdateAsync(values, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoWriteOutcome> UpdateAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(values, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<MongoWriteOutcome> UpdateAsync(MongoStorageValues values, MongoWriteOptions? options, MongoExecution mode)
     {
         RefusePrivilegedOperation("update");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Update, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
-        return Mutate(values, options, MutationKind.Update);
+        return Mutate(values, options, MutationKind.Update, mode);
     }
 
-    public MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null)
+    public MongoWriteOutcome Upsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
+        UpsertAsync(values, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoWriteOutcome> UpsertAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        UpsertAsync(values, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<MongoWriteOutcome> UpsertAsync(MongoStorageValues values, MongoWriteOptions? options, MongoExecution mode)
     {
         RefusePrivilegedOperation("upsert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
-        return Mutate(values, options, MutationKind.Upsert);
+        return Mutate(values, options, MutationKind.Upsert, mode);
     }
 
-    public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null)
+    public MongoWriteOutcome ConditionalUpsert(MongoStorageValues values, MongoWriteOptions? options = null) =>
+        ConditionalUpsertAsync(values, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoWriteOutcome> ConditionalUpsertAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        ConditionalUpsertAsync(values, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<MongoWriteOutcome> ConditionalUpsertAsync(
+        MongoStorageValues values,
+        MongoWriteOptions? options,
+        MongoExecution mode)
     {
         RefusePrivilegedOperation("conditional upsert");
         WritePreconditionValidator.Validate(Unit, WriteOperation.ConditionalUpsert, ToStoreOptions(options));
         WritePreconditionValidator.ValidateSystemOwnedValues(Unit, values.Values);
-        return ConditionalUpsertCore(values, options);
+        return ConditionalUpsertCore(values, options, mode);
     }
 
     public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes)
         => ApplyBatch(writes, exactOutcomes: false);
 
-    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
+    public IReadOnlyList<RowWriteOutcome> ApplyBatch(IReadOnlyList<RowWrite> writes, bool exactOutcomes) =>
+        ApplyBatchAsync(writes, exactOutcomes, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        CancellationToken cancellationToken = default) =>
+        ApplyBatchAsync(writes, exactOutcomes, MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchAsync(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        MongoExecution mode)
     {
         RefusePrivilegedOperation("batch write");
         ArgumentNullException.ThrowIfNull(writes);
         ThrowIfDisposed();
         var nativeOnAppend = IsNativeAppendBatch(writes);
-        var outcomes = ExecuteWithTransactionIfNeeded(transactional => transactional.ApplyBatchCore(writes, exactOutcomes));
-        if (nativeOnAppend && OnAppendRetentionCoordinator.TryGetObserver(outcomes, out var observer))
-            ApplyOnAppendRetention(observer);
+        var outcomes = await ExecuteWithTransactionIfNeeded(
+            transactional => transactional.ApplyBatchCore(writes, exactOutcomes, mode), mode).ConfigureAwait(false);
+        if (nativeOnAppend && OnAppendRetentionCoordinator.ContainsAppend(outcomes))
+            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return outcomes;
     }
 
@@ -1344,7 +1521,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                             write.Options.Precondition.Kind == WritePreconditionKind.Unconditional &&
                             write.Values is not null);
 
-    private IReadOnlyList<RowWriteOutcome> ApplyBatchCore(IReadOnlyList<RowWrite> writes, bool exactOutcomes)
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchCore(
+        IReadOnlyList<RowWrite> writes,
+        bool exactOutcomes,
+        MongoExecution mode)
     {
         if (writes.Count == 0)
             return [];
@@ -1352,7 +1532,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                                write.Options.Precondition.Kind != WritePreconditionKind.Unconditional ||
                                write.Values is null ||
                                Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence)))
-            return ApplyBatchFallback(writes);
+            return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
 
         // Keep the logical RowWrite for outcome correlation and physicalize exactly once for
         // the native command. Fallback and exact paths delegate to single-row methods, which
@@ -1364,11 +1544,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         // use the native single-row conditional primitive in that mode.
         if (exactOutcomes)
         {
-            return writes.Zip(physicalWrites, (write, physical) =>
-                new RowWriteOutcome(write, ToStore(
-                    ExactOutcomeUpsert(
-                        new MongoStorageValues(physical.Values!.Values),
-                        ToNative(write.Options))))).ToArray();
+            var exact = new List<RowWriteOutcome>(writes.Count);
+            for (var index = 0; index < writes.Count; index++)
+            {
+                exact.Add(new RowWriteOutcome(writes[index], ToStore(await ExactOutcomeUpsert(
+                    new MongoStorageValues(physicalWrites[index].Values!.Values),
+                    ToNative(writes[index].Options),
+                    mode).ConfigureAwait(false))));
+            }
+            return exact;
         }
 
         var models = new List<WriteModel<BsonDocument>>(writes.Count);
@@ -1380,9 +1564,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             var canInsert = missingRequired is null;
             incompleteWrites.Add(missingRequired);
             var document = canInsert
-                ? MongoDocumentMapper.EncodeDocument(
+                ? await MongoDocumentMapper.EncodeDocument(
                     Unit, write.Values.Values, identity, existing: null, _ =>
                         throw new InvalidOperationException("ProviderSequence must use the fallback batch path."))
+                    .ConfigureAwait(false)
                 : null;
             var set = new BsonDocument();
             var setOnInsert = new BsonDocument();
@@ -1420,15 +1605,21 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             });
         }
 
-        writes[0].Options.Observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.batch-write",
             "MongoDB.BulkWrite(UpdateOne upsert:eligible-per-row ordered:false)",
+            ProviderCommandKind.Write,
             IsProbe: false));
         try
         {
-            var result = transactionSession is null
-                ? collection.BulkWrite(models, new BulkWriteOptions { IsOrdered = false })
-                : collection.BulkWrite(transactionSession, models, new BulkWriteOptions { IsOrdered = false });
+            var bulkOptions = new BulkWriteOptions { IsOrdered = false };
+            var result = await mode.Run(
+                token => transactionSession is null
+                    ? collection.BulkWriteAsync(models, bulkOptions, token)
+                    : collection.BulkWriteAsync(transactionSession, models, bulkOptions, token),
+                () => transactionSession is null
+                    ? collection.BulkWrite(models, bulkOptions)
+                    : collection.BulkWrite(transactionSession, models, bulkOptions)).ConfigureAwait(false);
             ThrowIfIncompleteUpsertWasNotApplied(result, incompleteWrites, []);
             return writes.Select(write => new RowWriteOutcome(write,
                 new WriteOutcome(WriteOutcomeStatus.Upserted))).ToArray();
@@ -1463,35 +1654,59 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         throw new InvalidOperationException("MongoDB did not apply every acknowledged aggregate batch write.");
     }
 
-    private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes) =>
-        writes.Select(write => new RowWriteOutcome(write, write.Mode switch
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchFallback(IReadOnlyList<RowWrite> writes, MongoExecution mode)
+    {
+        var outcomes = new List<RowWriteOutcome>(writes.Count);
+        foreach (var write in writes)
         {
-            RowWriteMode.Insert => ToStore(Insert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Update => ToStore(Update(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion => ToStore(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Upsert => ToStore(Upsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.ConditionalUpsert => ToStore(ConditionalUpsert(new MongoStorageValues(write.Values!.Values), ToNative(write.Options))),
-            RowWriteMode.Delete => ToStore(Delete(new MongoStorageKey(write.Key!.Values), ToNative(write.Options))),
-            RowWriteMode.CompareAndDelete => ToStore(CompareAndDelete(new MongoStorageKey(write.Key!.Values), write.ExpectedValues, ToNative(write.Options))),
-            _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
-        })).ToArray();
+            outcomes.Add(new RowWriteOutcome(write, ToStore(await (write.Mode switch
+            {
+                RowWriteMode.Insert => InsertAsync(new MongoStorageValues(write.Values!.Values), ToNative(write.Options), mode),
+                RowWriteMode.Update => UpdateAsync(new MongoStorageValues(write.Values!.Values), ToNative(write.Options), mode),
+                RowWriteMode.Upsert when write.Options.Precondition.Kind == WritePreconditionKind.IfVersion =>
+                    ConditionalUpsertAsync(new MongoStorageValues(write.Values!.Values), ToNative(write.Options), mode),
+                RowWriteMode.Upsert => UpsertAsync(new MongoStorageValues(write.Values!.Values), ToNative(write.Options), mode),
+                RowWriteMode.ConditionalUpsert => ConditionalUpsertAsync(new MongoStorageValues(write.Values!.Values), ToNative(write.Options), mode),
+                RowWriteMode.Delete => DeleteAsync(new MongoStorageKey(write.Key!.Values), ToNative(write.Options), mode),
+                RowWriteMode.CompareAndDelete => CompareAndDeleteAsync(new MongoStorageKey(write.Key!.Values), write.ExpectedValues, ToNative(write.Options), mode),
+                _ => throw new ArgumentOutOfRangeException(nameof(writes), write.Mode, null)
+            }).ConfigureAwait(false))));
+        }
+        return outcomes;
+    }
 
     private static MongoWriteOptions? ToNative(WriteOptions options) =>
-        new() { Precondition = options.Precondition, Observer = options.Observer };
+        new() { Precondition = options.Precondition };
 
     private static WriteOutcome ToStore(MongoWriteOutcome outcome) =>
         new((WriteOutcomeStatus)outcome.Status, outcome.Version, outcome.UniqueIndexName, outcome.GeneratedValues);
 
-    public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null)
+    public MongoWriteOutcome Delete(MongoStorageKey key, MongoWriteOptions? options = null) =>
+        DeleteAsync(key, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoWriteOutcome> DeleteAsync(
+        MongoStorageKey key,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        DeleteAsync(key, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<MongoWriteOutcome> DeleteAsync(MongoStorageKey key, MongoWriteOptions? options, MongoExecution mode)
     {
         RefusePrivilegedOperation("delete");
         WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, ToStoreOptions(options));
         ArgumentNullException.ThrowIfNull(key);
         ThrowIfDisposed();
-        return ExecuteWithTransactionIfNeeded(transactional => transactional.DeleteCore(key, options));
+        return ExecuteWithTransactionIfNeeded(transactional => transactional.DeleteCore(key, options, mode), mode);
     }
 
-    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
+        ApplyRetentionCore(options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null) =>
+        ApplyRetentionCore(options,
+            MongoExecution.Asynchronous(options?.CancellationToken ?? CancellationToken.None));
+
+    private async ValueTask<RetentionResult> ApplyRetentionCore(RetentionExecutionOptions? options, MongoExecution mode)
     {
         RefusePrivilegedOperation("retention");
         options ??= new RetentionExecutionOptions();
@@ -1510,7 +1725,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         // No stage accumulates every row identity for a partition in a server or client array.
         if (declaration.PartitionColumns.Count == 0)
         {
-            DrainPartition(new BsonDocument());
+            await DrainPartition(new BsonDocument()).ConfigureAwait(false);
             return new RetentionResult(deleted, batches);
         }
 
@@ -1526,9 +1741,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             .Sort(partitionSort);
         partitions.Options.BatchSize = Math.Max(1, Math.Min(options.MaxRowsPerBatch, 512));
         partitions.Options.AllowDiskUse = true;
-        using var cursor = partitions.ToCursor(options.CancellationToken);
+        using var cursor = await mode.ToCursor(partitions, options.CancellationToken).ConfigureAwait(false);
         BsonDocument? previous = null;
-        while (cursor.MoveNext(options.CancellationToken))
+        while (await mode.MoveNext(cursor, options.CancellationToken).ConfigureAwait(false))
         {
             foreach (var document in cursor.Current)
             {
@@ -1538,12 +1753,12 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 if (partition.Equals(previous))
                     continue;
                 previous = partition;
-                DrainPartition(partition);
+                await DrainPartition(partition).ConfigureAwait(false);
             }
         }
         return new RetentionResult(deleted, batches);
 
-        void DrainPartition(BsonDocument partitionFilter)
+        async ValueTask DrainPartition(BsonDocument partitionFilter)
         {
             while (true)
             {
@@ -1555,23 +1770,30 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     .Project(new BsonDocument("_id", 1));
                 victimsQuery.Options.BatchSize = options.MaxRowsPerBatch;
                 victimsQuery.Options.AllowDiskUse = true;
-                options.Observer?.Observe(new WritePathEvent(
+                commandObserver?.Observe(new ProviderCommandEvent(
                     "mongodb.retention-watermark-find",
                     $"MongoDB.Find(sort:order-desc+key-asc; skip:{keepNewest}; limit:{options.MaxRowsPerBatch}; projection:_id)",
+                    ProviderCommandKind.Read,
                     IsProbe: false));
-                var victims = victimsQuery.ToList(options.CancellationToken);
+                var victims = await mode.ToList(victimsQuery, options.CancellationToken).ConfigureAwait(false);
                 if (victims.Count == 0)
                     return;
 
                 var ids = new BsonArray(victims.Select(document => document["_id"]));
                 var filter = new BsonDocument("_id", new BsonDocument("$in", ids));
-                var result = transactionSession is null
-                    ? collection.DeleteMany(filter, options.CancellationToken)
-                    : collection.DeleteMany(transactionSession, filter, cancellationToken: options.CancellationToken);
+                var result = await mode.Run(
+                    token => transactionSession is null
+                        ? collection.DeleteManyAsync(filter, token)
+                        : collection.DeleteManyAsync(transactionSession, filter, cancellationToken: token),
+                    () => transactionSession is null
+                        ? collection.DeleteMany(filter, options.CancellationToken)
+                        : collection.DeleteMany(transactionSession, filter, cancellationToken: options.CancellationToken))
+                    .ConfigureAwait(false);
                 var affected = checked((int)result.DeletedCount);
-                options.Observer?.Observe(new WritePathEvent(
+                commandObserver?.Observe(new ProviderCommandEvent(
                     "mongodb.retention-delete-many",
                     $"MongoDB.DeleteMany(ids<=:{options.MaxRowsPerBatch})",
+                    ProviderCommandKind.Write,
                     IsProbe: false));
                 deleted += affected;
                 batches++;
@@ -1585,21 +1807,39 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             : collection.Find(transactionSession, filter);
     }
 
-    public StorageInspection Inspect()
+    public StorageInspection Inspect() =>
+        InspectCore(MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<StorageInspection> InspectAsync(CancellationToken cancellationToken = default) =>
+        InspectCore(MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<StorageInspection> InspectCore(MongoExecution mode)
     {
         RefusePrivilegedOperation("inspect");
         StorageInspectionSessionExtensions.EnsureProviderSequence(Unit);
         ThrowIfDisposed();
         var filter = new BsonDocument("_id", HighWaterId());
-        var document = transactionSession is null
-            ? state.Metadata.Find(filter).FirstOrDefault()
-            : state.Metadata.Find(transactionSession, filter).FirstOrDefault();
+        var document = await mode.FirstOrDefault(transactionSession is null
+            ? state.Metadata.Find(filter)
+            : state.Metadata.Find(transactionSession, filter)).ConfigureAwait(false);
         if (document is null || !document.TryGetValue(HighWaterValue, out var value) || value.IsBsonNull)
             return new StorageInspection(null);
         return new StorageInspection(value.ToInt64());
     }
 
-    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
+    public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null) =>
+        ApplyExactRetention(operationId, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<RetentionOperationResult> ApplyRetentionAsync(
+        OperationId operationId,
+        RetentionExecutionOptions? options = null) =>
+        ApplyExactRetention(operationId, options,
+            MongoExecution.Asynchronous(options?.CancellationToken ?? CancellationToken.None));
+
+    private ValueTask<RetentionOperationResult> ApplyExactRetention(
+        OperationId operationId,
+        RetentionExecutionOptions? options,
+        MongoExecution mode)
     {
         RefusePrivilegedOperation("retention");
         var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
@@ -1608,13 +1848,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         options ??= new RetentionExecutionOptions();
         RetentionSessionExtensions.ValidateExecutionOptions(options);
         RetentionOperationCodec.ValidateOperation(operationId);
-        return ExecuteWithTransactionIfNeeded(transactional => transactional.ApplyExactRetentionCore(operationId, declaration, options));
+        return ExecuteWithTransactionIfNeeded(
+            transactional => transactional.ApplyExactRetentionCore(operationId, declaration, options, mode), mode);
     }
 
-    private RetentionOperationResult ApplyExactRetentionCore(
+    private async ValueTask<RetentionOperationResult> ApplyExactRetentionCore(
         OperationId operationId,
         RetentionIdempotencyDeclaration declaration,
-        RetentionExecutionOptions options)
+        RetentionExecutionOptions options,
+        MongoExecution mode)
     {
         var scope = Access.Scope?.Value ?? string.Empty;
         var ledger = state.Operations(declaration.LedgerName);
@@ -1636,21 +1878,28 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             ["_id"] = identity,
             ["$expr"] = new BsonDocument("$gt", new BsonArray { "$committed_at", cutoffExpression })
         };
-        var existing = transactionSession is null
-            ? ledger.Find(valid).FirstOrDefault()
-            : ledger.Find(transactionSession, valid).FirstOrDefault();
+        var existing = await mode.FirstOrDefault(transactionSession is null
+            ? ledger.Find(valid)
+            : ledger.Find(transactionSession, valid)).ConfigureAwait(false);
         if (existing is not null)
             return ReadExistingRetention(existing, operationId, scope, fingerprint);
 
-        var expired = transactionSession is null
-            ? ledger.Find(new BsonDocument("_id", identity)).FirstOrDefault()
-            : ledger.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();
+        var expired = await mode.FirstOrDefault(transactionSession is null
+            ? ledger.Find(new BsonDocument("_id", identity))
+            : ledger.Find(transactionSession, new BsonDocument("_id", identity))).ConfigureAwait(false);
         if (expired is not null)
         {
-            if (transactionSession is null)
-                ledger.DeleteOne(new BsonDocument("_id", identity));
-            else
-                ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
+            await mode.Run(
+                token => transactionSession is null
+                    ? ledger.DeleteOneAsync(new BsonDocument("_id", identity), token)
+                    : ledger.DeleteOneAsync(transactionSession, new BsonDocument("_id", identity), cancellationToken: token),
+                () =>
+                {
+                    if (transactionSession is null)
+                        ledger.DeleteOne(new BsonDocument("_id", identity));
+                    else
+                        ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
+                }).ConfigureAwait(false);
         }
 
         var ledgerSet = new BsonDocument
@@ -1679,9 +1928,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         BsonDocument? previous;
         try
         {
-            previous = transactionSession is null
-                ? ledger.FindOneAndUpdate(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions)
-                : ledger.FindOneAndUpdate(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions);
+            previous = await mode.Run(
+                token => transactionSession is null
+                    ? ledger.FindOneAndUpdateAsync(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions, token)
+                    : ledger.FindOneAndUpdateAsync(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions, token),
+                () => transactionSession is null
+                    ? ledger.FindOneAndUpdate(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions)
+                    : ledger.FindOneAndUpdate(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions))
+                .ConfigureAwait(false);
         }
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
@@ -1692,13 +1946,20 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
         // This method is called through ExecuteWithTransactionIfNeeded. A cancellation or
         // provider failure aborts the transaction, so no delete batch can outlive its ledger result.
-        var retention = ApplyRetention(options);
+        var retention = await ApplyRetentionCore(options, mode).ConfigureAwait(false);
         var result = new RetentionOperationResult(RetentionOperationStatus.Executed, retention.DeletedRows, retention.Batches, retention.Completed);
         var completed = Builders<BsonDocument>.Update.Set("exact_result", RetentionOperationCodec.SerializeResult(result));
-        if (transactionSession is null)
-            ledger.UpdateOne(new BsonDocument("_id", identity), completed);
-        else
-            ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
+        await mode.Run(
+            token => transactionSession is null
+                ? ledger.UpdateOneAsync(new BsonDocument("_id", identity), completed, cancellationToken: token)
+                : ledger.UpdateOneAsync(transactionSession, new BsonDocument("_id", identity), completed, cancellationToken: token),
+            () =>
+            {
+                if (transactionSession is null)
+                    ledger.UpdateOne(new BsonDocument("_id", identity), completed);
+                else
+                    ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
+            }).ConfigureAwait(false);
         return result;
     }
 
@@ -1737,7 +1998,19 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return sort;
     }
 
-    public MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
+    public MongoWriteOutcome Append(OperationId operationId, IReadOnlyList<MongoStorageValues> values) =>
+        AppendAsync(operationId, values, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoWriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<MongoStorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        AppendAsync(operationId, values, MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<MongoWriteOutcome> AppendAsync(
+        OperationId operationId,
+        IReadOnlyList<MongoStorageValues> values,
+        MongoExecution mode)
     {
         RefusePrivilegedOperation("append");
         ThrowIfDisposed();
@@ -1762,7 +2035,9 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             try
             {
-                outcome = ExecuteWithTransactionIfNeeded(transactional => transactional.AppendCore(operationId, values, declaration, exactOutcomes: false).ToStatusOutcome());
+                outcome = await ExecuteWithTransactionIfNeeded(async transactional => (await transactional
+                    .AppendCore(operationId, values, declaration, exactOutcomes: false, mode)
+                    .ConfigureAwait(false)).ToStatusOutcome(), mode).ConfigureAwait(false);
                 break;
             }
             catch (MongoLedgerConflictException) when (attempt == 0)
@@ -1774,7 +2049,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 // work; restarting only the append would silently lose those earlier writes.
                 if (transactionSession is not null)
                 {
-                    try { transactionSession.AbortTransaction(); }
+                    try { await Abort(transactionSession, mode).ConfigureAwait(false); }
                     catch (MongoException) { }
                     unitOfWork?.Poison();
                     throw new MongoUnitOfWorkConflictException(
@@ -1784,11 +2059,23 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             outcome.Status is MongoWriteOutcomeStatus.Inserted or MongoWriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return outcome;
     }
 
-    public MongoAppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<MongoStorageValues> values)
+    public MongoAppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<MongoStorageValues> values) =>
+        AppendWithOutcomesAsync(operationId, values, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoAppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<MongoStorageValues> values,
+        CancellationToken cancellationToken = default) =>
+        AppendWithOutcomesAsync(operationId, values, MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask<MongoAppendOutcomeReport> AppendWithOutcomesAsync(
+        OperationId operationId,
+        IReadOnlyList<MongoStorageValues> values,
+        MongoExecution mode)
     {
         RefusePrivilegedOperation("append");
         ThrowIfDisposed();
@@ -1814,15 +2101,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             try
             {
-                report = ExecuteWithTransactionIfNeeded(
-                    transactional => transactional.AppendCore(operationId, values, declaration, exactOutcomes: true).ToReport());
+                report = await ExecuteWithTransactionIfNeeded(async transactional => (await transactional
+                    .AppendCore(operationId, values, declaration, exactOutcomes: true, mode)
+                    .ConfigureAwait(false)).ToReport(), mode).ConfigureAwait(false);
                 break;
             }
             catch (MongoLedgerConflictException) when (attempt == 0)
             {
                 if (transactionSession is not null)
                 {
-                    try { transactionSession.AbortTransaction(); }
+                    try { await Abort(transactionSession, mode).ConfigureAwait(false); }
                     catch (MongoException) { }
                     unitOfWork?.Poison();
                     throw new MongoUnitOfWorkConflictException(
@@ -1832,15 +2120,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
         if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             report.Status is MongoWriteOutcomeStatus.Inserted or MongoWriteOutcomeStatus.Replayed)
-            ApplyOnAppendRetention(observer: null);
+            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return report;
     }
 
-    private MongoAppendExecution AppendCore(
+    private async ValueTask<MongoAppendExecution> AppendCore(
         OperationId operationId,
         IReadOnlyList<MongoStorageValues> values,
         AppendIdempotencyDeclaration declaration,
-        bool exactOutcomes)
+        bool exactOutcomes,
+        MongoExecution mode)
     {
         var scope = Access.Scope?.Value ?? string.Empty;
         var ledger = state.Operations(declaration.LedgerName);
@@ -1853,7 +2142,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             ["unit"] = "millisecond",
             ["amount"] = Math.Max(1L, checked((long)Math.Ceiling(declaration.Window.TotalMilliseconds)))
         });
-        var expired = ledger.Find(
+        var expired = await mode.ToList(ledger.Find(
                 transactionSession,
                 new BsonDocument("$expr", new BsonDocument("$and", new BsonArray
                 {
@@ -1861,16 +2150,22 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     new BsonDocument("$lte", new BsonArray { "$committed_at", cutoffExpression })
                 })))
             .Limit(128)
-            .Project(new BsonDocument("_id", 1))
-            .ToList();
+            .Project(new BsonDocument("_id", 1))).ConfigureAwait(false);
         if (expired.Count != 0)
         {
             var ids = expired.Select(document => document["_id"]).ToArray();
             var deleteFilter = Builders<BsonDocument>.Filter.In("_id", ids);
-            if (transactionSession is null)
-                ledger.DeleteMany(deleteFilter);
-            else
-                ledger.DeleteMany(transactionSession, deleteFilter);
+            await mode.Run(
+                token => transactionSession is null
+                    ? ledger.DeleteManyAsync(deleteFilter, token)
+                    : ledger.DeleteManyAsync(transactionSession, deleteFilter, cancellationToken: token),
+                () =>
+                {
+                    if (transactionSession is null)
+                        ledger.DeleteMany(deleteFilter);
+                    else
+                        ledger.DeleteMany(transactionSession, deleteFilter);
+                }).ConfigureAwait(false);
         }
 
         var identity = new BsonDocument
@@ -1884,21 +2179,28 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             ["_id"] = identity,
             ["$expr"] = new BsonDocument("$gt", new BsonArray { "$committed_at", cutoffExpression })
         };
-        var existing = transactionSession is null
-            ? ledger.Find(validIdentity).FirstOrDefault()
-            : ledger.Find(transactionSession, validIdentity).FirstOrDefault();
+        var existing = await mode.FirstOrDefault(transactionSession is null
+            ? ledger.Find(validIdentity)
+            : ledger.Find(transactionSession, validIdentity)).ConfigureAwait(false);
         if (existing is not null)
             return ReadExistingAppend(existing, operationId, scope, fingerprint, exactOutcomes);
 
-        var expiredExisting = transactionSession is null
-            ? ledger.Find(new BsonDocument("_id", identity)).FirstOrDefault()
-            : ledger.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();
+        var expiredExisting = await mode.FirstOrDefault(transactionSession is null
+            ? ledger.Find(new BsonDocument("_id", identity))
+            : ledger.Find(transactionSession, new BsonDocument("_id", identity))).ConfigureAwait(false);
         if (expiredExisting is not null)
         {
-            if (transactionSession is null)
-                ledger.DeleteOne(new BsonDocument("_id", identity));
-            else
-                ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
+            await mode.Run(
+                token => transactionSession is null
+                    ? ledger.DeleteOneAsync(new BsonDocument("_id", identity), token)
+                    : ledger.DeleteOneAsync(transactionSession, new BsonDocument("_id", identity), cancellationToken: token),
+                () =>
+                {
+                    if (transactionSession is null)
+                        ledger.DeleteOne(new BsonDocument("_id", identity));
+                    else
+                        ledger.DeleteOne(transactionSession, new BsonDocument("_id", identity));
+                }).ConfigureAwait(false);
         }
 
         // The pipeline keeps provider time (rather than client clock) as the
@@ -1936,9 +2238,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         BsonDocument? previous;
         try
         {
-            previous = transactionSession is null
-                ? ledger.FindOneAndUpdate(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions)
-                : ledger.FindOneAndUpdate(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions);
+            previous = await mode.Run(
+                token => transactionSession is null
+                    ? ledger.FindOneAndUpdateAsync(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions, token)
+                    : ledger.FindOneAndUpdateAsync(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions, token),
+                () => transactionSession is null
+                    ? ledger.FindOneAndUpdate(new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions)
+                    : ledger.FindOneAndUpdate(transactionSession, new BsonDocument("_id", identity), ledgerUpdate, ledgerOptions))
+                .ConfigureAwait(false);
         }
         catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
         {
@@ -1958,10 +2265,11 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         var outcomes = new List<MongoWriteOutcome>(values.Count);
         foreach (var value in values)
         {
-            var outcome = MutateCore(value, MongoWriteOptions.Unconditional, MutationKind.Insert);
+            var outcome = await MutateCore(value, MongoWriteOptions.Unconditional, MutationKind.Insert, mode)
+                .ConfigureAwait(false);
             if (!outcome.Succeeded)
                 throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
-            RecordHighWater(outcome.GeneratedValues);
+            await RecordHighWater(outcome.GeneratedValues, mode).ConfigureAwait(false);
             outcomes.Add(outcome);
         }
         var serializedResult = ExactAppendCodec.SerializeOutcomes(
@@ -1970,10 +2278,17 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 outcome.Version,
                 generatedValues: outcome.GeneratedValues)).ToArray());
         var completed = Builders<BsonDocument>.Update.Set("exact_result", serializedResult);
-        if (transactionSession is null)
-            ledger.UpdateOne(new BsonDocument("_id", identity), completed);
-        else
-            ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
+        await mode.Run(
+            token => transactionSession is null
+                ? ledger.UpdateOneAsync(new BsonDocument("_id", identity), completed, cancellationToken: token)
+                : ledger.UpdateOneAsync(transactionSession, new BsonDocument("_id", identity), completed, cancellationToken: token),
+            () =>
+            {
+                if (transactionSession is null)
+                    ledger.UpdateOne(new BsonDocument("_id", identity), completed);
+                else
+                    ledger.UpdateOne(transactionSession, new BsonDocument("_id", identity), completed);
+            }).ConfigureAwait(false);
         return new MongoAppendExecution(MongoWriteOutcomeStatus.Inserted, outcomes);
     }
 
@@ -2036,47 +2351,49 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
     private static WriteOptions? ToStoreOptions(MongoWriteOptions? options) => options is null
         ? null
-        : new WriteOptions { Precondition = options.Precondition, Observer = options.Observer };
+        : new WriteOptions { Precondition = options.Precondition };
 
     internal void Close() => disposed = true;
 
-    private MongoWriteOutcome Mutate(
+    private async ValueTask<MongoWriteOutcome> Mutate(
         MongoStorageValues values,
         MongoWriteOptions? options,
         MutationKind kind,
+        MongoExecution mode,
         bool exactOutcome = false)
     {
         ArgumentNullException.ThrowIfNull(values);
         ThrowIfDisposed();
-        var outcome = ExecuteWithTransactionIfNeeded(transactional =>
+        var outcome = await ExecuteWithTransactionIfNeeded(async transactional =>
         {
-            var result = transactional.MutateCore(values, options, kind, exactOutcome);
-            transactional.RecordHighWater(result.GeneratedValues);
+            var result = await transactional.MutateCore(values, options, kind, mode, exactOutcome).ConfigureAwait(false);
+            await transactional.RecordHighWater(result.GeneratedValues, mode).ConfigureAwait(false);
             return result;
-        });
+        }, mode).ConfigureAwait(false);
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
             kind is MutationKind.Insert or MutationKind.Upsert)
         {
             // Cleanup starts only after the sequence/write transaction commits, so a coalesced
             // dirty signal always represents a row visible to the active retention owner.
-            ApplyOnAppendRetention(options?.Observer);
+            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         }
         return outcome;
     }
 
-    private void ApplyOnAppendRetention(IWritePathObserver? observer)
+    private ValueTask ApplyOnAppendRetention(MongoExecution mode)
     {
-        void Cleanup() => ApplyRetention(new RetentionExecutionOptions { Observer = observer });
-        if (transactionSession is null)
-            OnAppendRetentionCoordinator.Run(state, Unit, Access.Scope?.Value, Cleanup);
-        else
-            Cleanup();
+        async ValueTask Cleanup() =>
+            await ApplyRetentionCore(new RetentionExecutionOptions(), mode).ConfigureAwait(false);
+        return transactionSession is null
+            ? OnAppendRetentionCoordinator.Run(state, Unit, Access.Scope?.Value, Cleanup)
+            : Cleanup();
     }
 
-    private MongoWriteOutcome MutateCore(
+    private async ValueTask<MongoWriteOutcome> MutateCore(
         MongoStorageValues values,
         MongoWriteOptions? options,
         MutationKind kind,
+        MongoExecution mode,
         bool exactOutcome = false)
     {
         values = new MongoStorageValues(SearchKeyProjection.Populate(Unit, values.Values));
@@ -2092,7 +2409,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         if (sequence is not null && !hasSequenceLocator && (kind is MutationKind.Insert or MutationKind.Upsert))
         {
             var copied = keyValues.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-            var generated = NextSequence(sequence, options?.Observer);
+            var generated = await NextSequence(sequence, mode).ConfigureAwait(false);
             copied[sequence.Name] = generated;
             values = new MongoStorageValues(copied);
             keyValues = values.Values;
@@ -2100,16 +2417,19 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         }
         var identity = MongoDocumentMapper.EncodeKey(Unit, keyValues);
         if (!Unit.Concurrency.IsOptimistic)
-            return MutateNoneCore(
+        {
+            return await MutateNoneCore(
                 values,
                 options,
                 kind,
                 identity,
                 hasSequenceLocator,
-                generatedValues);
+                generatedValues,
+                mode).ConfigureAwait(false);
+        }
 
-        var existing = FindOne(identity);
-        var existingVersion = Version(identity, existing);
+        var existing = await FindOne(identity, mode).ConfigureAwait(false);
+        var existingVersion = await Version(identity, mode, existing).ConfigureAwait(false);
 
         if (kind == MutationKind.Insert && existing is not null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, existingVersion);
@@ -2121,16 +2441,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion);
 
         var nextVersion = NextVersion(existingVersion);
-        var document = MongoDocumentMapper.EncodeDocument(
+        var document = await MongoDocumentMapper.EncodeDocument(
             Unit,
             keyValues,
             identity,
             existing,
             column => sequence is not null && column.Name == sequence.Name && generatedValues.TryGetValue(column.Name, out var generated)
-                ? Convert.ToInt64(generated, System.Globalization.CultureInfo.InvariantCulture)
-                : NextSequence(column, options?.Observer),
+                ? new ValueTask<long>(Convert.ToInt64(generated, System.Globalization.CultureInfo.InvariantCulture))
+                : NextSequence(column, mode),
             preserveCreatedAt: exactOutcome,
-            generatedValues: generatedValues);
+            generatedValues: generatedValues).ConfigureAwait(false);
         if (nextVersion is not null)
             document[MongoDocumentMapper.VersionField] = nextVersion.Value;
         var inserted = kind == MutationKind.Insert;
@@ -2138,12 +2458,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             var filter = ConcurrencyFilter(identity, existingVersion);
             if (kind == MutationKind.Insert)
-                InsertOne(document);
+                await InsertOne(document, mode).ConfigureAwait(false);
             else if (kind == MutationKind.Update)
             {
-                var result = ReplaceOne(filter, document, isUpsert: false);
+                var result = await ReplaceOne(filter, document, isUpsert: false, mode).ConfigureAwait(false);
                 if (Unit.Concurrency.IsOptimistic && result.MatchedCount == 0)
-                    return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
+                    return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict,
+                        await Version(identity, mode).ConfigureAwait(false));
             }
             else
             {
@@ -2152,19 +2473,20 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     // Use insert rather than an upsert when the caller observed no row. An
                     // upsert can match a row inserted after that observation and would then
                     // misclassify the update and reset its version token.
-                    InsertOne(document);
+                    await InsertOne(document, mode).ConfigureAwait(false);
                     inserted = true;
                 }
                 else
                 {
-                    var result = ReplaceOne(filter, document,
+                    var result = await ReplaceOne(filter, document,
                         isUpsert: !hasSequenceLocator &&
-                                  (!Unit.Concurrency.IsOptimistic || existing is null));
+                                  (!Unit.Concurrency.IsOptimistic || existing is null), mode).ConfigureAwait(false);
                     inserted = result.UpsertedId is not null;
                     if (Unit.Concurrency.IsOptimistic &&
                         result.MatchedCount == 0 &&
                         result.UpsertedId is null)
-                        return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, Version(identity));
+                        return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict,
+                            await Version(identity, mode).ConfigureAwait(false));
                 }
             }
         }
@@ -2176,8 +2498,21 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     : MongoWriteOutcomeStatus.UniqueViolation,
                 existingVersion);
         }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            // A concurrent transactional insert into the same identity can surface as
+            // WiredTiger code 112 rather than duplicate key 11000. Treat both outcomes
+            // identically so an exact unit of work reports its portable conflict result
+            // after the transaction is rolled back instead of leaking a driver exception.
+            return new MongoWriteOutcome(
+                exactOutcome && Unit.Concurrency.IsOptimistic
+                    ? MongoWriteOutcomeStatus.ConcurrencyConflict
+                    : MongoWriteOutcomeStatus.UniqueViolation,
+                existingVersion);
+        }
 
-        PersistVersion(identity, nextVersion);
+        await PersistVersion(identity, nextVersion, mode).ConfigureAwait(false);
         var status = kind switch
         {
             MutationKind.Insert => MongoWriteOutcomeStatus.Inserted,
@@ -2194,13 +2529,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return new MongoWriteOutcome(status, nextVersion, generatedValues: generatedValues);
     }
 
-    private MongoWriteOutcome MutateNoneCore(
+    private async ValueTask<MongoWriteOutcome> MutateNoneCore(
         MongoStorageValues values,
         MongoWriteOptions? options,
         MutationKind kind,
         BsonValue identity,
         bool hasSequenceLocator,
-        IReadOnlyDictionary<string, object?> generatedValues)
+        IReadOnlyDictionary<string, object?> generatedValues,
+        MongoExecution mode)
     {
         var missingRequired = Unit.Columns.FirstOrDefault(column =>
             column.Generation == ColumnGeneration.Supplied &&
@@ -2210,15 +2546,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             !values.Values.ContainsKey(column.Name));
         var canInsert = missingRequired is null && !hasSequenceLocator;
         var document = kind == MutationKind.Insert || canInsert
-            ? MongoDocumentMapper.EncodeDocument(
+            ? await MongoDocumentMapper.EncodeDocument(
                 Unit,
                 values.Values,
                 identity,
                 existing: null,
-                column => NextSequence(column, options?.Observer),
-                generatedValues: generatedValues)
+                column => NextSequence(column, mode),
+                generatedValues: generatedValues).ConfigureAwait(false)
             : null;
-        options?.Observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.none-write",
             kind switch
             {
@@ -2226,13 +2562,14 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 MutationKind.Update => "MongoDB.UpdateOne(upsert:false)",
                 _ => $"MongoDB.UpdateOne(upsert:{canInsert.ToString().ToLowerInvariant()})"
             },
+            ProviderCommandKind.Write,
             IsProbe: false));
         try
         {
             var filter = new BsonDocument("_id", identity);
             if (kind == MutationKind.Insert)
             {
-                InsertOne(document!);
+                await InsertOne(document!, mode).ConfigureAwait(false);
                 return new MongoWriteOutcome(
                     MongoWriteOutcomeStatus.Inserted,
                     generatedValues: generatedValues);
@@ -2264,9 +2601,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 update["$setOnInsert"] = setOnInsert;
             var isUpsert = kind == MutationKind.Upsert && canInsert && !hasSequenceLocator;
             var updateOptions = new UpdateOptions { IsUpsert = isUpsert };
-            var result = transactionSession is null
-                ? collection.UpdateOne(filter, update, updateOptions)
-                : collection.UpdateOne(transactionSession, filter, update, updateOptions);
+            var result = await mode.Run(
+                token => transactionSession is null
+                    ? collection.UpdateOneAsync(filter, update, updateOptions, token)
+                    : collection.UpdateOneAsync(transactionSession, filter, update, updateOptions, token),
+                () => transactionSession is null
+                    ? collection.UpdateOne(filter, update, updateOptions)
+                    : collection.UpdateOne(transactionSession, filter, update, updateOptions)).ConfigureAwait(false);
             if (result.MatchedCount == 0 && result.UpsertedId is null)
             {
                 if (kind == MutationKind.Update || hasSequenceLocator)
@@ -2287,11 +2628,17 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 null,
                 ExtractIndexName(exception.WriteError?.Message));
         }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation);
+        }
     }
 
-    private MongoWriteOutcome ConditionalUpsertCore(
+    private async ValueTask<MongoWriteOutcome> ConditionalUpsertCore(
         MongoStorageValues values,
-        MongoWriteOptions? options)
+        MongoWriteOptions? options,
+        MongoExecution mode)
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new MongoStorageValues(SearchKeyProjection.Populate(Unit, values.Values));
@@ -2310,28 +2657,29 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 $"MongoDB conditional upsert cannot use ProviderSequence column '{sequence.Name}': sequence allocation requires a separate MongoDB command and transaction. Use Insert/Upsert or remove ProviderSequence for this one-command operation.");
         }
 
-        var outcome = ExecuteWithTransactionIfNeeded(transactional =>
-            transactional.ConditionalUpsertOne(values, options));
+        var outcome = await ExecuteWithTransactionIfNeeded(transactional =>
+            transactional.ConditionalUpsertOne(values, options, mode), mode).ConfigureAwait(false);
         if (outcome.Status == MongoWriteOutcomeStatus.Inserted &&
             Unit.Retention?.Trigger == RetentionTrigger.OnAppend)
-            ApplyOnAppendRetention(options?.Observer);
+            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return outcome;
     }
 
-    private MongoWriteOutcome ConditionalUpsertOne(
+    private async ValueTask<MongoWriteOutcome> ConditionalUpsertOne(
         MongoStorageValues values,
-        MongoWriteOptions? options)
+        MongoWriteOptions? options,
+        MongoExecution mode)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
         var missingRequired = MissingRequiredColumn(values.Values);
         var canInsert = missingRequired is null;
         var document = canInsert
-            ? MongoDocumentMapper.EncodeDocument(
+            ? await MongoDocumentMapper.EncodeDocument(
                 Unit,
                 values.Values,
                 identity,
                 existing: null,
-                column => NextSequence(column, options?.Observer))
+                column => NextSequence(column, mode)).ConfigureAwait(false)
             : null;
         var filter = new BsonDocument("_id", identity);
         var optimistic = Unit.Concurrency.IsOptimistic;
@@ -2380,12 +2728,17 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         // identity, filter, or document values because they may contain PII/secrets.
         var commandDescription =
             $"MongoDB.UpdateOne(upsert:{isUpsert.ToString().ToLowerInvariant()}; filter=identity+version; update=$set/$inc/$setOnInsert)";
-        options?.Observer?.Observe(new WritePathEvent("mongodb.conditional-upsert", commandDescription, IsProbe: false));
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.conditional-upsert", commandDescription, ProviderCommandKind.Write, IsProbe: false));
         try
         {
-            var result = transactionSession is null
-                ? collection.UpdateOne(filter, update, new UpdateOptions { IsUpsert = isUpsert })
-                : collection.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = isUpsert });
+            var updateOptions = new UpdateOptions { IsUpsert = isUpsert };
+            var result = await mode.Run(
+                token => transactionSession is null
+                    ? collection.UpdateOneAsync(filter, update, updateOptions, token)
+                    : collection.UpdateOneAsync(transactionSession, filter, update, updateOptions, token),
+                () => transactionSession is null
+                    ? collection.UpdateOne(filter, update, updateOptions)
+                    : collection.UpdateOne(transactionSession, filter, update, updateOptions)).ConfigureAwait(false);
             if (result.UpsertedId is not null)
                 return new MongoWriteOutcome(MongoWriteOutcomeStatus.Inserted, optimistic ? 1 : null);
             if (result.MatchedCount != 0)
@@ -2410,22 +2763,31 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 null,
                 indexName);
         }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            return new MongoWriteOutcome(
+                optimistic
+                    ? MongoWriteOutcomeStatus.ConcurrencyConflict
+                    : MongoWriteOutcomeStatus.UniqueViolation);
+        }
     }
 
-    private MongoWriteOutcome ExactOutcomeUpsert(
+    private async ValueTask<MongoWriteOutcome> ExactOutcomeUpsert(
         MongoStorageValues values,
-        MongoWriteOptions? options)
+        MongoWriteOptions? options,
+        MongoExecution mode)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, values.Values);
         var missingRequired = MissingRequiredColumn(values.Values);
         var canInsert = missingRequired is null;
         var document = canInsert
-            ? MongoDocumentMapper.EncodeDocument(
+            ? await MongoDocumentMapper.EncodeDocument(
                 Unit,
                 values.Values,
                 identity,
                 existing: null,
-                column => NextSequence(column, options?.Observer))
+                column => NextSequence(column, mode)).ConfigureAwait(false)
             : null;
         var set = new BsonDocument();
         foreach (var column in Unit.Columns)
@@ -2461,9 +2823,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         if (setOnInsert.ElementCount != 0)
             update["$setOnInsert"] = setOnInsert;
 
-        options?.Observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.exact-batch-upsert",
             $"MongoDB.FindOneAndUpdate(upsert:{canInsert.ToString().ToLowerInvariant()}; return=before)",
+            ProviderCommandKind.Write,
             IsProbe: false));
         try
         {
@@ -2473,9 +2836,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 IsUpsert = canInsert,
                 ReturnDocument = ReturnDocument.Before
             };
-            var before = transactionSession is null
-                ? collection.FindOneAndUpdate(filter, update, findOptions)
-                : collection.FindOneAndUpdate(transactionSession, filter, update, findOptions);
+            var before = await mode.Run(
+                token => transactionSession is null
+                    ? collection.FindOneAndUpdateAsync(filter, update, findOptions, token)
+                    : collection.FindOneAndUpdateAsync(transactionSession, filter, update, findOptions, token),
+                () => transactionSession is null
+                    ? collection.FindOneAndUpdate(filter, update, findOptions)
+                    : collection.FindOneAndUpdate(transactionSession, filter, update, findOptions)).ConfigureAwait(false);
             if (before is null && missingRequired is not null)
                 throw new InvalidOperationException($"Column '{missingRequired.Name}' is required.");
             var version = Unit.Concurrency.IsOptimistic
@@ -2491,6 +2858,11 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             var indexName = ExtractIndexName(exception.WriteError?.Message);
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation, null, indexName);
+        }
+        catch (MongoCommandException exception) when (
+            ShouldNormalizeTransientWriteConflict && IsTransientWriteConflict(exception))
+        {
+            return new MongoWriteOutcome(MongoWriteOutcomeStatus.UniqueViolation);
         }
     }
 
@@ -2513,6 +2885,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         string.Equals(indexName, "_id_", StringComparison.Ordinal) ||
         string.Equals(indexName, "_id", StringComparison.Ordinal);
 
+    private static bool IsTransientWriteConflict(MongoCommandException exception) =>
+        exception.Code == 112 || exception.HasErrorLabel("TransientTransactionError");
+
+    private static bool IsTransientTransactionBodyFailure(MongoException exception) =>
+        exception.HasErrorLabel("TransientTransactionError") ||
+        exception is MongoCommandException { Code: 112 };
+
     private static string? ExtractIndexName(string? message)
     {
         if (string.IsNullOrWhiteSpace(message))
@@ -2526,33 +2905,47 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         return (end < 0 ? message[start..] : message[start..end]).Trim('"', '\'', '{', '}');
     }
 
-    private MongoWriteOutcome DeleteCore(MongoStorageKey key, MongoWriteOptions? options)
+    private async ValueTask<MongoWriteOutcome> DeleteCore(MongoStorageKey key, MongoWriteOptions? options, MongoExecution mode)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
         if (!Unit.Concurrency.IsOptimistic)
         {
-            options?.Observer?.Observe(new WritePathEvent("mongodb.none-delete", "MongoDB.DeleteOne", IsProbe: false));
-            var result = DeleteOne(new BsonDocument("_id", identity));
+            commandObserver?.Observe(new ProviderCommandEvent("mongodb.none-delete", "MongoDB.DeleteOne", ProviderCommandKind.Write, IsProbe: false));
+            var result = await DeleteOne(new BsonDocument("_id", identity), mode).ConfigureAwait(false);
             return result.DeletedCount == 0
                 ? new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound)
                 : new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted);
         }
-        var existing = FindOne(identity);
-        var existingVersion = Version(identity, existing);
+        var existing = await FindOne(identity, mode).ConfigureAwait(false);
+        var existingVersion = await Version(identity, mode, existing).ConfigureAwait(false);
         if (existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
         if (!ConcurrencyAllows(existing, existingVersion, options, MutationKind.Delete))
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion);
 
-        DeleteOne(new BsonDocument("_id", identity));
-        RemoveVersion(identity);
+        await DeleteOne(new BsonDocument("_id", identity), mode).ConfigureAwait(false);
+        await RemoveVersion(identity, mode).ConfigureAwait(false);
         return new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted, Unit.Concurrency.IsOptimistic ? existingVersion : null);
     }
 
     public MongoWriteOutcome CompareAndDelete(
         MongoStorageKey key,
         IReadOnlyDictionary<string, object?> expectedValues,
-        MongoWriteOptions? options = null)
+        MongoWriteOptions? options = null) =>
+        CompareAndDeleteAsync(key, expectedValues, options, MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask<MongoWriteOutcome> CompareAndDeleteAsync(
+        MongoStorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        MongoWriteOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        CompareAndDeleteAsync(key, expectedValues, options, MongoExecution.Asynchronous(cancellationToken));
+
+    private ValueTask<MongoWriteOutcome> CompareAndDeleteAsync(
+        MongoStorageKey key,
+        IReadOnlyDictionary<string, object?> expectedValues,
+        MongoWriteOptions? options,
+        MongoExecution mode)
     {
         RefusePrivilegedOperation("compare-and-delete");
         ArgumentNullException.ThrowIfNull(key);
@@ -2566,22 +2959,24 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             ToStoreOptions(options));
         ThrowIfDisposed();
         return ExecuteWithTransactionIfNeeded(
-            transactional => transactional.CompareAndDeleteCore(new MongoStorageKey(canonicalKey.Values), validated, options),
+            transactional => transactional.CompareAndDeleteCore(new MongoStorageKey(canonicalKey.Values), validated, options, mode),
+            mode,
             requireTransaction: true);
     }
 
-    private MongoWriteOutcome CompareAndDeleteCore(
+    private async ValueTask<MongoWriteOutcome> CompareAndDeleteCore(
         MongoStorageKey key,
         IReadOnlyDictionary<string, object?> expectedValues,
-        MongoWriteOptions? options)
+        MongoWriteOptions? options,
+        MongoExecution mode)
     {
         var identity = MongoDocumentMapper.EncodeKey(Unit, key.Values);
         var existing = Unit.Concurrency.IsOptimistic
-            ? FindOne(identity, options?.Observer)
+            ? await FindOne(identity, mode, "mongodb.compare-and-delete-read").ConfigureAwait(false)
             : null;
         if (Unit.Concurrency.IsOptimistic && existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
-        var existingVersion = Version(identity, existing);
+        var existingVersion = await Version(identity, mode, existing).ConfigureAwait(false);
         var filter = new BsonDocument("_id", identity);
         foreach (var pair in expectedValues)
         {
@@ -2592,18 +2987,18 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         if (Unit.Concurrency.IsOptimistic && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
             filter[MongoDocumentMapper.VersionField] = options.Precondition.Version!.Value;
 
-        options?.Observer?.Observe(new WritePathEvent("mongodb.compare-and-delete", "MongoDB.DeleteOne", IsProbe: false));
-        var result = DeleteOne(filter);
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.compare-and-delete", "MongoDB.DeleteOne", ProviderCommandKind.Write, IsProbe: false));
+        var result = await DeleteOne(filter, mode).ConfigureAwait(false);
         if (result.DeletedCount != 0)
         {
-            RemoveVersion(identity, options?.Observer);
+            await RemoveVersion(identity, mode).ConfigureAwait(false);
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.Deleted, existingVersion);
         }
 
-        existing ??= FindOne(identity, options?.Observer);
+        existing ??= await FindOne(identity, mode).ConfigureAwait(false);
         if (existing is null)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.NotFound);
-        existingVersion ??= Version(identity, existing);
+        existingVersion ??= await Version(identity, mode, existing).ConfigureAwait(false);
         if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
             options.Precondition.Version != existingVersion)
             return new MongoWriteOutcome(MongoWriteOutcomeStatus.ConcurrencyConflict, existingVersion);
@@ -2660,95 +3055,131 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             ? checked((current ?? 0) + 1)
             : null;
 
-    private long NextSequence(ColumnDefinition column, IWritePathObserver? observer = null)
+    private async ValueTask<long> NextSequence(ColumnDefinition column, MongoExecution mode)
     {
         // Keep sequence allocation visible to the same diagnostic seam as the write.
         // ConditionalUpsert rejects this path before it can occur, preserving its
         // one-command contract; ordinary generated writes still report the extra
         // provider command instead of hiding it from accounting.
-        observer?.Observe(new WritePathEvent(
+        commandObserver?.Observe(new ProviderCommandEvent(
             "mongodb.provider-sequence",
             "MongoDB.FindOneAndUpdate(sequence)",
+            ProviderCommandKind.Write,
             IsProbe: false));
-        return state.Sequences.FindOneAndUpdate(
-            transactionSession,
-            new BsonDocument("_id", Unit.Id.Value + ":" + column.Name),
-            Builders<BsonDocument>.Update.Inc("value", 1),
-            new FindOneAndUpdateOptions<BsonDocument>
-            {
-                IsUpsert = true,
-                ReturnDocument = ReturnDocument.After
-            })!["value"].ToInt64();
+        var filter = new BsonDocument("_id", Unit.Id.Value + ":" + column.Name);
+        var update = Builders<BsonDocument>.Update.Inc("value", 1);
+        var options = new FindOneAndUpdateOptions<BsonDocument>
+        {
+            IsUpsert = true,
+            ReturnDocument = ReturnDocument.After
+        };
+        var allocated = await mode.Run(
+            token => state.Sequences.FindOneAndUpdateAsync(transactionSession, filter, update, options, token),
+            () => state.Sequences.FindOneAndUpdate(transactionSession, filter, update, options)).ConfigureAwait(false);
+        return allocated!["value"].ToInt64();
     }
 
-    private void PersistVersion(BsonValue identity, long? version)
+    private ValueTask PersistVersion(BsonValue identity, long? version, MongoExecution mode)
     {
         if (!Unit.Concurrency.IsOptimistic || version is null)
-            return;
+            return default;
         var filter = new BsonDocument("_id", MetadataId(identity));
         var document = new BsonDocument { ["_id"] = MetadataId(identity), ["version"] = version.Value };
-        if (transactionSession is null)
-            state.Metadata.ReplaceOne(filter, document, new ReplaceOptions { IsUpsert = true });
-        else
-            state.Metadata.ReplaceOne(transactionSession, filter, document, new ReplaceOptions { IsUpsert = true });
+        var options = new ReplaceOptions { IsUpsert = true };
+        return mode.Run(
+            token => transactionSession is null
+                ? state.Metadata.ReplaceOneAsync(filter, document, options, token)
+                : state.Metadata.ReplaceOneAsync(transactionSession, filter, document, options, token),
+            () =>
+            {
+                if (transactionSession is null)
+                    state.Metadata.ReplaceOne(filter, document, options);
+                else
+                    state.Metadata.ReplaceOne(transactionSession, filter, document, options);
+            });
     }
 
-    private long? Version(BsonValue identity, BsonDocument? document = null)
+    private async ValueTask<long?> Version(BsonValue identity, MongoExecution mode, BsonDocument? document = null)
     {
         if (!Unit.Concurrency.IsOptimistic)
             return null;
         if (document is not null && document.TryGetValue(MongoDocumentMapper.VersionField, out var version))
             return version.ToInt64();
         var filter = new BsonDocument("_id", MetadataId(identity));
-        var metadata = transactionSession is null
-            ? state.Metadata.Find(filter).FirstOrDefault()
-            : state.Metadata.Find(transactionSession, filter).FirstOrDefault();
+        var metadata = await mode.FirstOrDefault(transactionSession is null
+            ? state.Metadata.Find(filter)
+            : state.Metadata.Find(transactionSession, filter)).ConfigureAwait(false);
         return metadata is null ? null : metadata.GetValue("version", 0).ToInt64();
     }
 
-    private void RemoveVersion(BsonValue identity, IWritePathObserver? observer = null)
+    private ValueTask RemoveVersion(BsonValue identity, MongoExecution mode)
     {
-        if (Unit.Concurrency.IsOptimistic)
-        {
-            var filter = new BsonDocument("_id", MetadataId(identity));
-            observer?.Observe(new WritePathEvent("mongodb.compare-and-delete-version-delete", "MongoDB.DeleteOne(metadata)", IsProbe: false));
-            if (transactionSession is null)
-                state.Metadata.DeleteOne(filter);
-            else
-                state.Metadata.DeleteOne(transactionSession, filter);
-        }
+        if (!Unit.Concurrency.IsOptimistic)
+            return default;
+        var filter = new BsonDocument("_id", MetadataId(identity));
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.compare-and-delete-version-delete", "MongoDB.DeleteOne(metadata)", ProviderCommandKind.Write, IsProbe: false));
+        return mode.Run(
+            token => transactionSession is null
+                ? state.Metadata.DeleteOneAsync(filter, token)
+                : state.Metadata.DeleteOneAsync(transactionSession, filter, cancellationToken: token),
+            () =>
+            {
+                if (transactionSession is null)
+                    state.Metadata.DeleteOne(filter);
+                else
+                    state.Metadata.DeleteOne(transactionSession, filter);
+            });
     }
 
-    private BsonDocument? FindOne(BsonValue identity, IWritePathObserver? observer = null)
+    private ValueTask<BsonDocument?> FindOne(
+        BsonValue identity,
+        MongoExecution mode,
+        string operation = "mongodb.write-probe",
+        bool isProbe = true)
     {
-        observer?.Observe(new WritePathEvent("mongodb.compare-and-delete-read", "MongoDB.FindOne", IsProbe: true));
-        return transactionSession is null
-            ? collection.Find(new BsonDocument("_id", identity)).FirstOrDefault()
-            : collection.Find(transactionSession, new BsonDocument("_id", identity)).FirstOrDefault();
+        commandObserver?.Observe(new ProviderCommandEvent(operation, "MongoDB.FindOne", ProviderCommandKind.Read, IsProbe: isProbe));
+        return mode.FirstOrDefault(transactionSession is null
+            ? collection.Find(new BsonDocument("_id", identity))
+            : collection.Find(transactionSession, new BsonDocument("_id", identity)))!;
     }
 
-    private void InsertOne(BsonDocument document)
-    {
-        if (transactionSession is null)
-            collection.InsertOne(document);
-        else
-            collection.InsertOne(transactionSession, document);
-    }
+    private ValueTask InsertOne(BsonDocument document, MongoExecution mode) =>
+        mode.Run(
+            token => transactionSession is null
+                ? collection.InsertOneAsync(document, cancellationToken: token)
+                : collection.InsertOneAsync(transactionSession, document, cancellationToken: token),
+            () =>
+            {
+                if (transactionSession is null)
+                    collection.InsertOne(document);
+                else
+                    collection.InsertOne(transactionSession, document);
+            });
 
-    private ReplaceOneResult ReplaceOne(BsonDocument filter, BsonDocument document, bool isUpsert)
+    private ValueTask<ReplaceOneResult> ReplaceOne(
+        BsonDocument filter,
+        BsonDocument document,
+        bool isUpsert,
+        MongoExecution mode)
     {
         var options = new ReplaceOptions { IsUpsert = isUpsert };
-        if (transactionSession is null)
-            return collection.ReplaceOne(filter, document, options);
-        return collection.ReplaceOne(transactionSession, filter, document, options);
+        return mode.Run(
+            token => transactionSession is null
+                ? collection.ReplaceOneAsync(filter, document, options, token)
+                : collection.ReplaceOneAsync(transactionSession, filter, document, options, token),
+            () => transactionSession is null
+                ? collection.ReplaceOne(filter, document, options)
+                : collection.ReplaceOne(transactionSession, filter, document, options));
     }
 
-    private DeleteResult DeleteOne(BsonDocument filter)
-    {
-        if (transactionSession is null)
-            return collection.DeleteOne(filter);
-        return collection.DeleteOne(transactionSession, filter);
-    }
+    private ValueTask<DeleteResult> DeleteOne(BsonDocument filter, MongoExecution mode) =>
+        mode.Run(
+            token => transactionSession is null
+                ? collection.DeleteOneAsync(filter, token)
+                : collection.DeleteOneAsync(transactionSession, filter, cancellationToken: token),
+            () => transactionSession is null
+                ? collection.DeleteOne(filter)
+                : collection.DeleteOne(transactionSession, filter));
 
     private BsonValue MetadataId(BsonValue identity) => new BsonDocument
     {
@@ -2764,33 +3195,42 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         ["kind"] = "sequence-high-water"
     };
 
-    private void RecordHighWater(IReadOnlyDictionary<string, object?> generatedValues)
+    private ValueTask RecordHighWater(IReadOnlyDictionary<string, object?> generatedValues, MongoExecution mode)
     {
         var sequence = Unit.Columns.FirstOrDefault(column => column.Generation == ColumnGeneration.ProviderSequence);
         if (sequence is null || !generatedValues.TryGetValue(sequence.Name, out var generated) || generated is null)
-            return;
+            return default;
         var filter = new BsonDocument("_id", HighWaterId());
         var update = Builders<BsonDocument>.Update
             .SetOnInsert("unit", Unit.Id.Value)
             .SetOnInsert("scope", Access.Scope?.Value ?? "<global>")
             .Max(HighWaterValue, Convert.ToInt64(generated, CultureInfo.InvariantCulture));
-        if (transactionSession is null)
-            state.Metadata.UpdateOne(filter, update, new UpdateOptions { IsUpsert = true });
-        else
-            state.Metadata.UpdateOne(transactionSession, filter, update, new UpdateOptions { IsUpsert = true });
+        var options = new UpdateOptions { IsUpsert = true };
+        return mode.Run(
+            token => transactionSession is null
+                ? state.Metadata.UpdateOneAsync(filter, update, options, token)
+                : state.Metadata.UpdateOneAsync(transactionSession, filter, update, options, token),
+            () =>
+            {
+                if (transactionSession is null)
+                    state.Metadata.UpdateOne(filter, update, options);
+                else
+                    state.Metadata.UpdateOne(transactionSession, filter, update, options);
+            });
     }
 
-    private T ExecuteWithTransactionIfNeeded<T>(
-        Func<MongoStorageSession, T> operation,
+    private async ValueTask<T> ExecuteWithTransactionIfNeeded<T>(
+        Func<MongoStorageSession, ValueTask<T>> operation,
+        MongoExecution mode,
         bool requireTransaction = false)
     {
         if (transactionSession is not null)
-            return operation(this);
+            return await operation(this).ConfigureAwait(false);
         if (!requireTransaction &&
             !Unit.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence) &&
             Unit.AppendIdempotency is null &&
             Unit.RetentionIdempotency is null)
-            return operation(this);
+            return await operation(this).ConfigureAwait(false);
 
         var transactionReason = requireTransaction
             ? "CompareAndDelete"
@@ -2801,30 +3241,36 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         MongoException? lastTransientFailure = null;
         for (var attempt = 0; attempt < 5; attempt++)
         {
-            using var session = state.Context.StartSession();
+            using var session = await mode.Run(
+                token => state.Context.StartSessionAsync(cancellationToken: token),
+                () => state.Context.StartSession()).ConfigureAwait(false);
             session.StartTransaction();
-            var transactional = new MongoStorageSession(state, applied, Access, collection, session);
+            var transactional = new MongoStorageSession(state, applied, Access, collection, session, observer: commandObserver);
             var operationCompleted = false;
             try
             {
-                var result = operation(transactional);
-                if (result is MongoWriteOutcome { Status: MongoWriteOutcomeStatus.UniqueViolation })
+                var result = await operation(transactional).ConfigureAwait(false);
+                if (result is MongoWriteOutcome
+                    {
+                        Status: MongoWriteOutcomeStatus.UniqueViolation or
+                            MongoWriteOutcomeStatus.ConcurrencyConflict
+                    })
                 {
-                    // A duplicate-key write aborts the Mongo transaction immediately. Return
-                    // the provider-neutral outcome without attempting commitTransaction on the
-                    // already-aborted transaction; callers must be able to continue their
-                    // conformance sequence with a fresh write transaction.
-                    try { session.AbortTransaction(); }
+                    // A duplicate-key or transient-conflict write aborts the Mongo transaction
+                    // immediately. Return the provider-neutral outcome without attempting
+                    // commitTransaction on the already-aborted transaction; callers must be
+                    // able to continue their conformance sequence with a fresh write transaction.
+                    try { await Abort(session, mode).ConfigureAwait(false); }
                     catch (MongoException) { }
                     operationCompleted = true;
                     return result;
                 }
                 operationCompleted = true;
-                CommitTransactionWithRetry(session);
+                await CommitTransactionWithRetry(session, mode).ConfigureAwait(false);
                 return result;
             }
             catch (MongoException exception) when (
-                exception.HasErrorLabel("TransientTransactionError") && attempt < 4)
+                IsTransientTransactionBodyFailure(exception) && attempt < 4)
             {
                 lastTransientFailure = exception;
             }
@@ -2832,7 +3278,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             {
                 if (!operationCompleted && session.IsInTransaction)
                 {
-                    try { session.AbortTransaction(); }
+                    try { await Abort(session, mode).ConfigureAwait(false); }
                     catch (MongoException) { }
                 }
                 transactional.Close();
@@ -2844,13 +3290,17 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         throw new InvalidOperationException($"MongoDB {transactionReason} transaction retries were exhausted.");
     }
 
-    internal static void CommitTransactionWithRetry(IClientSessionHandle session)
+    internal static ValueTask Abort(IClientSessionHandle session, MongoExecution mode) =>
+        mode.Run(token => session.AbortTransactionAsync(token), () => session.AbortTransaction());
+
+    internal static async ValueTask CommitTransactionWithRetry(IClientSessionHandle session, MongoExecution mode)
     {
         for (var attempt = 0; ; attempt++)
         {
             try
             {
-                session.CommitTransaction();
+                await mode.Run(token => session.CommitTransactionAsync(token), () => session.CommitTransaction())
+                    .ConfigureAwait(false);
                 return;
             }
             catch (MongoException exception) when (
@@ -2884,6 +3334,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
 
 internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
 {
+    private readonly IProviderCommandObserver? commandObserver;
     private readonly MongoProviderState state;
     private readonly IReadOnlyDictionary<StorageUnitId, (MongoAppliedUnit Applied, IMongoCollection<BsonDocument> Collection)> units;
     private readonly MongoStorageAccess access;
@@ -2895,8 +3346,10 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         MongoProviderState state,
         IReadOnlyList<MongoAppliedUnit> applied,
         IReadOnlyList<IMongoCollection<BsonDocument>> collections,
-        MongoStorageAccess access)
+        MongoStorageAccess access,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.state = state;
         this.access = access;
         units = applied.Select((unit, index) => (unit, collections[index]))
@@ -2913,24 +3366,32 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         ThrowIfTerminal();
         if (!units.TryGetValue(unit.Id, out var applied))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
-        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session, this);
+        var session = new MongoStorageSession(state, applied.Applied, access, applied.Collection, this.session, this, commandObserver);
         sessions.Add(session);
         return session;
     }
 
-    public void Commit()
+    public void Commit() => CommitCore(MongoExecution.Synchronous).GetAwaiter().GetResult();
+
+    public ValueTask CommitAsync(CancellationToken cancellationToken = default) =>
+        CommitCore(MongoExecution.Asynchronous(cancellationToken));
+
+    private async ValueTask CommitCore(MongoExecution mode)
     {
         ThrowIfTerminal();
         try
         {
-            MongoStorageSession.CommitTransactionWithRetry(session);
-            terminal = true;
-            CloseSessions();
+            await MongoStorageSession.CommitTransactionWithRetry(session, mode).ConfigureAwait(false);
         }
-        finally
+        catch (Exception failure)
         {
-            session.Dispose();
+            // A failed commit still ends this unit and still disposes the native session. It must
+            // become terminal in the same step, or a caller's Dispose rolls back through a disposed
+            // session and replaces the commit failure with a lifecycle error.
+            WriteFailureCleanup.Run(failure, Complete);
+            throw;
         }
+        Complete();
     }
 
     public void Rollback()
@@ -2940,13 +3401,18 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
         {
             if (session.IsInTransaction)
                 session.AbortTransaction();
-            terminal = true;
-            CloseSessions();
         }
         finally
         {
-            session.Dispose();
+            Complete();
         }
+    }
+
+    private void Complete()
+    {
+        terminal = true;
+        CloseSessions();
+        session.Dispose();
     }
 
     public void Dispose()
@@ -2975,9 +3441,7 @@ internal sealed class MongoUnitOfWork : IMongoUnitOfWork, IMongoUnitOfWorkState
     {
         if (terminal)
             return;
-        terminal = true;
-        CloseSessions();
-        session.Dispose();
+        Complete();
     }
 }
 
@@ -3010,12 +3474,12 @@ internal static class MongoDocumentMapper
         return key.ElementCount == 1 ? key[0] : key;
     }
 
-    internal static BsonDocument EncodeDocument(
+    internal static async ValueTask<BsonDocument> EncodeDocument(
         StorageUnit unit,
         IReadOnlyDictionary<string, object?> values,
         BsonValue identity,
         BsonDocument? existing,
-        Func<ColumnDefinition, long> nextSequence,
+        Func<ColumnDefinition, ValueTask<long>> nextSequence,
         bool preserveCreatedAt = false,
         IReadOnlyDictionary<string, object?>? generatedValues = null)
     {
@@ -3036,7 +3500,9 @@ internal static class MongoDocumentMapper
                 if (isPresent && existing is null && !generatedInternally)
                     throw new ArgumentException($"ProviderSequence column '{column.Name}' is assigned by MongoDB and cannot be supplied.", nameof(values));
                 var generated = existing?.GetValue(column.Name, BsonNull.Value) ??
-                    (generatedInternally ? MongoValueCodec.Encode(generatedValues![column.Name], column) : new BsonInt64(nextSequence(column)));
+                    (generatedInternally
+                        ? MongoValueCodec.Encode(generatedValues![column.Name], column)
+                        : new BsonInt64(await nextSequence(column).ConfigureAwait(false)));
                 if (isPresent && existing is not null && !generatedInternally &&
                     !MongoValueCodec.Encode(value, column).Equals(generated))
                 {
@@ -3095,8 +3561,13 @@ internal static class SchemaIdentity
         string.Join("|", unit.Columns.Select(Column)),
         string.Join("|", unit.DerivedColumns.Select(column =>
             string.Join("|", column.Name, column.SourceColumn, column.Projection, column.AlgorithmId))),
-        string.Join("|", unit.Indexes.Select(Index)),
-        SchemaFingerprint.Canonicalize(unit.AggregationProfiles.Select(AggregationProfile)));
+        // Indexes and aggregation profiles are sets, not sequences, exactly as SchemaSubject
+        // treats them: naming the same ones in a different order describes the same unit. A
+        // schema document canonicalizes their order and the fluent builder does not, so an
+        // order-sensitive hash here would refuse a declaration the deployment tool just applied.
+        string.Join("|", unit.Indexes.Select(Index).OrderBy(canonical => canonical, StringComparer.Ordinal)),
+        SchemaFingerprint.Canonicalize(unit.AggregationProfiles.Select(AggregationProfile)
+            .OrderBy(canonical => canonical, StringComparer.Ordinal)));
 
     internal static bool ColumnEquals(ColumnDefinition left, ColumnDefinition right) =>
         string.Equals(Column(left), Column(right), StringComparison.Ordinal);

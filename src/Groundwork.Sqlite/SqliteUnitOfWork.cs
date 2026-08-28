@@ -15,6 +15,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
     private readonly List<SqliteStorageSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;
+    private readonly IProviderCommandObserver? commandObserver;
 
     internal SqliteUnitOfWork(
         SqliteProviderConnection owner,
@@ -22,8 +23,10 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         SqliteTransaction transaction,
         IEnumerable<StorageUnit> units,
         StorageAccess access,
-        BatchWriteOptions options)
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.owner = owner;
         this.connection = connection;
         this.transaction = transaction;
@@ -39,7 +42,7 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         if (!units.Contains(unit.Id))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
         SqliteSchemaCoordinator.ValidateAccess(unit, access);
-        var session = new SqliteStorageSession(owner, SqliteSchemaCoordinator.Physicalize(unit), access, connection, transaction);
+        var session = new SqliteStorageSession(owner, SqliteSchemaCoordinator.Physicalize(unit), access, connection, transaction, commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);
@@ -77,10 +80,13 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
             transaction.Commit();
             return batch.DrainCompleted();
         }
-        catch
+        catch (Exception failure)
         {
-            try { transaction.Rollback(); }
-            finally { Complete(); }
+            WriteFailureCleanup.Run(failure, () =>
+            {
+                try { transaction.Rollback(); }
+                finally { Complete(); }
+            });
             throw;
         }
         finally
@@ -90,6 +96,11 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
         }
     }
 
+    /// <summary>
+    /// Microsoft.Data.Sqlite completes its asynchronous surface synchronously and this provider
+    /// serializes commands on a gate a suspended continuation cannot hold, so an asynchronous
+    /// commit flushes and commits on the calling thread; see docs/sqlite-provider.md.
+    /// </summary>
     public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -117,9 +128,10 @@ internal sealed class SqliteUnitOfWork : IUnitOfWork
     private void Complete()
     {
         terminal = true;
-        foreach (var session in sessions) session.Close();
-        transaction.Dispose();
-        connection.Dispose();
+        WriteFailureCleanup.RunAll(
+            () => { foreach (var session in sessions) session.Close(); },
+            transaction.Dispose,
+            connection.Dispose);
     }
 
     private void ThrowIfTerminal()

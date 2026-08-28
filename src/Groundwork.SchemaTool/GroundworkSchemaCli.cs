@@ -19,25 +19,6 @@ public static class SchemaToolExitCodes
     public const int Cancelled = 130;
 }
 
-public interface ISchemaToolProviderSession : IDisposable
-{
-    ProviderIdentity Provider { get; }
-    IPhysicalSchemaExecutor Executor { get; }
-    IPhysicalSchemaHistoryInspector Inspector { get; }
-}
-
-public sealed record SchemaToolProviderOptions(
-    string Provider,
-    string? Connection,
-    string? Database,
-    CancellationToken CancellationToken);
-
-public interface ISchemaToolProviderSessionFactory
-{
-    string Alias { get; }
-    ISchemaToolProviderSession Open(SchemaToolProviderOptions options);
-}
-
 public static class SchemaToolAuthorization
 {
     public static PhysicalSchemaPlanAuthorization Evaluate(
@@ -53,12 +34,12 @@ public static class SchemaToolAuthorization
         var refusals = new List<SchemaRefusal>();
         if (!safeAuthorized && plan.Operations.Length != 0)
             refusals.Add(new("GW-CLI-007", "Schema changes require explicit --safe authorization.", "authorization.safe"));
-        refusals.AddRange(protection.DestructiveOperationIdentities
-            .Where(identity => !authorized.Contains(identity))
-            .Select(identity => new SchemaRefusal(
+        refusals.AddRange(protection.DestructiveOperations
+            .Where(operation => !operation.IsAuthorizedBy(authorized))
+            .Select(operation => new SchemaRefusal(
                 "GW-CLI-008",
-                $"Destructive operation '{identity}' requires explicit authorization.",
-                $"authorization.destructive.{identity}")));
+                $"Destructive operation '{operation.Address ?? operation.Identity}' requires explicit authorization.",
+                $"authorization.destructive.{operation.Identity}")));
         refusals.AddRange(protection.SemanticMigrationIdentities
             .Where(identity => !semantic.Contains(identity))
             .Select(identity => new SchemaRefusal(
@@ -73,6 +54,9 @@ public static class SchemaToolAuthorization
 
 public static class GroundworkSchemaCli
 {
+    /// <summary>Reported when a target's schema is applied but an attached data migration is not.</summary>
+    public const string DataMigrationPendingOutcome = "data-migration-pending";
+
     public static Task<int> RunAsync(
         IReadOnlyList<string> arguments,
         TextWriter output,
@@ -113,12 +97,19 @@ public static class GroundworkSchemaCli
             if (arguments.Count >= 2 && arguments[0] == "schema" && arguments[1] == "emit")
                 return await EmitAsync(arguments, output, json, cancellationToken);
 
-            if (arguments.Count == 0 || arguments[0] is not ("plan" or "validate" or "status" or "apply"))
+            if (arguments.Count == 0 || arguments[0] is not ("plan" or "validate" or "status" or "apply" or "adopt"))
                 throw new SchemaToolInvocationException("GW-CLI-001", "Command options are invalid. Run '--help'.");
             var command = arguments[0];
             ValidateInvocation(arguments, command, 1);
             var schemaPath = RequiredValue(arguments, "--schema");
             var providerName = RequiredValue(arguments, "--provider");
+            var phase = Value(arguments, "--phase") switch
+            {
+                null or "expand" => SchemaEvolutionPhase.Expand,
+                "contract" => SchemaEvolutionPhase.Contract,
+                _ => throw new SchemaToolInvocationException(
+                    "GW-CLI-001", "Option '--phase' accepts 'expand' or 'contract'.")
+            };
             var schemaJson = await File.ReadAllTextAsync(schemaPath, cancellationToken);
             var coveragePath = Value(arguments, "--coverage");
             var verification = SchemaVerifier.Verify(
@@ -146,17 +137,29 @@ public static class GroundworkSchemaCli
                     "GW-CLI-006",
                     $"No provider plug-in is registered for '{providerName}'.");
             var schema = GroundworkSchemaCanonical.Read(schemaJson);
-            var targets = SchemaCompilation.CompileTargets(schema, provider.Provider);
+            IReadOnlyList<PhysicalSchemaTarget> targets;
+            try
+            {
+                targets = SchemaCompilation.CompileTargets(schema, provider.Targets);
+            }
+            catch (InvalidOperationException exception)
+            {
+                // A provider raises its physicalization refusals as InvalidOperationException;
+                // they name a code and path, so they belong with the validation failures.
+                await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
+                return SchemaToolExitCodes.ValidationFailed;
+            }
             var targetReports = new List<SchemaToolTargetReport>();
 
-            if (command == "apply")
+            if (command is "apply" or "adopt")
             {
                 var safe = arguments.Contains("--safe", StringComparer.Ordinal);
                 var expectedPlans = Values(arguments, "--expected-plan").ToHashSet(StringComparer.Ordinal);
                 if (!safe && expectedPlans.Count == 0)
                     throw new SchemaToolInvocationException(
                         "GW-CLI-001",
-                        "Apply requires --safe or an exact --expected-plan authorization mode.");
+                        $"{command[0..1].ToUpperInvariant()}{command[1..]} requires --safe or an exact " +
+                        "--expected-plan authorization mode.");
                 var destructive = Values(arguments, "--allow-destructive")
                     .Concat(Values(arguments, "--authorize-destructive")).ToHashSet(StringComparer.Ordinal);
                 var semantic = Values(arguments, "--allow-semantic")
@@ -188,18 +191,23 @@ public static class GroundworkSchemaCli
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var inspection = provider.Inspector.InspectHistory(target);
-                    var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UnixEpoch);
-                    return (Target: target, Inspection: inspection, Plan: plan, Authorization: Authorize(target, plan));
+                    var readiness = AssessContractReadiness(provider, target, inspection, phase);
+                    var plan = PhysicalSchemaDiffPlanner.Plan(
+                        target, inspection.History, DateTimeOffset.UnixEpoch, phase: phase, readiness: readiness);
+                    return (Target: target, Inspection: inspection, Plan: plan, Readiness: readiness,
+                        Authorization: Authorize(target, plan));
                 }).ToArray();
                 if (preflight.Any(item => !item.Inspection.IsAppliedSchemaValid || !item.Plan.IsApplicable))
                 {
                     targetReports.AddRange(preflight.Select(item => FromPlan(
                         item.Target,
                         item.Plan,
-                        item.Inspection)));
+                        item.Inspection,
+                        readiness: item.Readiness)));
                     await WriteAsync(output, json, new SchemaToolReport(
                         command, "blocked", null,
-                        provider.Provider.Name, provider.Provider.Version, targetReports, []));
+                        provider.Provider.Name, provider.Provider.Version, targetReports, [])
+                    { Phase = PhaseName(phase) });
                     return SchemaToolExitCodes.ValidationFailed;
                 }
                 if (preflight.Any(item => !item.Authorization.IsAuthorized))
@@ -208,11 +216,50 @@ public static class GroundworkSchemaCli
                         item.Target,
                         item.Plan,
                         item.Inspection,
-                        item.Authorization.Refusals)));
+                        item.Authorization.Refusals,
+                        item.Readiness)));
                     await WriteAsync(output, json, new SchemaToolReport(
                         command, "authorization-required", null,
-                        provider.Provider.Name, provider.Provider.Version, targetReports, []));
+                        provider.Provider.Name, provider.Provider.Version, targetReports, [])
+                    { Phase = PhaseName(phase) });
                     return SchemaToolExitCodes.AuthorizationRequired;
+                }
+
+                if (command == "adopt")
+                {
+                    if (provider.Executor is not IPhysicalSchemaCatalogInspector)
+                    {
+                        // Named rather than generic: a provider that cannot compare a deployed
+                        // catalog to a target cannot prove anything, and adoption is the proof.
+                        await WriteErrorAsync(
+                            output, error, json, "GW-CLI-013",
+                            $"Provider '{provider.Provider.Name}' cannot compare a deployed catalog to a " +
+                            "compiled target, so it cannot adopt one.");
+                        return SchemaToolExitCodes.ValidationFailed;
+                    }
+                    foreach (var target in targets)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        targetReports.Add(FromAdoption(target, PhysicalSchemaAdoption.Adopt(
+                            target,
+                            provider.Executor,
+                            planAuthorization: plan => Authorize(target, plan))));
+                    }
+                    var adoptionBlocked = targetReports.Any(item => item.Outcome == "blocked");
+                    var adoptionUnauthorized = targetReports.Any(item => item.Outcome == "authorization-required");
+                    // A run where every target was already recorded reports ready, not adopted:
+                    // "adopted" has to mean history was written, or a deploy log cannot tell the
+                    // two apart.
+                    var adoptedAny = targetReports.Any(item => item.Outcome == "adopted");
+                    await WriteAsync(output, json, new SchemaToolReport(
+                        command,
+                        adoptionUnauthorized ? "authorization-required"
+                            : adoptionBlocked ? "blocked"
+                            : adoptedAny ? "adopted" : "ready",
+                        null, provider.Provider.Name, provider.Provider.Version, targetReports, []));
+                    if (adoptionUnauthorized)
+                        return SchemaToolExitCodes.AuthorizationRequired;
+                    return adoptionBlocked ? SchemaToolExitCodes.ValidationFailed : SchemaToolExitCodes.Success;
                 }
 
                 foreach (var target in targets)
@@ -221,17 +268,31 @@ public static class GroundworkSchemaCli
                     var result = PhysicalSchemaApplication.Apply(
                         target,
                         provider.Executor,
-                        planAuthorization: plan => Authorize(target, plan));
-                    targetReports.Add(FromApplication(target, result));
+                        planAuthorization: plan => Authorize(target, plan),
+                        phase: phase,
+                        dataMigrationExecutor: provider.DataMigrations);
+                    targetReports.Add(FromApplication(target, result) with
+                    {
+                        DataMigrations = ReadDataMigrations(provider, target),
+                        Supersessions = Describe(result.ContractReadiness)
+                    });
                 }
                 var authorizationRequired = targetReports.Any(target => target.Outcome == "authorization-required");
                 var blocked = targetReports.Any(target => target.Outcome == "blocked");
-                var outcome = authorizationRequired ? "authorization-required" : blocked ? "blocked" : "applied";
+                var dataMigrationPending = targetReports.Any(target => target.Outcome == DataMigrationPendingOutcome);
+                var outcome = authorizationRequired
+                    ? "authorization-required"
+                    : blocked ? "blocked" : dataMigrationPending ? DataMigrationPendingOutcome : "applied";
                 await WriteAsync(output, json, new SchemaToolReport(
-                    command, outcome, null, provider.Provider.Name, provider.Provider.Version, targetReports, []));
-                return authorizationRequired
-                    ? SchemaToolExitCodes.AuthorizationRequired
-                    : blocked ? SchemaToolExitCodes.ValidationFailed : SchemaToolExitCodes.Success;
+                    command, outcome, null, provider.Provider.Name, provider.Provider.Version, targetReports, [])
+                { Phase = PhaseName(phase) });
+                if (authorizationRequired)
+                    return SchemaToolExitCodes.AuthorizationRequired;
+                if (blocked)
+                    return SchemaToolExitCodes.ValidationFailed;
+                // The schema is applied but the data is not, so this exits as pending work rather
+                // than as success: a deploy gate that treats 0 as done must not pass here.
+                return dataMigrationPending ? SchemaToolExitCodes.PendingChanges : SchemaToolExitCodes.Success;
             }
 
             var pending = false;
@@ -240,15 +301,25 @@ public static class GroundworkSchemaCli
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var inspection = provider.Inspector.InspectHistory(target);
-                var plan = PhysicalSchemaDiffPlanner.Plan(target, inspection.History, DateTimeOffset.UnixEpoch);
+                var readiness = AssessContractReadiness(provider, target, inspection, phase);
+                var plan = PhysicalSchemaDiffPlanner.Plan(
+                    target, inspection.History, DateTimeOffset.UnixEpoch, phase: phase, readiness: readiness);
+                var dataMigrations = ReadDataMigrations(provider, target);
                 pending |= plan.Operations.Length != 0;
+                // A target whose schema is applied still has pending work when a data migration was
+                // interrupted, so its resume is reported as pending rather than as ready.
+                pending |= dataMigrations.Any(report => report.State == SchemaToolDataMigrationReport.PendingState);
                 invalid |= !inspection.IsAppliedSchemaValid || !plan.IsApplicable;
-                targetReports.Add(FromPlan(target, plan, inspection));
+                targetReports.Add(FromPlan(target, plan, inspection, readiness: readiness) with
+                {
+                    DataMigrations = dataMigrations
+                });
             }
             var reportOutcome = invalid ? "blocked" : command == "validate" ? "ready" : pending ? "pending" : "ready";
             await WriteAsync(output, json, new SchemaToolReport(
                 command, reportOutcome, command == "validate" ? "live" : null,
-                provider.Provider.Name, provider.Provider.Version, targetReports, []));
+                provider.Provider.Name, provider.Provider.Version, targetReports, [])
+            { Phase = PhaseName(phase) });
             if (invalid)
                 return SchemaToolExitCodes.ValidationFailed;
             return command != "validate" && pending
@@ -260,15 +331,30 @@ public static class GroundworkSchemaCli
             await WriteErrorAsync(output, error, json, exception.Code, exception.Message);
             return SchemaToolExitCodes.InvalidInvocation;
         }
+        catch (SchemaToolProviderInvocationException exception)
+        {
+            await WriteErrorAsync(output, error, json, "GW-CLI-001", exception.Message);
+            return SchemaToolExitCodes.InvalidInvocation;
+        }
         catch (OperationCanceledException)
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-009", "The operation was cancelled.");
             return SchemaToolExitCodes.Cancelled;
         }
+        catch (GroundworkSchemaBoundaryException exception)
+        {
+            await WriteErrorAsync(output, error, json, GroundworkSchemaBoundaryException.Code, exception.Message);
+            return SchemaToolExitCodes.ValidationFailed;
+        }
         catch (Exception exception) when (exception is JsonException or FormatException or ArgumentException)
         {
             await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
             return SchemaToolExitCodes.ValidationFailed;
+        }
+        catch (SchemaToolProviderException exception)
+        {
+            await WriteErrorAsync(output, error, json, "GW-CLI-010", $"Schema tool execution failed: {exception.Message}");
+            return SchemaToolExitCodes.ExecutionFailed;
         }
         catch (Exception)
         {
@@ -304,7 +390,8 @@ public static class GroundworkSchemaCli
         PhysicalSchemaTarget target,
         PhysicalSchemaDiffPlan plan,
         PhysicalSchemaInspectionResult inspection,
-        IEnumerable<SchemaRefusal>? authorizationRefusals = null) => new(
+        IEnumerable<SchemaRefusal>? authorizationRefusals = null,
+        ContractReadinessAssessment? readiness = null) => new(
         target.Subject.Id.Value,
         target.Fingerprint,
         authorizationRefusals?.Any() == true
@@ -314,11 +401,19 @@ public static class GroundworkSchemaCli
                 : plan.Operations.Length == 0 ? "ready" : "pending",
         PlanFingerprint(target, plan),
         inspection.History.AppliedState?.TargetFingerprint,
-        plan.Operations.Select(SchemaToolOperationReport.FromPending).ToArray(),
+        plan.Operations.Select(operation => SchemaToolOperationReport.FromPending(operation, PhysicalSchemaPlanProtection.Inspect(plan.Operations))).ToArray(),
         inspection.History.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
-        plan.Refusals.Concat(authorizationRefusals ?? [])
+        plan.Refusals
+            .Concat(authorizationRefusals ?? [])
+            .Concat(inspection.ColumnDrift.IsDefault ? [] : (IEnumerable<SchemaRefusal>)inspection.ColumnDrift)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
-        false);
+        false)
+    {
+        Supersessions = Describe(readiness),
+        Warnings = (inspection.ToleratedDrift.IsDefault ? [] : inspection.ToleratedDrift)
+            .Concat(inspection.IndexDrift.IsDefault ? [] : (IEnumerable<SchemaRefusal>)inspection.IndexDrift)
+            .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray()
+    };
 
     private static SchemaToolTargetReport FromApplication(
         PhysicalSchemaTarget target,
@@ -330,23 +425,126 @@ public static class GroundworkSchemaCli
             PhysicalSchemaApplicationOutcome.Rejected => "blocked",
             PhysicalSchemaApplicationOutcome.AuthorizationRequired => "authorization-required",
             PhysicalSchemaApplicationOutcome.NoChanges => "ready",
+            PhysicalSchemaApplicationOutcome.DataMigrationIncomplete => DataMigrationPendingOutcome,
             _ => "applied"
         },
         PlanFingerprint(target, result.Plan),
         result.AppliedState?.TargetFingerprint,
-        result.Outcome == PhysicalSchemaApplicationOutcome.Applied
+        result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete
             ? []
-            : result.Plan.Operations.Select(SchemaToolOperationReport.FromPending).ToArray(),
+            : result.Plan.Operations.Select(operation => SchemaToolOperationReport.FromPending(operation, PhysicalSchemaPlanProtection.Inspect(result.Plan.Operations))).ToArray(),
         result.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
         result.Plan.Refusals.Concat(result.AuthorizationRefusals)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
-        result.Outcome == PhysicalSchemaApplicationOutcome.Applied);
+        result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete);
+
+    /// <summary>
+    /// One adoption's report. An adopted target reports the operations the plan would have executed
+    /// as applied, because that is exactly what its published history now records; a refusal reports
+    /// the drift by name so an operator sees which column or index differs.
+    /// </summary>
+    private static SchemaToolTargetReport FromAdoption(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaAdoptionResult result) => new(
+        target.Subject.Id.Value,
+        target.Fingerprint,
+        result.Outcome switch
+        {
+            PhysicalSchemaAdoptionOutcome.Adopted => "adopted",
+            PhysicalSchemaAdoptionOutcome.AlreadyAdopted => "ready",
+            PhysicalSchemaAdoptionOutcome.AuthorizationRequired => "authorization-required",
+            _ => "blocked"
+        },
+        PlanFingerprint(target, result.Plan),
+        result.AppliedState?.TargetFingerprint,
+        result.Outcome == PhysicalSchemaAdoptionOutcome.Adopted
+            ? []
+            : result.Plan.Operations
+                .Select(operation => SchemaToolOperationReport.FromPending(
+                    operation, PhysicalSchemaPlanProtection.Inspect(result.Plan.Operations)))
+                .ToArray(),
+        result.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
+        result.Refusals.Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
+        result.Outcome == PhysicalSchemaAdoptionOutcome.Adopted)
+    {
+        Warnings = result.ToleratedDrift
+            .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path))
+            .ToArray()
+    };
+
+    /// <summary>
+    /// Reports pending versus applied data migrations for one target from provider-owned state. The
+    /// tool cannot see host transforms, so a semantic migration the subject declares but the ledger
+    /// has never recorded is reported as not-recorded rather than guessed either way.
+    /// </summary>
+    private static IReadOnlyList<SchemaToolDataMigrationReport> ReadDataMigrations(
+        ISchemaToolProviderSession provider,
+        PhysicalSchemaTarget target)
+    {
+        if (provider.DataMigrations is not { } executor)
+            return [];
+        var recorded = executor.ReadLedgerEntries(target.Identity)
+            .Select(SchemaToolDataMigrationReport.From)
+            .ToList();
+        var declared = target.Subject.Evolution.SemanticMigrationId;
+        if (!string.IsNullOrWhiteSpace(declared) &&
+            !recorded.Any(report => string.Equals(report.Identity, declared, StringComparison.Ordinal)))
+        {
+            recorded.Add(new SchemaToolDataMigrationReport(
+                declared,
+                SchemaToolDataMigrationReport.NotRecordedState,
+                target.Subject.Name,
+                0, 0, 0, null, null));
+        }
+        return recorded
+            .OrderBy(report => report.State == SchemaToolDataMigrationReport.AppliedState)
+            .ThenBy(report => report.Identity, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Establishes contract readiness from the same durable state the plan is built from. The
+    /// deployment tool never asserts readiness: it calls the kernel rule and passes what it returns.
+    /// </summary>
+    private static ContractReadinessAssessment? AssessContractReadiness(
+        ISchemaToolProviderSession provider,
+        PhysicalSchemaTarget target,
+        PhysicalSchemaInspectionResult inspection,
+        SchemaEvolutionPhase phase) =>
+        phase == SchemaEvolutionPhase.Contract
+            ? ExpandContractWorkflow.AssessContractReadiness(
+                target,
+                inspection.History,
+                provider.DataMigrations?.ReadLedgerEntries(target.Identity),
+                DateTimeOffset.UtcNow)
+            : null;
+
+    private static IReadOnlyList<SchemaToolSupersessionReport> Describe(ContractReadinessAssessment? readiness) =>
+        readiness is null
+            ? []
+            : [.. readiness.Supersessions.Select(status => new SchemaToolSupersessionReport(
+                status.SupersededColumn,
+                status.ReplacementColumn,
+                status.State.ToString(),
+                status.IsContractable,
+                Instant(status.RetainedSince),
+                Instant(status.BackfillCompletedAt),
+                Instant(status.ContractableAt)))];
+
+    private static string PhaseName(SchemaEvolutionPhase phase) =>
+        phase == SchemaEvolutionPhase.Contract ? "contract" : "expand";
+
+    private static string? Instant(DateTimeOffset? value) =>
+        value?.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
 
     private static string PlanFingerprint(PhysicalSchemaTarget target, PhysicalSchemaDiffPlan plan)
     {
+        // The phase is appended only for a contract plan, so every expand plan keeps the exact
+        // fingerprint it had before phases existed and an --expected-plan value does not churn.
         var parts = new[] { target.Fingerprint, plan.ExpectedAppliedTargetFingerprint ?? string.Empty }
-            .Concat(plan.Operations.SelectMany(operation => new[] { operation.Identity, operation.Fingerprint }));
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', parts))));
+            .Concat(plan.Operations.SelectMany(operation => new[] { operation.Identity, operation.Fingerprint }))
+            .Concat(plan.Phase == SchemaEvolutionPhase.Expand ? [] : new[] { "phase:" + plan.Phase });
+        return PortableHex.Lower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', parts))));
     }
 
     private static async Task WriteErrorAsync(
@@ -376,8 +574,10 @@ public static class GroundworkSchemaCli
             return report;
         var pending = value.Targets.SelectMany(target => target.PendingOperations).ToArray();
         var applied = value.Targets.SelectMany(target => target.AppliedOperations).ToArray();
+        // Report the spelling that actually authorizes each operation: the readable address where
+        // the plan leaves it unambiguous, and the exact identity otherwise.
         var destructive = pending.Where(operation => operation.IsDestructive)
-            .Select(operation => operation.Identity).Distinct(StringComparer.Ordinal).Order().ToArray();
+            .Select(operation => operation.Authorization).Distinct(StringComparer.Ordinal).Order().ToArray();
         var semantic = pending.Select(operation => operation.SemanticMigrationIdentity)
             .Where(identity => identity is not null).Cast<string>()
             .Distinct(StringComparer.Ordinal).Order().ToArray();
@@ -396,6 +596,11 @@ public static class GroundworkSchemaCli
             appliedTargetFingerprint = value.Targets.Count == 1 ? value.Targets[0].AppliedTargetFingerprint : null,
             targets = value.Targets,
             resolvedNames = Array.Empty<object>(),
+            dataMigrations = value.Targets.SelectMany(item => item.DataMigrations)
+                .OrderBy(item => item.Identity, StringComparer.Ordinal),
+            phase = value.Phase,
+            supersessions = value.Targets.SelectMany(item => item.Supersessions)
+                .OrderBy(item => item.SupersededColumn, StringComparer.Ordinal),
             pendingOperations = pending,
             appliedOperations = applied.OrderBy(operation => operation.Identity, StringComparer.Ordinal),
             authorization = new
@@ -405,7 +610,8 @@ public static class GroundworkSchemaCli
                 semanticRequired = semantic
             },
             diagnosticRecords = (object?)null,
-            diagnostics = value.Diagnostics.Concat(value.Targets.SelectMany(item => item.Diagnostics)).Select(Error),
+            diagnostics = value.Diagnostics.Concat(value.Targets.SelectMany(item => item.Diagnostics)).Select(Error)
+                .Concat(value.Targets.SelectMany(item => item.Warnings).Select(Warning)),
             targetMutated = value.Targets.Any(item => item.Mutated)
         };
     }
@@ -418,6 +624,14 @@ public static class GroundworkSchemaCli
         target = error.Path
     };
 
+    private static object Warning(SchemaVerificationError warning) => new
+    {
+        severity = "warning",
+        warning.Code,
+        warning.Message,
+        target = warning.Path
+    };
+
     private static string Human(object report) => report switch
     {
         SchemaToolReport value => string.Join(Environment.NewLine,
@@ -428,8 +642,24 @@ public static class GroundworkSchemaCli
                 $"Targets: {value.Targets.Count}",
                 $"Pending operations: {value.Targets.Sum(target => target.PendingOperations.Count)}",
                 $"Applied operations: {value.Targets.Sum(target => target.AppliedOperations.Count)}"
-            }.Concat(value.Diagnostics.Select(diagnostic =>
-                $"error {diagnostic.Code}: {diagnostic.Message} ({diagnostic.Path})"))),
+            }.Concat(value.Targets.SelectMany(target => target.Supersessions)
+                .OrderBy(supersession => supersession.SupersededColumn, StringComparer.Ordinal)
+                .Select(supersession =>
+                    $"Superseded column {supersession.SupersededColumn} -> {supersession.ReplacementColumn}: " +
+                    $"{supersession.State.ToLowerInvariant()}" +
+                    (supersession.IsContractable
+                        ? ", contractable"
+                        : $", not contractable{(supersession.ContractableAt is null ? string.Empty : " until " + supersession.ContractableAt)}")))
+            .Concat(value.Targets.SelectMany(target => target.DataMigrations)
+                .OrderBy(migration => migration.Identity, StringComparer.Ordinal)
+                .Select(migration => $"Data migration {migration.Identity}: {migration.State}" +
+                    (migration.State == SchemaToolDataMigrationReport.PendingState
+                        ? $" ({migration.RowsScanned} rows scanned, resume at {migration.ResumeCursor})"
+                        : string.Empty)))
+            .Concat(value.Diagnostics.Concat(value.Targets.SelectMany(target => target.Diagnostics))
+                .Select(diagnostic => $"error {diagnostic.Code}: {diagnostic.Message} ({diagnostic.Path})"))
+            .Concat(value.Targets.SelectMany(target => target.Warnings)
+                .Select(warning => $"warning {warning.Code}: {warning.Message} ({warning.Path})"))),
         _ => "Groundwork schema emit: written"
     };
 
@@ -460,20 +690,20 @@ public static class GroundworkSchemaCli
         var flags = command switch
         {
             "validate" => new HashSet<string>(["--offline"], StringComparer.Ordinal),
-            "apply" => new HashSet<string>(["--safe"], StringComparer.Ordinal),
+            "apply" or "adopt" => new HashSet<string>(["--safe"], StringComparer.Ordinal),
             _ => new HashSet<string>(StringComparer.Ordinal)
         };
         var values = command switch
         {
             "schema emit" => new HashSet<string>(["--input", "--file", "--output"], StringComparer.Ordinal),
-            "apply" => new HashSet<string>([
+            "apply" or "adopt" => new HashSet<string>([
                 "--schema", "--provider", "--connection", "--database", "--provider-assembly",
-                "--coverage", "--output", "--expected-plan", "--allow-destructive", "--allow-semantic",
+                "--coverage", "--output", "--phase", "--expected-plan", "--allow-destructive", "--allow-semantic",
                 "--authorize-destructive", "--authorize-semantic"
             ], StringComparer.Ordinal),
             _ => new HashSet<string>([
                 "--schema", "--provider", "--connection", "--database", "--provider-assembly",
-                "--coverage", "--output"
+                "--coverage", "--output", "--phase"
             ], StringComparer.Ordinal)
         };
         var repeatable = new HashSet<string>([
@@ -495,6 +725,8 @@ public static class GroundworkSchemaCli
                 (!repeatable.Contains(option) && !seen.Add(option)))
                 throw InvalidOptions();
             if (option == "--output" && arguments[index + 1] is not ("json" or "human"))
+                throw InvalidOptions();
+            if (option == "--phase" && arguments[index + 1] is not ("expand" or "contract"))
                 throw InvalidOptions();
             index++;
         }
@@ -527,6 +759,7 @@ public static class GroundworkSchemaCli
             provider,
             Value(arguments, "--connection"),
             Value(arguments, "--database"),
+            arguments.Count != 0 && arguments[0] == "apply",
             cancellationToken));
     }
 
@@ -543,13 +776,23 @@ public static class GroundworkSchemaCli
     }
 
     private const string HelpText = """
-        Usage: groundwork <plan|validate|status|apply> --schema <file> --provider <name> [--connection <value>]
+        Usage: groundwork <plan|validate|status|apply|adopt> --schema <file> --provider <name> [--connection <value>]
                [--database <name>] [--provider-assembly <file>] [--coverage <file>] [--output json|human]
+               [--phase expand|contract]
                groundwork schema emit --input <file> --file <file> [--output json|human]
+
+        --phase selects which half of an expand-contract evolution to plan. It defaults to expand, the
+        additive half. The contract half removes superseded columns and refuses until its readiness is
+        established from the applied schema ledger and the data-migration ledger.
 
         Apply requires --safe, or exact --expected-plan authorization. Destructive operation identities additionally
         require --allow-destructive <identity>; semantic migrations require --allow-semantic <identity>.
         Runtime admission remains inspect-only unless AutoApplyOnStartup is explicitly enabled by the host.
+
+        Adopt records an existing catalog Groundwork has never applied, under the same authorization as apply. It
+        executes no DDL: it proves the deployed catalog is exactly the compiled target and publishes the applied
+        state that applying it would have produced. Any difference is refused by name. It never infers a schema,
+        and it refuses a target that already has applied history.
         """;
 
     private sealed class SchemaToolInvocationException(string code, string message) : Exception(message)
@@ -565,7 +808,21 @@ public sealed record SchemaToolReport(
     string? Provider,
     string? ProviderVersion,
     IReadOnlyList<SchemaToolTargetReport> Targets,
-    IReadOnlyList<SchemaVerificationError> Diagnostics);
+    IReadOnlyList<SchemaVerificationError> Diagnostics)
+{
+    /// <summary>Which half of an expand–contract evolution this invocation planned.</summary>
+    public string Phase { get; init; } = nameof(SchemaEvolutionPhase.Expand).ToLowerInvariant();
+}
+
+/// <summary>One superseded column's place in the expand–contract workflow, as durable state has it.</summary>
+public sealed record SchemaToolSupersessionReport(
+    string SupersededColumn,
+    string ReplacementColumn,
+    string State,
+    bool IsContractable,
+    string? RetainedSince,
+    string? BackfillCompletedAt,
+    string? ContractableAt);
 
 public sealed record SchemaToolTargetReport(
     string Subject,
@@ -576,7 +833,46 @@ public sealed record SchemaToolTargetReport(
     IReadOnlyList<SchemaToolOperationReport> PendingOperations,
     IReadOnlyList<SchemaToolOperationReport> AppliedOperations,
     IReadOnlyList<SchemaVerificationError> Diagnostics,
-    bool Mutated);
+    bool Mutated)
+{
+    /// <summary>Recorded data-migration state for this target, pending first.</summary>
+    public IReadOnlyList<SchemaToolDataMigrationReport> DataMigrations { get; init; } = [];
+
+    /// <summary>Contract readiness per superseded column; empty unless the contract phase was planned.</summary>
+    public IReadOnlyList<SchemaToolSupersessionReport> Supersessions { get; init; } = [];
+
+    /// <summary>Drift a declaration's opt-in foreign-column policy downgraded to a warning.</summary>
+    public IReadOnlyList<SchemaVerificationError> Warnings { get; init; } = [];
+}
+
+/// <summary>One semantic migration's recorded data-migration state on one target.</summary>
+public sealed record SchemaToolDataMigrationReport(
+    string Identity,
+    string State,
+    string? Unit,
+    long RowsScanned,
+    long RowsChanged,
+    int Batches,
+    string? ResumeCursor,
+    string? CompletedAt)
+{
+    /// <summary>The subject declares this semantic migration but nothing has been recorded for it.</summary>
+    public const string NotRecordedState = "not-recorded";
+
+    public const string PendingState = "pending";
+
+    public const string AppliedState = "applied";
+
+    internal static SchemaToolDataMigrationReport From(DataMigrationLedgerEntry entry) => new(
+        entry.MigrationId,
+        entry.IsComplete ? AppliedState : PendingState,
+        entry.UnitName,
+        entry.RowsScanned,
+        entry.RowsChanged,
+        entry.Batches,
+        entry.Cursor,
+        entry.CompletedAt?.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+}
 
 public sealed record SchemaToolOperationReport(
     string Identity,
@@ -585,16 +881,24 @@ public sealed record SchemaToolOperationReport(
     string? StorageUnit,
     string SubjectIdentity,
     bool IsDestructive,
-    string? SemanticMigrationIdentity)
+    string? SemanticMigrationIdentity,
+    string? AuthorizationAddress = null)
 {
-    internal static SchemaToolOperationReport FromPending(PhysicalSchemaOperation operation) => new(
+    /// <summary>The exact spelling that authorizes this operation, readable where the plan allows.</summary>
+    internal string Authorization => AuthorizationAddress ?? Identity;
+
+    internal static SchemaToolOperationReport FromPending(
+        PhysicalSchemaOperation operation,
+        PhysicalSchemaPlanProtection protection) => new(
         operation.Identity,
         operation.Fingerprint,
         operation.Kind.ToString(),
         operation.SubjectId?.Value,
         operation.SubjectIdentity,
         operation.RequiresAuthorization,
-        operation.SemanticMigrationId);
+        operation.SemanticMigrationId,
+        protection.DestructiveOperations
+            .FirstOrDefault(protected_ => protected_.Identity == operation.Identity)?.Address);
 
     internal static SchemaToolOperationReport FromApplied(PhysicalSchemaAppliedOperation operation) => new(
         operation.Identity,

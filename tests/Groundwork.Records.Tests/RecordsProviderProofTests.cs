@@ -11,6 +11,7 @@ using MongoDB.Bson;
 using MongoDB.Driver;
 using Npgsql;
 using Xunit;
+using Groundwork.LiveDatabases;
 
 namespace Groundwork.Records.Tests;
 
@@ -104,8 +105,7 @@ public sealed class RecordsProviderProofTests
     [SkippableFact]
     public void SQLServer_executes_typed_records()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_SQLSERVER_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server records proof.");
+        var connectionString = LiveSqlServer.Required();
         using var connection = new SqlServerProviderFactory().Create(connectionString!);
         var table = RecordTestFixture.CustomerTable("records_sqlserver_" + Guid.NewGuid().ToString("N"));
         AssertTypedCrud(connection, table, "sqlserver@example.test");
@@ -117,8 +117,7 @@ public sealed class RecordsProviderProofTests
     [SkippableFact]
     public void MongoDB_executes_typed_records()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
-        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB records proof.");
+        var connectionString = LiveMongo.Required();
         using var connection = new MongoProviderFactory().Create(connectionString!);
         using var nativeConnection = Assert.IsType<MongoDbProviderConnection>(
             new MongoDbProviderFactory().Create(connectionString!));
@@ -204,6 +203,14 @@ public sealed class RecordsProviderProofTests
         var upserted = records.Upsert(customer with { Name = "Ada Byron" }, RecordWriteOptions.IfVersion(2));
         Assert.True(upserted.Status is RecordWriteStatus.Upserted or RecordWriteStatus.Updated);
         Assert.Equal(3, upserted.Version);
+
+        // The selected index is provider-default evidence, not a hint. Give cost-based optimizers
+        // enough rows to choose the equality index honestly instead of preferring a tiny-table scan.
+        for (var index = 0; index < 64; index++)
+        {
+            var decoy = Customer.Create("Optimizer scale", $"optimizer-{index:D2}-{email}");
+            Assert.Equal(RecordWriteStatus.Inserted, records.Insert(decoy).Status);
+        }
 
         var query = table.Query.Where(row => row.Email == email).OrderBy(row => row.Name);
         var result = records.Query(query, RecordQueryOptions.UsingIndex("by_email"));

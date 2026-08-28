@@ -14,6 +14,14 @@ public sealed class KernelBoundaryTests
     private static readonly ImmutableArray<string> ForbiddenContractVocabulary =
         ["Document", "Envelope", "Record", "Stream", "Diagnostic"];
 
+    // Platform assemblies that Microsoft.NETCore.App carries in-box on the newest target Groundwork
+    // ships for, but delivers as a servicing package on an older one. They are the BCL either way:
+    // no Groundwork layering rule is about how the platform chooses to deliver its own libraries.
+    // System.IO.Pipelines reaches Groundwork.Kernel only as a transitive dependency of the pinned
+    // System.Text.Json, which both targets deliberately share so their JSON behavior is identical.
+    private static readonly ImmutableHashSet<string> PlatformServicingAssemblies =
+        ImmutableHashSet.Create(StringComparer.Ordinal, "System.IO.Pipelines");
+
     private static readonly ImmutableHashSet<string> KnownContractFamilies =
         ImmutableHashSet.Create(StringComparer.Ordinal,
             "Groundwork.Records",
@@ -126,6 +134,30 @@ public sealed class KernelBoundaryTests
         Assert.Empty(testingReferences);
     }
 
+    // The hosting integration sits outside the Store contract, so it is the one assembly that could
+    // quietly make "reference Groundwork" mean "reference four database drivers". It must reach
+    // providers only through IStorageProviderFactory, which the application supplies.
+    [Fact]
+    public void Hosting_integration_reaches_providers_only_through_the_factory_seam()
+    {
+        using var universe = AssemblyUniverse.Load();
+        var hosting = universe.Assemblies.Single(assembly => string.Equals(
+            assembly.GetName().Name, "Groundwork.Extensions.DependencyInjection", StringComparison.Ordinal));
+        var violations = universe.NonBclReferenceClosure(hosting)
+            .Where(reference => reference.Name.StartsWith("Groundwork.", StringComparison.Ordinal))
+            .Where(reference => IsProviderAssemblyName(reference.Name) ||
+                                reference.Name.StartsWith("Groundwork.Substrate.", StringComparison.Ordinal) ||
+                                KnownContractFamilies.Contains(reference.Name) ||
+                                reference.Name.StartsWith("Groundwork.Testing", StringComparison.Ordinal))
+            .Select(reference => reference.Path)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(violations.Length == 0,
+            "Groundwork.Extensions.DependencyInjection must not reference a provider, a substrate, a " +
+            "contract family, or the testing package:" + Environment.NewLine + string.Join(Environment.NewLine, violations));
+    }
+
     [Fact]
     public void Store_public_lifetime_contract_keeps_resource_ownership_explicit()
     {
@@ -151,6 +183,7 @@ public sealed class KernelBoundaryTests
                string.Equals(name, "Groundwork.Records.Store", StringComparison.Ordinal) ||
                string.Equals(name, "Groundwork.Query.Planning", StringComparison.Ordinal) ||
                string.Equals(name, "Groundwork.Testing", StringComparison.Ordinal) ||
+               name?.StartsWith("Groundwork.Extensions.", StringComparison.Ordinal) == true ||
                name?.StartsWith("Groundwork.Tool", StringComparison.Ordinal) == true;
     }
 
@@ -162,15 +195,15 @@ public sealed class KernelBoundaryTests
     private static bool IsSubstrateAssembly(string? name) =>
         name?.StartsWith("Groundwork.Substrate.", StringComparison.Ordinal) == true;
 
-    private static bool IsProviderAssembly(Assembly assembly)
-    {
-        var name = assembly.GetName().Name;
-        return name?.StartsWith("Groundwork.MongoDb", StringComparison.Ordinal) == true ||
-               name?.StartsWith("Groundwork.PostgreSql", StringComparison.Ordinal) == true ||
-               name?.StartsWith("Groundwork.Sqlite", StringComparison.Ordinal) == true ||
-               name?.StartsWith("Groundwork.SqlServer", StringComparison.Ordinal) == true ||
-               HasMetadata(assembly, "Groundwork.Provider", "true");
-    }
+    private static bool IsProviderAssembly(Assembly assembly) =>
+        IsProviderAssemblyName(assembly.GetName().Name) ||
+        HasMetadata(assembly, "Groundwork.Provider", "true");
+
+    private static bool IsProviderAssemblyName(string? name) =>
+        name?.StartsWith("Groundwork.MongoDb", StringComparison.Ordinal) == true ||
+        name?.StartsWith("Groundwork.PostgreSql", StringComparison.Ordinal) == true ||
+        name?.StartsWith("Groundwork.Sqlite", StringComparison.Ordinal) == true ||
+        name?.StartsWith("Groundwork.SqlServer", StringComparison.Ordinal) == true;
 
     private static bool IsContractFamily(Assembly assembly) =>
         HasMetadata(assembly, "Groundwork.ContractFamily", "true");
@@ -324,13 +357,19 @@ public sealed class KernelBoundaryTests
             var assemblies = groundworkAssemblies
                 .Select(context.LoadFromAssemblyPath)
                 .ToImmutableArray();
+            // What counts as the BCL is the shared framework's own contents, not the trusted-platform
+            // assembly list. Groundwork ships for more than one target framework and this suite runs
+            // once per target, so the classification has to survive two differences. Where the repo
+            // pins a platform package (System.Text.Json, System.Collections.Immutable) the app-local
+            // copy takes the assembly's slot in the trusted list and the in-box path never appears
+            // there, even though the platform does provide it. And a few platform assemblies are
+            // in-box on the newest supported target but delivered as a servicing package on an older
+            // one, so they are named below.
             var runtimeDirectory = Path.TrimEndingDirectorySeparator(RuntimeEnvironment.GetRuntimeDirectory());
-            var bclNames = trustedPlatformAssemblies
-                .Where(path => string.Equals(
-                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(path)!),
-                    runtimeDirectory,
-                    StringComparison.Ordinal))
+            var bclNames = Directory
+                .EnumerateFiles(runtimeDirectory, "*.dll", SearchOption.TopDirectoryOnly)
                 .Select(path => Path.GetFileNameWithoutExtension(path)!)
+                .Concat(PlatformServicingAssemblies)
                 .ToImmutableHashSet(StringComparer.Ordinal);
 
             return new AssemblyUniverse(context, assemblies, bclNames);

@@ -1,4 +1,5 @@
 using Groundwork.Kernel;
+using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.Query.Model;
 using Groundwork.Testing;
@@ -26,6 +27,33 @@ public sealed class MongoProviderIntegrationTests
 
         Assert.True(connection.Schema.Apply(unit).Applied);
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    /// <summary>
+    /// MongoDB has no applied schema ledger, so it cannot distinguish a renamed field from a new
+    /// one. It refuses the declaration by name rather than quietly reading nulls out of documents
+    /// that still carry the old field; the executor that makes this work is #86.
+    /// </summary>
+    [SkippableFact]
+    public void Schema_admission_refuses_a_column_whose_logical_id_has_diverged()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-rename-" + Guid.NewGuid().ToString("N")),
+            Name = "mongo_rename_" + Guid.NewGuid().ToString("N"),
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "buyer", Id = "customer", Type = PortableType.String, MaxLength = 64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        var failure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+
+        Assert.Contains("GW-SCHEMA-009", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("buyer", failure.Message, StringComparison.Ordinal);
     }
 
     [SkippableFact]
@@ -75,6 +103,63 @@ public sealed class MongoProviderIntegrationTests
         Assert.DoesNotContain("$addToSet", pipeline, StringComparison.Ordinal);
         Assert.Contains("__groundwork_aggregation_set_probe_count", pipeline, StringComparison.Ordinal);
         Assert.Contains("__groundwork_aggregation_set_probe_value", pipeline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Native_scoped_pipeline_uses_group_count_order_limit_and_scope_collection_identity()
+    {
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-scoped-aggregation-artifact"),
+            Name = "mongo_scoped_aggregation_artifact",
+            Scope = ScopePolicy.Scoped,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "group", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AggregationProfiles =
+            [
+                new AggregationProfile
+                {
+                    Name = "summary",
+                    GroupByColumns = ["group"],
+                    Aggregates = [new Aggregate.Count("count")],
+                    MaxInputRows = 20,
+                    MaxGroups = 10
+                }
+            ]
+        };
+        var profile = unit.AggregationProfiles.Single();
+        var query = new AggregationQuery("summary")
+        {
+            OrderByTerms =
+            [
+                new AggregationOrderTerm("count", Groundwork.Kernel.SortDirection.Descending),
+                new AggregationOrderTerm("group", Groundwork.Kernel.SortDirection.Ascending)
+            ],
+            Take = 5
+        };
+
+        var stages = MongoStorageSession.RenderNativeAggregationPipeline(unit, profile, query);
+        var pipeline = string.Join("\n", stages.Select(stage => stage.ToJson()));
+        var applied = new MongoAppliedUnit(unit, unit.Name);
+        var firstCollection = MongoSchemaCoordinator.CollectionName(
+            applied,
+            MongoStorageAccess.Scoped(new StorageScope("tenant-a")));
+        var secondCollection = MongoSchemaCoordinator.CollectionName(
+            applied,
+            MongoStorageAccess.Scoped(new StorageScope("tenant-b")));
+
+        Assert.Contains("\"$group\"", pipeline, StringComparison.Ordinal);
+        Assert.Contains("\"count\" : { \"$sum\" : 1", pipeline, StringComparison.Ordinal);
+        Assert.Contains("\"$sort\"", pipeline, StringComparison.Ordinal);
+        Assert.Contains("\"$limit\" : 5", pipeline, StringComparison.Ordinal);
+        Assert.DoesNotContain("$addToSet", pipeline, StringComparison.Ordinal);
+        Assert.NotEqual(firstCollection, secondCollection);
+        Assert.Contains("__scope__", firstCollection, StringComparison.Ordinal);
+        Assert.Contains("__scope__", secondCollection, StringComparison.Ordinal);
     }
 
     [SkippableFact]
@@ -311,23 +396,28 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
-    public void Provider_passes_the_shipped_conformance_suite()
+    public async Task Provider_passes_the_shipped_conformance_suite_on_both_surfaces()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         var url = new MongoUrlBuilder(connectionString) { DatabaseName = "p1conformance_" + Guid.NewGuid().ToString("N") };
+        var database = url.ToMongoUrl().ToString();
 
-        var report = ConformanceSuite.Run(new MongoProviderFactory(), url.ToMongoUrl().ToString());
+        // One database, both surfaces: each run proves the whole contract on its own storage units.
+        var synchronous = ConformanceSuite.Run(new MongoProviderFactory(), database);
+        Assert.True(synchronous.Passed, string.Join(Environment.NewLine,
+            synchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
 
-        Assert.True(report.Passed, string.Join(Environment.NewLine,
-            report.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
+        var asynchronous = await ConformanceSuite.RunAsync(new MongoProviderFactory(), database);
+        Assert.True(asynchronous.Passed, string.Join(Environment.NewLine,
+            asynchronous.Failures.Select(failure => $"{failure.Name}: {failure.Failure}")));
     }
 
     [SkippableFact]
     public void Live_compare_and_delete_is_transactional_and_exact()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var native = OpenConnection();
@@ -375,21 +465,21 @@ public sealed class MongoProviderIntegrationTests
             session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-decimal" }),
                 new Dictionary<string, object?> { ["amount"] = 7 }).Status);
 
-        var mismatchObserver = new WritePathObserver();
+        var mismatchObserver = new ProviderCommandObserver();
+        var mismatchSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, mismatchObserver);
         Assert.Equal(WriteOutcomeStatus.ComparisonMismatch,
-            session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L },
-                new WriteOptions { Observer = mismatchObserver }).Status);
+            mismatchSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+                new Dictionary<string, object?> { ["owner"] = "worker-b", ["fence"] = 7L }).Status);
         Assert.Equal(2, mismatchObserver.RoundTrips);
         Assert.Contains(mismatchObserver.Commands, command => command.Operation == "mongodb.compare-and-delete-read");
         Assert.Equal(2L, session.Update(new StorageValues(new Dictionary<string, object?>
         {
             ["id"] = "claim-1", ["owner"] = "worker-a", ["fence"] = 7L
         }), WriteOptions.IfVersion(1)).Version);
-        var deleteObserver = new WritePathObserver();
-        var deleted = session.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
-            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L },
-            new WriteOptions { Observer = deleteObserver });
+        var deleteObserver = new ProviderCommandObserver();
+        var deleteSession = (ICompareAndDeleteStorageSession)connection.OpenSession(unit, StorageAccess.Global, deleteObserver);
+        var deleted = deleteSession.CompareAndDelete(new StorageKey(new Dictionary<string, object?> { ["id"] = "claim-1" }),
+            new Dictionary<string, object?> { ["owner"] = "worker-a", ["fence"] = 7L });
         Assert.Equal(WriteOutcomeStatus.Deleted, deleted.Status);
         Assert.Equal(2L, deleted.Version);
         Assert.Equal(3, deleteObserver.RoundTrips);
@@ -459,7 +549,7 @@ public sealed class MongoProviderIntegrationTests
         var second = connection.Schema.Apply(unit);
         var indexes = connection.Catalog.ReadIndexes(unit.Id);
         using var reopened = new MongoDbProviderFactory().Create(
-            Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION")!);
+            LiveMongo.ConnectionString!);
         var reopenedIndexes = reopened.Catalog.ReadIndexes(unit.Id);
         var native = Assert.IsType<MongoDbProviderConnection>(connection).Database
             .GetCollection<BsonDocument>(unit.Name);
@@ -530,7 +620,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void Composite_key_reordering_is_refused_after_reopening_the_provider()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         var unit = new StorageUnit
@@ -719,11 +809,11 @@ public sealed class MongoProviderIntegrationTests
         Assert.NotNull(stored);
         Assert.DoesNotContain(SearchKeyProjection.ColumnName("status"), stored.Values.Values.Keys);
 
-        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(session);
-        var aggregateObserver = new WritePathObserver();
+        var aggregateObserver = new ProviderCommandObserver();
+        var batch = Assert.IsAssignableFrom<IBatchedStorageSession>(
+            connection.OpenSession(unit, MongoStorageAccess.Global, aggregateObserver));
         var aggregate = batch.ApplyBatch(
-            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }),
-                new WriteOptions { Observer = aggregateObserver })]);
+            [RowWrite.Upsert(unit, new StorageValues(new Dictionary<string, object?> { ["id"] = 1 }))]);
         Assert.Equal(WriteOutcomeStatus.Upserted, Assert.Single(aggregate).Outcome.Status);
         Assert.Contains(aggregateObserver.Commands, command => command.Operation == "mongodb.batch-write");
 
@@ -842,7 +932,7 @@ public sealed class MongoProviderIntegrationTests
     [SkippableFact]
     public void StartsWithUsesIndex_for_the_optimizer_selected_folded_physical_index_without_a_hint()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB explain proofs.");
         var previousFlag = Environment.GetEnvironmentVariable("GW_EXPLAIN_ASSERT");
@@ -1068,9 +1158,155 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public async Task Concurrent_transactional_create_only_reservations_report_a_conflict_instead_of_leaking_wiredtiger_error()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var nativeSetup = new MongoDbProviderFactory().Create(connectionString!);
+        Skip.If(nativeSetup.ProviderSequenceFit is ProviderFit.Unsupported,
+            "MongoDB standalone deployments cannot execute unit-of-work transactions.");
+
+        var name = "mongo_login_race_" + Guid.NewGuid().ToString("N")[..20];
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "identity", Type = PortableType.String, IsNullable = false, MaxLength = 128 },
+                new() { Name = "owner", Type = PortableType.String, IsNullable = false, MaxLength = 128 }
+            ],
+            Key = new KeyDefinition { Columns = ["identity"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(nativeSetup.Schema.Apply(unit).Applied);
+
+        using var firstConnection = new MongoProviderFactory().Create(connectionString!);
+        using var secondConnection = new MongoProviderFactory().Create(connectionString!);
+        using var first = firstConnection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        using var second = secondConnection.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, unit);
+        first.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("first"), WriteOptions.CreateOnly));
+        second.Stage(RowWrite.ConditionalUpsert(unit, ReservationValues("second"), WriteOptions.CreateOnly));
+
+        using var start = new Barrier(2);
+        var firstTask = Task.Run(() => CommitReservation(first, start));
+        var secondTask = Task.Run(() => CommitReservation(second, start));
+        var results = await Task.WhenAll(firstTask, secondTask);
+
+        Assert.Single(results, result => result.Report?.IsSuccessful == true);
+        var loser = Assert.Single(results, result => result.Report is null);
+        var batchError = Assert.IsType<BatchWriteException>(loser.Error);
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, Assert.Single(batchError.Outcomes).Outcome.Status);
+        var winner = firstConnection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["identity"] = "provider|subject" }));
+        Assert.NotNull(winner);
+        Assert.True(winner!.Values.Values["owner"] is "first" or "second");
+        Assert.Equal(1, winner.Version);
+
+        static StorageValues ReservationValues(string owner) =>
+            new(new Dictionary<string, object?>
+            {
+                ["identity"] = "provider|subject",
+                ["owner"] = owner
+            });
+
+        static ReservationCommitResult CommitReservation(IUnitOfWork work, Barrier start)
+        {
+            start.SignalAndWait();
+            try
+            {
+                return new ReservationCommitResult(work.CommitWithOutcomes(), null);
+            }
+            catch (Exception exception)
+            {
+                return new ReservationCommitResult(null, exception);
+            }
+        }
+    }
+
+    [SkippableFact]
+    public void Transaction_body_retries_a_transient_write_conflict_before_returning_success()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var native = new MongoDbProviderFactory().Create(connectionString!);
+        Skip.If(native.ProviderSequenceFit is ProviderFit.Unsupported,
+            "MongoDB standalone deployments cannot execute unit-of-work transactions.");
+
+        var name = "mongo_retry_body_" + Guid.NewGuid().ToString("N")[..20];
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new() { Name = "sequence", Type = PortableType.Int64, IsNullable = false, Generation = ColumnGeneration.ProviderSequence },
+                new() { Name = "payload", Type = PortableType.String, IsNullable = false, MaxLength = 128 }
+            ],
+            Key = new KeyDefinition { Columns = ["sequence"] }
+        };
+        Assert.True(native.Schema.Apply(unit).Applied);
+
+        using var failpointClient = new MongoClient(connectionString!);
+        var admin = failpointClient.GetDatabase("admin");
+        var failpointEnabled = false;
+        try
+        {
+            try
+            {
+                admin.RunCommand<BsonDocument>(new BsonDocument
+                {
+                    ["configureFailPoint"] = "failCommand",
+                    ["mode"] = new BsonDocument("times", 1),
+                    ["data"] = new BsonDocument
+                    {
+                        ["failCommands"] = new BsonArray { "insert" },
+                        ["errorCode"] = 112,
+                        ["errorLabels"] = new BsonArray { "TransientTransactionError" }
+                    }
+                });
+                failpointEnabled = true;
+            }
+            catch (MongoCommandException exception)
+            {
+                Skip.If(true, $"MongoDB failCommand is unavailable: {exception.Message}");
+            }
+
+            using var connection = new MongoProviderFactory().Create(connectionString!);
+            var outcome = connection.OpenSession(unit, StorageAccess.Global).Insert(
+                new StorageValues(new Dictionary<string, object?> { ["payload"] = "retry-me" }));
+
+            Assert.Equal(WriteOutcomeStatus.Inserted, outcome.Status);
+            Assert.Equal(1L, outcome.GeneratedValue<long>("sequence"));
+        }
+        finally
+        {
+            if (failpointEnabled)
+            {
+                try
+                {
+                    admin.RunCommand<BsonDocument>(new BsonDocument
+                    {
+                        ["configureFailPoint"] = "failCommand",
+                        ["mode"] = "off"
+                    });
+                }
+                catch (MongoException)
+                {
+                    // Keep the original test failure if disabling the test-only failpoint fails.
+                }
+            }
+        }
+    }
+
+    private sealed record ReservationCommitResult(BatchWriteReport? Report, Exception? Error);
+
+    [SkippableFact]
     public void Provider_sequence_is_capability_gated_by_mongodb_transactions()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var connection = OpenConnection();
@@ -1112,13 +1348,12 @@ public sealed class MongoProviderIntegrationTests
             Assert.True(store.Schema.Apply(compareUnit).Applied);
             Assert.DoesNotContain(store.Capabilities,
                 capability => capability.Id == BatchWriteCapabilities.CompareAndDelete);
-            var compareSession = store.OpenSession(compareUnit, StorageAccess.Global);
+            var observer = new ProviderCommandObserver();
+            var compareSession = store.OpenSession(compareUnit, StorageAccess.Global, observer);
             Assert.False(compareSession is ICompareAndDeleteStorageSession);
-            var observer = new WritePathObserver();
             Assert.Throws<NotSupportedException>(() => compareSession.CompareAndDelete(
                 new StorageKey(new Dictionary<string, object?> { ["id"] = "missing" }),
-                new Dictionary<string, object?> { ["owner"] = "worker" },
-                new WriteOptions { Observer = observer }));
+                new Dictionary<string, object?> { ["owner"] = "worker" }));
             Assert.Empty(observer.Commands);
             var uowRefusal = Assert.Throws<InvalidOperationException>(() =>
                 store.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Exact, compareUnit));
@@ -1276,9 +1511,29 @@ public sealed class MongoProviderIntegrationTests
     private static StorageValues OptimisticUpsertStoreValues(string id, string payload) =>
         new(new Dictionary<string, object?> { ["id"] = id, ["payload"] = payload });
 
+    [SkippableFact]
+    public void Provider_side_count_over_an_empty_collection_reports_zero()
+    {
+        using var connection = OpenConnection();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo.empty.count"),
+            Name = "mongo_empty_count",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, MongoStorageAccess.Global);
+
+        var counted = session.Query(QueryRequestExecution.ForProviderCount(new QueryRequest(
+            new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None)));
+
+        Assert.Equal(0L, counted.TotalCount);
+    }
+
     private static IMongoProviderConnection OpenConnection()
     {
-        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         return new MongoDbProviderFactory().Create(connectionString!);

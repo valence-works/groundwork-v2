@@ -13,6 +13,17 @@ The first public packages are pre-1.0 previews. See the [v2 versioning
 policy](docs/v2/versioning.md) and [provider support
 matrix](docs/v2/support-matrix.md) before consuming a preview package.
 
+## Documentation
+
+The consumer-facing documentation lives in the
+[project wiki](https://github.com/valence-works/groundwork-v2/wiki). Start with
+[Installation](https://github.com/valence-works/groundwork-v2/wiki/Installation)
+and [Core Concepts](https://github.com/valence-works/groundwork-v2/wiki/Core-Concepts).
+
+The wiki is generated from `docs/wiki/` in this repository and published by the
+`publish-wiki` workflow on every push to `main`. Edit the markdown there and open
+a pull request; direct edits in the wiki UI are overwritten on the next publish.
+
 ## Consume preview packages
 
 Groundwork previews are published to the public Feedz source:
@@ -43,8 +54,21 @@ dependencies. For example:
 Then install the exact preview required by the application:
 
 ```shell
-dotnet add package Groundwork.Sqlite --version 0.1.0-preview.1
+dotnet add package Groundwork.Sqlite --version 0.2.0-preview.1
 ```
+
+## Sample application
+
+`samples/Groundwork.Samples.Api` is a runnable ASP.NET Core minimal API covering
+declaration, schema deployment, typed CRUD, a covered query with paging, a unit
+of work, optimistic concurrency, and tenant scopes — switchable across all four
+providers from configuration.
+
+```shell
+dotnet run --project samples/Groundwork.Samples.Api
+```
+
+See its [README](samples/Groundwork.Samples.Api/README.md).
 
 ## Build
 

@@ -1,3 +1,4 @@
+using System.Data;
 using System.Collections.ObjectModel;
 using System.Data.Common;
 using System.Globalization;
@@ -14,6 +15,9 @@ public abstract class RelationalDialect
 {
     public const string SearchKeyDefinitionKind = "search-key-algorithm";
     public const string SearchKeyDefinitionSeparator = "\u001f";
+
+    public const string SchemaHistoryTable = "__groundwork_schema_history";
+    public const string SearchKeyAlgorithmsTable = "__groundwork_search_key_algorithms";
 
     public abstract string ProviderName { get; }
 
@@ -55,6 +59,14 @@ public abstract class RelationalDialect
         IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "NULL",
         _ => throw new AggregationValidationException([new("GW-AGG-PRED-011", $"The predicate value is not compatible with {type}.", "postPredicate.values")])
     };
+
+    /// <summary>Renders one portable null-aware output ordering term for grouped aggregation.</summary>
+    protected internal virtual string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {expression} {order}";
+    }
 
     public abstract string QuoteIdentifier(string identifier);
 
@@ -109,6 +121,96 @@ public abstract class RelationalDialect
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Redefines an existing column in place. The default reuses <see cref="FinalizeColumn"/>,
+    /// because finalizing a backfilled column and widening or narrowing one are the same physical
+    /// act on every dialect Groundwork ships: replace the column's definition with the declared one.
+    /// </summary>
+    public virtual void AlterColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ColumnDefinition definition) =>
+        FinalizeColumn(connection, transaction, table, definition);
+
+    /// <summary>Removes one column and every value stored in it.</summary>
+    public virtual string DropColumnSql(string table, string column) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} DROP COLUMN {QuoteIdentifier(column)};";
+
+    /// <summary>
+    /// Removes one column. Providers that cannot express the removal as a single statement override
+    /// this hook; the default executes <see cref="DropColumnSql"/>.
+    /// </summary>
+    public virtual void DropColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(definition);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = DropColumnSql(table, definition.Name);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>Removes the primary storage and every row in it.</summary>
+    public virtual string DropTableSql(string table) => $"DROP TABLE {QuoteIdentifier(table)};";
+
+    /// <summary>Renames the primary storage, carrying its rows with it.</summary>
+    public virtual string RenameTableSql(string table, string renamed) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} RENAME TO {QuoteIdentifier(renamed)};";
+
+    /// <summary>
+    /// Renames the primary storage. Providers whose physical index names embed the storage name
+    /// override this hook so their catalog stays addressable afterwards.
+    /// </summary>
+    public virtual void RenameTable(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        string renamed)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = RenameTableSql(table, renamed);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Moves one index onto renamed storage. Every dialect Groundwork ships derives its physical
+    /// index name from the storage name, so the index has to move with it. The portable default
+    /// drops and recreates; a dialect with a native index rename overrides this to keep it cheap.
+    /// </summary>
+    public virtual void RenameIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string fromTable,
+        string toTable,
+        IndexDefinition index)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(index);
+        Execute(connection, transaction, DropIndexSql(fromTable, index.Name));
+        Execute(connection, transaction, CreateIndexSql(toTable, index, IndexFilter(index)));
+    }
+
+    /// <summary>Runs one statement on the dialect's schema connection and transaction.</summary>
+    protected static void Execute(DbConnection connection, DbTransaction transaction, string sql)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>Renames one column in place, carrying its values with it.</summary>
+    public virtual string RenameColumnSql(string table, string column, string renamed) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} RENAME COLUMN {QuoteIdentifier(column)} TO {QuoteIdentifier(renamed)};";
+
     public abstract string CreateIndexSql(string table, IndexDefinition index, string? filter);
 
     public abstract string DropIndexSql(string table, string index);
@@ -118,6 +220,15 @@ public abstract class RelationalDialect
     public abstract string BatchInsertSql(RelationalWriteShape shape, int batchSize);
 
     public abstract object? ConvertValue(object? value, ColumnDefinition definition);
+
+    /// <summary>
+    /// The read direction of <see cref="ConvertValue"/>: maps one stored value back to the portable
+    /// CLR shape the declaration names. A host-process data-migration transform must see the same
+    /// value type whatever provider it runs against, so the row it is given is mapped through this
+    /// rather than handed the driver's native representation.
+    /// </summary>
+    public virtual object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is DBNull ? null : value;
 
     public abstract void Validate(ColumnDefinition definition);
 
@@ -151,6 +262,20 @@ public abstract class RelationalDialect
         return connection.BeginTransaction();
     }
 
+    /// <summary>The isolation one durable Groundwork unit runs at on this dialect.</summary>
+    public virtual IsolationLevel TransactionIsolation => IsolationLevel.Unspecified;
+
+    /// <summary>
+    /// Begins a transaction on the surface the caller selected, at this dialect's isolation. The
+    /// asynchronous data-migration path uses it so a chunk does not open its unit with a blocking
+    /// call, and so it runs at the same isolation as a schema apply rather than the driver default.
+    /// </summary>
+    public virtual ValueTask<DbTransaction> BeginTransaction(DbConnection connection, RelationalExecution mode)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        return mode.BeginTransaction(connection, TransactionIsolation);
+    }
+
     public abstract void EnsureInfrastructure(DbConnection connection);
 
     public abstract PhysicalSchemaHistoryState ReadHistory(
@@ -175,12 +300,12 @@ public abstract class RelationalDialect
 
     public abstract bool TableExists(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table);
 
     public abstract IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table);
 
     /// <summary>
@@ -190,12 +315,12 @@ public abstract class RelationalDialect
     /// </summary>
     public virtual IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table) => new Dictionary<string, string>(StringComparer.Ordinal);
 
     public abstract RelationalIndexMetadata? ReadIndex(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string index);
 
@@ -208,7 +333,42 @@ public abstract class RelationalDialect
 
     public virtual string? BackfillColumnSql(string table, ColumnDefinition column) => null;
 
+    /// <summary>
+    /// The most parameters one statement may bind on this provider. It bounds a data-migration
+    /// chunk, so a chunk is sized to what the provider can actually bind instead of failing on it.
+    /// The default is the smallest budget any shipped provider has, so an unrevised custom dialect
+    /// is conservative rather than wrong.
+    /// </summary>
+    public virtual int ParameterBudget => 999;
+
+    /// <summary>Caps an ordered scan at <paramref name="rows"/> rows.</summary>
+    public virtual string LimitClause(int rows) => $" LIMIT {rows}";
+
+    /// <summary>
+    /// Upserts one row of the data-migration ledger, keyed by subject, provider, and migration id.
+    /// A dialect that returns non-null must also create
+    /// <see cref="RelationalDataMigrationLedger.TableName"/> in <see cref="EnsureInfrastructure"/>;
+    /// returning null withholds the <see cref="Groundwork.Kernel.Schema.DataMigrationCapabilities.AppliedLedger"/>
+    /// capability, and the kernel then refuses data migrations on this dialect rather than running
+    /// them unrecorded.
+    /// </summary>
+    public virtual string? DataMigrationLedgerUpsertSql => null;
+
     public virtual void ApplyProviderDefinition(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+    }
+
+    /// <summary>
+    /// Removes a provider-owned definition that no longer belongs to the deployed schema, because
+    /// the storage it named was renamed or removed. A provider that materializes nothing in
+    /// <see cref="ApplyProviderDefinition"/> has nothing to remove and inherits the empty default;
+    /// one that creates a named object or a catalog row must delete it here, or every rename and
+    /// retirement leaves another dead object behind in the user's database.
+    /// </summary>
+    public virtual void DropProviderDefinition(
         DbConnection connection,
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
@@ -217,7 +377,7 @@ public abstract class RelationalDialect
 
     public virtual void ValidateTarget(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         PhysicalSchemaTarget target)
     {
     }

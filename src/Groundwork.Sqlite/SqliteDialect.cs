@@ -2,6 +2,7 @@ using System.Data.Common;
 using System.Data;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
@@ -12,6 +13,16 @@ namespace Groundwork.Sqlite;
 internal sealed class SqliteDialect : RelationalDialect
 {
     public override string ProviderName => "SQLite";
+
+    protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        if (type != PortableType.String)
+            return base.RenderAggregationOrder(expression, type, direction);
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        var ordinal = expression + " COLLATE GROUNDWORK_UTF16_ORDINAL";
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {ordinal} {order}";
+    }
     public override RelationalQueryRenderer CreateQueryRenderer() => new SqliteQueryRenderer();
     public override bool CreateTableIncludesColumns => true;
 
@@ -36,11 +47,12 @@ internal sealed class SqliteDialect : RelationalDialect
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
 
-    public override string? MapCollation(ColumnDefinition definition) => definition.Collation switch
+    public override string? MapCollation(ColumnDefinition definition) => (definition.Type, definition.Collation) switch
     {
-        null or PortableCollation.Ordinal => "BINARY",
-        PortableCollation.OrdinalIgnoreCase => "NOCASE",
-        PortableCollation.UnicodeOrdinalIgnoreCase => throw new NotSupportedException(
+        (PortableType.String, null or PortableCollation.Ordinal) => "GROUNDWORK_UTF16_ORDINAL",
+        (_, null or PortableCollation.Ordinal) => "BINARY",
+        (_, PortableCollation.OrdinalIgnoreCase) => "NOCASE",
+        (_, PortableCollation.UnicodeOrdinalIgnoreCase) => throw new NotSupportedException(
             "SQLite does not provide the portable UnicodeOrdinalIgnoreCase collation."),
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
@@ -94,6 +106,16 @@ internal sealed class SqliteDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         ((SqliteConnection)connection).BeginTransaction(IsolationLevel.Serializable, deferred: false);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.Serializable;
+
+    /// <summary>
+    /// SQLite's asynchronous surface completes synchronously anyway, and only the synchronous
+    /// overload can ask for an immediate rather than a deferred transaction, so both surfaces open
+    /// the unit the same way.
+    /// </summary>
+    public override ValueTask<DbTransaction> BeginTransaction(DbConnection connection, RelationalExecution mode) =>
+        new(BeginTransaction(connection));
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;
@@ -116,6 +138,32 @@ internal sealed class SqliteDialect : RelationalDialect
 
     public override object? ConvertValue(object? value, ColumnDefinition definition) =>
         SqliteProviderConnection.ToSqliteValue(value, definition);
+
+    public override object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is null ? null : ReadPortableValue(value, definition);
+
+    /// <summary>
+    /// Maps one stored SQLite value back to the portable CLR shape its declaration names. The
+    /// storage session and the data-migration scan share this one definition, so a host transform
+    /// sees the declared type rather than SQLite's storage class.
+    /// </summary>
+    public static object? ReadPortableValue(object value, ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (value is DBNull) return null;
+        return definition.Type switch
+        {
+            PortableType.Boolean => Convert.ToInt64(value, CultureInfo.InvariantCulture) != 0,
+            PortableType.Int32 => Convert.ToInt32(value, CultureInfo.InvariantCulture),
+            PortableType.Int64 => Convert.ToInt64(value, CultureInfo.InvariantCulture),
+            PortableType.Decimal => decimal.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture),
+            PortableType.Guid => Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!),
+            PortableType.DateTimeOffset => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            PortableType.Binary => ((byte[])value).ToArray(),
+            PortableType.Json => value is string json ? JsonDocument.Parse(json).RootElement.Clone() : value,
+            _ => value
+        };
+    }
 
     public override void Validate(ColumnDefinition definition)
     {
@@ -145,6 +193,19 @@ internal sealed class SqliteDialect : RelationalDialect
     public override long AcquireFence(DbConnection connection, PhysicalSchemaTargetIdentity target, string owner) => 1;
     public override void AssertFence(DbConnection connection, DbTransaction transaction, PhysicalSchemaTargetIdentity target, string owner, long fence) { }
 
+    public override int ParameterBudget => SqliteQueryRenderer.ParameterBudget;
+
+    public override string? DataMigrationLedgerUpsertSql =>
+        "INSERT INTO \"__groundwork_data_migrations\" (\"subject_id\",\"provider_name\",\"migration_id\",\"unit_name\"," +
+        "\"request_fingerprint\",\"state\",\"cursor\",\"rows_scanned\",\"rows_changed\",\"batches\"," +
+        "\"started_at\",\"updated_at\",\"completed_at\") VALUES (@subject,@provider,@migration,@unit,@fingerprint," +
+        "@state,@cursor,@scanned,@changed,@batches,@started,@updated,@completed) " +
+        "ON CONFLICT (\"subject_id\",\"provider_name\",\"migration_id\") DO UPDATE SET " +
+        "\"unit_name\"=excluded.\"unit_name\",\"request_fingerprint\"=excluded.\"request_fingerprint\"," +
+        "\"state\"=excluded.\"state\",\"cursor\"=excluded.\"cursor\",\"rows_scanned\"=excluded.\"rows_scanned\"," +
+        "\"rows_changed\"=excluded.\"rows_changed\",\"batches\"=excluded.\"batches\"," +
+        "\"updated_at\"=excluded.\"updated_at\",\"completed_at\"=excluded.\"completed_at\";";
+
     public override void EnsureInfrastructure(DbConnection connection)
     {
         using var command = connection.CreateCommand();
@@ -161,6 +222,22 @@ internal sealed class SqliteDialect : RelationalDialect
                 "column_name" TEXT NOT NULL,
                 "algorithm_id" TEXT NOT NULL,
                 PRIMARY KEY ("table_name", "column_name")
+            );
+            CREATE TABLE IF NOT EXISTS "__groundwork_data_migrations" (
+                "subject_id" TEXT NOT NULL,
+                "provider_name" TEXT NOT NULL,
+                "migration_id" TEXT NOT NULL,
+                "unit_name" TEXT NOT NULL,
+                "request_fingerprint" TEXT NOT NULL,
+                "state" TEXT NOT NULL,
+                "cursor" TEXT NULL,
+                "rows_scanned" INTEGER NOT NULL,
+                "rows_changed" INTEGER NOT NULL,
+                "batches" INTEGER NOT NULL,
+                "started_at" TEXT NOT NULL,
+                "updated_at" TEXT NOT NULL,
+                "completed_at" TEXT NULL,
+                PRIMARY KEY ("subject_id", "provider_name", "migration_id")
             );
             """;
         command.ExecuteNonQuery();
@@ -180,9 +257,24 @@ internal sealed class SqliteDialect : RelationalDialect
             "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=excluded.\"algorithm_id\";");
     }
 
-    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+    public override void DropProviderDefinition(
         DbConnection connection,
         DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported SQLite provider definition '{definition.Kind}'.");
+        RelationalSearchKeyCatalog.Drop(
+            connection,
+            transaction,
+            definition,
+            "DELETE FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table AND \"column_name\"=@column;");
+    }
+
+    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+        DbConnection connection,
+        DbTransaction? transaction,
         string table)
         => RelationalSearchKeyCatalog.Read(
             connection,
@@ -231,16 +323,16 @@ internal sealed class SqliteDialect : RelationalDialect
             throw new InvalidOperationException($"SQLite schema history publish affected an unexpected number of rows for '{target}'.");
     }
 
-    public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+    public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
+        command.Transaction = (SqliteTransaction?)transaction;
         command.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=@name;";
         AddParameter(command, "@name", table);
         return command.ExecuteScalar() is not null;
     }
 
-    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction transaction, string table)
+    public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(DbConnection connection, DbTransaction? transaction, string table)
     {
         var createSql = ReadCreateSql((SqliteConnection)connection, transaction, table);
         using var command = connection.CreateCommand();
@@ -254,13 +346,14 @@ internal sealed class SqliteDialect : RelationalDialect
             var declaration = createSql is null ? null : SqliteCreateTableSql.ExtractColumnDeclaration(createSql, name);
             var providerSequence = declaration?.Contains("AUTOINCREMENT", StringComparison.OrdinalIgnoreCase) == true;
             result[name] = new(name, reader.GetString(2), !providerSequence && reader.GetInt32(3) == 0,
-                reader.IsDBNull(4) ? null : reader.GetString(4), "BINARY", reader.GetInt32(5),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                declaration is null ? "BINARY" : SqliteCreateTableSql.ExtractCollation(declaration), reader.GetInt32(5),
                 Generation: providerSequence ? ColumnGeneration.ProviderSequence : ColumnGeneration.Supplied);
         }
         return result;
     }
 
-    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction transaction, string table, string index)
+    public override RelationalIndexMetadata? ReadIndex(DbConnection connection, DbTransaction? transaction, string table, string index)
     {
         using var list = connection.CreateCommand();
         list.Transaction = transaction;
@@ -325,18 +418,10 @@ internal sealed class SqliteDialect : RelationalDialect
     internal static string PhysicalIndexName(string table, string logicalName) =>
         $"__groundwork_ix_{table.Length}_{table}_{logicalName.Length}_{logicalName}";
 
-    private static void Execute(DbConnection connection, DbTransaction transaction, string sql)
+    private static string? ReadCreateSql(SqliteConnection connection, DbTransaction? transaction, string table)
     {
         using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
-    }
-
-    private static string? ReadCreateSql(SqliteConnection connection, DbTransaction transaction, string table)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = (SqliteTransaction)transaction;
+        command.Transaction = (SqliteTransaction?)transaction;
         command.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name=@name;";
         AddParameter(command, "@name", table);
         return command.ExecuteScalar() as string;

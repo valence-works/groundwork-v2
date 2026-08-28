@@ -411,15 +411,8 @@ public sealed class MongoQueryRenderer
                 ? "_groundwork_ordinal_key_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 : term.Column.Name;
             if (term.Column.Type == QueryType.String)
-            {
                 data.Add(new BsonDocument("$set", new BsonDocument(orderName,
-                    new BsonDocument("$function", new BsonDocument
-                    {
-                        { "body", "function(value) { if (value === null || value === undefined) return null; var key = ''; for (var i = 0; i < value.length; i++) { var unit = value.charCodeAt(i).toString(16); key += ('0000' + unit).slice(-4); } return key; }" },
-                        { "args", new BsonArray { "$" + term.Column.Name } },
-                        { "lang", "js" }
-                    }))));
-            }
+                    RenderOrdinalKey("$" + term.Column.Name))));
             sort.Add(orderName, term.Direction == OrderDirection.Ascending ? 1 : -1);
         }
         if (sort.ElementCount != 0)
@@ -470,13 +463,8 @@ public sealed class MongoQueryRenderer
         return prefix;
     }
 
-    private static BsonDocument RenderOrdinalKey(string field)
-        => new("$function", new BsonDocument
-        {
-            { "body", "function(value) { if (value === null || value === undefined) return null; var key = ''; for (var i = 0; i < value.length; i++) { var unit = value.charCodeAt(i).toString(16); key += ('0000' + unit).slice(-4); } return key; }" },
-            { "args", new BsonArray { field } },
-            { "lang", "js" }
-        });
+    internal static BsonDocument RenderOrdinalKey(string field)
+        => RenderOrdinalKey(new BsonString(field));
 
     private static BsonDocument RenderOrdinalKey(QueryConstant value)
         => RenderOrdinalKey(ToBson(value));

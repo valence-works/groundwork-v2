@@ -16,6 +16,16 @@ public sealed class PostgreSqlDialect : RelationalDialect
 {
     public override string ProviderName => "PostgreSQL";
 
+    protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
+    {
+        if (type != PortableType.String)
+            return base.RenderAggregationOrder(expression, type, direction);
+        var descending = direction == SortDirection.Descending;
+        var order = descending ? "DESC" : "ASC";
+        var key = PostgreSqlQueryRenderer.RenderOrdinalKey(expression);
+        return $"CASE WHEN {expression} IS NULL THEN {(descending ? 1 : 0)} ELSE {(descending ? 0 : 1)} END, {key} {order}";
+    }
+
     public override RelationalQueryRenderer CreateQueryRenderer() => new PostgreSqlQueryRenderer();
 
     public override string RenderAggregationContains(string expression, string literal) =>
@@ -98,6 +108,48 @@ public sealed class PostgreSqlDialect : RelationalDialect
     public override string FinalizeColumnSql(string table, string column, ColumnDefinition definition) =>
         $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {QuoteIdentifier(column)} SET NOT NULL;";
 
+    /// <summary>
+    /// PostgreSQL spells a redefinition as separate type, nullability, and default clauses, so the
+    /// shared finalize statement — which only asserts NOT NULL — is not enough on its own.
+    /// </summary>
+    public override void AlterColumn(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        var column = QuoteIdentifier(definition.Name);
+        var alter = $"ALTER TABLE {QuoteIdentifier(table)} ALTER COLUMN {column}";
+        var type = MapType(definition);
+        Execute(
+            connection,
+            transaction,
+            $"{alter} TYPE {type}{(MapCollation(definition) is { } collation ? $" COLLATE {collation}" : string.Empty)} " +
+            $"USING {column}::{type};");
+        Execute(connection, transaction, $"{alter} {(definition.IsNullable ? "DROP NOT NULL" : "SET NOT NULL")};");
+        Execute(
+            connection,
+            transaction,
+            MapDefault(definition) is { } value ? $"{alter} SET DEFAULT {value};" : $"{alter} DROP DEFAULT;");
+    }
+
+    /// <summary>PostgreSQL renames an index in place rather than rebuilding it.</summary>
+    public override void RenameIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string fromTable,
+        string toTable,
+        IndexDefinition index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        Execute(
+            connection,
+            transaction,
+            $"ALTER INDEX IF EXISTS {QuoteIdentifier(PhysicalIndexName(fromTable, index.Name))} " +
+            $"RENAME TO {QuoteIdentifier(PhysicalIndexName(toTable, index.Name))};");
+    }
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;
@@ -152,6 +204,30 @@ public sealed class PostgreSqlDialect : RelationalDialect
         _ when definition.Type == PortableType.Json && value is not string => JsonSerializer.Serialize(value),
         _ => value
     };
+
+    public override object? ReadValue(object? value, ColumnDefinition definition) =>
+        value is null ? null : ReadPortableValue(value, definition);
+
+    /// <summary>
+    /// Maps one stored PostgreSQL value back to the portable CLR shape its declaration names. The
+    /// storage session and the data-migration scan share this one definition, so a host transform
+    /// sees the declared type rather than the driver's native representation.
+    /// </summary>
+    public static object? ReadPortableValue(object value, ColumnDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (value is DBNull)
+            return null;
+        return definition.Type switch
+        {
+            PortableType.DateTimeOffset => new DateTimeOffset(Convert.ToInt64(value, CultureInfo.InvariantCulture), TimeSpan.Zero),
+            PortableType.Json when value is string json => JsonDocument.Parse(json).RootElement.Clone(),
+            PortableType.Json when value is JsonDocument document => document.RootElement.Clone(),
+            PortableType.Json when value is JsonElement element => element.Clone(),
+            PortableType.Binary when value is byte[] bytes => bytes.ToArray(),
+            _ => value
+        };
+    }
 
     public override void Validate(ColumnDefinition definition)
     {
@@ -253,6 +329,21 @@ public sealed class PostgreSqlDialect : RelationalDialect
     public override DbTransaction BeginTransaction(DbConnection connection) =>
         connection.BeginTransaction(IsolationLevel.ReadCommitted);
 
+    public override IsolationLevel TransactionIsolation => IsolationLevel.ReadCommitted;
+
+    public override int ParameterBudget => PostgreSqlQueryRenderer.ParameterBudget;
+
+    public override string? DataMigrationLedgerUpsertSql =>
+        "INSERT INTO \"__groundwork_data_migrations\" (\"subject_id\",\"provider_name\",\"migration_id\",\"unit_name\"," +
+        "\"request_fingerprint\",\"state\",\"cursor\",\"rows_scanned\",\"rows_changed\",\"batches\"," +
+        "\"started_at\",\"updated_at\",\"completed_at\") VALUES (@subject,@provider,@migration,@unit,@fingerprint," +
+        "@state,@cursor,@scanned,@changed,@batches,@started,@updated,@completed) " +
+        "ON CONFLICT (\"subject_id\",\"provider_name\",\"migration_id\") DO UPDATE SET " +
+        "\"unit_name\"=EXCLUDED.\"unit_name\",\"request_fingerprint\"=EXCLUDED.\"request_fingerprint\"," +
+        "\"state\"=EXCLUDED.\"state\",\"cursor\"=EXCLUDED.\"cursor\",\"rows_scanned\"=EXCLUDED.\"rows_scanned\"," +
+        "\"rows_changed\"=EXCLUDED.\"rows_changed\",\"batches\"=EXCLUDED.\"batches\"," +
+        "\"updated_at\"=EXCLUDED.\"updated_at\",\"completed_at\"=EXCLUDED.\"completed_at\";";
+
     public override void EnsureInfrastructure(DbConnection connection)
     {
         const string infrastructureResource = "groundwork:infrastructure";
@@ -280,6 +371,22 @@ public sealed class PostgreSqlDialect : RelationalDialect
                     "algorithm_id" text NOT NULL,
                     PRIMARY KEY ("table_name", "column_name")
                 );
+                CREATE TABLE IF NOT EXISTS "__groundwork_data_migrations" (
+                    "subject_id" text NOT NULL,
+                    "provider_name" text NOT NULL,
+                    "migration_id" text NOT NULL,
+                    "unit_name" text NOT NULL,
+                    "request_fingerprint" text NOT NULL,
+                    "state" text NOT NULL,
+                    "cursor" text NULL,
+                    "rows_scanned" bigint NOT NULL,
+                    "rows_changed" bigint NOT NULL,
+                    "batches" integer NOT NULL,
+                    "started_at" text NOT NULL,
+                    "updated_at" text NOT NULL,
+                    "completed_at" text NULL,
+                    PRIMARY KEY ("subject_id", "provider_name", "migration_id")
+                );
                 """);
             command.ExecuteNonQuery();
         }
@@ -303,9 +410,24 @@ public sealed class PostgreSqlDialect : RelationalDialect
             "INSERT INTO \"__groundwork_search_key_algorithms\" (\"table_name\",\"column_name\",\"algorithm_id\") VALUES (@table,@column,@algorithm) ON CONFLICT (\"table_name\",\"column_name\") DO UPDATE SET \"algorithm_id\"=EXCLUDED.\"algorithm_id\";");
     }
 
-    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+    public override void DropProviderDefinition(
         DbConnection connection,
         DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Unsupported PostgreSQL provider definition '{definition.Kind}'.");
+        RelationalSearchKeyCatalog.Drop(
+            connection,
+            transaction,
+            definition,
+            "DELETE FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table AND \"column_name\"=@column;");
+    }
+
+    public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
+        DbConnection connection,
+        DbTransaction? transaction,
         string table)
         => RelationalSearchKeyCatalog.Read(
             connection,
@@ -356,7 +478,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
             throw new InvalidOperationException($"PostgreSQL schema history publish affected an unexpected number of rows for '{target}'.");
     }
 
-    public override bool TableExists(DbConnection connection, DbTransaction transaction, string table)
+    public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
         using var command = Command(connection, transaction, "SELECT to_regclass(@table) IS NOT NULL;");
         Add(command, "table", table);
@@ -365,7 +487,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     public override IReadOnlyDictionary<string, RelationalColumnMetadata> ReadColumns(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table)
     {
         using var command = Command(connection, transaction, """
@@ -405,7 +527,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     public override RelationalIndexMetadata? ReadIndex(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string index)
     {
@@ -420,7 +542,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
 
     private RelationalIndexMetadata? ReadIndexByName(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string index)
     {

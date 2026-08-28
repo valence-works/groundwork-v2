@@ -15,6 +15,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
     private readonly List<PostgreSqlStorageSession> sessions = [];
     private readonly BatchContext batch;
     private bool terminal;
+    private readonly IProviderCommandObserver? commandObserver;
 
     internal PostgreSqlUnitOfWork(
         PostgreSqlProviderConnection owner,
@@ -22,8 +23,10 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
         NpgsqlTransaction transaction,
         IReadOnlyList<StorageUnit> declarations,
         StorageAccess access,
-        BatchWriteOptions options)
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer = null)
     {
+        commandObserver = observer;
         this.owner = owner;
         this.connection = connection;
         this.transaction = transaction;
@@ -38,7 +41,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
         ThrowIfTerminal();
         if (!units.TryGetValue(unit.Id, out var physical))
             throw new InvalidOperationException($"Storage unit '{unit.Id.Value}' was not declared for this unit of work.");
-        var session = new PostgreSqlStorageSession(owner, physical, access, connection, transaction);
+        var session = new PostgreSqlStorageSession(owner, physical, access, connection, transaction, commandObserver);
         sessions.Add(session);
         var batched = BatchStorageSession.Create(session, batch);
         batch.Register(batched);
@@ -58,28 +61,56 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             batch.FlushAll();
     }
 
-    public BatchWriteSummary Commit() => BatchWriteSummary.FromOutcomes(CompleteCommit());
+    public BatchWriteSummary Commit() =>
+        BatchWriteSummary.FromOutcomes(CompleteCommit(isAsync: false, CancellationToken.None).GetAwaiter().GetResult());
+
+    public async ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default) =>
+        BatchWriteSummary.FromOutcomes(await CompleteCommit(isAsync: true, cancellationToken).ConfigureAwait(false));
 
     public BatchWriteReport CommitWithOutcomes()
     {
         ThrowIfTerminal();
         batch.RequireExactOutcomes();
-        return new BatchWriteReport(CompleteCommit());
+        return new BatchWriteReport(CompleteCommit(isAsync: false, CancellationToken.None).GetAwaiter().GetResult());
     }
 
-    private IReadOnlyList<RowWriteOutcome> CompleteCommit()
+    public async ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminal();
+        batch.RequireExactOutcomes();
+        return new BatchWriteReport(await CompleteCommit(isAsync: true, cancellationToken).ConfigureAwait(false));
+    }
+
+    private async ValueTask<IReadOnlyList<RowWriteOutcome>> CompleteCommit(bool isAsync, CancellationToken cancellationToken)
     {
         ThrowIfTerminal();
         try
         {
-            batch.FlushAll();
-            transaction.Commit();
+            if (isAsync)
+            {
+                await batch.FlushAllAsync(cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                batch.FlushAll();
+                transaction.Commit();
+            }
             return batch.DrainCompleted();
         }
-        catch
+        catch (Exception failure)
         {
-            try { transaction.Rollback(); }
-            finally { Complete(); }
+            await WriteFailureCleanup.Run(failure, async () =>
+            {
+                try
+                {
+                    if (isAsync)
+                        await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                    else
+                        transaction.Rollback();
+                }
+                finally { Complete(); }
+            }).ConfigureAwait(false);
             throw;
         }
         finally
@@ -87,18 +118,6 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
             if (!terminal)
                 Complete();
         }
-    }
-
-    public ValueTask<BatchWriteReport> CommitWithOutcomesAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(CommitWithOutcomes());
-    }
-
-    public ValueTask<BatchWriteSummary> CommitAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(Commit());
     }
 
     public void Rollback()
@@ -131,8 +150,7 @@ internal sealed class PostgreSqlUnitOfWork : IUnitOfWork
     private void Complete()
     {
         terminal = true;
-        CloseSessions();
-        connection.Dispose();
+        WriteFailureCleanup.RunAll(CloseSessions, connection.Dispose);
     }
 
     private void ThrowIfTerminal()

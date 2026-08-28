@@ -8,8 +8,11 @@ namespace Groundwork.Sqlite;
 /// <summary>SQLite's one native renderer for the normalized v2 query contract.</summary>
 public sealed class SqliteQueryRenderer : RelationalQueryRenderer
 {
+    /// <summary>SQLite's real bound on bound parameters in one statement.</summary>
+    public const int ParameterBudget = 999;
+
     public SqliteQueryRenderer()
-        : base(new SqliteDialect(), parameterBudget: 999, supportsIndexHints: false)
+        : base(new SqliteDialect(), ParameterBudget, supportsIndexHints: false)
     {
     }
 

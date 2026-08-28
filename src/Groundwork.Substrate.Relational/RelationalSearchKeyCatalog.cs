@@ -16,9 +16,21 @@ public static class RelationalSearchKeyCatalog
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
         ArgumentNullException.ThrowIfNull(definition);
+        var (table, column) = Split(definition);
+        PortableSearchKeyAlgorithmIdentity.Parse(definition.CanonicalDefinition);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = upsertSql;
+        AddParameter(command, "@table", table);
+        AddParameter(command, "@column", column);
+        AddParameter(command, "@algorithm", definition.CanonicalDefinition);
+        command.ExecuteNonQuery();
+    }
+
+    private static (string Table, string Column) Split(ProviderPhysicalSchemaDefinition definition)
+    {
         if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Provider definition '{definition.Kind}' is not a search-key algorithm definition.");
-
         var separator = definition.SubjectIdentity.IndexOf(RelationalDialect.SearchKeyDefinitionSeparator, StringComparison.Ordinal);
         if (separator <= 0 ||
             separator != definition.SubjectIdentity.LastIndexOf(RelationalDialect.SearchKeyDefinitionSeparator, StringComparison.Ordinal) ||
@@ -26,25 +38,41 @@ public static class RelationalSearchKeyCatalog
         {
             throw new InvalidOperationException("A relational search-key provider definition requires a table and column identity.");
         }
+        return (
+            definition.SubjectIdentity[..separator],
+            definition.SubjectIdentity[(separator + RelationalDialect.SearchKeyDefinitionSeparator.Length)..]);
+    }
 
-        PortableSearchKeyAlgorithmIdentity.Parse(definition.CanonicalDefinition);
+    /// <summary>
+    /// Removes one derived search-key algorithm row. The derived column itself is an ordinary column
+    /// that travels with its table, so this deletes recorded metadata only and never touches stored
+    /// values — there is nothing here to back-fill afterwards.
+    /// </summary>
+    public static void Drop(
+        DbConnection connection,
+        DbTransaction transaction,
+        ProviderPhysicalSchemaDefinition definition,
+        string deleteSql)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(definition);
+        var (table, column) = Split(definition);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = upsertSql;
-        AddParameter(command, "@table", definition.SubjectIdentity[..separator]);
-        AddParameter(command, "@column", definition.SubjectIdentity[(separator + RelationalDialect.SearchKeyDefinitionSeparator.Length)..]);
-        AddParameter(command, "@algorithm", definition.CanonicalDefinition);
+        command.CommandText = deleteSql;
+        AddParameter(command, "@table", table);
+        AddParameter(command, "@column", column);
         command.ExecuteNonQuery();
     }
 
     public static IReadOnlyDictionary<string, string> Read(
         DbConnection connection,
-        DbTransaction transaction,
+        DbTransaction? transaction,
         string table,
         string selectSql)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        ArgumentNullException.ThrowIfNull(transaction);
         ArgumentException.ThrowIfNullOrWhiteSpace(table);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;

@@ -8,8 +8,11 @@ namespace Groundwork.SqlServer;
 /// <summary>SQL Server's one native renderer for the normalized v2 query contract.</summary>
 public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
 {
+    /// <summary>SQL Server's real bound on bound parameters in one statement.</summary>
+    public const int ParameterBudget = 2_100;
+
     public SqlServerQueryRenderer()
-        : base(new SqlServerDialect(), parameterBudget: 2_100, supportsIndexHints: true)
+        : base(new SqlServerDialect(), ParameterBudget, supportsIndexHints: true)
     {
     }
 
@@ -227,7 +230,7 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
     protected override string RenderContains(string expression, string parameter) =>
         "(DATALENGTH(@" + parameter + ") = 0 OR CHARINDEX(@" + parameter + ", " + expression + ") > 0)";
 
-    private static string RenderGuidOrderKey(string expression) =>
+    internal static string RenderGuidOrderKey(string expression) =>
         "CONVERT(char(36), " + expression + ") COLLATE Latin1_General_100_BIN2";
 
     protected override string RenderEndsWith(string expression, string parameter) =>

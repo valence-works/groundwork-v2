@@ -35,23 +35,56 @@ internal sealed class QueryResolution
 
 internal static class QueryResolver
 {
-    private static readonly ImmutableHashSet<string> TerminalNames =
-        ImmutableHashSet.Create(StringComparer.Ordinal, "QueryAsync", "CountAsync", "FirstOrDefaultAsync", "ToListAsync");
+    internal static readonly ImmutableHashSet<string> TerminalNames =
+        ImmutableHashSet.Create(StringComparer.Ordinal, "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync");
 
-    public static bool IsCandidate(InvocationExpressionSyntax terminal)
+    /// <summary>
+    /// Gate that keeps LINQ-shaped terminals on unrelated types out of the analysis: the receiver
+    /// must be fed by a Table&lt;T&gt;() call, and must then be the closed query surface itself or a
+    /// type that is not enumerable — the closed surface deliberately is not, so a materialized
+    /// collection can never be one. Only an unresolvable receiver falls back to the syntactic
+    /// discovery alone.
+    /// </summary>
+    public static bool IsClosedSurfaceCandidate(
+        InvocationExpressionSyntax terminal,
+        SemanticModel model,
+        CancellationToken cancellationToken)
     {
-        if (terminal.Expression is not MemberAccessExpressionSyntax member)
+        if (terminal.Expression is not MemberAccessExpressionSyntax member ||
+            FindTableInvocation(member.Expression, terminal) is null)
             return false;
-        if (GetInvocationChain(member.Expression).Any(IsTableInvocation))
+        if (model.GetTypeInfo(member.Expression, cancellationToken).Type is not { } receiver ||
+            receiver.TypeKind == TypeKind.Error)
             return true;
-        if (member.Expression is not IdentifierNameSyntax local)
-            return false;
+        return IsClosedSurfaceType(receiver.OriginalDefinition) ||
+               receiver.AllInterfaces.Any(item => IsClosedSurfaceType(item.OriginalDefinition)) ||
+               !IsEnumerable(receiver);
+    }
+
+    private static bool IsClosedSurfaceType(ITypeSymbol definition) =>
+        definition is INamedTypeSymbol { Arity: 1, Name: "IGwQueryable" or "GwQueryTable" } named &&
+        named.ContainingNamespace.ToDisplayString() == "Groundwork.Query.Linq";
+
+    private static bool IsEnumerable(ITypeSymbol receiver) =>
+        receiver.SpecialType == SpecialType.System_Collections_IEnumerable ||
+        receiver.AllInterfaces.Any(item => item.SpecialType == SpecialType.System_Collections_IEnumerable);
+
+    /// <summary>Finds the Table&lt;T&gt;() call feeding a receiver, directly or through its local initializer.</summary>
+    private static InvocationExpressionSyntax? FindTableInvocation(
+        ExpressionSyntax receiver,
+        InvocationExpressionSyntax terminal)
+    {
+        if (GetInvocationChain(receiver).FirstOrDefault(IsTableInvocation) is { } table)
+            return table;
+        if (receiver is not IdentifierNameSyntax local)
+            return null;
         var method = terminal.FirstAncestorOrSelf<BaseMethodDeclarationSyntax>();
         var initializer = method?.DescendantNodes().OfType<VariableDeclaratorSyntax>()
             .FirstOrDefault(item => item.Identifier.ValueText == local.Identifier.ValueText)
             ?.Initializer?.Value;
-        return initializer is InvocationExpressionSyntax invocation &&
-               GetInvocationChain(invocation).Any(IsTableInvocation);
+        return initializer is InvocationExpressionSyntax invocation
+            ? GetInvocationChain(invocation).FirstOrDefault(IsTableInvocation)
+            : null;
     }
 
     public static QueryResolution Resolve(
@@ -164,12 +197,9 @@ internal static class QueryResolver
             return QueryResolution.Unresolved($"method '{name}' is outside the closed query surface", invocation);
         }
 
-        ResultShape result = terminal.Expression is MemberAccessExpressionSyntax terminalMember &&
-                     terminalMember.Name.Identifier.ValueText == "CountAsync"
-            ? (ResultShape)ResultShape.TotalCount.Instance
-            : ResultShape.Rows.Instance;
+        var (result, pagingOverride) = TerminalShape(terminal);
         return QueryResolution.Resolved(
-            BuildRequests(state, optionalPredicates, result),
+            BuildRequests(state, optionalPredicates, result, pagingOverride),
             terminal);
     }
 
@@ -221,7 +251,7 @@ internal static class QueryResolver
                 continue;
             if (reference.Parent is MemberAccessExpressionSyntax member && member.Expression == reference &&
                 member.Parent is InvocationExpressionSyntax invocation &&
-                member.Name.Identifier.ValueText is "Where" or "QueryAsync" or "CountAsync" or "FirstOrDefaultAsync" or "ToListAsync")
+                (member.Name.Identifier.ValueText == "Where" || TerminalNames.Contains(member.Name.Identifier.ValueText)))
                 continue;
             return QueryResolution.Unresolved("the query local escapes the method before its terminal operation", terminal);
         }
@@ -251,11 +281,8 @@ internal static class QueryResolver
                 return QueryResolution.Unresolved("reassignment shape enumeration is bounded at 32 shapes; use WhereIf or runtime coverage", ifStatement, ifStatement);
         }
 
-        ResultShape result = terminal.Expression is MemberAccessExpressionSyntax terminalMember &&
-                     terminalMember.Name.Identifier.ValueText == "CountAsync"
-            ? (ResultShape)ResultShape.TotalCount.Instance
-            : ResultShape.Rows.Instance;
-        return QueryResolution.Resolved(BuildRequests(state, optional, result), terminal);
+        var (result, pagingOverride) = TerminalShape(terminal);
+        return QueryResolution.Resolved(BuildRequests(state, optional, result, pagingOverride), terminal);
     }
 
     private static QueryResolution ResolveInitializer(
@@ -270,10 +297,22 @@ internal static class QueryResolver
         return ResolveChain(initializer, chain, tableInvocation, tableType, model, schema, cancellationToken);
     }
 
+    /// <summary>Mirrors the runtime terminal semantics of <c>Count()</c>/<c>Any()</c> and their async forms.</summary>
+    private static (ResultShape Result, Paging? PagingOverride) TerminalShape(InvocationExpressionSyntax terminal) =>
+        terminal.Expression is MemberAccessExpressionSyntax member
+            ? member.Name.Identifier.ValueText switch
+            {
+                "Count" or "CountAsync" => ((ResultShape)ResultShape.TotalCount.Instance, Paging.None),
+                "Any" or "AnyAsync" => (ResultShape.Rows.Instance, Paging.OffsetLimit(0, 1)),
+                _ => (ResultShape.Rows.Instance, null)
+            }
+            : (ResultShape.Rows.Instance, null);
+
     private static IEnumerable<QueryRequest> BuildRequests(
         QueryShapeState state,
         IReadOnlyList<Predicate> optionalPredicates,
-        ResultShape result)
+        ResultShape result,
+        Paging? pagingOverride)
     {
         var shapeCount = 1 << optionalPredicates.Count;
         for (var mask = 0; mask < shapeCount; mask++)
@@ -288,9 +327,9 @@ internal static class QueryResolver
                 1 => terms[0],
                 _ => new Predicate.And(terms)
             };
-            var paging = state.Limit.HasValue
+            var paging = pagingOverride ?? (state.Limit.HasValue
                 ? Paging.OffsetLimit(state.Offset ?? 0, state.Limit.Value)
-                : Paging.None;
+                : Paging.None);
             yield return new QueryRequest(
                 new TableId(state.Table.Name),
                 predicate,

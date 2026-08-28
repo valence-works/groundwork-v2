@@ -1,0 +1,65 @@
+using Groundwork.Kernel.Schema;
+
+namespace Groundwork.Store;
+
+/// <summary>
+/// The one mapping from planned physical schema operations to the public <see cref="SchemaChange"/>
+/// vocabulary. Every provider coordinator uses it, so a new operation kind is described the same way
+/// everywhere or not at all.
+/// </summary>
+/// <remarks>
+/// The switch is deliberately total: an unmapped kind throws rather than falling into a default
+/// bucket. A default is how six operation kinds — including dropping a column — came to describe
+/// themselves as adding a derived column, which the weaker startup test in
+/// <c>GroundworkAdmissionRunner</c> then read as additive. Adding a kind must break here.
+/// </remarks>
+public static class SchemaChangeMapping
+{
+    public static IReadOnlyList<SchemaChange> Describe(IEnumerable<PhysicalSchemaOperation> operations)
+    {
+        ArgumentNullException.ThrowIfNull(operations);
+        return operations
+            .Where(operation => operation.Kind is not PhysicalSchemaOperationKind.ValidatePhysicalSchema and
+                                not PhysicalSchemaOperationKind.PublishAppliedState and
+                                not PhysicalSchemaOperationKind.BackfillColumn and
+                                not PhysicalSchemaOperationKind.FinalizeColumn and
+                                // A supersession marker performs no physical work at all: it records
+                                // that a column is deliberately retained, or that the DropColumn
+                                // beside it in the contract plan removed it. That removal is already
+                                // described; describing the marker too would double-count it.
+                                not PhysicalSchemaOperationKind.ColumnSupersession)
+            .Select(operation => new SchemaChange(Describe(operation), operation.SubjectIdentity))
+            .ToArray();
+    }
+
+    private static SchemaChangeKind Describe(PhysicalSchemaOperation operation) => operation switch
+    {
+        // An index taken out of the way of a column alteration is put back by the same plan, so it
+        // is a rebuild rather than a removal.
+        DropPhysicalIndexOperation { IsRebuild: true } => SchemaChangeKind.RebuildIndex,
+        _ => operation.Kind switch
+        {
+            PhysicalSchemaOperationKind.CreatePrimaryStorage => SchemaChangeKind.CreateStorageUnit,
+            PhysicalSchemaOperationKind.AddColumn =>
+                operation.SubjectIdentity.StartsWith("__groundwork_", StringComparison.Ordinal)
+                    ? SchemaChangeKind.AddDerivedColumn
+                    : SchemaChangeKind.AddColumn,
+            PhysicalSchemaOperationKind.CreatePhysicalIndex => SchemaChangeKind.CreateIndex,
+            PhysicalSchemaOperationKind.RebuildPhysicalIndex => SchemaChangeKind.RebuildIndex,
+            PhysicalSchemaOperationKind.RenamePrimaryStorage => SchemaChangeKind.RenameStorageUnit,
+            PhysicalSchemaOperationKind.RenameColumn => SchemaChangeKind.RenameColumn,
+            PhysicalSchemaOperationKind.AlterColumn => SchemaChangeKind.AlterColumn,
+            PhysicalSchemaOperationKind.DropColumn => SchemaChangeKind.DropColumn,
+            PhysicalSchemaOperationKind.DropIndex => SchemaChangeKind.DropIndex,
+            PhysicalSchemaOperationKind.DropPrimaryStorage => SchemaChangeKind.DropStorageUnit,
+            // A provider-owned definition has described itself as a derived column since it was
+            // introduced. It is the remaining inaccuracy in this vocabulary and belongs with #201,
+            // which replaces this mapping with the runtime's own admission verdict.
+            PhysicalSchemaOperationKind.ApplyProviderDefinition => SchemaChangeKind.AddDerivedColumn,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(operation),
+                operation.Kind,
+                "No public schema-change description is defined for this physical schema operation kind.")
+        }
+    };
+}

@@ -21,6 +21,11 @@ when requested.
 The default index policy is provider-default and emits no native hint. A declaration must use
 `QueryIndexPinning.Pinned` before SQL Server or MongoDB can receive a hint. PostgreSQL and SQLite
 retain the declaration for diagnostics but have no hint syntax and therefore remain unhinted.
+Consumers querying an ordinary `IStorageSession` can call
+`storageUnit.CreateQueryRenderOptions(selectedIndex)` to translate the admitted unit's index
+names, column types, nullability, and missing-value policy without restating schema metadata. The
+optional selection remains provider-default: it enables coverage/explain evidence but never silently
+turns into an optimizer hint.
 An empty `In` normalizes to match-none; a pinned declaration is still carried on the native
 command. A pinned index that excludes null values is refused when the predicate could match an
 excluded null, except for match-none. This preserves the v1 sparse-index safety rule.
