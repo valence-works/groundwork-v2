@@ -140,7 +140,7 @@ def closing_issue_numbers(
         if default_branch is not None:
             base = pull_request.get("base")
             base_ref = base.get("ref") if isinstance(base, Mapping) else None
-            if not isinstance(base_ref, str) or base_ref.casefold() != default_branch.casefold():
+            if not isinstance(base_ref, str) or base_ref != default_branch:
                 continue
         body = pull_request.get("body")
         if isinstance(body, str):

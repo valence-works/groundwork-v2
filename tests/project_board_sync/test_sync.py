@@ -159,6 +159,15 @@ class ClosingPullRequestTests(unittest.TestCase):
                 "body": "Fixes #20",
                 "commits": [{"commit": {"message": "Fixes #21"}}],
             },
+            {
+                "state": "open",
+                "base": {
+                    "ref": "Main",
+                    "repo": {"full_name": REPOSITORY},
+                },
+                "body": "Fixes #22",
+                "commits": [{"commit": {"message": "Fixes #23"}}],
+            },
         ]
         self.assertEqual(
             {20, 21},
