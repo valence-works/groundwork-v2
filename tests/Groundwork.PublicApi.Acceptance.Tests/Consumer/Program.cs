@@ -262,7 +262,8 @@ static void RunLifecycleJourney(IStorageProviderConnection connection)
         RetentionIdempotency = new RetentionIdempotencyDeclaration { Window = TimeSpan.FromMinutes(10) }
     };
     Require(connection.Schema.Apply(unit).Applied, "The lifecycle schema did not apply.");
-    var session = connection.OpenSession(unit, StorageAccess.Global);
+    var session = connection.OpenOwnedSession(unit, StorageAccess.Global);
+    Require(!session.IsReleased, "The public owned session reported itself released while open.");
     session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "first" }));
     session.Insert(new StorageValues(new Dictionary<string, object?> { ["payload"] = "second" }));
     Require(session.Inspect().LifetimeCommittedSequenceHighWater == 2, "The public lifecycle inspection did not expose the committed high-water.");
@@ -272,6 +273,8 @@ static void RunLifecycleJourney(IStorageProviderConnection connection)
     Require(executed.Status == RetentionOperationStatus.Executed && executed.DeletedRows == 2, "The public exact retention override did not delete all rows.");
     Require(replayed.Status == RetentionOperationStatus.Replayed && replayed.DeletedRows == executed.DeletedRows, "The public exact retention did not replay its result.");
     Require(session.Inspect().LifetimeCommittedSequenceHighWater == 2, "The public exact retention override reset the sequence high-water.");
+    session.Dispose();
+    Require(session.IsReleased, "The public owned session did not report its released state.");
 }
 
 static void RunRecordsJourney(IStorageProviderConnection connection)
