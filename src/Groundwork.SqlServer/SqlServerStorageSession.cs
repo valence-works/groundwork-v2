@@ -1948,6 +1948,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private SqlCommand Command(string sql)
     {
+        owner.ThrowIfDisposed();
         if (closed) throw new ObjectDisposedException(nameof(SqlServerStorageSession));
         var command = connection.CreateCommand();
         command.CommandText = sql;

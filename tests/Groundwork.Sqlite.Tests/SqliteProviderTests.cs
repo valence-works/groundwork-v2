@@ -88,6 +88,41 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Owned_deferred_conflict_detail_rejects_provider_disposal()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("owned-deferred-provider-lifetime"),
+            Name = "owned_deferred_provider_lifetime",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        var values = new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one",
+            ["value"] = "value"
+        });
+        Assert.Equal(WriteOutcomeStatus.Inserted, owned.Insert(values).Status);
+        var stale = Assert.IsAssignableFrom<IConcurrencyStorageSession>(owned).ConditionalUpsert(
+            values,
+            new WriteOptions { Precondition = WritePrecondition.IfVersion(99) });
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, stale.Status);
+
+        connection.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => { _ = stale.Detail; });
+    }
+
+    [Fact]
     public void Provider_composed_index_names_are_injective_for_underscore_components()
     {
         var left = SqliteDialect.PhysicalIndexName("a_", "b");

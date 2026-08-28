@@ -1885,6 +1885,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private void ThrowIfClosed()
     {
+        owner.ThrowIfDisposed();
         if (closed) throw new ObjectDisposedException(nameof(SqliteStorageSession));
     }
 

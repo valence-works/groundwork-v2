@@ -66,6 +66,42 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     }
 
     [SkippableFact]
+    public void Owned_deferred_conflict_detail_rejects_provider_disposal()
+    {
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
+        var name = "sql_owned_deferred_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, MaxLength = 64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        using var owned = connection.OpenOwnedSession(unit, StorageAccess.Global);
+        var values = new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one",
+            ["value"] = "value"
+        });
+        Assert.Equal(WriteOutcomeStatus.Inserted, owned.Insert(values).Status);
+        var stale = Assert.IsAssignableFrom<IConcurrencyStorageSession>(owned).ConditionalUpsert(
+            values,
+            new WriteOptions { Precondition = WritePrecondition.IfVersion(99) });
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, stale.Status);
+
+        connection.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => { _ = stale.Detail; });
+    }
+
+    [SkippableFact]
     public async Task Provider_passes_provider_neutral_conformance_on_both_surfaces()
     {
         var connectionString = fixture.Reset();
