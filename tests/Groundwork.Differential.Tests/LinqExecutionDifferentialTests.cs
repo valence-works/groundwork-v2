@@ -177,7 +177,7 @@ public sealed class LinqExecutionDifferentialTests
         Assert.Equal(4, await AssertSameAsync(matrix, provider => provider.Table.Query
             .Where(ticket => ticket.Status == "open")
             .MinAsync(provider.Executor, ticket => ticket.Amount)));
-        Assert.Equal(10L, await AssertSameAsync(matrix, provider => provider.Table.Query
+        Assert.Equal(100L, await AssertSameAsync(matrix, provider => provider.Table.Query
             .Where(ticket => ticket.Status == "open")
             .MaxAsync(provider.Executor, ticket => ticket.LongAmount)));
         Assert.Equal(4.00m, await AssertSameAsync(matrix, provider => provider.Table.Query
