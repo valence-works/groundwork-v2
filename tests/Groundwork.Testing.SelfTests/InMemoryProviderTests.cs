@@ -1738,6 +1738,17 @@ public sealed class InMemoryProviderTests
             distinct: true), options);
 
         Assert.Equal("b", Assert.Single(second.Rows)["value"]);
+
+        var counted = session.Query(new QueryRequest(
+            table,
+            request.Where,
+            request.Order,
+            request.Projection,
+            Paging.Continuation(first.NextContinuationToken!, 1),
+            ResultShape.TotalCount.Instance,
+            distinct: true), options);
+        Assert.Equal(2L, counted.TotalCount);
+        Assert.Equal("b", Assert.Single(counted.Rows)["value"]);
     }
 
     [Fact]

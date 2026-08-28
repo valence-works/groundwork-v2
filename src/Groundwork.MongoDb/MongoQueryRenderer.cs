@@ -576,6 +576,7 @@ public sealed class MongoQueryRenderer
         }
 
         var data = new List<BsonDocument>();
+        BsonDocument? distinctContinuationMatch = null;
         if (cursor is not null && !distinct)
             data.Add(new BsonDocument("$match", RenderContinuation(order, cursor)));
         var sort = new BsonDocument();
@@ -634,7 +635,10 @@ public sealed class MongoQueryRenderer
             if (sort.ElementCount != 0)
                 data.Add(new BsonDocument("$sort", sort.DeepClone().AsBsonDocument));
             if (cursor is not null)
-                data.Add(new BsonDocument("$match", RenderContinuation(order, cursor)));
+            {
+                distinctContinuationMatch = new BsonDocument("$match", RenderContinuation(order, cursor));
+                data.Add(distinctContinuationMatch);
+            }
         }
         if (projection.ElementCount != 0)
         {
@@ -682,7 +686,8 @@ public sealed class MongoQueryRenderer
             if (distinct)
             {
                 countPipeline.AddRange(data
-                    .Where(stage => !stage.Contains("$skip") && !stage.Contains("$limit"))
+                    .Where(stage => !ReferenceEquals(stage, distinctContinuationMatch) &&
+                                    !stage.Contains("$skip") && !stage.Contains("$limit"))
                     .Select(stage => stage.DeepClone()));
             }
             countPipeline.Add(new BsonDocument("$count", "__groundwork_total_count"));

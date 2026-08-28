@@ -716,9 +716,12 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
                     sourceIncludesContinuation: true,
                     sourceIncludesDistinct: true);
             }
+            long? distinctTotalCount = null;
             if (request.Distinct)
             {
                 rows = DistinctRows(request, rows);
+                if (request.Result.IncludesTotalCount)
+                    distinctTotalCount = rows.Count;
                 if (request.Paging.ContinuationToken is { } distinctToken)
                 {
                     IReadOnlyList<QueryConstant> cursor;
@@ -739,17 +742,18 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
                     sourceIncludesDistinct: true);
 
             if (rows.Count == 0)
-                return new QueryMaterializedResult(Array.Empty<IReadOnlyDictionary<string, object?>>(), 0L, null, selectedIndex);
+                return new QueryMaterializedResult(Array.Empty<IReadOnlyDictionary<string, object?>>(), distinctTotalCount ?? 0L, null, selectedIndex);
 
+            var totalCount = distinctTotalCount ?? rows.Count;
             var counted = rows.Select((row, index) => index == 0
                 ? (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(row)
                 {
-                    ["__groundwork_total_count"] = (long)rows.Count
+                    ["__groundwork_total_count"] = (long)totalCount
                 }
                 : row).ToArray();
             return QueryResultMaterializer.Materialize(request, renderOptions, counted, selectedIndex,
                 sourceIncludesRequestedOffset: false,
-                sourceIncludesContinuation: !deferContinuation,
+                sourceIncludesContinuation: request.Distinct || !deferContinuation,
                 sourceIncludesDistinct: true);
         }
     }

@@ -118,6 +118,37 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Mongo_counted_distinct_continuation_keeps_the_cursor_out_of_the_count_branch()
+    {
+        var tokenRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(Name),
+            Paging.Keyset(1),
+            distinct: true);
+        var options = new QueryRenderOptions(tieBreakColumns: [Id]);
+        var token = QueryContinuationToken.Encode(tokenRequest, options,
+            [QueryConstant.Of(Name, "Alice"), QueryConstant.Of(Id, 42L)]);
+        var countedRequest = new QueryRequest(
+            tokenRequest.Table,
+            tokenRequest.Where,
+            tokenRequest.Order,
+            tokenRequest.Projection,
+            Paging.Continuation(token, 1),
+            ResultShape.TotalCount.Instance,
+            distinct: true);
+
+        var command = new MongoQueryRenderer().Render(countedRequest, options);
+        var union = command.Pipeline.Single(stage => stage.Contains("$unionWith"));
+        var countPipeline = union["$unionWith"]["pipeline"].AsBsonArray
+            .Select(value => value.AsBsonDocument)
+            .ToArray();
+        Assert.Contains(command.Pipeline, stage => stage.Contains("$match") && stage["$match"].AsBsonDocument.Contains("$or"));
+        Assert.DoesNotContain(countPipeline, stage => stage.Contains("$match") && stage["$match"].AsBsonDocument.Contains("$or"));
+    }
+
+    [Fact]
     public void Native_distinct_and_portable_terminal_ordering_are_visible_in_each_renderer()
     {
         var text = new ColumnRef(Table, "name", QueryType.String, isNullable: true, maxLength: 100);

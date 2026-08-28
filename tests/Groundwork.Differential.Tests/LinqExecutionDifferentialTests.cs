@@ -144,6 +144,11 @@ public sealed class LinqExecutionDifferentialTests
             .FirstOrDefaultAsync(provider.Executor));
         Assert.Null(empty);
 
+        var singleEmpty = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "archived")
+            .SingleOrDefaultAsync(provider.Executor));
+        Assert.Null(singleEmpty);
+
         var one = await AssertSameAsync(matrix, provider => provider.Table.Query
             .Where(ticket => ticket.Id == 4L)
             .SingleAsync(provider.Executor));
@@ -164,6 +169,15 @@ public sealed class LinqExecutionDifferentialTests
             .Take(2)
             .ToQueryRequest()));
         Assert.Equal(["eu", "us"], distinct);
+
+        var distinctWithNull = await AssertSameAsync(matrix, provider => provider.Executor.ToListAsync<string?>(provider.Table.Query
+            .Where(ticket => ticket.Region == "eu" || ticket.Region == "us" || ticket.Region == null)
+            .OrderBy(ticket => ticket.Region)
+            .Select(ticket => ticket.Region)
+            .Distinct()
+            .Take(3)
+            .ToQueryRequest()));
+        Assert.Equal(["eu", "us", null], distinctWithNull);
 
         var textDistinct = await AssertSameAsync(matrix, provider => provider.Executor.ToListAsync<string?>(provider.Table.Query
             .Where(ticket => ticket.Status == "open")
@@ -263,12 +277,24 @@ public sealed class LinqExecutionDifferentialTests
             .Where(ticket => ticket.Status == "open")
             .MaxAsync(provider.Executor, ticket => ticket.OccurredAt)));
 
-        Assert.Null(await AssertSameAsync(matrix, provider => provider.Table.Query
-            .Where(ticket => ticket.Status == "closed" && ticket.Amount == null)
-            .SumAsync(provider.Executor, ticket => ticket.Amount)));
-        Assert.Null(await AssertSameAsync(matrix, provider => provider.Table.Query
-            .Where(ticket => ticket.Status == "archived")
-            .MaxAsync(provider.Executor, ticket => ticket.LongAmount)));
+        await AssertNullForEmptyAndAllNullAsync(
+            (provider, query) => query.SumAsync(provider.Executor, ticket => ticket.Amount));
+        await AssertNullForEmptyAndAllNullAsync(
+            (provider, query) => query.MinAsync(provider.Executor, ticket => ticket.Amount));
+        await AssertNullForEmptyAndAllNullAsync(
+            (provider, query) => query.MaxAsync(provider.Executor, ticket => ticket.Amount));
+
+        async Task AssertNullForEmptyAndAllNullAsync<TResult>(
+            Func<LinqProvider, IGwQueryable<Ticket>, Task<TResult>> terminal)
+        {
+            var emptyResult = await AssertSameAsync(matrix, provider => terminal(provider,
+                provider.Table.Query.Where(ticket => ticket.Status == "archived")));
+            Assert.Null(emptyResult);
+
+            var allNullResult = await AssertSameAsync(matrix, provider => terminal(provider,
+                provider.Table.Query.Where(ticket => ticket.Status == "closed" && ticket.Amount == null)));
+            Assert.Null(allNullResult);
+        }
     }
 
     [SkippableFact]
