@@ -24,6 +24,14 @@ namespace Groundwork.Differential.Tests;
 [Collection(NativeProviderDifferentialCollection.Name)]
 public sealed class LinqExecutionDifferentialTests
 {
+    [Fact]
+    public void Differential_descriptions_compare_decimal_values_without_scale()
+    {
+        Assert.Equal("24", Describe(24.00m));
+        Assert.Equal("24", Describe(24m));
+        Assert.NotEqual("24", Describe(24.01m));
+    }
+
     [SkippableFact]
     public async Task Linq_terminals_materialize_identical_rows_on_every_provider()
     {
@@ -117,6 +125,176 @@ public sealed class LinqExecutionDifferentialTests
         Assert.False(await AssertSameAsync(matrix, provider => provider.Table.Query
             .Where(ticket => ticket.Status == "archived")
             .AnyAsync(provider.Executor)));
+    }
+
+    [SkippableFact]
+    public async Task Linq_cardinality_distinct_and_nullable_reductions_agree_on_every_provider()
+    {
+        using var matrix = LinqExecutionMatrix.OpenAll();
+
+        var first = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .OrderBy(ticket => ticket.SortKey)
+            .FirstAsync(provider.Executor));
+        Assert.Equal(2L, first.Id);
+
+        var empty = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "archived")
+            .OrderBy(ticket => ticket.SortKey)
+            .FirstOrDefaultAsync(provider.Executor));
+        Assert.Null(empty);
+
+        var singleEmpty = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "archived")
+            .SingleOrDefaultAsync(provider.Executor));
+        Assert.Null(singleEmpty);
+
+        var one = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Id == 4L)
+            .SingleAsync(provider.Executor));
+        Assert.Equal(4L, one.Id);
+
+        foreach (var provider in matrix.Providers)
+            await Assert.ThrowsAsync<InvalidOperationException>(() => provider.Table.Query
+                .Where(ticket => ticket.Status == "open")
+                .SingleAsync(provider.Executor));
+
+        // Select has no mapped result model, so this intentionally exercises the executor's scalar
+        // materializer directly. The region index makes the distinct source covered.
+        var distinct = await AssertSameAsync(matrix, provider => provider.Executor.ToListAsync<string?>(provider.Table.Query
+            .Where(ticket => ticket.Region == "eu" || ticket.Region == "us" || ticket.Region == null)
+            .OrderBy(ticket => ticket.Region)
+            .Select(ticket => ticket.Region)
+            .Distinct()
+            .Take(2)
+            .ToQueryRequest()));
+        Assert.Equal(["eu", "us"], distinct);
+
+        var distinctWithNull = await AssertSameAsync(matrix, provider => provider.Executor.ToListAsync<string?>(provider.Table.Query
+            .Where(ticket => ticket.Region == "eu" || ticket.Region == "us" || ticket.Region == null)
+            .OrderBy(ticket => ticket.Region)
+            .Select(ticket => ticket.Region)
+            .Distinct()
+            .Take(3)
+            .ToQueryRequest()));
+        Assert.Equal(["eu", "us", null], distinctWithNull);
+
+        var textDistinct = await AssertSameAsync(matrix, provider => provider.Executor.ToListAsync<string?>(provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .OrderBy(ticket => ticket.TextValue)
+            .Select(ticket => ticket.TextValue)
+            .Distinct()
+            .Take(4)
+            .ToQueryRequest()));
+        Assert.Equal(["a", "a ", "𐀀", "\uE000"], textDistinct);
+
+        var continuationTable = new TableId(matrix.TableName);
+        var continuationStatus = new ColumnRef(continuationTable, "status", QueryType.String, isNullable: false, maxLength: 32);
+        var continuationRegion = new ColumnRef(continuationTable, "region", QueryType.String, isNullable: true, maxLength: 32);
+        var continuationRequest = new QueryRequest(
+            continuationTable,
+            new Predicate.Equal(continuationStatus, QueryConstant.Of(continuationStatus, "open")),
+            [new OrderTerm(continuationRegion, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(continuationRegion),
+            Paging.Keyset(1),
+            distinct: true);
+        foreach (var provider in matrix.Providers)
+        {
+            var firstDistinctPage = provider.Session.Query(continuationRequest, matrix.Unit.CreateQueryRenderOptions());
+            Assert.Equal(["eu"], firstDistinctPage.Rows.Select(row => row["region"]));
+            Assert.NotNull(firstDistinctPage.NextContinuationToken);
+            var secondDistinctPage = provider.Session.Query(new QueryRequest(
+                continuationRequest.Table,
+                continuationRequest.Where,
+                continuationRequest.Order,
+                continuationRequest.Projection,
+                Paging.Continuation(firstDistinctPage.NextContinuationToken!, 1),
+                distinct: true), matrix.Unit.CreateQueryRenderOptions());
+            Assert.Equal(["us"], secondDistinctPage.Rows.Select(row => row["region"]));
+        }
+
+        var reductionStatus = new ColumnRef(continuationTable, "status", QueryType.String, isNullable: false, maxLength: 32);
+        var reductionSort = new ColumnRef(continuationTable, "sort_key", QueryType.Int32, isNullable: false);
+        var reductionWide = new ColumnRef(continuationTable, "wide_amount", QueryType.Int32, isNullable: true);
+        var reductionPage = await AssertSameAsync(matrix, provider =>
+        {
+            var first = provider.Session.Query(new QueryRequest(
+                continuationTable,
+                new Predicate.Equal(reductionStatus, QueryConstant.Of(reductionStatus, "open")),
+                [new OrderTerm(reductionSort, OrderDirection.Ascending, NullOrder.Last)],
+                Projection.ColumnsOnly(reductionWide),
+                Paging.Keyset(1),
+                distinct: true), matrix.Unit.CreateQueryRenderOptions());
+            Assert.NotNull(first.NextContinuationToken);
+            return provider.Executor.ReduceAsync<long?>(new QueryRequest(
+                continuationTable,
+                new Predicate.Equal(reductionStatus, QueryConstant.Of(reductionStatus, "open")),
+                [new OrderTerm(reductionSort, OrderDirection.Ascending, NullOrder.Last)],
+                Projection.ColumnsOnly(reductionWide),
+                Paging.Continuation(first.NextContinuationToken!, 2),
+                new ResultShape.Sum(reductionWide),
+                distinct: true));
+        });
+        Assert.Equal(1_500_000_000L, reductionPage);
+
+        Assert.Equal(24L, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .SumAsync(provider.Executor, ticket => ticket.Amount)));
+        Assert.Equal(240L, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .SumAsync(provider.Executor, ticket => ticket.LongAmount)));
+        Assert.Equal(24.00m, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .SumAsync(provider.Executor, ticket => ticket.DecimalAmount)));
+        Assert.Equal(3_100_000_000L, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .SumAsync(provider.Executor, ticket => ticket.WideAmount)));
+        Assert.Equal(4, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MinAsync(provider.Executor, ticket => ticket.Amount)));
+        Assert.Equal(100L, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MaxAsync(provider.Executor, ticket => ticket.LongAmount)));
+        Assert.Equal(4.00m, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MinAsync(provider.Executor, ticket => ticket.DecimalAmount)));
+        Assert.Equal("a", await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MinAsync(provider.Executor, ticket => ticket.TextValue)));
+        Assert.Equal("\uE000", await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MaxAsync(provider.Executor, ticket => ticket.TextValue)));
+        Assert.Equal(Guid.Parse("00000000-0000-0000-0000-000000000001"), await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MinAsync(provider.Executor, ticket => ticket.GuidValue)));
+        Assert.Equal(Guid.Parse("00000000-0000-0000-0000-000000000005"), await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MaxAsync(provider.Executor, ticket => ticket.GuidValue)));
+        Assert.Equal(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MinAsync(provider.Executor, ticket => ticket.OccurredAt)));
+        Assert.Equal(new DateTimeOffset(2026, 1, 5, 0, 0, 0, TimeSpan.Zero), await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MaxAsync(provider.Executor, ticket => ticket.OccurredAt)));
+
+        await AssertNullForEmptyAndAllNullAsync(
+            (provider, query) => query.SumAsync(provider.Executor, ticket => ticket.Amount));
+        await AssertNullForEmptyAndAllNullAsync(
+            (provider, query) => query.MinAsync(provider.Executor, ticket => ticket.Amount));
+        await AssertNullForEmptyAndAllNullAsync(
+            (provider, query) => query.MaxAsync(provider.Executor, ticket => ticket.Amount));
+
+        async Task AssertNullForEmptyAndAllNullAsync<TResult>(
+            Func<LinqProvider, IGwQueryable<Ticket>, Task<TResult>> terminal)
+        {
+            var emptyResult = await AssertSameAsync(matrix, provider => terminal(provider,
+                provider.Table.Query.Where(ticket => ticket.Status == "archived")));
+            Assert.Null(emptyResult);
+
+            var allNullResult = await AssertSameAsync(matrix, provider => terminal(provider,
+                provider.Table.Query.Where(ticket => ticket.Status == "closed" && ticket.Amount == null)));
+            Assert.Null(allNullResult);
+        }
     }
 
     [SkippableFact]
@@ -262,6 +440,8 @@ public sealed class LinqExecutionDifferentialTests
     private static string Describe<TResult>(TResult value) => value switch
     {
         IReadOnlyList<Ticket> tickets => string.Join(" | ", tickets),
+        IReadOnlyList<string?> values => string.Join(" | ", values.Select(value => value ?? "<null>")),
+        decimal number => number.ToString("G29", System.Globalization.CultureInfo.InvariantCulture),
         null => "<null>",
         _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "<null>"
     };

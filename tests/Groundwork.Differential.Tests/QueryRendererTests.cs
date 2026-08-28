@@ -19,6 +19,206 @@ public sealed class QueryRendererTests
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Int32, isNullable: true);
 
     [Fact]
+    public void All_four_renderers_use_a_native_reduction_after_distinct_and_input_paging()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice")),
+            [new OrderTerm(Amount, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(Amount),
+            Paging.OffsetLimit(0, 2),
+            new ResultShape.Sum(Amount),
+            distinct: true);
+
+        var relational = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request),
+            new PostgreSqlQueryRenderer().Render(request),
+            new SqlServerQueryRenderer().Render(request)
+        };
+        Assert.All(relational, command =>
+        {
+            Assert.Contains("SUM", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("COUNT", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("ROW_NUMBER", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("amount", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        });
+
+        var mongo = new MongoQueryRenderer().Render(request);
+        Assert.NotEmpty(mongo.Pipeline);
+        var mongoPipeline = string.Join("\n", mongo.Pipeline.Select(stage => stage.ToString()));
+        Assert.Contains("$group", mongoPipeline, StringComparison.Ordinal);
+        Assert.Contains("$facet", mongoPipeline, StringComparison.Ordinal);
+        Assert.Contains("$sum", mongoPipeline, StringComparison.Ordinal);
+        Assert.Contains("$limit", mongoPipeline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Sql_server_reductions_only_order_the_derived_input_when_paged()
+    {
+        var ordered = Request(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Amount, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.None,
+            new ResultShape.Sum(Amount),
+            Projection.ColumnsOnly(Amount));
+        var paged = new QueryRequest(
+            ordered.Table,
+            ordered.Where,
+            ordered.Order,
+            ordered.Projection,
+            Paging.OffsetLimit(0, 2),
+            ordered.Result,
+            ordered.LatestPerKey,
+            ordered.AcceptedScan,
+            ordered.Distinct);
+
+        var unpagedCommand = new SqlServerQueryRenderer().Render(ordered);
+        var pagedCommand = new SqlServerQueryRenderer().Render(paged);
+
+        Assert.DoesNotContain("ORDER BY", unpagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ORDER BY", pagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("OFFSET", pagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("FETCH NEXT", pagedCommand.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Relational_all_column_distinct_continuation_has_an_explicit_outer_predicate()
+    {
+        var tokenRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.Keyset(2),
+            distinct: true);
+        var options = new QueryRenderOptions(tieBreakColumns: [Id]);
+        var token = QueryContinuationToken.Encode(tokenRequest, options,
+            [QueryConstant.Of(Name, "Alice"), QueryConstant.Of(Id, 42L)]);
+        var request = new QueryRequest(
+            tokenRequest.Table,
+            tokenRequest.Where,
+            tokenRequest.Order,
+            tokenRequest.Projection,
+            Paging.Continuation(token, 2),
+            distinct: true);
+
+        var commands = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Contains("SELECT * FROM __groundwork_distinct WHERE 1 = 1 AND", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("SELECT * FROM __groundwork_distinct AND", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
+    public void Mongo_counted_distinct_continuation_keeps_the_cursor_out_of_the_count_branch()
+    {
+        var tokenRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(Name),
+            Paging.Keyset(1),
+            distinct: true);
+        var options = new QueryRenderOptions(tieBreakColumns: [Id]);
+        var token = QueryContinuationToken.Encode(tokenRequest, options,
+            [QueryConstant.Of(Name, "Alice"), QueryConstant.Of(Id, 42L)]);
+        var countedRequest = new QueryRequest(
+            tokenRequest.Table,
+            tokenRequest.Where,
+            tokenRequest.Order,
+            tokenRequest.Projection,
+            Paging.Continuation(token, 1),
+            ResultShape.TotalCount.Instance,
+            distinct: true);
+
+        var command = new MongoQueryRenderer().Render(countedRequest, options);
+        var union = command.Pipeline.Single(stage => stage.Contains("$unionWith"));
+        var countPipeline = union["$unionWith"]["pipeline"].AsBsonArray
+            .Select(value => value.AsBsonDocument)
+            .ToArray();
+        Assert.Contains(command.Pipeline, stage => stage.Contains("$match") && stage["$match"].AsBsonDocument.Contains("$or"));
+        Assert.DoesNotContain(countPipeline, stage => stage.Contains("$match") && stage["$match"].AsBsonDocument.Contains("$or"));
+    }
+
+    [Fact]
+    public void Native_distinct_and_portable_terminal_ordering_are_visible_in_each_renderer()
+    {
+        var text = new ColumnRef(Table, "name", QueryType.String, isNullable: true, maxLength: 100);
+        var guid = new ColumnRef(Table, "id_guid", QueryType.Guid, isNullable: true);
+        var distinct = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(text, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(text),
+            Paging.OffsetLimit(0, 2),
+            distinct: true);
+
+        var sqlServerDistinct = new SqlServerQueryRenderer().Render(distinct);
+        Assert.Contains("ROW_NUMBER", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CONVERT(varbinary(max)", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DATALENGTH", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var distinctOptions = QueryRenderOptions.Default with
+        {
+            TieBreakColumns = [Id],
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                [text.Name] = new QuerySearchKeyColumn(text.Name, text.Name, QuerySearchKeyPolicy.Ordinal, text.MaxLength),
+                [Id.Name] = new QuerySearchKeyColumn(Id.Name, Id.Name, QuerySearchKeyPolicy.Ordinal)
+            }
+        };
+        var distinctWithIdentity = QueryRequestExecution.ForPage(distinct, distinctOptions);
+        var sqliteDistinct = new SqliteQueryRenderer().Render(distinctWithIdentity, distinctOptions);
+        Assert.Contains("PARTITION BY \"name\"", sqliteDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PARTITION BY \"name\" COLLATE GROUNDWORK_UTF16_ORDINAL, \"id\"", sqliteDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var postgresMin = new PostgreSqlQueryRenderer().Render(new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(guid),
+            Paging.None,
+            new ResultShape.Min(guid)));
+        Assert.Contains("::text", postgresMin.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ROW_NUMBER", postgresMin.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var mongoMin = new MongoQueryRenderer().Render(new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(text),
+            Paging.None,
+            new ResultShape.Min(text)));
+        var mongoText = string.Join("\n", mongoMin.Pipeline.Select(stage => stage.ToString()));
+        Assert.Contains("$function", mongoText, StringComparison.Ordinal);
+        Assert.Contains("$first", mongoText, StringComparison.Ordinal);
+
+        var mongoDistinct = new MongoQueryRenderer().Render(distinct);
+        var distinctGroupIndex = mongoDistinct.Pipeline
+            .Select((stage, index) => (stage, index))
+            .Single(item => item.stage.Contains("$group"))
+            .index;
+        var distinctSortIndex = mongoDistinct.Pipeline
+            .Select((stage, index) => (stage, index))
+            .Where(item => item.stage.Contains("$sort"))
+            .Select(item => item.index)
+            .Last();
+        var distinctSkipIndex = mongoDistinct.Pipeline
+            .Select((stage, index) => (stage, index))
+            .Single(item => item.stage.Contains("$skip"))
+            .index;
+        Assert.InRange(distinctSortIndex, distinctGroupIndex + 1, distinctSkipIndex - 1);
+    }
+
+    [Fact]
     public void All_four_renderers_preserve_the_normalized_result_shape_and_order()
     {
         var request = Request(

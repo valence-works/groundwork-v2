@@ -256,9 +256,23 @@ public sealed class LinqFrontEndTests
         Assert.Contains("model-aware adapter", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Public_async_reductions_dispatch_through_the_scalar_executor_seam()
+    {
+        var executor = new RecordingExecutor();
+        var query = new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.IsOpen);
+
+        await query.SumAsync(executor, ticket => ticket.TenantId);
+
+        Assert.NotNull(executor.LastReduction);
+        Assert.IsType<ResultShape.Sum>(executor.LastReduction!.Result);
+        Assert.Equal(nameof(Ticket.TenantId), ((ResultShape.Sum)executor.LastReduction.Result).Column.Name);
+    }
+
     private sealed class RecordingExecutor : IGwQueryExecutor
     {
         public object? LastModel { get; private set; }
+        public QueryRequest? LastReduction { get; private set; }
         public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
         {
             LastModel = model;
@@ -266,6 +280,11 @@ public sealed class LinqFrontEndTests
         }
         public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(1L);
         public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<TResult> ReduceAsync<TResult>(QueryRequest request, CancellationToken cancellationToken = default)
+        {
+            LastReduction = request;
+            return Task.FromResult(default(TResult)!);
+        }
     }
 
     private sealed class RowsExecutor(IReadOnlyList<Ticket> rows) : IGwQueryExecutor
@@ -276,6 +295,8 @@ public sealed class LinqFrontEndTests
         public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult((long)rows.Count);
 
         public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(rows.Count != 0);
+
+        public Task<TResult> ReduceAsync<TResult>(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(default(TResult)!);
     }
 
     [Fact]

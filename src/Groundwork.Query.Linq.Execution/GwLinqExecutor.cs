@@ -1,4 +1,5 @@
 using System.Threading;
+using System.Globalization;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
@@ -110,6 +111,25 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
         return result.Rows.Count != 0;
     }
 
+    public async Task<TResult> ReduceAsync<TResult>(QueryRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Result is not ResultShape.Reduction reduction)
+            throw new ArgumentException("The request result must be a scalar reduction.", nameof(request));
+
+        // The provider has rendered and executed the aggregate itself. Reading exactly one named
+        // scalar field here is intentionally separate from ToListAsync: a reduction can never
+        // silently fall back to ordinary row materialization if a provider forgets its shape.
+        var result = await ExecuteAsync(request, request, cancellationToken).ConfigureAwait(false);
+        if (result.Rows.Count != 1)
+            throw new InvalidOperationException(
+                $"The provider did not return exactly one row for {reduction.GetType().Name} on '{reduction.Column.Name}'.");
+        if (!result.Rows[0].TryGetValue(reduction.Column.Name, out var value))
+            throw new InvalidOperationException(
+                $"The provider reduction result did not contain the '{reduction.Column.Name}' scalar field.");
+        return ConvertReductionValue<TResult>(value);
+    }
+
     /// <summary>
     /// Admits the request the caller actually wrote — not the narrowed count or existence probe
     /// derived from it — so a refusal carries the same code and the same named fix the analyzer
@@ -136,4 +156,19 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
 
     private RuntimeCoverageGate CreateGate()
         => RuntimeCoverage.ForQuery(session, connection, admission);
+
+    private static TResult ConvertReductionValue<TResult>(object? value)
+    {
+        if (value is null)
+            return default!;
+        if (value is TResult typed)
+            return typed;
+
+        var targetType = Nullable.GetUnderlyingType(typeof(TResult)) ?? typeof(TResult);
+        if (targetType == typeof(Guid) && value is string guid)
+            return (TResult)(object)Guid.Parse(guid);
+        if (targetType == typeof(DateTimeOffset) && value is string timestamp)
+            return (TResult)(object)DateTimeOffset.Parse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        return (TResult)Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
+    }
 }

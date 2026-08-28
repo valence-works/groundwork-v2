@@ -56,11 +56,13 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
     {
         var (executionSource, renderOptions, command) = PrepareQuery(request, options);
-        var rows = RelationalQueryResultReader.Read(connection, command, DecodeQueryValue, activeTransaction ?? transaction);
+        var rows = RelationalQueryResultReader.Read(connection, command,
+            (name, value) => DecodeQueryValue(name, value, executionSource), activeTransaction ?? transaction);
         AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
+            sourceIncludesContinuation: true,
+            sourceIncludesDistinct: true);
     });
 
     /// <summary>
@@ -76,13 +78,14 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
             cancellationToken.ThrowIfCancellationRequested();
             var (executionSource, renderOptions, command) = PrepareQuery(request, options);
             var rows = RelationalQueryResultReader.Read(
-                    connection, command, DecodeQueryValue, activeTransaction ?? transaction,
+                    connection, command, (name, value) => DecodeQueryValue(name, value, executionSource), activeTransaction ?? transaction,
                     RelationalExecution.Asynchronous(cancellationToken))
                 .GetAwaiter().GetResult();
             AssertExplainPlan(command, renderOptions);
             return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
                 sourceIncludesRequestedOffset: true,
-                sourceIncludesContinuation: true);
+                sourceIncludesContinuation: true,
+                sourceIncludesDistinct: true);
         }));
 
     public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
@@ -207,6 +210,14 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
         if (name == "__groundwork_total_count") return value;
         var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
         return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
+    }
+
+    private object? DecodeQueryValue(string name, object? value, QueryRequest request)
+    {
+        if (request.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
+            string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
+            return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
+        return DecodeQueryValue(name, value);
     }
 
     public CrossScopeQueryResult QueryAcrossScopes(

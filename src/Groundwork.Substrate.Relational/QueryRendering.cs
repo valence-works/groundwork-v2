@@ -241,7 +241,7 @@ public abstract class RelationalQueryRenderer
             {
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
-            if (!request.Result.IncludesTotalCount && request.LatestPerKey is null)
+            if (!request.Result.IncludesTotalCount && request.LatestPerKey is null && !request.Distinct)
                 where = $"({where}) AND ({RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex)})";
         }
 
@@ -270,7 +270,7 @@ public abstract class RelationalQueryRenderer
         var selection = request.Projection.AllColumns
             ? "*"
             : string.Join(", ", request.Projection.Columns.Select(RenderSelection));
-        if ((request.LatestPerKey is not null || request.Result.IncludesTotalCount) && !request.Projection.AllColumns)
+        if ((request.LatestPerKey is not null || request.Result.IncludesTotalCount || request.Distinct) && !request.Projection.AllColumns)
         {
             var required = (request.LatestPerKey is { } latest
                     ? new[] { latest.Key, latest.Timestamp }.Concat(options.LatestPartitionColumns)
@@ -297,40 +297,109 @@ public abstract class RelationalQueryRenderer
         if (indexHintApplied)
             from += " " + RenderIndexHint(options.ResolvePhysicalIndexName(pinnedIndex!.Name));
         string sql;
-        if (request.Result.IncludesTotalCount)
+        if (request.Result is ResultShape.Reduction reduction)
+        {
+            sql = RenderReduction(reduction, request, effectiveOrder, cursor, parameters, ref parameterIndex, from, where, options);
+        }
+        else if (request.Result.IncludesTotalCount)
         {
             var latestSource = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
             // RenderLatestSource has already applied the caller predicate to the base CTE.
             // Reapplying it here would require predicate-only columns in a columns-only
             // projection and would duplicate its parameters.
+            var pageSource = "__groundwork_base";
             var pageWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
-            if (cursor is not null)
-                pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
-            var page = "SELECT * FROM __groundwork_base WHERE " + pageWhere;
-            if (effectiveOrder.Count != 0)
+            if (request.Distinct)
             {
-                page += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
-                if (RequiresOrderForOffset && request.Paging.Offset is null && request.Paging.Limit is null)
-                    page += " OFFSET 0 ROWS";
+                var distinctWhere = pageWhere;
+                if (request.Projection.AllColumns)
+                {
+                    latestSource += ", __groundwork_distinct AS (SELECT DISTINCT * FROM __groundwork_base WHERE " + distinctWhere + ")";
+                }
+                else
+                {
+                    var partition = string.Join(", ", request.Projection.Columns
+                        .Where(column => !IsExecutionOnlySearchColumn(column, options))
+                        .Select(RenderDistinctPartition));
+                    var rankOrder = effectiveOrder.Count == 0
+                        ? "(SELECT 1)"
+                        : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                    var inputAlias = dialect.QuoteIdentifier("__groundwork_distinct_input");
+                    var rankAlias = dialect.QuoteIdentifier("__groundwork_distinct_rank");
+                    latestSource += ", __groundwork_distinct_ranked AS (SELECT " + inputAlias + ".*, ROW_NUMBER() OVER (PARTITION BY " +
+                        partition + " ORDER BY " + rankOrder + ") AS " + rankAlias + " FROM __groundwork_base AS " + inputAlias +
+                        " WHERE " + distinctWhere + "), __groundwork_distinct AS (SELECT * FROM __groundwork_distinct_ranked WHERE " + rankAlias + " = 1)";
+                }
+                pageSource = "__groundwork_distinct";
+                pageWhere = "1 = 1";
             }
-            else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
-                page += " ORDER BY (SELECT 1)";
-            page += RenderPaging(request.Paging, parameters, ref parameterIndex);
-            var countWhere = request.LatestPerKey is null ? string.Empty : " WHERE __groundwork_latest_rank = 1";
+            var countWhere = request.Distinct || request.LatestPerKey is null ? string.Empty : " WHERE __groundwork_latest_rank = 1";
+            var countSource = request.Distinct ? pageSource : "__groundwork_base";
             var aggregate = RenderCountAggregate();
-            sql = latestSource + ", __groundwork_page AS (" + page + "), __groundwork_total AS (SELECT " + aggregate + " AS __groundwork_total_count FROM __groundwork_base" + countWhere + ") " +
-                "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
-                "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1 ORDER BY " +
-                dialect.QuoteIdentifier("__groundwork_count_only") + " ASC" +
-                (effectiveOrder.Count == 0 ? string.Empty : ", " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm))) + ";";
+            if (request.Distinct && request.Paging.Offset is null && request.Paging.Limit is null && cursor is null)
+            {
+                sql = latestSource + ", __groundwork_total AS (SELECT " + aggregate + " AS __groundwork_total_count FROM " + countSource + countWhere + ") " +
+                    "SELECT __groundwork_total.__groundwork_total_count, 1 AS __groundwork_count_only FROM __groundwork_total;";
+            }
+            else
+            {
+                if (cursor is not null)
+                    pageWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
+                var page = "SELECT * FROM " + pageSource + " WHERE " + pageWhere;
+                if (effectiveOrder.Count != 0)
+                {
+                    page += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                    if (RequiresOrderForOffset && request.Paging.Offset is null && request.Paging.Limit is null)
+                        page += " OFFSET 0 ROWS";
+                }
+                else if ((request.Paging.Offset is not null || request.Paging.Limit is not null) && RequiresOrderForOffset)
+                    page += " ORDER BY (SELECT 1)";
+                page += RenderPaging(request.Paging, parameters, ref parameterIndex);
+                sql = latestSource + ", __groundwork_page AS (" + page + "), __groundwork_total AS (SELECT " + aggregate + " AS __groundwork_total_count FROM " + countSource + countWhere + ") " +
+                    "SELECT __groundwork_page.*, __groundwork_total.__groundwork_total_count, CASE WHEN __groundwork_page.__groundwork_has_row IS NULL THEN 1 ELSE 0 END AS __groundwork_count_only " +
+                    "FROM __groundwork_total LEFT JOIN __groundwork_page ON 1 = 1 ORDER BY " +
+                    dialect.QuoteIdentifier("__groundwork_count_only") + " ASC" +
+                    (effectiveOrder.Count == 0 ? string.Empty : ", " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm))) + ";";
+            }
         }
         else
         {
-            var source = request.LatestPerKey is null
-                ? "SELECT " + selection + " FROM " + from + " WHERE " + where
-                : RenderLatestSource(request.LatestPerKey, selection, from, where, options) + " SELECT " + selection + " FROM __groundwork_base WHERE __groundwork_latest_rank = 1";
+            string source;
+            if (!request.Distinct)
+            {
+                source = request.LatestPerKey is null
+                    ? "SELECT " + selection + " FROM " + from + " WHERE " + where
+                    : RenderLatestSource(request.LatestPerKey, selection, from, where, options) + " SELECT " + selection + " FROM __groundwork_base WHERE __groundwork_latest_rank = 1";
+            }
+            else
+            {
+                // Distinct is a provider operation, and its unit is the projected value rather
+                // than the raw row. A ranked CTE preserves the requested order while allowing
+                // order-only columns to be selected without making them part of the distinct key.
+                var baseCte = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
+                var baseWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
+                if (request.Projection.AllColumns)
+                {
+                    source = baseCte + ", __groundwork_distinct AS (SELECT DISTINCT * FROM __groundwork_base WHERE " + baseWhere + ") " +
+                        "SELECT * FROM __groundwork_distinct WHERE 1 = 1";
+                }
+                else
+                {
+                    var partition = string.Join(", ", request.Projection.Columns
+                        .Where(column => !IsExecutionOnlySearchColumn(column, options))
+                        .Select(RenderDistinctPartition));
+                    var rankOrder = effectiveOrder.Count == 0
+                        ? "(SELECT 1)"
+                        : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+                    var inputAlias = dialect.QuoteIdentifier("__groundwork_distinct_input");
+                    var rankAlias = dialect.QuoteIdentifier("__groundwork_distinct_rank");
+                    source = baseCte + ", __groundwork_distinct_ranked AS (SELECT " + inputAlias + ".*, ROW_NUMBER() OVER (PARTITION BY " +
+                        partition + " ORDER BY " + rankOrder + ") AS " + rankAlias + " FROM __groundwork_base AS " + inputAlias +
+                        " WHERE " + baseWhere + ") SELECT * FROM __groundwork_distinct_ranked WHERE " + rankAlias + " = 1";
+                }
+            }
             sql = source;
-            if (cursor is not null && request.LatestPerKey is not null)
+            if (cursor is not null && (request.LatestPerKey is not null || request.Distinct))
                 sql += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
             if (effectiveOrder.Count != 0)
                 sql += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
@@ -452,8 +521,120 @@ public abstract class RelationalQueryRenderer
 
     protected virtual bool RequiresOrderForOffset => false;
 
+    /// <summary>Renders the native aggregate expression over one already-windowed value.</summary>
+    protected virtual string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression) =>
+        reduction switch
+        {
+            ResultShape.Sum => "CASE WHEN COUNT(" + valueExpression + ") = 0 THEN NULL ELSE SUM(" + valueExpression + ") END",
+            ResultShape.Min => "MIN(" + valueExpression + ")",
+            ResultShape.Max => "MAX(" + valueExpression + ")",
+            _ => throw new ArgumentOutOfRangeException(nameof(reduction), reduction, null)
+        };
+
+    /// <summary>
+    /// Whether a reduction must select its value through the renderer's portable order key. Raw
+    /// MIN/MAX comparisons inherit provider collation or native identifier ordering, which is not
+    /// the public ordinal string/Guid contract.
+    /// </summary>
+    protected virtual bool UsesPortableReductionOrder(ResultShape.Reduction reduction) =>
+        reduction is ResultShape.Min or ResultShape.Max &&
+        reduction.Column.Type is QueryType.String or QueryType.Guid;
+
     protected virtual string RenderIndexHint(string indexName) =>
         throw new NotSupportedException($"{ProviderName} does not support index hints.");
+
+    private string RenderReduction(
+        ResultShape.Reduction reduction,
+        QueryRequest request,
+        IReadOnlyList<OrderTerm> effectiveOrder,
+        IReadOnlyList<QueryConstant>? cursor,
+        ICollection<QueryRenderParameter> parameters,
+        ref int parameterIndex,
+        string from,
+        string where,
+        QueryRenderOptions options)
+    {
+        // A reduction is a scalar over the caller's selected input, not an ordinary row query.
+        // Materialize the source columns needed for latest/order semantics into a CTE, then apply
+        // distinct and the input window before the provider aggregate. This keeps the whole
+        // operation server-side and makes Take/Skip affect the reduced input rather than the
+        // single aggregate row.
+        var sourceColumns = new[] { reduction.Column }
+            .Concat(request.LatestPerKey is { } latest
+                ? new[] { latest.Key, latest.Timestamp }.Concat(options.LatestPartitionColumns)
+                : Array.Empty<ColumnRef>())
+            .Concat(effectiveOrder.Select(term => term.Column))
+            .GroupBy(column => column.Name, StringComparer.Ordinal)
+            .Select(group => RenderSelection(group.First()))
+            .ToArray();
+        var selection = string.Join(", ", sourceColumns);
+        var latestSource = RenderLatestSource(request.LatestPerKey, selection, from, where, options);
+        var sourceWhere = request.LatestPerKey is null ? "1 = 1" : "__groundwork_latest_rank = 1";
+        if (cursor is not null && request.LatestPerKey is not null && !request.Distinct)
+            sourceWhere += " AND (" + RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
+
+        var source = "SELECT * FROM __groundwork_base WHERE " + sourceWhere;
+        var inputAlias = dialect.QuoteIdentifier("__groundwork_reduction_input");
+        string windowed;
+        if (request.Distinct)
+        {
+            // Keep the first source row for each projected value. This is the relational analogue
+            // of the ordinary materializer's stable DistinctRows operation: an ORDER BY on a
+            // different source column still determines which duplicate survives, and the page is
+            // applied only after that row-number filter. A plain SELECT DISTINCT cannot preserve
+            // that ordering portably (nor can SQL Server order by the renderer's CASE expression
+            // unless it is selected literally).
+            var rankOrder = effectiveOrder.Count == 0
+                ? "(SELECT 1)"
+                : string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+            windowed = "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " +
+                RenderDistinctPartition(reduction.Column) + " ORDER BY " + rankOrder + ") AS " +
+                dialect.QuoteIdentifier("__groundwork_reduction_distinct_rank") + " FROM (" + source +
+                ") AS " + inputAlias + ") AS " + inputAlias + " WHERE " +
+                dialect.QuoteIdentifier("__groundwork_reduction_distinct_rank") + " = 1";
+
+            if (cursor is not null)
+            {
+                var cursorAlias = dialect.QuoteIdentifier("__groundwork_reduction_distinct_cursor");
+                windowed = "SELECT * FROM (" + windowed + ") AS " + cursorAlias + " WHERE (" +
+                    RenderContinuation(effectiveOrder, cursor, parameters, ref parameterIndex) + ")";
+            }
+        }
+        else
+        {
+            windowed = "SELECT * FROM (" + source + ") AS " + inputAlias;
+        }
+
+        var hasPaging = request.Paging.Offset is not null || request.Paging.Limit is not null;
+        if (hasPaging && effectiveOrder.Count != 0)
+            windowed += " ORDER BY " + string.Join(", ", effectiveOrder.Select(RenderOrderTerm));
+        else if (hasPaging && RequiresOrderForOffset)
+            windowed += " ORDER BY (SELECT 1)";
+        windowed += RenderPaging(request.Paging, parameters, ref parameterIndex);
+
+        var pageAlias = dialect.QuoteIdentifier("__groundwork_reduction_page");
+        var valueExpression = pageAlias + "." + dialect.QuoteIdentifier(reduction.Column.Name);
+        string aggregateSource = windowed;
+        string aggregate;
+        if (UsesPortableReductionOrder(reduction))
+        {
+            var orderedAlias = dialect.QuoteIdentifier("__groundwork_reduction_ordered");
+            var rankName = dialect.QuoteIdentifier("__groundwork_reduction_value_rank");
+            var direction = reduction is ResultShape.Min ? OrderDirection.Ascending : OrderDirection.Descending;
+            var orderTerm = RenderOrderTerm(new OrderTerm(reduction.Column, direction, NullOrder.Last));
+            aggregateSource = "SELECT " + orderedAlias + ".*, ROW_NUMBER() OVER (ORDER BY " + orderTerm + ") AS " + rankName +
+                " FROM (" + windowed + ") AS " + orderedAlias;
+            var orderedValue = pageAlias + "." + dialect.QuoteIdentifier(reduction.Column.Name);
+            aggregate = RenderReductionAggregate(reduction,
+                "CASE WHEN " + pageAlias + "." + rankName + " = 1 THEN " + orderedValue + " END");
+        }
+        else
+        {
+            aggregate = RenderReductionAggregate(reduction, valueExpression);
+        }
+        return latestSource + " SELECT " + aggregate + " AS " + dialect.QuoteIdentifier(reduction.Column.Name) +
+            " FROM (" + aggregateSource + ") AS " + pageAlias + ";";
+    }
 
     private string RenderLatestSource(
         LatestPerKey? latest,
@@ -482,6 +663,14 @@ public abstract class RelationalQueryRenderer
 
     /// <summary>Returns the provider expression used for comparisons and ordering of one column.</summary>
     protected virtual string RenderColumn(ColumnRef column) => dialect.QuoteIdentifier(column.Name);
+
+    /// <summary>Renders one projected column's native equality key for provider-side Distinct.</summary>
+    protected virtual string RenderDistinctPartition(ColumnRef column) => RenderColumn(column);
+
+    private static bool IsExecutionOnlySearchColumn(ColumnRef column, QueryRenderOptions options) =>
+        options.SearchKeyColumns.Values.Any(mapping =>
+            !string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal) &&
+            string.Equals(mapping.PhysicalColumn, column.Name, StringComparison.Ordinal));
 
     /// <summary>Renders one selected expression and preserves the model column name as its result alias.</summary>
     protected virtual string RenderSelection(ColumnRef column) =>

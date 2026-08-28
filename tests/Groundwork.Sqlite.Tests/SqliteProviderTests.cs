@@ -881,6 +881,15 @@ public sealed class SqliteProviderTests
         public string Code = string.Empty;
     }
 
+    private sealed class LinqMetric
+    {
+        public string Id { get; set; } = string.Empty;
+        public string? Status { get; set; }
+        public int? Amount { get; set; }
+        public long? LongAmount { get; set; }
+        public decimal? DecimalAmount { get; set; }
+    }
+
     [Fact]
     public async Task Configured_linq_database_executes_ToListAsync_against_sqlite()
     {
@@ -940,10 +949,87 @@ public sealed class SqliteProviderTests
         Assert.True(await table.Query.Where(ticket => ticket.Display == "miss").AnyAsync(executor));
         Assert.False(await table.Query.Where(ticket => ticket.Display == "absent").AnyAsync(executor));
 
+        var distinct = await executor.ToListAsync<string?>(table.Query
+            .Where(ticket => ticket.Display == "hit" || ticket.Display == "miss")
+            .OrderBy(ticket => ticket.Display)
+            .Select(ticket => ticket.Display)
+            .Distinct()
+            .Take(2)
+            .ToQueryRequest());
+        Assert.Equal(["hit", "miss"], distinct);
+
         var cancelled = new CancellationToken(canceled: true);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.ToListAsync(executor, cancelled));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.CountAsync(executor, cancelled));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.AnyAsync(executor, cancelled));
+    }
+
+    [Fact]
+    public async Task Configured_linq_executor_reduces_nullable_values_natively_and_preserves_empty_semantics()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("linq-reductions"), Name = "linq_reductions",
+            Columns =
+            [
+                new() { Name = "Id", Type = PortableType.String, IsNullable = false },
+                new() { Name = "status", Type = PortableType.String },
+                new() { Name = "amount", Type = PortableType.Int32 },
+                new() { Name = "long_amount", Type = PortableType.Int64 },
+                new() { Name = "decimal_amount", Type = PortableType.Decimal, Precision = 18, Scale = 4 }
+            ],
+            Key = new KeyDefinition { Columns = ["Id"] },
+            Indexes =
+            [
+                new() { Name = "ix_status_amount", Columns = [new IndexColumn("status"), new IndexColumn("amount")] },
+                new() { Name = "ix_status_long", Columns = [new IndexColumn("status"), new IndexColumn("long_amount")] },
+                new() { Name = "ix_status_decimal", Columns = [new IndexColumn("status"), new IndexColumn("decimal_amount")] }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        foreach (var values in new[]
+        {
+            new Dictionary<string, object?> { ["Id"] = "one", ["status"] = "open", ["amount"] = 4, ["long_amount"] = 4L, ["decimal_amount"] = 4.25m },
+            new Dictionary<string, object?> { ["Id"] = "two", ["status"] = "open", ["amount"] = null, ["long_amount"] = null, ["decimal_amount"] = null },
+            new Dictionary<string, object?> { ["Id"] = "three", ["status"] = "open", ["amount"] = 8, ["long_amount"] = 8L, ["decimal_amount"] = 8.75m },
+            new Dictionary<string, object?> { ["Id"] = "closed", ["status"] = "closed", ["amount"] = null, ["long_amount"] = null, ["decimal_amount"] = null }
+        })
+            Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(new StorageValues(values)).Status);
+
+        var executor = new SqliteLinqExecutor(session);
+        var table = new GwQueryDatabase(executor).Table<LinqMetric>(new GwTableModel<LinqMetric>("linq_reductions",
+        [
+            new GwColumn<LinqMetric>(nameof(LinqMetric.Id), "Id", QueryType.String, false),
+            new GwColumn<LinqMetric>(nameof(LinqMetric.Status), "status", QueryType.String),
+            new GwColumn<LinqMetric>(nameof(LinqMetric.Amount), "amount", QueryType.Int32),
+            new GwColumn<LinqMetric>(nameof(LinqMetric.LongAmount), "long_amount", QueryType.Int64),
+            new GwColumn<LinqMetric>(nameof(LinqMetric.DecimalAmount), "decimal_amount", QueryType.Decimal,
+                DecimalPrecision: 18, DecimalScale: 4)
+        ]));
+
+        var open = table.Query.Where(metric => metric.Status == "open");
+        Assert.Equal(12L, await open.SumAsync(executor, metric => metric.Amount));
+        Assert.Equal(12L, await open.SumAsync(executor, metric => metric.LongAmount));
+        Assert.Equal(13.00m, await open.SumAsync(executor, metric => metric.DecimalAmount));
+        Assert.Equal(4, await open.MinAsync(executor, metric => metric.Amount));
+        Assert.Equal(8L, await open.MaxAsync(executor, metric => metric.LongAmount));
+        Assert.Equal(4.25m, await open.MinAsync(executor, metric => metric.DecimalAmount));
+
+        Assert.Equal(4L, await open.OrderBy(metric => metric.Amount).Take(1).SumAsync(executor, metric => metric.Amount));
+        Assert.Equal(4L, await open.OrderBy(metric => metric.Amount).Distinct().Take(1).SumAsync(executor, metric => metric.Amount));
+
+        var allNull = table.Query.Where(metric => metric.Status == "closed");
+        Assert.Null(await allNull.SumAsync(executor, metric => metric.Amount));
+        Assert.Null(await allNull.MinAsync(executor, metric => metric.DecimalAmount));
+        Assert.Null(await allNull.MaxAsync(executor, metric => metric.LongAmount));
+
+        var empty = table.Query.Where(metric => metric.Status == "absent");
+        Assert.Null(await empty.SumAsync(executor, metric => metric.Amount));
+        Assert.Null(await empty.MinAsync(executor, metric => metric.DecimalAmount));
+        Assert.Null(await empty.MaxAsync(executor, metric => metric.LongAmount));
     }
 
     [Fact]

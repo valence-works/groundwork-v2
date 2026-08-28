@@ -283,6 +283,38 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Async_reduction_terminals_match_sync_selector_and_coverage_diagnostics()
+    {
+        var source = WithSchema(
+            SchemaWithIndex("ix_status_amount", "status ASC, amount ASC", "ix_status_created", "status ASC, created_at ASC")) +
+            QuerySource("""
+                var sum = db.Table<Ticket>().Where(t => t.Status == status).SumAsync(executor, t => t.Amount, default);
+                var minimum = db.Table<Ticket>().Where(t => t.Status == status).MinAsync(executor, t => t.CreatedAt);
+                var maximum = db.Table<Ticket>().Where(t => t.Status == status).MaxAsync(executor, t => t.Amount);
+                """);
+
+        var diagnostics = await Analyze(source);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_LINQ_112");
+    }
+
+    [Fact]
+    public async Task Async_reduction_terminals_report_the_same_selector_and_index_failures()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("""
+                var unsupported = db.Table<Ticket>().MinAsync(executor, t => t.IsOpen);
+                var uncovered = db.Table<Ticket>().Where(t => t.Status == status).SumAsync(executor, t => t.Amount);
+                """));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_112");
+        var coverage = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
+        Assert.Contains("reduction column", coverage.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Reduction_terminals_reject_non_orderable_columns()
     {
         var diagnostics = await Analyze(

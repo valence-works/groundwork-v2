@@ -26,8 +26,8 @@ translate, and tells you *at build time* when you've stepped outside it.
 Supported: `Where`, `WhereIf`, `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenByDescending`, `Skip`,
 `Take`, mapped-column `Select`, `Distinct`, `LatestPer`, `AcceptScan`, and the terminals `ToList`,
 `ToListAsync`, `Count`, `Any`, `CountAsync`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`,
-`SingleOrDefault`, `Sum`, `Min`, and `Max`. Async adapter forms are currently limited to row and
-cardinality terminals; reduction execution is tracked by #150. `First` and
+`SingleOrDefault`, `Sum`, `Min`, and `Max`. The async reduction forms `SumAsync`, `MinAsync`, and
+`MaxAsync` dispatch through the provider-native scalar executor. `First` and
 `FirstOrDefault` require an explicit deterministic order; `Distinct` removes duplicate projected
 values before paging. `Sum` is limited to mapped `Int32`, `Int64`, and `Decimal` columns (integer
 sums return nullable `Int64`); `Min` and `Max` use mapped orderable columns, ignore nulls, and return null
@@ -50,6 +50,7 @@ var executor = new GwLinqExecutor(session, connection);
 var rows  = await table.Query.Where(c => c.Email == email).ToListAsync(executor);
 var count = await table.Query.Where(c => c.Email == email).CountAsync(executor);
 var any   = await table.Query.Where(c => c.Email == email).AnyAsync(executor);
+var total = await table.Query.Where(c => c.Email == email).SumAsync(executor, c => c.LoginCount);
 ```
 
 Every terminal is admitted through the shared runtime coverage gate before the provider renders
@@ -60,6 +61,11 @@ build time, on whichever provider you happen to be running. See
 and when `session.Read(key)` is still the right call for fetching a row by its key.
 
 `SqliteLinqExecutor` remains as the named SQLite entry point and adds no behavior of its own.
+
+Reduction execution returns one provider-produced scalar row. Filtering, latest-per-key selection,
+`Distinct`, ordering, and any input `Skip`/`Take` window happen before the native `SUM`, `MIN`, or
+`MAX`; no full source row set is materialized on the client. Null inputs are ignored and an empty or
+all-null input returns null.
 
 Closed terms are read from constants and closure fields **without compiling an expression per query
 call**. Unsupported expression nodes are rejected rather than evaluated on the client.

@@ -179,6 +179,12 @@ public interface IGwQueryExecutor
     Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default);
     Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default);
     Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Executes a provider-native scalar reduction. Implementations must not route this request
+    /// through ordinary row materialization: the reduction shape is the execution contract.
+    /// </summary>
+    Task<TResult> ReduceAsync<TResult>(QueryRequest request, CancellationToken cancellationToken = default);
 }
 
 public static class GwQueryAsyncExtensions
@@ -203,6 +209,90 @@ public static class GwQueryAsyncExtensions
 
     public static Task<bool> AnyAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default) =>
         (executor ?? throw new ArgumentNullException(nameof(executor))).AnyAsync(query.Any().Request, cancellationToken);
+
+    public static Task<long?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Sum(selector).Request, cancellationToken);
+
+    public static Task<long?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Sum(selector).Request, cancellationToken);
+
+    public static Task<long?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Sum(selector).Request, cancellationToken);
+
+    public static Task<long?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Sum(selector).Request, cancellationToken);
+
+    public static Task<decimal?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, decimal?>(query, executor, () => query.Sum(selector).Request, cancellationToken);
+
+    public static Task<decimal?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, decimal?>(query, executor, () => query.Sum(selector).Request, cancellationToken);
+
+    public static Task<int?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, int?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<int?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, int?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<long?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<long?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<decimal?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, decimal?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<decimal?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, decimal?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<string?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, string?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, string?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<DateTimeOffset?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, DateTimeOffset>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, DateTimeOffset?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<DateTimeOffset?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, DateTimeOffset?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, DateTimeOffset?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<Guid?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, Guid>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, Guid?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<Guid?> MinAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, Guid?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, Guid?>(query, executor, () => query.Min(selector).Request, cancellationToken);
+
+    public static Task<int?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, int?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<int?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, int?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<long?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<long?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, long?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<decimal?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, decimal?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<decimal?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, decimal?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<string?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, string?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, string?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<DateTimeOffset?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, DateTimeOffset>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, DateTimeOffset?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<DateTimeOffset?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, DateTimeOffset?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, DateTimeOffset?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<Guid?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, Guid>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, Guid?>(query, executor, () => query.Max(selector).Request, cancellationToken);
+
+    public static Task<Guid?> MaxAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, Guid?>> selector, CancellationToken cancellationToken = default) =>
+        ExecuteReduction<T, Guid?>(query, executor, () => query.Max(selector).Request, cancellationToken);
 
     public static async Task<T> FirstAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, CancellationToken cancellationToken = default)
     {
@@ -243,6 +333,18 @@ public static class GwQueryAsyncExtensions
             _ => null
         };
         return executor.ToListAsync(requestFactory(), model, cancellationToken);
+    }
+
+    private static Task<TResult> ExecuteReduction<T, TResult>(
+        IGwQueryable<T> query,
+        IGwQueryExecutor executor,
+        Func<QueryRequest> requestFactory,
+        CancellationToken cancellationToken)
+    {
+        if (query is null) throw new ArgumentNullException(nameof(query));
+        if (executor is null) throw new ArgumentNullException(nameof(executor));
+        if (requestFactory is null) throw new ArgumentNullException(nameof(requestFactory));
+        return executor.ReduceAsync<TResult>(requestFactory(), cancellationToken);
     }
 }
 

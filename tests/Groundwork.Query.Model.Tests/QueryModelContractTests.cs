@@ -11,6 +11,7 @@ public sealed class QueryModelContractTests
     private static readonly TableId Table = new("orders");
     private static readonly ColumnRef Name = new(Table, "name", QueryType.String, isNullable: true);
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Decimal, isNullable: true, decimalPrecision: 18, decimalScale: 4);
+    private static readonly ColumnRef IntAmount = new(Table, "int_amount", QueryType.Int32, isNullable: true);
     private static readonly ColumnRef Created = new(Table, "created", QueryType.DateTimeOffset, isNullable: false);
     private static readonly ColumnRef Id = new(Table, "id", QueryType.Guid, isNullable: false);
     private static readonly ColumnRef Tags = new(Table, "tags", QueryType.String, isNullable: true);
@@ -485,7 +486,7 @@ public sealed class QueryModelContractTests
         ], sourceIncludesRequestedOffset: false);
 
         Assert.Equal("Bob", Assert.Single(result.Rows)["name"]);
-        Assert.Null(QueryRequestExecution.ForProviderPage(request, QueryRenderOptions.Default).Paging.Limit);
+        Assert.Equal(2, QueryRequestExecution.ForProviderPage(request, QueryRenderOptions.Default).Paging.Limit);
     }
 
     [Fact]
@@ -508,6 +509,45 @@ public sealed class QueryModelContractTests
         ]);
 
         Assert.Equal(2L, result.TotalCount);
+    }
+
+    [Fact]
+    public void Reduction_materialization_requires_exactly_one_native_scalar_row()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(Amount),
+            Paging.OffsetLimit(0, 2),
+            new ResultShape.Sum(Amount));
+
+        Assert.Throws<InvalidOperationException>(() => QueryResultMaterializer.Materialize(request,
+            QueryRenderOptions.Default,
+            [new Dictionary<string, object?> { ["amount"] = 1m }, new Dictionary<string, object?> { ["amount"] = 2m }]));
+        var result = QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default,
+            [new Dictionary<string, object?> { ["amount"] = 3L }]);
+
+        Assert.Equal(3L, Assert.Single(result.Rows)["amount"]);
+        Assert.Equal(2, QueryRequestExecution.ForProviderPage(request, QueryRenderOptions.Default).Paging.Limit);
+    }
+
+    [Fact]
+    public void Int32_sum_materialization_widens_the_native_scalar_to_Int64()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(IntAmount),
+            Paging.None,
+            new ResultShape.Sum(IntAmount));
+
+        var result = QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default,
+            [new Dictionary<string, object?> { [IntAmount.Name] = 3_000_000_000L }]);
+
+        Assert.IsType<long>(Assert.Single(result.Rows)[IntAmount.Name]);
+        Assert.Equal(3_000_000_000L, result.Rows[0][IntAmount.Name]);
     }
 
     [Fact]
