@@ -281,7 +281,7 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
     {
         ArgumentNullException.ThrowIfNull(query);
         StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
         var mode = RelationalExecution.Synchronous;
         var decode = (string name, object? value) =>
         {

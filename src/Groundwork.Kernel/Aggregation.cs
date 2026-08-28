@@ -184,6 +184,100 @@ public sealed record AggregationPredicateAllowance
 }
 
 /// <summary>
+/// An explicit, time-limited admission for one runtime-composed aggregation shape. Ad-hoc
+/// aggregations still use the closed <see cref="AggregationGroup"/> and <see cref="Aggregate"/>
+/// vocabulary; this value supplies the budgets that keep the composed operation bounded.
+/// </summary>
+public sealed record AggregationAcceptance
+{
+    private const int WarningWindowDays = 30;
+
+    private AggregationAcceptance(
+        bool allowed,
+        string? id,
+        string? reason,
+        string? owner,
+        DateTimeOffset? expiresOn,
+        int maxGroups,
+        int maxInputRows)
+    {
+        Allowed = allowed;
+        Id = id;
+        Reason = reason;
+        Owner = owner;
+        ExpiresOn = expiresOn;
+        MaxGroups = maxGroups;
+        MaxInputRows = maxInputRows;
+    }
+
+    public bool Allowed { get; }
+
+    public string? Id { get; }
+
+    public string? Reason { get; }
+
+    public string? Owner { get; }
+
+    /// <summary>The UTC calendar date on which this acceptance stops being valid.</summary>
+    public DateTimeOffset? ExpiresOn { get; }
+
+    /// <summary>The maximum number of reduced groups admitted by the composed operation.</summary>
+    public int MaxGroups { get; }
+
+    /// <summary>The maximum number of source rows admitted by the composed operation.</summary>
+    public int MaxInputRows { get; }
+
+    public static AggregationAcceptance Refuse { get; } = new(false, null, null, null, null, 0, 0);
+
+    public static AggregationAcceptance Allow(
+        string id,
+        string reason,
+        string owner,
+        DateTimeOffset expiresOn,
+        int maxGroups,
+        int maxInputRows)
+    {
+        if (string.IsNullOrWhiteSpace(id) ||
+            !id.StartsWith("GW-AGG-", StringComparison.Ordinal) ||
+            id.Length == "GW-AGG-".Length)
+            throw new ArgumentException("An aggregation acceptance id must start with 'GW-AGG-'.", nameof(id));
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("An aggregation acceptance reason is required.", nameof(reason));
+        if (string.IsNullOrWhiteSpace(owner))
+            throw new ArgumentException("An aggregation acceptance owner is required.", nameof(owner));
+        if (maxGroups <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxGroups), "MaxGroups must be positive.");
+        if (maxInputRows <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxInputRows), "MaxInputRows must be positive.");
+
+        return new(
+            true,
+            id,
+            reason,
+            owner,
+            NormalizeDate(expiresOn),
+            maxGroups,
+            maxInputRows);
+    }
+
+    public bool IsExpiredAt(DateTimeOffset now) =>
+        Allowed && ExpiresOn is DateTimeOffset expiry && NormalizeDate(now) >= expiry;
+
+    public bool IsExpiringAt(DateTimeOffset now) =>
+        Allowed && ExpiresOn is DateTimeOffset expiry &&
+        !IsExpiredAt(now) && expiry - NormalizeDate(now) <= TimeSpan.FromDays(WarningWindowDays);
+
+    private static DateTimeOffset NormalizeDate(DateTimeOffset value) =>
+        new(value.Year, value.Month, value.Day, 0, 0, 0, TimeSpan.Zero);
+}
+
+/// <summary>Opts an assembly into explicit, attributed accepted-aggregation diagnostics.</summary>
+[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = false, Inherited = false)]
+public sealed class GwAllowAcceptedAggregationsAttribute : Attribute
+{
+}
+
+/// <summary>
 /// A bounded, named aggregation shape.  A caller can select this shape by name but cannot submit
 /// an arbitrary aggregate expression.
 /// </summary>
@@ -278,6 +372,17 @@ public sealed record AggregationQuery
     /// <summary>Alias retained for callers that refer to the selected declaration as Profile.</summary>
     public string Profile => ProfileName;
 
+    /// <summary>
+    /// A runtime-composed profile admitted by <see cref="AdHocAcceptance"/>. Named profiles leave
+    /// this unset and continue to resolve from the storage unit declaration.
+    /// </summary>
+    public AggregationProfile? AdHocProfile { get; init; }
+
+    /// <summary>Admission metadata for <see cref="AdHocProfile"/>.</summary>
+    public AggregationAcceptance? AdHocAcceptance { get; init; }
+
+    public bool IsAdHoc => AdHocProfile is not null || AdHocAcceptance is not null;
+
     public AggregationPredicate? PostPredicate { get; init; }
 
     /// <summary>
@@ -326,6 +431,52 @@ public sealed record AggregationQuery
     public int? Take { get; init; }
 
     public static AggregationQuery For(string profileName) => new(profileName);
+
+    /// <summary>Creates an ad-hoc query from a closed aggregation profile vocabulary.</summary>
+    public static AggregationQuery ForAdHoc(
+        AggregationProfile profile,
+        AggregationAcceptance acceptance)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(acceptance);
+        return new AggregationQuery(profile.Name)
+        {
+            AdHocProfile = AggregationProfileSnapshot.Capture(profile),
+            AdHocAcceptance = acceptance
+        };
+    }
+
+    /// <summary>Creates a column-grouped ad-hoc query from the closed aggregation vocabulary.</summary>
+    public static AggregationQuery ForAdHoc(
+        string name,
+        IReadOnlyList<string> groupByColumns,
+        IReadOnlyList<Aggregate> aggregates,
+        AggregationAcceptance acceptance) =>
+        ForAdHoc(new AggregationProfile
+        {
+            Name = name,
+            GroupByColumns = groupByColumns ?? throw new ArgumentNullException(nameof(groupByColumns)),
+            Aggregates = aggregates ?? throw new ArgumentNullException(nameof(aggregates)),
+            AllowedPredicates = []
+        }, acceptance);
+
+    /// <summary>Creates an expression-grouped ad-hoc query from the closed aggregation vocabulary.</summary>
+    public static AggregationQuery ForAdHoc(
+        string name,
+        IReadOnlyList<AggregationGroup> groupByExpressions,
+        IReadOnlyList<Aggregate> aggregates,
+        AggregationAcceptance acceptance) =>
+        ForAdHoc(new AggregationProfile
+        {
+            Name = name,
+            GroupByExpressions = groupByExpressions ?? throw new ArgumentNullException(nameof(groupByExpressions)),
+            Aggregates = aggregates ?? throw new ArgumentNullException(nameof(aggregates)),
+            AllowedPredicates = []
+        }, acceptance);
+
+    /// <summary>Alias for <see cref="ForAdHoc(AggregationProfile, AggregationAcceptance)"/>.</summary>
+    public static AggregationQuery AdHoc(AggregationProfile profile, AggregationAcceptance acceptance) =>
+        ForAdHoc(profile, acceptance);
 
     private Predicate? sourcePredicate;
 }
@@ -662,6 +813,40 @@ public static class AggregationProfileValidator
             "profileName")]);
     }
 
+    /// <summary>Resolves a declared profile or the captured profile carried by an ad-hoc query.</summary>
+    public static AggregationProfile ResolveOrThrow(StorageUnit unit, AggregationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (query.AdHocProfile is null)
+        {
+            if (query.AdHocAcceptance is not null)
+                throw new AggregationValidationException([new(
+                    "GW-AGG-ADHOC-001",
+                    "An aggregation acceptance requires a runtime-composed profile.",
+                    "adHocAcceptance")]);
+            return ResolveOrThrow(unit, query.ProfileName);
+        }
+
+        if (query.AdHocAcceptance is null || !query.AdHocAcceptance.Allowed)
+            throw new AggregationValidationException([new(
+                "GW-AGG-ADHOC-001",
+                "A runtime-composed aggregation requires an active aggregation acceptance.",
+                "adHocAcceptance")]);
+        if (query.AdHocAcceptance.IsExpiredAt(DateTimeOffset.UtcNow))
+            throw new AggregationValidationException([new(
+                "GW-AGG-ADHOC-002",
+                "The runtime-composed aggregation acceptance has expired.",
+                "adHocAcceptance.expiresOn")]);
+
+        var captured = AggregationProfileSnapshot.Capture(query.AdHocProfile);
+        // Ad-hoc budgets belong to the acceptance, never to caller-controlled profile metadata.
+        return captured with
+        {
+            MaxGroups = query.AdHocAcceptance.MaxGroups,
+            MaxInputRows = query.AdHocAcceptance.MaxInputRows
+        };
+    }
+
     public static void Validate(StorageUnit unit, AggregationProfile profile)
     {
         ArgumentNullException.ThrowIfNull(unit);
@@ -694,6 +879,7 @@ public static class AggregationProfileValidator
                 }
                 if (group.Alias.StartsWith("__groundwork_aggregation_", StringComparison.Ordinal))
                     Add("GW-AGG-DECL-009", $"Group-by alias '{group.Alias}' uses a reserved aggregation alias.", paths + ".groupByExpressions");
+                AddPortabilityRefusals(group.Alias, paths + ".groupByExpressions." + group.Alias);
                 switch (group)
                 {
                     case AggregationGroup.Column column when !columns.ContainsKey(column.Alias):
@@ -738,6 +924,7 @@ public static class AggregationProfileValidator
                     Add("GW-AGG-DECL-004", "Aggregate aliases are required.", paths + ".aggregates");
                 if (aggregate.Alias.StartsWith("__groundwork_aggregation_", StringComparison.Ordinal))
                     Add("GW-AGG-DECL-010", $"Aggregate alias '{aggregate.Alias}' uses a reserved name.", paths + ".aggregates");
+                AddPortabilityRefusals(aggregate.Alias, paths + ".aggregates." + aggregate.Alias);
                 if (groups.Any(group => string.Equals(group.Alias, aggregate.Alias, StringComparison.Ordinal)))
                     Add("GW-AGG-DECL-005", $"Aggregate alias '{aggregate.Alias}' collides with a group-by column.", paths + ".aggregates");
                 switch (aggregate)
@@ -806,6 +993,11 @@ public static class AggregationProfileValidator
             throw new AggregationValidationException(errors);
 
         void Add(string code, string message, string path) => errors.Add(new(code, message, path));
+        void AddPortabilityRefusals(string identifier, string path)
+        {
+            foreach (var refusal in PortabilityValidator.ValidatePhysicalIdentifier(identifier, path).Refusals)
+                Add(refusal.Code, refusal.Message, refusal.Path);
+        }
         void AddDuplicateErrors(IEnumerable<string> values, string kind, string path)
         {
             foreach (var duplicate in values.GroupBy(value => value, StringComparer.Ordinal).Where(group => group.Count() > 1))
@@ -843,6 +1035,17 @@ public static class AggregationProfileValidator
 /// <summary>Provider-neutral reduction used by the reference provider and conformance fixtures.</summary>
 public static class AggregationExecutor
 {
+    /// <summary>Executes a declared or accepted ad-hoc aggregation query against reference rows.</summary>
+    public static AggregationResult Execute(
+        StorageUnit unit,
+        IEnumerable<IReadOnlyDictionary<string, object?>> rows,
+        AggregationQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var profile = AggregationProfileValidator.ResolveOrThrow(unit, query);
+        return Execute(unit, profile, rows, query);
+    }
+
     public static AggregationResult Execute(
         StorageUnit unit,
         AggregationProfile profile,
@@ -1024,6 +1227,31 @@ public static class AggregationExecutor
         ArgumentNullException.ThrowIfNull(profile);
         ArgumentNullException.ThrowIfNull(query);
         AggregationProfileValidator.Validate(unit, profile);
+        if (query.IsAdHoc)
+        {
+            if (query.AdHocProfile is null || query.AdHocAcceptance is null || !query.AdHocAcceptance.Allowed)
+                throw new AggregationValidationException([new(
+                    "GW-AGG-ADHOC-001",
+                    "A runtime-composed aggregation requires an active aggregation acceptance.",
+                    "adHocAcceptance")]);
+            if (query.AdHocAcceptance.IsExpiredAt(DateTimeOffset.UtcNow))
+                throw new AggregationValidationException([new(
+                    "GW-AGG-ADHOC-002",
+                    "The runtime-composed aggregation acceptance has expired.",
+                    "adHocAcceptance.expiresOn")]);
+            if (!string.Equals(query.ProfileName, query.AdHocProfile.Name, StringComparison.Ordinal))
+                throw new AggregationValidationException([new(
+                    "GW-AGG-ADHOC-003",
+                    "The ad-hoc query name must match its composed profile name.",
+                    "profileName")]);
+        }
+        else if (query.AdHocAcceptance is not null)
+        {
+            throw new AggregationValidationException([new(
+                "GW-AGG-ADHOC-004",
+                "An aggregation acceptance cannot be supplied for a declared profile.",
+                "adHocAcceptance")]);
+        }
         if (!string.Equals(query.ProfileName, profile.Name, StringComparison.Ordinal))
             throw new AggregationValidationException([new("GW-AGG-QUERY-001", $"Profile '{query.ProfileName}' is not the selected declaration.", "profileName")]);
 

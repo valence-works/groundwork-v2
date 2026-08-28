@@ -286,6 +286,12 @@ Grouped by concern:
 | `GW-AGG-TYPE-001`…`004`, `GW-AGG-COLUMN-001`/`002` | Reducer types and columns |
 | `GW-AGG-SUM-001` | `Sum` accepts only `Int32`/`Int64`/`Decimal` |
 | `GW-AGG-FIRST-001` | `FirstBy` requires a non-null orderable order column |
+| `GW-AGG-ADHOC-001`…`004` | Missing, expired, or mismatched ad-hoc acceptance |
+| `GW-AGG-ADHOC-902` (`GW_AGG_ADHOC_902`) | Accepted aggregation without `[assembly: GwAllowAcceptedAggregations]` |
+| `GW-AGG-ADHOC-903` (`GW_AGG_ADHOC_903`) | Accepted aggregation on or after its expiry date |
+| `GW-AGG-ADHOC-904` (`GW_AGG_ADHOC_904`) | Accepted aggregation within its final 30 days |
+| `GW-AGG-ADHOC-905` (`GW_AGG_ADHOC_905`) | Inventory of accepted aggregation metadata (id, reason, owner, expiry, and budgets) |
+| `GW-AGG-ADHOC-906` (`GW_AGG_ADHOC_906`) | Required accepted aggregation metadata is not statically resolvable; fails closed |
 
 ---
 

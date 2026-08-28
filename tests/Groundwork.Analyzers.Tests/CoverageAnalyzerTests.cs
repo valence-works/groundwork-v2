@@ -3,8 +3,10 @@ using System.Diagnostics;
 using System.Text;
 using Groundwork.Analyzers;
 using Groundwork.Schema;
+using Groundwork.Kernel;
 using Groundwork.Query.Linq.Fragments;
 using Groundwork.Query.Linq;
+using Groundwork.Query.Model;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CodeActions;
 using Microsoft.CodeAnalysis.CodeFixes;
@@ -611,6 +613,134 @@ public sealed class CoverageAnalyzerTests
         Assert.Contains(error, item => item.Id == "GW_COVER_905" && item.Severity == DiagnosticSeverity.Info);
     }
 
+    [Fact]
+    public async Task Accepted_aggregation_emits_inventory_and_expiry_diagnostics()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0007\", \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var warning = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+        var inventory = Assert.Single(warning.Where(item => item.Id == "GW_AGG_ADHOC_905"));
+        Assert.Contains("GW-AGG-0007", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("admin report", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("billing", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains(warning, item => item.Id == "GW_AGG_ADHOC_904" && item.Severity == DiagnosticSeverity.Warning);
+
+        var expired = await Analyze(source, now: new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        Assert.Contains(expired, item => item.Id == "GW_AGG_ADHOC_903" && item.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(expired, item => item.Id == "GW_AGG_ADHOC_905" && item.Severity == DiagnosticSeverity.Info);
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_without_assembly_opt_in_is_a_build_error()
+    {
+        var source = WithSchema("{\"tables\":[]}") +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0008\", \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_902");
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_resolves_const_and_reordered_named_arguments()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "static class Values { public const string Id = \"GW-AGG-0009\"; public const string Reason = \"admin report\"; public const string Owner = \"billing\"; public const int Groups = 20; public const int InputRows = 200; } class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(maxInputRows: Values.InputRows, owner: Values.Owner, id: Values.Id, maxGroups: Values.Groups, reason: Values.Reason, expiresOn: new System.DateTimeOffset(day: 1, month: 1, year: 2027, hour: 0, minute: 0, second: 0, offset: System.TimeSpan.Zero)); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        var inventory = Assert.Single(diagnostics.Where(item => item.Id == "GW_AGG_ADHOC_905"));
+        Assert.Contains("GW-AGG-0009", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxGroups='20'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxInputRows='200'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_904");
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_906");
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_resolves_mixed_named_and_positional_arguments()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0010\", reason: \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        var inventory = Assert.Single(diagnostics.Where(item => item.Id == "GW_AGG_ADHOC_905"));
+        Assert.Contains("GW-AGG-0010", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxGroups='20'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("maxInputRows='200'", inventory.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_906");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Accepted_aggregation_duplicate_id_does_not_suppress_expiry_diagnostics(bool expiredFirst)
+    {
+        const string expired = "static readonly Groundwork.Kernel.AggregationAcceptance Expired = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0014\", \"shared report\", \"billing\", new System.DateTimeOffset(2026, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200);";
+        const string active = "static readonly Groundwork.Kernel.AggregationAcceptance Active = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0014\", \"shared report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200);";
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { " + (expiredFirst ? expired + active : active + expired) + " }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_903" && item.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(2, diagnostics.Count(item => item.Id == "GW_AGG_ADHOC_905"));
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_duplicate_id_with_conflicting_metadata_is_fully_inventoried()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Billing = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0015\", \"shared report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); static readonly Groundwork.Kernel.AggregationAcceptance Operations = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0015\", \"shared report\", \"operations\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 30, 300); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        var inventory = diagnostics.Where(item => item.Id == "GW_AGG_ADHOC_905").ToArray();
+        Assert.Equal(2, inventory.Length);
+        Assert.Contains(inventory, item => item.GetMessage().Contains("owner='billing'", StringComparison.Ordinal) && item.GetMessage().Contains("maxGroups='20'", StringComparison.Ordinal));
+        Assert.Contains(inventory, item => item.GetMessage().Contains("owner='operations'", StringComparison.Ordinal) && item.GetMessage().Contains("maxGroups='30'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_with_persian_calendar_expiry_fails_closed()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0011\", \"admin report\", \"billing\", new System.DateTimeOffset(1405, 1, 1, 0, 0, 0, 0, new System.Globalization.PersianCalendar(), System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_906" && item.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_with_unresolved_calendar_expiry_fails_closed()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static System.Globalization.Calendar Calendar => GetCalendar(); static System.Globalization.Calendar GetCalendar() => null!; static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0012\", \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, 0, Calendar, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_906" && item.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_with_runtime_id_fails_closed_instead_of_bypassing_opt_in()
+    {
+        var source = WithSchema("{\"tables\":[]}") +
+                     "static class Values { static string Id => \"GW-AGG-0013\"; } class Use { static readonly Groundwork.Kernel.AggregationAcceptance Value = Groundwork.Kernel.AggregationAcceptance.Allow(Values.Id, \"admin report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 1, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_902");
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_906" && item.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_905");
+    }
+
     private static async Task<ImmutableArray<Diagnostic>> Analyze(
         string source,
         AdditionalText? additional = null,
@@ -676,6 +806,8 @@ public sealed class CoverageAnalyzerTests
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
         return paths
             .Concat([typeof(GroundworkSchemaAttribute).Assembly.Location])
+            .Concat([typeof(ScanAcceptance).Assembly.Location])
+            .Concat([typeof(AggregationAcceptance).Assembly.Location])
             .Concat([typeof(GwQueryTable<>).Assembly.Location])
             .Concat([typeof(ExternalFragments).Assembly.Location])
             .Where(File.Exists)
@@ -683,12 +815,16 @@ public sealed class CoverageAnalyzerTests
             .Select(path => MetadataReference.CreateFromFile(path));
     }
 
-    private static string WithSchema(string schema, bool allowAcceptedScans = false)
+    private static string WithSchema(
+        string schema,
+        bool allowAcceptedScans = false,
+        bool allowAcceptedAggregations = false)
     {
         var document = GroundworkSchemaCanonical.Parse(schema);
         var fingerprint = GroundworkSchemaCanonical.Fingerprint(document);
         return "using Groundwork.Schema; using Groundwork.Query.Model; " +
                (allowAcceptedScans ? "[assembly: GwAllowAcceptedScans] " : string.Empty) +
+               (allowAcceptedAggregations ? "[assembly: Groundwork.Kernel.GwAllowAcceptedAggregations] " : string.Empty) +
                "[assembly: GroundworkSchema(" + Literal(schema) + ", " + Literal(fingerprint) + ")]\n";
     }
 

@@ -796,7 +796,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
     {
         RefusePrivilegedPointOperation("aggregate");
         ArgumentNullException.ThrowIfNull(query);
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
         AggregationExecutor.ValidateQuery(Unit, profile, query);
         commandObserver?.Observe(new ProviderCommandEvent("in-memory.aggregate", query.ProfileName, ProviderCommandKind.Read, IsProbe: false));
         // The executor scans through this session's public Query. That scan is the aggregate's own work,

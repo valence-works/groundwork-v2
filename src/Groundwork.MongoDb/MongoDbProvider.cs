@@ -1316,7 +1316,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         RefusePrivilegedOperation("aggregate");
         ArgumentNullException.ThrowIfNull(query);
         ThrowIfDisposed();
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query.ProfileName);
+        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
         AggregationProfileValidator.Validate(Unit, profile);
         return ExecuteNativeAggregation(profile, query, mode);
     }

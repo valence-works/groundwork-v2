@@ -100,6 +100,32 @@ They are not interchangeable. Worked example — a trace with an older row
 Callers **cannot** submit an aggregate expression, change a reducer, or raise a profile's budgets.
 Those are declaration-time decisions.
 
+## Accepted ad-hoc aggregation
+
+For a report whose grouping and reducers are selected at runtime, compose an ad-hoc query from the
+same closed `AggregationGroup` and `Aggregate` vocabulary and attach an explicit acceptance:
+
+```csharp
+var query = AggregationQuery.ForAdHoc(
+    "support-summary",
+    ["team"],
+    [new Aggregate.Count("count"), new Aggregate.Sum("total", "amount")],
+    AggregationAcceptance.Allow(
+        "GW-AGG-0001", "temporary support report", "operations",
+        new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero), maxGroups: 100, maxInputRows: 10_000));
+var result = session.Aggregate(query);
+```
+
+Acceptance metadata is audited statically, so use a fixed `DateTimeOffset` construction (and
+constants for the other fields) rather than a runtime clock expression.
+
+`AggregationAcceptance` is the operational inventory entry: id, reason, owner, expiry,
+`MaxGroups`, and `MaxInputRows` are all required. An ad-hoc query without an active acceptance,
+or with an expired acceptance, is refused before provider I/O. Its budgets override any profile
+budget supplied during composition, and its shape is not persisted in schema history. Scoped
+sessions retain their scope restriction; privileged cross-scope sessions continue to refuse
+aggregation.
+
 Provider rendering: SQL emits the source predicate in the base `WHERE`; MongoDB emits `$match` before
 `$group`; the reference provider filters its input before reduction. Relational aggregation source
 predicates use the **same ordinary renderer fragment** as `QueryRequest`, so provider hooks, portable
@@ -218,6 +244,15 @@ Aggregation diagnostics are grouped by concern: `GW-AGG-DECL-*` (declaration), `
 (query admission), `GW-AGG-SOURCE-*` (source predicate), `GW-AGG-PRED-*` (post predicate),
 `GW-AGG-GROUP-*` (grouping), `GW-AGG-BOUND-*` (budgets), `GW-AGG-TYPE-*` / `GW-AGG-COLUMN-*` /
 `GW-AGG-SUM-001` / `GW-AGG-FIRST-001` (reducers). See **[Diagnostics Reference](Diagnostics-Reference)**.
+
+Accepted ad-hoc aggregation values are inventoried by the coverage analyzer when the assembly opts
+in with `[assembly: GwAllowAcceptedAggregations]`. The analyzer emits `GW-AGG-ADHOC-905` inventory
+records, warns with `GW-AGG-ADHOC-904` during the final 30 days, and errors with
+`GW-AGG-ADHOC-903` after expiry; `GW-AGG-ADHOC-902` refuses an acceptance without the opt-in.
+`GW-AGG-ADHOC-906` fails closed when required acceptance metadata cannot be resolved to constants.
+Identical metadata repeated at multiple call sites may be emitted as one inventory record; any
+changed id, reason, owner, expiry, or budget is inventoried separately, and expiry diagnostics are
+evaluated at every call site.
 
 ## Next
 
