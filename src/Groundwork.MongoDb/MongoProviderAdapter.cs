@@ -128,16 +128,9 @@ internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaC
         GroundworkRuntimeSchemaAdmissionOptions? options = null) =>
         inner.InspectRuntimeAdmission(desired, options);
 
-    public SchemaDiff Diff(StorageUnit desired) => ToStore(inner.Diff(desired));
+    public SchemaDiff Diff(StorageUnit desired) => inner.Diff(desired);
 
-    public SchemaApplyResult Apply(StorageUnit desired)
-    {
-        var result = inner.Apply(desired);
-        return new SchemaApplyResult(ToStore(result.Diff), result.Applied);
-    }
-
-    private static SchemaDiff ToStore(MongoSchemaDiff diff) => new(diff.Changes.Select(change =>
-        new SchemaChange((SchemaChangeKind)change.Kind, change.Identity)).ToArray());
+    public SchemaApplyResult Apply(StorageUnit desired) => inner.Apply(desired);
 }
 
 internal class MongoStoreSession(

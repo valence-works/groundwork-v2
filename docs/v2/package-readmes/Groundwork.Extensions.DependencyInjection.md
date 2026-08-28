@@ -22,8 +22,10 @@ against an otherwise matching applied target only makes dependent query shapes r
 (`GW-RUNTIME-002`); changing the declaration, including adding or changing an index, changes the
 target fingerprint and blocks startup until it is applied.
 
-Admission **inspects**; it does not apply. Schema is applied deliberately, at deployment time, with
-the `groundwork` CLI — see [`Groundwork.Tool`](https://www.nuget.org/packages/Groundwork.Tool).
+Admission inspects by default. `AutoApplyOnStartup` is an explicit development opt-in: it may apply
+only plans the kernel's schema protection rules deem safe, while destructive or semantic work still
+requires authorization. For production, apply schema deliberately at deployment time with the
+`groundwork` CLI — see [`Groundwork.Tool`](https://www.nuget.org/packages/Groundwork.Tool).
 
 The health check reports the same status, so a `Degraded` catalog is visible to your orchestrator
 rather than showing up as scattered query refusals.
