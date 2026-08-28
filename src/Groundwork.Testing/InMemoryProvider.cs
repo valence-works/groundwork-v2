@@ -308,7 +308,7 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
     {
         if (previous is null)
             return;
-        if (!previous.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
+        if (!LogicalKeyColumns(previous).SequenceEqual(LogicalKeyColumns(desired), StringComparer.Ordinal))
             throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change its key.");
         if (previous.Concurrency != desired.Concurrency)
             throw new SchemaConflictException(
@@ -336,6 +336,12 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
                 desired.RetentionIdempotency?.LedgerName,
                 StringComparison.Ordinal))
             throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change retention idempotency.");
+    }
+
+    private static IReadOnlyList<string> LogicalKeyColumns(StorageUnit unit)
+    {
+        var columns = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        return unit.Key.Columns.Select(column => columns[column].LogicalId).ToArray();
     }
 
     private static IReadOnlyList<SchemaChange> Describe(
