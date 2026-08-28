@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Testing;
@@ -40,6 +41,245 @@ public sealed class SqliteProviderTests
 
         Assert.True(connection.Schema.Apply(unit).Applied);
         Assert.True(connection.Schema.Diff(unit).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_diff_and_apply_refuse_a_default_with_the_wrong_clr_type()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-invalid-default"),
+            Name = "sqlite_invalid_default",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "attempts", Type = PortableType.Int64, Default = new PortableDefault(1.5d) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        var diffFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Diff(unit));
+        Assert.Contains("GW-PORT-013", diffFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("Int64", diffFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("Double", diffFailure.Message, StringComparison.Ordinal);
+
+        var applyFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+        Assert.Contains("GW-PORT-013", applyFailure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Json_defaults_are_serialized_as_json_literals_in_sqlite_schema()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["state"] = "pending",
+            ["items"] = new List<object?> { true, 2 }
+        };
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-json-default"),
+            Name = "gw_sqlite_json_default",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(payload) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var id = Guid.NewGuid();
+        var row = connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+            new Dictionary<string, object?> { ["id"] = id }));
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, row.Status);
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = id }));
+        Assert.NotNull(stored);
+        var json = Assert.IsType<JsonElement>(stored!.Values.Values["payload"]);
+        Assert.Equal("pending", json.GetProperty("state").GetString());
+        var items = json.GetProperty("items").EnumerateArray().ToArray();
+        Assert.True(items[0].GetBoolean());
+        Assert.Equal(2, items[1].GetInt32());
+    }
+
+    [Theory]
+    [InlineData("pending", false)]
+    [InlineData("\"pending\"", true)]
+    public void Raw_json_string_defaults_are_validated_and_deployed_consistently(string value, bool expectedPortable)
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-raw-json-default-" + expectedPortable),
+            Name = "gw_sqlite_raw_json_default_" + (expectedPortable ? "valid" : "invalid"),
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        if (!expectedPortable)
+        {
+            var diffFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Diff(unit));
+            Assert.Contains("GW-PORT-013", diffFailure.Message, StringComparison.Ordinal);
+            Assert.Contains("payload", diffFailure.Message, StringComparison.Ordinal);
+            Assert.Contains("Json", diffFailure.Message, StringComparison.Ordinal);
+            Assert.Contains(nameof(String), diffFailure.Message, StringComparison.Ordinal);
+
+            var applyFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+            Assert.Contains("GW-PORT-013", applyFailure.Message, StringComparison.Ordinal);
+            return;
+        }
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var id = Guid.NewGuid();
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+                new Dictionary<string, object?> { ["id"] = id })).Status);
+
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = id }));
+        Assert.NotNull(stored);
+        Assert.Equal("pending", Assert.IsType<JsonElement>(stored!.Values.Values["payload"]).GetString());
+    }
+
+    [Fact]
+    public void Json_document_and_element_root_string_defaults_are_serialized_and_deployed()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        using var document = JsonDocument.Parse("\"pending\"");
+
+        foreach (var (kind, value) in new[]
+        {
+            ("document", (object)document),
+            ("element", (object)document.RootElement)
+        })
+        {
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId("sqlite-json-string-default-" + kind),
+                Name = "gw_sqlite_json_string_default_" + kind,
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            };
+
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var id = Guid.NewGuid();
+            Assert.Equal(WriteOutcomeStatus.Inserted,
+                connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+                    new Dictionary<string, object?> { ["id"] = id })).Status);
+
+            var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+                new Dictionary<string, object?> { ["id"] = id }));
+            Assert.NotNull(stored);
+            Assert.Equal("pending", Assert.IsType<JsonElement>(stored!.Values.Values["payload"]).GetString());
+        }
+    }
+
+    [Fact]
+    public void Json_document_and_element_root_null_defaults_are_serialized_and_deployed()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        using var document = JsonDocument.Parse("null");
+
+        foreach (var (kind, value) in new[]
+        {
+            ("document", (object)document),
+            ("element", (object)document.RootElement)
+        })
+        {
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId("sqlite-json-null-default-" + kind),
+                Name = "gw_sqlite_json_null_default_" + kind,
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            };
+
+            Assert.True(connection.Schema.Apply(unit).Applied);
+            var id = Guid.NewGuid();
+            Assert.Equal(WriteOutcomeStatus.Inserted,
+                connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+                    new Dictionary<string, object?> { ["id"] = id })).Status);
+
+            var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+                new Dictionary<string, object?> { ["id"] = id }));
+            Assert.NotNull(stored);
+            var payload = Assert.IsType<JsonElement>(stored!.Values.Values["payload"]);
+            Assert.Equal(JsonValueKind.Null, payload.ValueKind);
+        }
+    }
+
+    [Fact]
+    public void Nested_json_document_and_element_scalars_are_serialized_as_nested_json_values()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        using var stringDocument = JsonDocument.Parse("\"pending\"");
+        using var nullDocument = JsonDocument.Parse("null");
+        var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = stringDocument,
+            ["elementString"] = stringDocument.RootElement,
+            ["documentNull"] = nullDocument,
+            ["elementNull"] = nullDocument.RootElement,
+            ["items"] = new List<object?>
+            {
+                stringDocument,
+                stringDocument.RootElement,
+                nullDocument,
+                nullDocument.RootElement
+            }
+        };
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("sqlite-nested-json-elements"),
+            Name = "gw_sqlite_nested_json_elements",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(payload) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var id = Guid.NewGuid();
+        Assert.Equal(WriteOutcomeStatus.Inserted,
+            connection.OpenSession(unit, StorageAccess.Global).Insert(new StorageValues(
+                new Dictionary<string, object?> { ["id"] = id })).Status);
+
+        var stored = connection.OpenSession(unit, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = id }));
+        Assert.NotNull(stored);
+        var json = Assert.IsType<JsonElement>(stored!.Values.Values["payload"]);
+        Assert.Equal("pending", json.GetProperty("documentString").GetString());
+        Assert.Equal("pending", json.GetProperty("elementString").GetString());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("documentNull").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("elementNull").ValueKind);
+        var items = json.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Equal("pending", items[0].GetString());
+        Assert.Equal("pending", items[1].GetString());
+        Assert.Equal(JsonValueKind.Null, items[2].ValueKind);
+        Assert.Equal(JsonValueKind.Null, items[3].ValueKind);
     }
 
     /// <summary>

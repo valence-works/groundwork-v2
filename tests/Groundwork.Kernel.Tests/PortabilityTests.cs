@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Groundwork.Kernel;
 using Xunit;
 
@@ -5,6 +6,157 @@ namespace Groundwork.Kernel.Tests;
 
 public sealed class PortabilityTests
 {
+    [Theory]
+    [InlineData(PortableType.String)]
+    [InlineData(PortableType.Int32)]
+    [InlineData(PortableType.Int64)]
+    [InlineData(PortableType.Decimal)]
+    [InlineData(PortableType.Boolean)]
+    [InlineData(PortableType.DateTimeOffset)]
+    [InlineData(PortableType.Guid)]
+    [InlineData(PortableType.Binary)]
+    [InlineData(PortableType.Double)]
+    [InlineData(PortableType.Json)]
+    public void A_default_must_supply_a_clr_value_in_its_portable_type_domain(PortableType type)
+    {
+        var supplied = MismatchedDefault(type);
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("value", type, nullable: false, maxLength: 32, precision: 18, scale: 4) with
+            {
+                Default = new PortableDefault(supplied)
+            }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Equal("columns.value.default", refusal.Path);
+        Assert.Contains("value", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(type.ToString(), refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(supplied.GetType().Name, refusal.Message, StringComparison.Ordinal);
+    }
+
+    private static object MismatchedDefault(PortableType type) => type switch
+    {
+        PortableType.String => 7,
+        PortableType.Int32 => 7L,
+        PortableType.Int64 => 1.5d,
+        PortableType.Decimal => 1,
+        PortableType.Boolean => 1,
+        PortableType.DateTimeOffset => "2024-01-01T00:00:00Z",
+        PortableType.Guid => "00000000-0000-0000-0000-000000000000",
+        PortableType.Binary => "AQI=",
+        PortableType.Double => 1,
+        PortableType.Json => new UnsupportedJsonDefault(),
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
+
+    [Fact]
+    public void A_json_default_accepts_a_portable_scalar_object_and_array_graph()
+    {
+        var value = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["text"] = "pending",
+            ["count"] = 7,
+            ["items"] = new List<object?> { true, null, new Dictionary<string, object?> { ["active"] = false } }
+        };
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with { Default = new PortableDefault(value) }
+        ], key: ["id"]));
+
+        Assert.True(result.IsPortable, string.Join(Environment.NewLine, result.Refusals));
+    }
+
+    [Fact]
+    public void A_json_default_rejects_a_non_json_compatible_clr_value()
+    {
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with
+            {
+                Default = new PortableDefault(new UnsupportedJsonDefault())
+            }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Equal("columns.payload.default", refusal.Path);
+        Assert.Contains("Json", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(UnsupportedJsonDefault), refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("JSON-compatible", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Json_document_and_element_defaults_are_accepted_by_the_focused_boundary()
+    {
+        using var document = JsonDocument.Parse("{\"state\":\"pending\"}");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+                Column("id", PortableType.Guid, nullable: false),
+                Column("payload", PortableType.Json) with { Default = new PortableDefault(value) }
+            ], key: ["id"]));
+
+            Assert.True(result.IsPortable, string.Join(Environment.NewLine, result.Refusals));
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"state\":\"pending\",\"state\":\"complete\"}")]
+    [InlineData("{\"payload\":{\"state\":\"pending\",\"state\":\"complete\"}}")]
+    public void Json_document_defaults_with_duplicate_properties_are_refused_with_portability_diagnostics(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with { Default = new PortableDefault(document) }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Equal("columns.payload.default", refusal.Path);
+        Assert.Contains("payload", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("Json", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(JsonDocument), refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("pending", false)]
+    [InlineData("\"pending\"", true)]
+    [InlineData("{\"state\":\"pending\"}", true)]
+    [InlineData("[true,2]", true)]
+    [InlineData("{\"state\":1,\"state\":2}", false)]
+    [InlineData("{\"payload\":{\"state\":1,\"state\":2}}", false)]
+    public void Top_level_json_strings_are_validated_as_raw_json_text(string value, bool expectedPortable)
+    {
+        var result = PortabilityValidator.ValidatePortableDefaults(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("payload", PortableType.Json) with { Default = new PortableDefault(value) }
+        ], key: ["id"]));
+
+        Assert.Equal(expectedPortable, result.IsPortable);
+        if (!expectedPortable)
+        {
+            var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+            Assert.Equal("columns.payload.default", refusal.Path);
+            Assert.Contains("payload", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("Json", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains(nameof(String), refusal.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void An_int64_default_is_not_widened_from_an_int()
+    {
+        var result = Validate(Unit([
+            Column("id", PortableType.Guid, nullable: false),
+            Column("value", PortableType.Int64) with { Default = new PortableDefault(1) }
+        ], key: ["id"]));
+
+        var refusal = Assert.Single(result.Refusals, finding => finding.Code == "GW-PORT-013");
+        Assert.Contains("Int64", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("Int32", refusal.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Decimal_without_precision_and_scale_is_refused()
     {
@@ -769,6 +921,8 @@ public sealed class PortabilityTests
         string Code,
         StorageUnit Unit,
         PortabilityValidationContext? Context = null);
+
+    private sealed class UnsupportedJsonDefault { }
 
     private static void AssertCode(PortabilityValidationResult result, string code, string detail)
     {

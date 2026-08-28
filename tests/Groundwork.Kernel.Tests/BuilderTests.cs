@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Records;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
@@ -68,6 +69,152 @@ public sealed class BuilderTests
         Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-PORT-002");
         Assert.Contains(exception.Diagnostics, diagnostic => diagnostic.Code == "GW-PORT-003");
         Assert.Equal(2, exception.Diagnostics.Count);
+    }
+
+    [Fact]
+    public void Fluent_build_refuses_a_default_with_the_wrong_clr_type()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() =>
+            Groundwork.Records.StorageUnit
+                .Declare("invalid-default", "invalid_default")
+                .Guid("id", column => column.Required())
+                .Int64("attempts", column => column.Default(1.5d))
+                .Key("id")
+                .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-013");
+        Assert.Equal("columns.attempts.default", diagnostic.Path);
+        Assert.Contains("Int64", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Double", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fluent_build_reports_a_mutable_default_type_mismatch_at_the_declaration_boundary()
+    {
+        var exception = Assert.Throws<StorageDeclarationException>(() =>
+            Groundwork.Records.StorageUnit
+                .Declare("invalid-mutable-default", "invalid_mutable_default")
+                .Guid("id", column => column.Required())
+                .Int64("attempts", column => column.Default(new List<int> { 1 }))
+                .Key("id")
+                .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-013");
+        Assert.Equal("columns.attempts.default", diagnostic.Path);
+        Assert.Contains("Int64", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("List", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fluent_build_snapshots_json_document_defaults()
+    {
+        using var document = JsonDocument.Parse("{\"state\":\"pending\",\"items\":[true,null]}");
+
+        var definition = Groundwork.Records.StorageUnit
+            .Declare("json-document-default", "json_document_default")
+            .Guid("id", column => column.Required())
+            .Json("payload", column => column.Default(document))
+            .Key("id")
+            .Build();
+
+        var payload = Assert.IsType<Dictionary<string, object?>>(definition.Columns.Single(column => column.Name == "payload").Default!.Value);
+        Assert.Equal("pending", payload["state"]);
+        Assert.Equal([true, null], Assert.IsType<List<object?>>(payload["items"]));
+    }
+
+    [Theory]
+    [InlineData("{\"state\":\"pending\",\"state\":\"complete\"}")]
+    [InlineData("{\"payload\":{\"state\":\"pending\",\"state\":\"complete\"}}")]
+    public void Fluent_build_refuses_duplicate_json_document_properties_at_the_declaration_boundary(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+
+        var exception = Assert.Throws<StorageDeclarationException>(() =>
+            Groundwork.Records.StorageUnit
+                .Declare("duplicate-json-default", "duplicate_json_default")
+                .Guid("id", column => column.Required())
+                .Json("payload", column => column.Default(document))
+                .Key("id")
+                .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-013");
+        Assert.Equal("columns.payload.default", diagnostic.Path);
+        Assert.Contains("payload", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(JsonDocument), diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fluent_build_preserves_raw_json_text_for_root_json_string_defaults()
+    {
+        using var document = JsonDocument.Parse("\"pending\"");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var definition = Groundwork.Records.StorageUnit
+                .Declare("json-string-default", "json_string_default")
+                .Guid("id", column => column.Required())
+                .Json("payload", column => column.Default(value))
+                .Key("id")
+                .Build();
+
+            Assert.Equal("\"pending\"", Assert.IsType<string>(
+                definition.Columns.Single(column => column.Name == "payload").Default!.Value));
+        }
+    }
+
+    [Fact]
+    public void Fluent_build_preserves_raw_json_text_for_root_json_null_defaults()
+    {
+        using var document = JsonDocument.Parse("null");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var definition = Groundwork.Records.StorageUnit
+                .Declare("json-null-default", "json_null_default")
+                .Guid("id", column => column.Required())
+                .Json("payload", column => column.Default(value))
+                .Key("id")
+                .Build();
+
+            Assert.Equal("null", Assert.IsType<string>(
+                definition.Columns.Single(column => column.Name == "payload").Default!.Value));
+        }
+    }
+
+    [Fact]
+    public void Fluent_build_snapshots_nested_json_document_and_element_scalars_as_clr_values()
+    {
+        using var stringDocument = JsonDocument.Parse("\"pending\"");
+        using var nullDocument = JsonDocument.Parse("null");
+        var value = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = stringDocument,
+            ["elementString"] = stringDocument.RootElement,
+            ["documentNull"] = nullDocument,
+            ["elementNull"] = nullDocument.RootElement,
+            ["items"] = new List<object?>
+            {
+                stringDocument,
+                stringDocument.RootElement,
+                nullDocument,
+                nullDocument.RootElement
+            }
+        };
+
+        var definition = Groundwork.Records.StorageUnit
+            .Declare("nested-json-default", "nested_json_default")
+            .Guid("id", column => column.Required())
+            .Json("payload", column => column.Default(value))
+            .Key("id")
+            .Build();
+
+        var snapshot = Assert.IsType<Dictionary<string, object?>>(
+            definition.Columns.Single(column => column.Name == "payload").Default!.Value);
+        Assert.Equal("pending", snapshot["documentString"]);
+        Assert.Equal("pending", snapshot["elementString"]);
+        Assert.Null(snapshot["documentNull"]);
+        Assert.Null(snapshot["elementNull"]);
+        Assert.Equal(["pending", "pending", null, null], Assert.IsType<List<object?>>(snapshot["items"]));
     }
 
     [Fact]
@@ -172,17 +319,22 @@ public sealed class BuilderTests
     }
 
     [Fact]
-    public void Unsupported_or_cyclic_json_defaults_are_rejected_explicitly()
+    public void Unsupported_or_cyclic_json_defaults_are_rejected_at_the_declaration_boundary()
     {
         var cyclic = new Dictionary<string, object?>();
         cyclic["self"] = cyclic;
 
-        Assert.Throws<ArgumentException>(() => Groundwork.Records.StorageUnit
+        var exception = Assert.Throws<StorageDeclarationException>(() => Groundwork.Records.StorageUnit
             .Declare("cyclic", "cyclic")
             .Int32("id", column => column.Required())
             .Json("metadata", column => column.Default(cyclic))
             .Key("id")
             .Build());
+
+        var diagnostic = Assert.Single(exception.Diagnostics, item => item.Code == "GW-PORT-013");
+        Assert.Equal("columns.metadata.default", diagnostic.Path);
+        Assert.Contains("Json", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Dictionary", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]

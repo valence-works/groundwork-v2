@@ -10,6 +10,32 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoValueCodecTests
 {
     [Fact]
+    public void Schema_diff_and_apply_refuse_an_invalid_raw_json_string_default_before_provider_work()
+    {
+        using var connection = new MongoDbProviderFactory().Create("mongodb://localhost:27017/groundwork-default-validation");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-invalid-raw-json-default"),
+            Name = "mongo_invalid_raw_json_default",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault("pending") }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+
+        var diffFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Diff(unit));
+        Assert.Contains("GW-PORT-013", diffFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("payload", diffFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("Json", diffFailure.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(String), diffFailure.Message, StringComparison.Ordinal);
+
+        var applyFailure = Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(unit));
+        Assert.Contains("GW-PORT-013", applyFailure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Partial_index_specification_excludes_explicit_nulls_for_every_key_term()
     {
         var definition = new IndexDefinition

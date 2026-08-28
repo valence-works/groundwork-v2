@@ -65,7 +65,14 @@ are both binary64, so a 32-bit column would be a widened one on half the provide
 
 A *declared default* is narrower still, because it reaches the store through DDL rather than as a
 parameter: SQL Server's float literal parser flushes a subnormal to zero, so a subnormal default is
-refused with `GW-PORT-013` even though the same value is perfectly writable as a value.
+refused with `GW-PORT-013` even though the same value is perfectly writable as a value. Every other
+non-null default must supply the exact CLR type named by its `PortableType`; declaration builders and
+all provider schema `Diff`/`Apply` paths refuse a mismatch with `GW-PORT-013` before provider work.
+`Json` is the intentional multi-shape exception: JSON-compatible scalars and recursively portable
+object/array graphs are accepted, including `JsonDocument` and `JsonElement`, while arbitrary CLR
+objects are refused. A top-level CLR `string` follows the provider convention of already-serialized
+JSON text and must itself parse as JSON; strings nested in an object or array remain ordinary JSON
+string values. Provider-specific coercion is never used to make a mismatched default portable.
 
 ```csharp
 .Double("reading")                              // stored, never compared

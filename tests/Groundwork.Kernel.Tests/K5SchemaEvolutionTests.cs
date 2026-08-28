@@ -726,6 +726,129 @@ public sealed class K5SchemaEvolutionTests
     }
 
     [Fact]
+    public void Schema_subject_preserves_raw_json_text_for_root_json_string_defaults()
+    {
+        using var document = JsonDocument.Parse("\"pending\"");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var subject = new SchemaSubject(new StorageUnit
+            {
+                Id = new StorageUnitId("json-string-element"),
+                Name = "JsonStringElement",
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            });
+
+            Assert.Equal("\"pending\"", Assert.IsType<string>(subject.Columns[1].Default!.Value));
+        }
+    }
+
+    [Fact]
+    public void Schema_subject_preserves_raw_json_text_for_root_json_null_defaults()
+    {
+        using var document = JsonDocument.Parse("null");
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var subject = new SchemaSubject(new StorageUnit
+            {
+                Id = new StorageUnitId("json-null-element"),
+                Name = "JsonNullElement",
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            });
+
+            Assert.Equal("null", Assert.IsType<string>(subject.Columns[1].Default!.Value));
+        }
+    }
+
+    [Fact]
+    public void Schema_subject_snapshots_nested_json_document_and_element_scalars_and_fingerprints_them_as_clr_values()
+    {
+        using var stringDocument = JsonDocument.Parse("\"pending\"");
+        using var nullDocument = JsonDocument.Parse("null");
+        var value = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = stringDocument,
+            ["elementString"] = stringDocument.RootElement,
+            ["documentNull"] = nullDocument,
+            ["elementNull"] = nullDocument.RootElement,
+            ["items"] = new List<object?>
+            {
+                stringDocument,
+                stringDocument.RootElement,
+                nullDocument,
+                nullDocument.RootElement
+            }
+        };
+
+        var subject = new SchemaSubject(Unit(value));
+        var equivalentClrSubject = new SchemaSubject(Unit(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentString"] = "pending",
+            ["elementString"] = "pending",
+            ["documentNull"] = null,
+            ["elementNull"] = null,
+            ["items"] = new List<object?> { "pending", "pending", null, null }
+        }));
+
+        var snapshot = Assert.IsType<Dictionary<string, object?>>(subject.Columns[1].Default!.Value);
+        Assert.Equal("pending", snapshot["documentString"]);
+        Assert.Equal("pending", snapshot["elementString"]);
+        Assert.Null(snapshot["documentNull"]);
+        Assert.Null(snapshot["elementNull"]);
+        Assert.Equal(["pending", "pending", null, null], Assert.IsType<List<object?>>(snapshot["items"]));
+        Assert.Equal(equivalentClrSubject.Fingerprint, subject.Fingerprint);
+
+        static StorageUnit Unit(object payload) => new()
+        {
+            Id = new StorageUnitId("nested-json-elements"),
+            Name = "NestedJsonElements",
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(payload) }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+    }
+
+    [Theory]
+    [InlineData("{\"state\":\"pending\",\"state\":\"complete\"}")]
+    [InlineData("{\"payload\":{\"state\":\"pending\",\"state\":\"complete\"}}")]
+    public void Schema_subject_refuses_duplicate_json_properties_with_structured_diagnostic(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+
+        foreach (var value in new object[] { document, document.RootElement })
+        {
+            var exception = Assert.Throws<ArgumentException>(() => new SchemaSubject(new StorageUnit
+            {
+                Id = new StorageUnitId("duplicate-json-element"),
+                Name = "DuplicateJsonElement",
+                Columns =
+                [
+                    new() { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                    new() { Name = "payload", Type = PortableType.Json, Default = new PortableDefault(value) }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            }));
+
+            Assert.Contains("GW-PORT-013", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("duplicate object property 'state'", exception.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void Applied_history_rejects_an_identity_that_does_not_match_its_payload()
     {
         var target = CreateTarget(CreateUnit(includePriority: false));
