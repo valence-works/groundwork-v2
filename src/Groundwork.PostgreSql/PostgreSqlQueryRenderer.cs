@@ -19,6 +19,11 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
 
     protected override string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression)
     {
+        if (reduction.Column.Type == QueryType.Guid && reduction is (ResultShape.Min or ResultShape.Max))
+        {
+            var aggregate = reduction is ResultShape.Min ? "MIN" : "MAX";
+            return "CAST(" + aggregate + "((" + valueExpression + ")::text COLLATE \"C\") AS uuid)";
+        }
         if (reduction is ResultShape.Sum && reduction.Column.Type is QueryType.Int32 or QueryType.Int64)
             return "CASE WHEN COUNT(" + valueExpression + ") = 0 THEN NULL ELSE CAST(SUM(" + valueExpression + ") AS bigint) END";
         return base.RenderReductionAggregate(reduction, valueExpression);
@@ -42,6 +47,15 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
 
     protected override string RenderOrderTerm(OrderTerm term)
     {
+        if (term.Column.Type == QueryType.Guid)
+        {
+            var guidExpression = RenderColumn(term.Column);
+            var guidKey = "(" + guidExpression + "::text COLLATE \"C\")";
+            var guidDirection = term.Direction == OrderDirection.Ascending ? "ASC" : "DESC";
+            var guidNullRank = term.NullOrder == NullOrder.First ? "0" : "1";
+            var guidNonNullRank = term.NullOrder == NullOrder.First ? "1" : "0";
+            return "CASE WHEN " + guidExpression + " IS NULL THEN " + guidNullRank + " ELSE " + guidNonNullRank + " END ASC, " + guidKey + " " + guidDirection;
+        }
         if (term.Column.Type != QueryType.String)
             return base.RenderOrderTerm(term);
 
@@ -83,6 +97,14 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex)
     {
+        if (column.Type == QueryType.Guid)
+        {
+            var guidExpression = RenderColumn(column);
+            if (value.Kind == QueryConstantKind.Null)
+                return guidExpression + " IS NULL";
+            var guidParameter = AddParameter(column, value, parameters, ref parameterIndex);
+            return "(" + guidExpression + " IS NOT NULL AND (" + guidExpression + "::text COLLATE \"C\") = ((@" + guidParameter + ")::text COLLATE \"C\"))";
+        }
         if (column.Type != QueryType.String)
             return base.RenderCursorEquality(column, value, parameters, ref parameterIndex);
         var expression = RenderColumn(column);
@@ -98,6 +120,16 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
         ICollection<QueryRenderParameter> parameters,
         ref int parameterIndex)
     {
+        if (term.Column.Type == QueryType.Guid)
+        {
+            var guidExpression = RenderColumn(term.Column);
+            if (value.Kind == QueryConstantKind.Null)
+                return term.NullOrder == NullOrder.First ? guidExpression + " IS NOT NULL" : "1 = 0";
+            var guidParameter = AddParameter(term.Column, value, parameters, ref parameterIndex);
+            var guidComparison = term.Direction == OrderDirection.Ascending ? ">" : "<";
+            var guidStrict = "(" + guidExpression + " IS NOT NULL AND (" + guidExpression + "::text COLLATE \"C\") " + guidComparison + " ((@" + guidParameter + ")::text COLLATE \"C\"))";
+            return term.NullOrder == NullOrder.First ? guidStrict : "(" + guidStrict + " OR " + guidExpression + " IS NULL)";
+        }
         if (term.Column.Type != QueryType.String)
             return base.RenderAfter(term, value, parameters, ref parameterIndex);
         var expression = RenderColumn(term.Column);

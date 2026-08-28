@@ -83,6 +83,46 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Native_distinct_and_portable_terminal_ordering_are_visible_in_each_renderer()
+    {
+        var text = new ColumnRef(Table, "name", QueryType.String, isNullable: true, maxLength: 100);
+        var guid = new ColumnRef(Table, "id_guid", QueryType.Guid, isNullable: true);
+        var distinct = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(text, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(text),
+            Paging.OffsetLimit(0, 2),
+            distinct: true);
+
+        var sqlServerDistinct = new SqlServerQueryRenderer().Render(distinct);
+        Assert.Contains("ROW_NUMBER", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CONVERT(varbinary(max)", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DATALENGTH", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var postgresMin = new PostgreSqlQueryRenderer().Render(new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(guid),
+            Paging.None,
+            new ResultShape.Min(guid)));
+        Assert.Contains("::text", postgresMin.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ROW_NUMBER", postgresMin.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var mongoMin = new MongoQueryRenderer().Render(new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(text),
+            Paging.None,
+            new ResultShape.Min(text)));
+        var mongoText = string.Join("\n", mongoMin.Pipeline.Select(stage => stage.ToString()));
+        Assert.Contains("$function", mongoText, StringComparison.Ordinal);
+        Assert.Contains("$first", mongoText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void All_four_renderers_preserve_the_normalized_result_shape_and_order()
     {
         var request = Request(

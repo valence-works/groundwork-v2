@@ -48,10 +48,9 @@ The MongoDB provider performs the same inspect-only admission split at `OpenSess
 `InspectSchema` report classifies missing/invalid BSON fields and persisted derived-column
 algorithm metadata as `GW-RUNTIME-001` column drift, and missing/changed declared native indexes
 as `GW-RUNTIME-002` index drift. Column drift blocks the store; index drift is retained in the
-report and does not block opening. MongoDB currently has no provider query executor wired to the
-Q3 runtime gate, so this release documents that provider gap explicitly: Mongo query endpoints
-must call the shared `RuntimeCoverageGate` before execution to obtain dependent-shape refusal;
-extra native indexes are never used by the admission report to satisfy a declared index.
+report and does not block opening. Its LINQ query executor is wired through the shared
+`RuntimeCoverageGate` before native aggregation/find execution; extra native indexes are never
+used by the admission report to satisfy a declared index.
 
 Q3 refusal codes are preserved in the diagnostic message and include the suggested `[GwIndex(...)]`
 declaration. Roslyn requires compiler-valid diagnostic identifiers, so the emitted IDs use

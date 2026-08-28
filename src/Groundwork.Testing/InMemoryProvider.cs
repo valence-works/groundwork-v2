@@ -690,13 +690,53 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
             var selectedIndex = renderOptions.FindPinnedIndex()?.Name;
             if (request.Result is ResultShape.Reduction reduction)
             {
+                // A reduction's Distinct unit is the reduced value, not the raw source row. Keep
+                // the continuation boundary after de-duplication so a duplicate straddling two
+                // pages cannot consume or repeat a value.
+                if (request.Distinct && request.Paging.ContinuationToken is { } reductionToken)
+                {
+                    IReadOnlyList<QueryConstant> cursor;
+                    try
+                    {
+                        cursor = QueryContinuationToken.Decode(reductionToken, executionRequest, renderOptions);
+                    }
+                    catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
+                    {
+                        throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
+                    }
+                    rows = rows
+                        .GroupBy(row => row.TryGetValue(reduction.Column.Name, out var value) ? value : null)
+                        .Select(group => group.First())
+                        .Where(row => IsAfter(row, order, cursor))
+                        .ToList();
+                }
                 var reduced = ReduceRows(reduction, request, rows);
                 return QueryResultMaterializer.Materialize(request, renderOptions, [reduced], selectedIndex,
                     sourceIncludesRequestedOffset: true,
-                    sourceIncludesContinuation: true);
+                    sourceIncludesContinuation: true,
+                    sourceIncludesDistinct: true);
+            }
+            if (request.Distinct)
+            {
+                rows = DistinctRows(request, rows);
+                if (request.Paging.ContinuationToken is { } distinctToken)
+                {
+                    IReadOnlyList<QueryConstant> cursor;
+                    try
+                    {
+                        cursor = QueryContinuationToken.Decode(distinctToken, executionRequest, renderOptions);
+                    }
+                    catch (Exception exception) when (exception is ArgumentException or FormatException or OverflowException)
+                    {
+                        throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
+                    }
+                    rows = rows.Where(row => IsAfter(row, order, cursor)).ToList();
+                }
             }
             if (!request.Result.IncludesTotalCount)
-                return QueryResultMaterializer.Materialize(request, renderOptions, rows, selectedIndex, sourceIncludesRequestedOffset: false);
+                return QueryResultMaterializer.Materialize(request, renderOptions, rows, selectedIndex,
+                    sourceIncludesRequestedOffset: false,
+                    sourceIncludesDistinct: true);
 
             if (rows.Count == 0)
                 return new QueryMaterializedResult(Array.Empty<IReadOnlyDictionary<string, object?>>(), 0L, null, selectedIndex);
@@ -709,7 +749,8 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
                 : row).ToArray();
             return QueryResultMaterializer.Materialize(request, renderOptions, counted, selectedIndex,
                 sourceIncludesRequestedOffset: false,
-                sourceIncludesContinuation: !deferContinuation);
+                sourceIncludesContinuation: !deferContinuation,
+                sourceIncludesDistinct: true);
         }
     }
 
@@ -905,11 +946,31 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
                 values.Length == 0 ? null : values.Select(Convert.ToInt64).Aggregate(0L, checked((total, value) => total + value)),
             ResultShape.Sum when reduction.Column.Type == QueryType.Decimal =>
                 values.Length == 0 ? null : values.Select(Convert.ToDecimal).Aggregate(0m, checked((total, value) => total + value)),
-            ResultShape.Min => values.Length == 0 ? null : values.Min(),
-            ResultShape.Max => values.Length == 0 ? null : values.Max(),
+            ResultShape.Min => values.Length == 0 ? null : values.Aggregate((best, candidate) => CompareValues(candidate!, best!) < 0 ? candidate : best),
+            ResultShape.Max => values.Length == 0 ? null : values.Aggregate((best, candidate) => CompareValues(candidate!, best!) > 0 ? candidate : best),
             _ => throw new InvalidOperationException("The in-memory reduction column is not portable.")
         };
         return new Dictionary<string, object?>(StringComparer.Ordinal) { [reduction.Column.Name] = result };
+    }
+
+    private static List<IReadOnlyDictionary<string, object?>> DistinctRows(
+        QueryRequest request,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<IReadOnlyDictionary<string, object?>>(rows.Count);
+        foreach (var row in rows)
+        {
+            var fields = request.Projection.AllColumns
+                ? row.Where(pair => !pair.Key.StartsWith("__groundwork_", StringComparison.Ordinal))
+                    .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                : request.Projection.Columns.Select(column => new KeyValuePair<string, object?>(
+                    column.Name, row.TryGetValue(column.Name, out var value) ? value : null));
+            var identity = string.Join("|", fields.Select(pair => pair.Key + "=" + ValueIdentity(pair.Value)));
+            if (seen.Add(identity))
+                result.Add(row);
+        }
+        return result;
     }
 
     private static string CompositeIdentity(

@@ -59,7 +59,8 @@ public static class QueryResultMaterializer
         string? selectedIndex = null,
         bool indexHintApplied = false,
         bool sourceIncludesRequestedOffset = true,
-        bool sourceIncludesContinuation = true)
+        bool sourceIncludesContinuation = true,
+        bool sourceIncludesDistinct = false)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
@@ -82,6 +83,19 @@ public static class QueryResultMaterializer
                     "A native reduction must materialize exactly one provider result row.");
             var reduced = effectiveSource[0];
 
+            // An Int32 Sum has an Int64 public result even though the source column remains
+            // Int32. Providers widen the native aggregate before decoding where possible; keep
+            // this final seam defensive so a provider returning a boxed Int32 cannot reintroduce
+            // overflow or leak the source type through the scalar result.
+            if (request.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
+                reduced.TryGetValue(sum.Column.Name, out var sumValue) && sumValue is not null)
+            {
+                var normalized = Convert.ToInt64(sumValue, CultureInfo.InvariantCulture);
+                var normalizedRow = reduced.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                normalizedRow[sum.Column.Name] = normalized;
+                reduced = normalizedRow;
+            }
+
             var fields = request.Projection.AllColumns
                 ? reduced.Where(pair => !IsInternalField(pair.Key))
                 : request.Projection.Columns
@@ -96,17 +110,17 @@ public static class QueryResultMaterializer
                 indexHintApplied);
         }
 
-        if (request.Distinct)
+        if (request.Distinct && !sourceIncludesDistinct)
             effectiveSource = DistinctRows(request, effectiveSource).ToArray();
 
         var totalCount = request.Result.IncludesTotalCount &&
             source.FirstOrDefault(row => row.TryGetValue("__groundwork_total_count", out var value) && value is not null) is { } counted &&
             counted.TryGetValue("__groundwork_total_count", out var count) && count is not null
-                ? request.Distinct && effectiveSource.Length != 0
+                ? request.Distinct && !sourceIncludesDistinct && effectiveSource.Length != 0
                     ? effectiveSource.Length
                     : Convert.ToInt64(count, CultureInfo.InvariantCulture)
                 : (long?)null;
-        if ((!sourceIncludesContinuation || request.Distinct) && request.Paging.ContinuationToken is { } token)
+        if ((!sourceIncludesContinuation || (request.Distinct && !sourceIncludesDistinct)) && request.Paging.ContinuationToken is { } token)
         {
             IReadOnlyList<QueryConstant> cursor;
             try
@@ -120,10 +134,12 @@ public static class QueryResultMaterializer
             var order = options.GetEffectiveOrder(executionRequest);
             effectiveSource = effectiveSource.Where(row => IsAfter(row, order, cursor)).ToArray();
         }
-        // A provider page is over raw rows. Distinct changes the page's unit to
-        // projected values, so the provider execution request deliberately leaves
-        // this window unpaged and the materializer applies it after de-duplication.
-        var offset = sourceIncludesRequestedOffset && !request.Distinct ? 0 : request.Paging.Offset ?? 0;
+        // Providers apply Distinct and its page natively and return one look-ahead row; the
+        // materializer owns only the final public projection and continuation token.
+        var providerAppliedDistinctWindow = request.Distinct && sourceIncludesDistinct;
+        var offset = sourceIncludesRequestedOffset && (!request.Distinct || providerAppliedDistinctWindow)
+            ? 0
+            : request.Paging.Offset ?? 0;
         var limit = request.Result.MaxRows is int maxRows
             ? request.Paging.Limit is int requestedLimit ? Math.Min(requestedLimit, maxRows) : maxRows
             : request.Paging.Limit;
@@ -314,8 +330,8 @@ public static class QueryRequestExecution
 
     /// <summary>
     /// Builds a provider execution request that answers a count with the provider's total-count
-    /// shape. Distinct counts retain the full source so projected values can be de-duplicated
-    /// before the total is materialized; ordinary counts use a single-row probe.
+    /// shape. Distinct counts retain their Distinct flag so each provider can de-duplicate in its
+    /// native command before counting; ordinary counts use a single-row probe.
     /// </summary>
     public static QueryRequest ForProviderCount(QueryRequest request)
     {
@@ -372,8 +388,8 @@ public static class QueryRequestExecution
     }
 
     /// <summary>
-    /// Builds the provider page request. Distinct queries fetch the ordered source without a
-    /// raw-row window because their offset and limit apply only after projected values are deduped.
+    /// Builds the provider page request. Native providers apply Distinct before the page window;
+    /// the extra row remains the look-ahead used to issue a continuation token.
     /// </summary>
     public static QueryRequest ForProviderPage(QueryRequest request, QueryRenderOptions options)
     {
@@ -392,7 +408,9 @@ public static class QueryRequestExecution
         if (!projection.AllColumns)
         {
             var columns = projection.Columns.ToList();
-            foreach (var term in order)
+            foreach (var term in order.Where(term => !request.Distinct ||
+                         options.SearchKeyColumns.Values.Any(mapping =>
+                             string.Equals(mapping.PhysicalColumn, term.Column.Name, StringComparison.Ordinal))))
             {
                 if (!columns.Any(column => string.Equals(column.Name, term.Column.Name, StringComparison.Ordinal)))
                     columns.Add(term.Column);
@@ -400,10 +418,8 @@ public static class QueryRequestExecution
             projection = Projection.ColumnsOnly(columns);
         }
 
-        var paging = request.Distinct
-            ? Paging.None
-            : request.Paging;
-        if (!request.Distinct && request.Paging.Limit is int limit)
+        var paging = request.Paging;
+        if (request.Paging.Limit is int limit)
         {
             var expandedLimit = request.Result.MaxRows is int maxRows
                 ? Math.Min(limit, maxRows)
@@ -414,7 +430,7 @@ public static class QueryRequestExecution
                     ? Paging.OffsetLimit(offset, expandedLimit)
                     : Paging.Keyset(expandedLimit);
         }
-        else if (!request.Distinct && request.Result.MaxRows is int maxRows)
+        else if (request.Result.MaxRows is int maxRows)
         {
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, maxRows)

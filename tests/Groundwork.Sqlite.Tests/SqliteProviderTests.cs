@@ -949,6 +949,15 @@ public sealed class SqliteProviderTests
         Assert.True(await table.Query.Where(ticket => ticket.Display == "miss").AnyAsync(executor));
         Assert.False(await table.Query.Where(ticket => ticket.Display == "absent").AnyAsync(executor));
 
+        var distinct = await executor.ToListAsync<string?>(table.Query
+            .Where(ticket => ticket.Display == "hit" || ticket.Display == "miss")
+            .OrderBy(ticket => ticket.Display)
+            .Select(ticket => ticket.Display)
+            .Distinct()
+            .Take(2)
+            .ToQueryRequest());
+        Assert.Equal(["hit", "miss"], distinct);
+
         var cancelled = new CancellationToken(canceled: true);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.ToListAsync(executor, cancelled));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => table.Query.CountAsync(executor, cancelled));

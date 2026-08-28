@@ -92,13 +92,17 @@ internal sealed class PostgreSqlStorageSession : IStorageSession, IProviderBound
         var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
         {
             if (name == "__groundwork_total_count") return value;
+            if (executionSource.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
+                string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
+                return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
             var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
             return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
         }, activeTransaction ?? transaction, mode).ConfigureAwait(false);
         await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
+            sourceIncludesContinuation: true,
+            sourceIncludesDistinct: true);
     });
 
     public CrossScopeQueryResult QueryAcrossScopes(
