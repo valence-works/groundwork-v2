@@ -300,10 +300,45 @@ jobs:
             8.0.x
             10.0.x
       - run: dotnet restore tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
-      - name: Run SQL Server conformance suite
+      # Run the target frameworks explicitly and serially. The W2 harness saturates the one SQL
+      # Server container, so parallel TFMs measure container capacity rather than runtime behavior.
+      - name: Run SQL Server conformance suite (net8.0)
         env:
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj --no-restore --configuration Release
+        run: >-
+          dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
+          --no-restore --configuration Release --framework net8.0
+          --logger "trx;LogFileName=sqlserver-conformance-net8.0.trx"
+          --results-directory artifacts/sqlserver-conformance
+      - name: Run SQL Server conformance suite (net10.0)
+        env:
+          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
+        run: >-
+          dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
+          --no-restore --configuration Release --framework net10.0
+          --logger "trx;LogFileName=sqlserver-conformance-net10.0.trx"
+          --results-directory artifacts/sqlserver-conformance
+      - name: Refuse a run whose SQL Server W2 proofs did not execute
+        run: |
+          proof="Groundwork.SqlServer.Tests.SqlServerProviderTests.W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix"
+          for tfm in net8.0 net10.0; do
+            results="artifacts/sqlserver-conformance/sqlserver-conformance-$tfm.trx"
+            passed=$(grep -o "testName=\"$proof\"[^>]*outcome=\"Passed\"" "$results" | wc -l || true)
+            notExecuted=$(grep -o "testName=\"$proof\"[^>]*outcome=\"NotExecuted\"" "$results" | wc -l || true)
+            echo "[$tfm] SQL Server W2 passed: $passed, not executed: $notExecuted"
+            if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ]; then
+              echo "::error::[$tfm] The SQL Server W2 proof did not execute exactly once." >&2
+              exit 1
+            fi
+          done
+      - name: Upload SQL Server conformance diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlserver-conformance-diagnostics
+          path: artifacts/sqlserver-conformance/**
+          if-no-files-found: ignore
+          retention-days: 14
 
   provider-infrastructure:
     runs-on: ubuntu-latest
@@ -533,20 +568,6 @@ jobs:
         with:
           name: w2-diagnostics
           path: tests/Groundwork.Concurrency.Tests/TestResults/**
-          if-no-files-found: ignore
-      - name: Run SQL Server W2 concurrency conformance
-        env:
-          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: >-
-          dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
-          --no-restore --configuration Release --filter "W2"
-          --logger "trx;LogFileName=w2-sqlserver.trx"
-      - name: Upload SQL Server W2 diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: w2-sqlserver-diagnostics
-          path: tests/Groundwork.SqlServer.Tests/TestResults/**
           if-no-files-found: ignore
       - name: Run W1 native provider-command proof across all providers
         env:
