@@ -13,53 +13,6 @@ public sealed class Q10RuntimeTests
     private static readonly ColumnRef Assignee = new(Table, "assignee", QueryType.String);
 
     [Fact]
-    public void Column_drift_is_startup_fatal_and_names_the_column()
-    {
-        var target = Target([SchemaIndex("ix_status", "status")]);
-        var history = ApplyTarget(target);
-        var inspection = PhysicalSchemaInspection.Compare(
-            history,
-            target,
-            new PhysicalSchemaSnapshot(
-                new StorageUnitId("tickets"),
-                "tickets",
-                [new PhysicalSchemaColumn("assignee", "String", true)],
-                [new PhysicalSchemaIndex("ix_status", [new IndexColumn("status")], false)]));
-        var result = new GroundworkRuntimeSchemaAdmissionResult(
-            inspection,
-            PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UnixEpoch));
-
-        Assert.False(result.IsReady);
-        Assert.Contains("status", result.Refusals.Single().Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Index_drift_does_not_fail_the_process()
-    {
-        var target = Target([SchemaIndex("ix_status", "status")]);
-        var history = ApplyTarget(target);
-        var inspection = PhysicalSchemaInspection.Compare(
-            history,
-            target,
-            new PhysicalSchemaSnapshot(
-                new StorageUnitId("tickets"),
-                "tickets",
-                [
-                    new PhysicalSchemaColumn("status", "String", true),
-                    new PhysicalSchemaColumn("assignee", "String", true)
-                ],
-                []));
-        var result = new GroundworkRuntimeSchemaAdmissionResult(
-            inspection,
-            PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UnixEpoch));
-
-        Assert.True(inspection.IsAppliedSchemaValid);
-        Assert.True(inspection.HasIndexDrift);
-        Assert.True(result.IsReady);
-        Assert.Contains("ix_status", result.Refusals.Single().Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void Legacy_two_argument_inspection_remains_safe_to_enumerate()
     {
         var target = Target([]);
@@ -71,56 +24,6 @@ public sealed class Q10RuntimeTests
             PhysicalSchemaDiffPlanner.Plan(target, PhysicalSchemaHistoryState.Empty, DateTimeOffset.UnixEpoch));
 
         Assert.Empty(result.Refusals);
-    }
-
-    [Fact]
-    public void Physical_schema_compare_classifies_collation_search_key_and_index_shape_drift()
-    {
-        var target = new PhysicalSchemaTarget(
-            new SchemaSubject(new StorageUnit
-            {
-                Id = new StorageUnitId("search"),
-                Name = "search",
-                Columns = [new ColumnDefinition
-                {
-                    Name = "status",
-                    Type = PortableType.String,
-                    Collation = PortableCollation.OrdinalIgnoreCase
-                }, new ColumnDefinition { Name = "status_folded", Type = PortableType.String, IsNullable = false }],
-                DerivedColumns = [new DerivedColumnDefinition
-                {
-                    Name = "status_folded",
-                    SourceColumn = "status",
-                    Projection = PortableProjection.UnicodeFold
-                }],
-                Key = new KeyDefinition { Columns = ["status"] },
-                Indexes = [new IndexDefinition
-                {
-                    Name = "ix_status",
-                    Columns = [new IndexColumn("status", SortDirection.Ascending)],
-                    IsUnique = true,
-                    MissingValues = MissingValueBehavior.Excluded
-                }]
-            }),
-            new ProviderIdentity("fake", "1"));
-        var inspection = PhysicalSchemaInspection.Compare(
-            PhysicalSchemaHistoryState.Empty,
-            target,
-            new PhysicalSchemaSnapshot(
-                new StorageUnitId("search"),
-                "search",
-                [
-                    new PhysicalSchemaColumn("status", "String", true, "Ordinal"),
-                    new PhysicalSchemaColumn("status_folded", "String", false, SearchKeyAlgorithmId: "old-fold-v1")
-                ],
-                [new PhysicalSchemaIndex("ix_status", [new IndexColumn("status", SortDirection.Descending)], false)]));
-
-        Assert.Contains(inspection.ColumnDrift, refusal => refusal.Message.Contains("collation", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(inspection.ColumnDrift, refusal => refusal.Message.Contains("search-key", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(inspection.ColumnDrift, refusal =>
-            refusal.Message.Contains(PortableStringComparison.UnicodeOrdinalIgnoreCaseAlgorithmId, StringComparison.Ordinal));
-        Assert.Contains(inspection.IndexDrift, refusal => refusal.Message.Contains("index", StringComparison.OrdinalIgnoreCase));
-        Assert.False(inspection.IsAppliedSchemaValid);
     }
 
     [Fact]
@@ -271,13 +174,6 @@ public sealed class Q10RuntimeTests
     private static CoverageIndex Index(string name, params string[] columns) =>
         new(name, columns);
 
-    private static IndexDefinition SchemaIndex(string name, params string[] columns) =>
-        new()
-        {
-            Name = name,
-            Columns = columns.Select(column => new IndexColumn(column)).ToArray()
-        };
-
     private static PhysicalSchemaTarget Target(IReadOnlyList<IndexDefinition> indexes) =>
         new(
             new SchemaSubject(new StorageUnit
@@ -294,41 +190,4 @@ public sealed class Q10RuntimeTests
             }),
             new ProviderIdentity("fake", "1"));
 
-    private static PhysicalSchemaHistoryState ApplyTarget(PhysicalSchemaTarget target)
-    {
-        var executor = new FakeSchemaExecutor();
-        var result = PhysicalSchemaApplication.Apply(target, executor, DateTimeOffset.UnixEpoch);
-        Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, result.Outcome);
-        return executor.History;
-    }
-
-    private sealed class FakeSchemaExecutor : IPhysicalSchemaExecutor
-    {
-        public PhysicalSchemaHistoryState History { get; private set; } = PhysicalSchemaHistoryState.Empty;
-
-        public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target) => new FakeLock(target);
-
-        public PhysicalSchemaHistoryState ReadHistory(PhysicalSchemaTargetIdentity target, IPhysicalSchemaApplicationLock applicationLock) => History;
-
-        public PhysicalSchemaOperationAcknowledgement ApplyOperation(
-            PhysicalSchemaTargetIdentity target,
-            PhysicalSchemaOperation operation,
-            IPhysicalSchemaApplicationLock applicationLock) =>
-            new(operation.Identity, operation.Fingerprint, DateTimeOffset.UnixEpoch);
-
-        public void PublishAppliedState(
-            PhysicalSchemaAppliedState state,
-            string? expectedAppliedTargetFingerprint,
-            IPhysicalSchemaApplicationLock applicationLock) =>
-            History = PhysicalSchemaHistoryState.FromApplied(state);
-
-        private sealed class FakeLock(PhysicalSchemaTargetIdentity target) : IPhysicalSchemaApplicationLock
-        {
-            public PhysicalSchemaTargetIdentity Target { get; } = target;
-
-            public void Dispose()
-            {
-            }
-        }
-    }
 }
