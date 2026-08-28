@@ -339,13 +339,26 @@ internal static class OnAppendRetentionCoordinator
     /// Registers an appender before it enters a provider write gate. The last concurrent
     /// appender drains the shared dirty signal after every registered write has committed.
     /// </summary>
-    internal static AppendRegistration Begin(object owner, StorageUnit unit, string? scope)
+    internal static AppendRegistration Begin(
+        object owner,
+        StorageUnit unit,
+        string? scope,
+        Action? onRegistered = null)
     {
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(unit);
         var state = State(owner, unit, scope);
         Interlocked.Increment(ref state.Appenders);
-        return new AppendRegistration(state);
+        try
+        {
+            onRegistered?.Invoke();
+            return new AppendRegistration(state);
+        }
+        catch
+        {
+            Interlocked.Decrement(ref state.Appenders);
+            throw;
+        }
     }
 
     private static DrainState State(object owner, StorageUnit unit, string? scope)

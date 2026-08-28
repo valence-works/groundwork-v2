@@ -1253,8 +1253,11 @@ internal sealed class SqliteStorageSession : IStorageSession, IProviderBoundStor
     private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "write");
+        Action? onRegistered = commandObserver is IOnAppendRegistrationObserver registrationObserver
+            ? registrationObserver.OnAppendRegistered
+            : null;
         return eligible && transaction is null
-            ? OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value)
+            ? OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value, onRegistered)
             : null;
     }
 
