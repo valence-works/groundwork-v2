@@ -75,11 +75,13 @@ public sealed class LinqExecutorTests
         using var fixture = Fixture.Open();
 
         var scalar = await fixture.Table.Query
+            .Where(ticket => ticket.Status == "open")
             .OrderBy(ticket => ticket.Status)
             .Select(ticket => ticket.Status)
             .Distinct()
             .FirstAsync(fixture.Executor);
         var record = await fixture.Table.Query
+            .Where(ticket => ticket.Status == "open")
             .OrderBy(ticket => ticket.Status)
             .Select(ticket => new StatusRecord(ticket.Status))
             .Distinct()
@@ -102,7 +104,8 @@ public sealed class LinqExecutorTests
         var query = fixture.Table.Query
             .OrderBy(ticket => ticket.Status)
             .Select(ticket => ticket.Status)
-            .Distinct();
+            .Distinct()
+            .AcceptScan("GW-SCAN-DISTINCT", "distinct paging test", "query-tests", new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero));
 
         var page = await fixture.Executor.ToListAsync<string>(query.Take(2).ToQueryRequest());
         Assert.Equal(["closed", "open"], page);
@@ -176,6 +179,32 @@ public sealed class LinqExecutorTests
 
         Assert.Equal(["Ake", "Zebra"], first.Rows.Select(row => row["status"]));
         Assert.Equal(["Åke", "Äke"], second.Rows.Select(row => row["status"]));
+    }
+
+    [Fact]
+    public async Task Executor_distinct_continuation_preserves_provider_locale_ordering()
+    {
+        using var fixture = Fixture.Open(localeOrder: true);
+        var table = new TableId(Fixture.TableName);
+        var status = new ColumnRef(table, "status", QueryType.String, true, 32);
+        QueryRequest Request(Paging paging) => new(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(status, OrderDirection.Ascending, NullOrder.First)],
+            Projection.ColumnsOnly(status),
+            paging,
+            ResultShape.Rows.Instance,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-DISTINCT-LOCALE",
+                "distinct continuation test",
+                "query-tests",
+                new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero)),
+            distinct: true);
+
+        var first = fixture.Session.Query(Request(Paging.Keyset(2)));
+        var second = await fixture.Executor.ToListAsync<string>(Request(Paging.Continuation(first.NextContinuationToken!, 2)));
+
+        Assert.Equal(["Åke", "Äke"], second);
     }
 
     [Fact]

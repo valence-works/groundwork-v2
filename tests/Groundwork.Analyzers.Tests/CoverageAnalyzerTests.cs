@@ -204,7 +204,7 @@ public sealed class CoverageAnalyzerTests
     public async Task Distinct_projection_is_covered_by_an_index_on_the_projected_column()
     {
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
-            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new { t.Status }).Distinct().Take(1).ToListAsync();"));
+            QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).OrderBy(t => t.Status).Select(t => new { t.Status }).Distinct().Take(1).ToListAsync();"));
 
         Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
     }
@@ -255,7 +255,7 @@ public sealed class CoverageAnalyzerTests
         var source = QuerySource("""
             public sealed class StatusDto { public string Status { get; set; } = ""; }
             public sealed class ConstructorStatusDto { public ConstructorStatusDto(string status) { Status = status; } public string Status { get; } }
-            var initialized = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new StatusDto { Status = t.Status }).Distinct().Take(1).ToListAsync();
+            var initialized = db.Table<Ticket>().Where(t => t.Status == "open").OrderBy(t => t.Status).Select(t => new StatusDto { Status = t.Status }).Distinct().Take(1).ToListAsync();
             var constructed = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new ConstructorStatusDto(t.Status)).FirstAsync();
             """);
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + source);
@@ -267,7 +267,7 @@ public sealed class CoverageAnalyzerTests
     public async Task Distinct_projection_without_a_covering_index_reports_the_projection_refusal()
     {
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
-            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new { t.Status }).Distinct().Take(1).ToListAsync();"));
+            QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).Select(t => new { t.Status }).Distinct().ToListAsync();"));
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
         Assert.Contains("not index-covered", diagnostic.GetMessage(), StringComparison.Ordinal);

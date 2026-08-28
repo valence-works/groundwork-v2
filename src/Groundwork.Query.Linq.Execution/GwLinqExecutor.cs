@@ -85,9 +85,8 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var result = await ExecuteDistinctAwareAsync(request,
-            request.Distinct ? DistinctSourceRequest(request) : QueryRequestExecution.ForResultShape(request),
-            cancellationToken).ConfigureAwait(false);
+        var result = await ExecuteAsync(request, QueryRequestExecution.ForResultShape(request), cancellationToken)
+            .ConfigureAwait(false);
         var materialize = LinqRowMaterializer.For(model, request.Projection);
         var rows = new T[result.Rows.Count];
         for (var index = 0; index < rows.Length; index++)
@@ -106,34 +105,10 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
     public async Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var result = await ExecuteDistinctAwareAsync(request,
-                request.Distinct ? DistinctSourceRequest(request) : QueryRequestExecution.ForExistenceProbe(request),
-                cancellationToken)
+        var result = await ExecuteAsync(request, QueryRequestExecution.ForExistenceProbe(request), cancellationToken)
             .ConfigureAwait(false);
         return result.Rows.Count != 0;
     }
-
-    private async Task<QueryMaterializedResult> ExecuteDistinctAwareAsync(
-        QueryRequest request,
-        QueryRequest executed,
-        CancellationToken cancellationToken)
-    {
-        var result = await ExecuteAsync(request, executed, cancellationToken).ConfigureAwait(false);
-        return request.Distinct
-            ? QueryResultMaterializer.Materialize(
-                request,
-                QueryRenderOptions.Default,
-                result.Rows,
-                result.SelectedIndex,
-                result.IndexHintApplied,
-                sourceIncludesRequestedOffset: false,
-                sourceIncludesContinuation: false)
-            : result;
-    }
-
-    private static QueryRequest DistinctSourceRequest(QueryRequest request) =>
-        new(request.Table, request.Where, request.Order, request.Projection,
-            Paging.None, ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan, distinct: true);
 
     /// <summary>
     /// Admits the request the caller actually wrote — not the narrowed count or existence probe

@@ -235,7 +235,7 @@ public sealed class CoverageCheckerTests
     public void Bounded_distinct_projection_is_covered_when_all_projected_columns_are_indexed()
     {
         var result = Check(
-            Predicate.AlwaysTrue.Instance,
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
             [new OrderTerm(Status, OrderDirection.Ascending, NullOrder.Last)],
             Paging.OffsetLimit(0, 1),
             Index("ix_status", "status"),
@@ -253,6 +253,21 @@ public sealed class CoverageCheckerTests
             Predicate.AlwaysTrue.Instance,
             [],
             Paging.None,
+            Index("ix_status", "status"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Bounded_order_does_not_admit_an_unfiltered_distinct_scan()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Status, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.OffsetLimit(0, 1),
             Index("ix_status", "status"),
             projection: Projection.ColumnsOnly(Status),
             distinct: true);
@@ -298,9 +313,8 @@ public sealed class CoverageCheckerTests
             distinct: true);
 
         Assert.False(result.IsCovered);
-        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
-        Assert.Contains("Distinct requires every projected column", result.Refusal.Message, StringComparison.Ordinal);
-        Assert.Contains("status", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+        Assert.Contains("unbounded Distinct", result.Refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

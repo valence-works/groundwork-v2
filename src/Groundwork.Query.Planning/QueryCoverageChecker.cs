@@ -21,8 +21,6 @@ public static class QueryCoverageChecker
             throw new ArgumentException("Index candidates cannot contain null references.", nameof(indexes));
 
         var constraints = ConstraintSet.Create(request.Where);
-        var hasBoundedOrder = request.Order.Length != 0 &&
-            ((request.Paging.Limit is int limit && limit > 0) || request.Result.MaxRows is int resultLimit && resultLimit > 0);
         var hasNonportableOrder = request.Order.Any(order =>
             order.NullOrder == NullOrder.ProviderDefault ||
             order.Column.Type is QueryType.Boolean or QueryType.Double or QueryType.Binary);
@@ -74,8 +72,8 @@ public static class QueryCoverageChecker
             refusals.Add(new Refusal("GW-COVER-016", "The query contains a predicate that cannot be represented by an ordered index."));
         if (request.Result.IncludesTotalCount && !constraints.HasBound && !request.Distinct)
             refusals.Add(new Refusal("GW-COVER-005", "An unbounded Count is not index-covered; full counts are scans."));
-        if (request.Distinct && !constraints.HasBound && !hasBoundedOrder)
-            refusals.Add(new Refusal("GW-COVER-005", "An unbounded Distinct is not index-covered; add a predicate or bounded order, or explicitly accept the scan."));
+        if (request.Distinct && !constraints.HasBound)
+            refusals.Add(new Refusal("GW-COVER-005", "An unbounded Distinct is not index-covered; add an equality/range predicate or explicitly accept the scan."));
         if (!constraints.HasBound && request.Order.Length == 0 && !request.Distinct)
             refusals.Add(new Refusal("GW-COVER-005", "An unfiltered query has no index bound."));
 
