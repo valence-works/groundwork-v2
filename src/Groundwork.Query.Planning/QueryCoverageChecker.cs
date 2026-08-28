@@ -62,6 +62,12 @@ public static class QueryCoverageChecker
             refusals.Add(new Refusal(
                 "GW-COVER-016",
                 "First and FirstOrDefault queries require an explicit deterministic order; add an OrderBy term."));
+        if (request.Result is ResultShape.Sum sum && !IsSumType(sum.Column.Type))
+            refusals.Add(new Refusal("GW-COVER-016", "Sum requires an Int32, Int64, or Decimal reduction column."));
+        if (request.Result is ResultShape.Reduction reduction &&
+            (request.Result is ResultShape.Min || request.Result is ResultShape.Max) &&
+            !IsOrderable(reduction.Column.Type))
+            refusals.Add(new Refusal("GW-COVER-016", "Min and Max require an orderable reduction column."));
         if (constraints.HasUnsupportedRange)
             refusals.Add(new Refusal(
                 "GW-COVER-016",
@@ -231,6 +237,14 @@ public static class QueryCoverageChecker
                 Priority: 1);
         }
 
+        if (request.Result is ResultShape.Reduction reduction && !ColumnIsCovered(reduction.Column, index))
+        {
+            return new Refusal(
+                "GW-COVER-006",
+                "The reduction column '" + reduction.Column.Name + "' is not present in the candidate index; add it to the index or explicitly accept the scan.",
+                Priority: 1);
+        }
+
         var hasBoundedOrder = request.Order.Length != 0 &&
             ((request.Paging.Limit is int limit && limit > 0) || request.Result.MaxRows is int resultLimit && resultLimit > 0);
         if (!constraints.HasBound && !hasBoundedOrder)
@@ -248,6 +262,15 @@ public static class QueryCoverageChecker
         !projection.AllColumns && projection.Columns.Length != 0 &&
         projection.Columns.All(column => index.Columns.Any(indexColumn =>
             string.Equals(indexColumn.Column, column.Name, StringComparison.Ordinal)));
+
+    private static bool ColumnIsCovered(ColumnRef column, CoverageIndex index) =>
+        index.Columns.Any(indexColumn => string.Equals(indexColumn.Column, column.Name, StringComparison.Ordinal));
+
+    private static bool IsSumType(QueryType type) => type is QueryType.Int32 or QueryType.Int64 or QueryType.Decimal;
+
+    private static bool IsOrderable(QueryType type) => type is
+        QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or
+        QueryType.DateTimeOffset or QueryType.Guid;
 
     private static SortResolution? ResolveSortStart(
         CoverageIndex index,
@@ -329,6 +352,8 @@ public static class QueryCoverageChecker
             foreach (var projection in request.Projection.Columns)
                 AddSuggestedColumn(columns, projection.Name, request.Order);
         }
+        if (request.Result is ResultShape.Reduction reduction)
+            AddSuggestedColumn(columns, reduction.Column.Name, request.Order);
         if (columns.Count == 0)
             columns.Add(new CoverageIndexColumn("<query-bound>"));
         return new CoverageIndex("ix_" + request.Table.Value.Replace(' ', '_'), columns);
@@ -356,6 +381,9 @@ public static class QueryCoverageChecker
         for (var i = 0; i < request.Order.Length && i < index.Columns.Length; i++)
             if (string.Equals(request.Order[i].Column.Name, index.Columns[i].Column, StringComparison.Ordinal))
                 score += 5;
+        if (request.Result is ResultShape.Reduction reduction &&
+            index.Columns.Any(column => string.Equals(column.Column, reduction.Column.Name, StringComparison.Ordinal)))
+            score += 10;
         return score;
     }
 

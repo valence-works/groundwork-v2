@@ -2,9 +2,12 @@
 
 A **closed** LINQ front-end: `IGwQueryable<T>`, with `Table<T>()`, `Where`, `WhereIf`, ordering,
 `Skip`/`Take`, mapped-column `Select`, `Distinct`, and the `ToList`/`ToListAsync`,
-`Count`/`CountAsync`, `Any`/`AnyAsync`, `First`/`FirstOrDefault`, and `Single`/`SingleOrDefault`
-terminals. `First` and `FirstOrDefault` require an explicit deterministic order; `Single` and
-`SingleOrDefault` use a bounded over-one probe.
+`Count`/`CountAsync`, `Any`/`AnyAsync`, `First`/`FirstOrDefault`, `Single`/`SingleOrDefault`,
+`Sum`/`SumAsync`, `Min`/`MinAsync`, and `Max`/`MaxAsync` terminals. `First` and `FirstOrDefault`
+require an explicit deterministic order; `Single` and `SingleOrDefault` use a bounded over-one
+probe. Reductions select one mapped column: `Sum` accepts `Int32`, `Int64`, and `Decimal` (integer
+results are `Int64`), while `Min` and `Max` accept orderable columns and return null for empty or
+all-null input when the result type is nullable.
 
 Deliberately *not* `IQueryable`. An open provider surface is what lets an expression compile
 happily and then fall back to client-side evaluation, or fail at runtime on one database and not

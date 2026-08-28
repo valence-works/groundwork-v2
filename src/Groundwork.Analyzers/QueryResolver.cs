@@ -12,25 +12,32 @@ internal sealed class QueryResolution
         ImmutableArray<QueryRequest> requests,
         string? failure,
         SyntaxNode diagnosticNode,
-        IfStatementSyntax? fixNode)
+        IfStatementSyntax? fixNode,
+        string? failureCode)
     {
         Requests = requests;
         Failure = failure;
         DiagnosticNode = diagnosticNode;
         FixNode = fixNode;
+        FailureCode = failureCode;
     }
 
     public ImmutableArray<QueryRequest> Requests { get; }
     public string? Failure { get; }
     public SyntaxNode DiagnosticNode { get; }
     public IfStatementSyntax? FixNode { get; }
+    public string? FailureCode { get; }
     public bool IsResolved => Failure is null;
 
     public static QueryResolution Resolved(IEnumerable<QueryRequest> requests, SyntaxNode node) =>
-        new(requests.ToImmutableArray(), null, node, null);
+        new(requests.ToImmutableArray(), null, node, null, null);
 
-    public static QueryResolution Unresolved(string failure, SyntaxNode node, IfStatementSyntax? fixNode = null) =>
-        new(ImmutableArray<QueryRequest>.Empty, failure, node, fixNode);
+    public static QueryResolution Unresolved(
+        string failure,
+        SyntaxNode node,
+        IfStatementSyntax? fixNode = null,
+        string? failureCode = null) =>
+        new(ImmutableArray<QueryRequest>.Empty, failure, node, fixNode, failureCode);
 }
 
 internal static class QueryResolver
@@ -39,7 +46,8 @@ internal static class QueryResolver
         ImmutableHashSet.Create(StringComparer.Ordinal,
             "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync",
             "First", "FirstOrDefault", "Single", "SingleOrDefault",
-            "FirstAsync", "FirstOrDefaultAsync", "SingleAsync", "SingleOrDefaultAsync");
+            "FirstAsync", "FirstOrDefaultAsync", "SingleAsync", "SingleOrDefaultAsync",
+            "Sum", "Min", "Max", "SumAsync", "MinAsync", "MaxAsync");
 
     /// <summary>
     /// Gate that keeps LINQ-shaped terminals on unrelated types out of the analysis: the receiver
@@ -230,7 +238,8 @@ internal static class QueryResolver
             return QueryResolution.Unresolved($"method '{name}' is outside the closed query surface", invocation);
         }
 
-        var (result, pagingOverride) = TerminalShape(terminal);
+        if (!TryTerminalShape(terminal, table, model, cancellationToken, out var result, out var pagingOverride, out var terminalFailure))
+            return QueryResolution.Unresolved(terminalFailure!, terminal, failureCode: "GW-LINQ-112");
         return QueryResolution.Resolved(
             BuildRequests(state, optionalPredicates, result, pagingOverride),
             terminal);
@@ -317,7 +326,8 @@ internal static class QueryResolver
                 return QueryResolution.Unresolved("reassignment shape enumeration is bounded at 32 shapes; use WhereIf or runtime coverage", ifStatement, ifStatement);
         }
 
-        var (result, pagingOverride) = TerminalShape(terminal);
+        if (!TryTerminalShape(terminal, table, model, cancellationToken, out var result, out var pagingOverride, out var terminalFailure))
+            return QueryResolution.Unresolved(terminalFailure!, terminal, failureCode: "GW-LINQ-112");
         return QueryResolution.Resolved(BuildRequests(state, optional, result, pagingOverride), terminal);
     }
 
@@ -333,20 +343,112 @@ internal static class QueryResolver
         return ResolveChain(initializer, chain, tableInvocation, tableType, model, schema, cancellationToken);
     }
 
-    /// <summary>Mirrors the runtime terminal semantics of count, existence, and cardinality terminals.</summary>
-    private static (ResultShape Result, Paging? PagingOverride) TerminalShape(InvocationExpressionSyntax terminal) =>
-        terminal.Expression is MemberAccessExpressionSyntax member
-            ? member.Name.Identifier.ValueText switch
-            {
-                "Count" or "CountAsync" => ((ResultShape)ResultShape.TotalCount.Instance, Paging.None),
-                "Any" or "AnyAsync" => (ResultShape.Rows.Instance, Paging.OffsetLimit(0, 1)),
-                "First" or "FirstAsync" => (ResultShape.First.Instance, Paging.OffsetLimit(0, 1)),
-                "FirstOrDefault" or "FirstOrDefaultAsync" => (ResultShape.FirstOrDefault.Instance, Paging.OffsetLimit(0, 1)),
-                "Single" or "SingleAsync" => (ResultShape.Single.Instance, Paging.OffsetLimit(0, 2)),
-                "SingleOrDefault" or "SingleOrDefaultAsync" => (ResultShape.SingleOrDefault.Instance, Paging.OffsetLimit(0, 2)),
-                _ => (ResultShape.Rows.Instance, null)
-            }
-            : (ResultShape.Rows.Instance, null);
+    /// <summary>Mirrors the runtime terminal semantics of the closed query surface.</summary>
+    private static bool TryTerminalShape(
+        InvocationExpressionSyntax terminal,
+        AnalyzerTable table,
+        SemanticModel model,
+        CancellationToken cancellationToken,
+        out ResultShape result,
+        out Paging? pagingOverride,
+        out string? failure)
+    {
+        result = ResultShape.Rows.Instance;
+        pagingOverride = null;
+        failure = null;
+        if (terminal.Expression is not MemberAccessExpressionSyntax member)
+            return true;
+
+        switch (member.Name.Identifier.ValueText)
+        {
+            case "Count":
+            case "CountAsync":
+                result = ResultShape.TotalCount.Instance;
+                pagingOverride = Paging.None;
+                return true;
+            case "Any":
+            case "AnyAsync":
+                result = ResultShape.Rows.Instance;
+                pagingOverride = Paging.OffsetLimit(0, 1);
+                return true;
+            case "First":
+            case "FirstAsync":
+                result = ResultShape.First.Instance;
+                pagingOverride = Paging.OffsetLimit(0, 1);
+                return true;
+            case "FirstOrDefault":
+            case "FirstOrDefaultAsync":
+                result = ResultShape.FirstOrDefault.Instance;
+                pagingOverride = Paging.OffsetLimit(0, 1);
+                return true;
+            case "Single":
+            case "SingleAsync":
+                result = ResultShape.Single.Instance;
+                pagingOverride = Paging.OffsetLimit(0, 2);
+                return true;
+            case "SingleOrDefault":
+            case "SingleOrDefaultAsync":
+                result = ResultShape.SingleOrDefault.Instance;
+                pagingOverride = Paging.OffsetLimit(0, 2);
+                return true;
+            case "Sum":
+            case "SumAsync":
+                return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
+                    static column => new ResultShape.Sum(column),
+                    static type => type is QueryType.Int32 or QueryType.Int64 or QueryType.Decimal,
+                    "Int32, Int64, or Decimal", out result, out failure);
+            case "Min":
+            case "MinAsync":
+                return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
+                    static column => new ResultShape.Min(column),
+                    IsOrderable,
+                    "orderable", out result, out failure);
+            case "Max":
+            case "MaxAsync":
+                return TryReductionShape(terminal, member.Name.Identifier.ValueText, table, model, cancellationToken,
+                    static column => new ResultShape.Max(column),
+                    IsOrderable,
+                    "orderable", out result, out failure);
+            default:
+                return true;
+        }
+    }
+
+    private static bool TryReductionShape(
+        InvocationExpressionSyntax terminal,
+        string operation,
+        AnalyzerTable table,
+        SemanticModel model,
+        CancellationToken cancellationToken,
+        Func<ColumnRef, ResultShape> shape,
+        Func<QueryType, bool> isSupported,
+        string supportedTypeDescription,
+        out ResultShape result,
+        out string? failure)
+    {
+        result = ResultShape.Rows.Instance;
+        failure = null;
+        var selector = terminal.ArgumentList.Arguments.LastOrDefault()?.Expression;
+        if (selector is null || !TryParseColumnLambda(selector, model, table, out var column, cancellationToken))
+        {
+            failure = operation + " requires a mapped, portable " + supportedTypeDescription + " column selector.";
+            return false;
+        }
+
+        var reference = ToColumnRef(column, table);
+        if (!isSupported(column.Type))
+        {
+            failure = operation + " requires an " + supportedTypeDescription + " column selector; '" + column.Name + "' is " + column.Type + ".";
+            return false;
+        }
+
+        result = shape(reference);
+        return true;
+    }
+
+    private static bool IsOrderable(QueryType type) => type is
+        QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or
+        QueryType.DateTimeOffset or QueryType.Guid;
 
     private static IEnumerable<QueryRequest> BuildRequests(
         QueryShapeState state,

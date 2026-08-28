@@ -139,6 +139,34 @@ public abstract record ResultShape
         public override int? MaxRows => 2;
         public override bool RequiresDeterministicOrder => false;
     }
+
+    /// <summary>Base for a scalar reduction over one mapped source column.</summary>
+    public abstract record Reduction : ResultShape
+    {
+        protected Reduction(ColumnRef column) =>
+            Column = column ?? throw new ArgumentNullException(nameof(column));
+
+        public ColumnRef Column { get; }
+        public override bool IncludesTotalCount => false;
+    }
+
+    /// <summary>Reduces a covered numeric column by addition.</summary>
+    public sealed record Sum : Reduction
+    {
+        public Sum(ColumnRef column) : base(column) { }
+    }
+
+    /// <summary>Reduces a covered orderable column to its smallest non-null value.</summary>
+    public sealed record Min : Reduction
+    {
+        public Min(ColumnRef column) : base(column) { }
+    }
+
+    /// <summary>Reduces a covered orderable column to its largest non-null value.</summary>
+    public sealed record Max : Reduction
+    {
+        public Max(ColumnRef column) : base(column) { }
+    }
 }
 
 public sealed record LatestPerKey
@@ -245,7 +273,11 @@ public static class QueryFingerprint
         builder.Append("|latest=").Append(request.LatestPerKey is null ? "none" : PredicateCanonicalizer.Column(request.LatestPerKey.Key) + ":" + PredicateCanonicalizer.Column(request.LatestPerKey.Timestamp));
         builder.Append("|scan=").Append(request.AcceptedScan?.Allowed == true ? "allow" : "refuse");
         if (includeResultShape)
+        {
             builder.Append("|result=").Append(request.Result.GetType().Name);
+            if (request.Result is ResultShape.Reduction reduction)
+                builder.Append(':').Append(PredicateCanonicalizer.Column(reduction.Column));
+        }
         return Sha256(builder.ToString());
     }
 

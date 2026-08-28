@@ -102,6 +102,30 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
 
     public LinqTerminal<T> SingleOrDefault() => new(CardinalityRequest(ResultShape.SingleOrDefault.Instance, 2));
 
+    public LinqTerminal<long> Sum(Expression<Func<T, int>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
+
+    public LinqTerminal<long?> Sum(Expression<Func<T, int?>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
+
+    public LinqTerminal<long> Sum(Expression<Func<T, long>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
+
+    public LinqTerminal<long?> Sum(Expression<Func<T, long?>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
+
+    public LinqTerminal<decimal> Sum(Expression<Func<T, decimal>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
+
+    public LinqTerminal<decimal?> Sum(Expression<Func<T, decimal?>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Sum(column), "Sum"));
+
+    public LinqTerminal<TResult> Min<TResult>(Expression<Func<T, TResult>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Min(column), "Min"));
+
+    public LinqTerminal<TResult> Max<TResult>(Expression<Func<T, TResult>> selector) =>
+        new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
+
     private GwTableModel<T> RequireModel() => model ?? throw new InvalidOperationException("A projection is terminal; apply filters and ordering before Select.");
     private GwQueryable<T> New(GwQueryState next) => new(model, executor, next);
 
@@ -116,6 +140,29 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         var boundedLimit = state.Take is int take ? Math.Min(take, limit) : limit;
         return new QueryRequest(state.Table, state.Where, state.Order, state.Projection,
             Paging.OffsetLimit(offset, boundedLimit), result, state.LatestPerKey, state.AcceptedScan, state.Distinct);
+    }
+
+    private QueryRequest ReductionRequest<TValue>(
+        Expression<Func<T, TValue>> selector,
+        Func<ColumnRef, ResultShape> shape,
+        string operation)
+    {
+        if (selector is null) throw new ArgumentNullException(nameof(selector));
+        var column = ExpressionLowerer.LowerColumn(selector, RequireModel());
+        if (operation == "Sum"
+            ? column.Type is not (QueryType.Int32 or QueryType.Int64 or QueryType.Decimal)
+            : column.Type is not (QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or QueryType.DateTimeOffset or QueryType.Guid))
+        {
+            throw new LinqTranslationException(new[]
+            {
+                new LinqDiagnostic("GW-LINQ-112", operation + " requires a mapped, portable " +
+                    (operation == "Sum" ? "numeric" : "orderable") + " column.", selector.Body)
+            });
+        }
+
+        return new QueryRequest(state.Table, state.Where, state.Order, Projection.ColumnsOnly(column),
+            state.Skip is null && state.Take is null ? Paging.None : Paging.OffsetLimit(state.Skip ?? 0, state.Take ?? int.MaxValue),
+            shape(column), state.LatestPerKey, state.AcceptedScan, state.Distinct);
     }
 
     private OrderTerm Order<TKey>(Expression<Func<T, TKey>> selector, OrderDirection direction)

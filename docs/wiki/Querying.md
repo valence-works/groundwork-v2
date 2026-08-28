@@ -25,9 +25,12 @@ translate, and tells you *at build time* when you've stepped outside it.
 
 Supported: `Where`, `WhereIf`, `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenByDescending`, `Skip`,
 `Take`, mapped-column `Select`, `Distinct`, `LatestPer`, `AcceptScan`, and the terminals `ToList`,
-`ToListAsync`, `Count`, `Any`, `CountAsync`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, and
-`SingleOrDefault` (plus their async adapter forms). `First` and `FirstOrDefault` require an explicit
-deterministic order; `Distinct` removes duplicate projected values before paging.
+`ToListAsync`, `Count`, `Any`, `CountAsync`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`,
+`SingleOrDefault`, `Sum`, `Min`, and `Max` (plus their async adapter forms). `First` and
+`FirstOrDefault` require an explicit deterministic order; `Distinct` removes duplicate projected
+values before paging. `Sum` is limited to mapped `Int32`, `Int64`, and `Decimal` columns (integer
+sums return `Int64`); `Min` and `Max` use mapped orderable columns, ignore nulls, and return null
+when no non-null value exists.
 
 `ToQueryRequest()` is the provider-neutral boundary:
 
@@ -75,6 +78,7 @@ call**. Unsupported expression nodes are rejected rather than evaluated on the c
 | `GW-LINQ-109` | Non-UTC clock | Use `DateTimeOffset.UtcNow` |
 | `GW-LINQ-110` | Decimal precision/scale overflow | The value exceeds the declared decimal |
 | `GW-LINQ-111` | First/FirstOrDefault without deterministic order | Add an explicit `OrderBy` before `First` or `FirstOrDefault` |
+| `GW-LINQ-112` | Sum/Min/Max selector is not a mapped portable column | Select a mapped numeric or orderable column |
 
 The predicate codes are locked by a **250-case conformance corpus** checked byte-for-byte in CI;
 the query-shape rows are covered by the model, lowering, and coverage suites so those contracts

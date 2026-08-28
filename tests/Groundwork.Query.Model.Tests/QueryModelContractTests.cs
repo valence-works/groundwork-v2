@@ -311,6 +311,66 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
+    public void Reduction_shapes_are_column_bound_and_part_of_the_shape_fingerprint()
+    {
+        var sum = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(Amount),
+            Paging.None,
+            new ResultShape.Sum(Amount));
+        var minimum = new QueryRequest(
+            Table,
+            sum.Where,
+            sum.Order,
+            Projection.ColumnsOnly(Name),
+            Paging.None,
+            new ResultShape.Min(Name));
+        var maximum = new QueryRequest(
+            Table,
+            sum.Where,
+            sum.Order,
+            Projection.ColumnsOnly(Name),
+            Paging.None,
+            new ResultShape.Max(Name));
+
+        Assert.Equal(Amount, Assert.IsType<ResultShape.Sum>(sum.Result).Column);
+        Assert.Equal(Name, Assert.IsType<ResultShape.Min>(minimum.Result).Column);
+        Assert.Equal(Name, Assert.IsType<ResultShape.Max>(maximum.Result).Column);
+        Assert.NotEqual(sum.ShapeFingerprint, minimum.ShapeFingerprint);
+        Assert.NotEqual(minimum.ShapeFingerprint, maximum.ShapeFingerprint);
+    }
+
+    [Fact]
+    public void Reduction_semantics_reject_unsupported_columns()
+    {
+        var boolean = new ColumnRef(Table, "enabled", QueryType.Boolean, isNullable: false);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(boolean),
+            Paging.None,
+            new ResultShape.Sum(boolean));
+
+        var refusal = Assert.Single(PortableQuerySemantics.Validate(request).Refusals);
+
+        Assert.Equal("GW-SEM-AGG-001", refusal.Code);
+        Assert.Contains("Sum", refusal.Message, StringComparison.Ordinal);
+
+        var min = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(Binary),
+            Paging.None,
+            new ResultShape.Min(Binary));
+        var minRefusal = Assert.Single(PortableQuerySemantics.Validate(min).Refusals);
+        Assert.Equal("GW-SEM-AGG-002", minRefusal.Code);
+    }
+
+    [Fact]
     public void Cardinality_validation_requires_an_explicit_order()
     {
         var request = new QueryRequest(

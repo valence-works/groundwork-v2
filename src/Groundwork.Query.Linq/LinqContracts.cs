@@ -134,6 +134,14 @@ public interface IGwQueryable<T>
     LinqTerminal<T> FirstOrDefault();
     LinqTerminal<T> Single();
     LinqTerminal<T> SingleOrDefault();
+    LinqTerminal<long> Sum(Expression<Func<T, int>> selector);
+    LinqTerminal<long?> Sum(Expression<Func<T, int?>> selector);
+    LinqTerminal<long> Sum(Expression<Func<T, long>> selector);
+    LinqTerminal<long?> Sum(Expression<Func<T, long?>> selector);
+    LinqTerminal<decimal> Sum(Expression<Func<T, decimal>> selector);
+    LinqTerminal<decimal?> Sum(Expression<Func<T, decimal?>> selector);
+    LinqTerminal<TResult> Min<TResult>(Expression<Func<T, TResult>> selector);
+    LinqTerminal<TResult> Max<TResult>(Expression<Func<T, TResult>> selector);
 }
 
 /// <summary>A query terminal carrying the provider-neutral request, ready for a runtime adapter.</summary>
@@ -203,6 +211,45 @@ public static class GwQueryAsyncExtensions
         return rows.Count == 0 ? default! : rows[0];
     }
 
+    public static Task<long> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, long>(query, executor, () => query.Sum(selector).Request, static rows => rows.Count == 0 ? 0L : rows[0], cancellationToken);
+
+    public static Task<long?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, int?>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, long?>(query, executor, () => query.Sum(selector).Request, static rows => rows.Count == 0 ? null : rows[0], cancellationToken);
+
+    public static Task<long> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, long>(query, executor, () => query.Sum(selector).Request, static rows => rows.Count == 0 ? 0L : rows[0], cancellationToken);
+
+    public static Task<long?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, long?>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, long?>(query, executor, () => query.Sum(selector).Request, static rows => rows.Count == 0 ? null : rows[0], cancellationToken);
+
+    public static Task<decimal> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, decimal>(query, executor, () => query.Sum(selector).Request, static rows => rows.Count == 0 ? 0m : rows[0], cancellationToken);
+
+    public static Task<decimal?> SumAsync<T>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, decimal?>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, decimal?>(query, executor, () => query.Sum(selector).Request, static rows => rows.Count == 0 ? null : rows[0], cancellationToken);
+
+    public static Task<TResult> MinAsync<T, TResult>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, TResult>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, TResult>(query, executor, () => query.Min(selector).Request, static rows => rows.Count == 0 ? default! : rows[0], cancellationToken);
+
+    public static Task<TResult> MaxAsync<T, TResult>(this IGwQueryable<T> query, IGwQueryExecutor executor, Expression<Func<T, TResult>> selector, CancellationToken cancellationToken = default) =>
+        ReduceAsync<T, TResult>(query, executor, () => query.Max(selector).Request, static rows => rows.Count == 0 ? default! : rows[0], cancellationToken);
+
+    private static async Task<TResult> ReduceAsync<T, TResult>(
+        IGwQueryable<T> query,
+        IGwQueryExecutor executor,
+        Func<QueryRequest> requestFactory,
+        Func<IReadOnlyList<TResult>, TResult> materialize,
+        CancellationToken cancellationToken)
+    {
+        if (query is null) throw new ArgumentNullException(nameof(query));
+        if (executor is null) throw new ArgumentNullException(nameof(executor));
+        if (requestFactory is null) throw new ArgumentNullException(nameof(requestFactory));
+        if (materialize is null) throw new ArgumentNullException(nameof(materialize));
+        var rows = await executor.ToListAsync<TResult>(requestFactory(), model: null, cancellationToken).ConfigureAwait(false);
+        return materialize(rows);
+    }
+
     private static Task<IReadOnlyList<T>> ReadCardinalityAsync<T>(IGwQueryable<T> query, IGwQueryExecutor executor, Func<QueryRequest> requestFactory, CancellationToken cancellationToken)
     {
         if (query is null) throw new ArgumentNullException(nameof(query));
@@ -264,4 +311,12 @@ public sealed class GwQueryTable<T> : IGwQueryable<T>
     public LinqTerminal<T> FirstOrDefault() => Root.FirstOrDefault();
     public LinqTerminal<T> Single() => Root.Single();
     public LinqTerminal<T> SingleOrDefault() => Root.SingleOrDefault();
+    public LinqTerminal<long> Sum(Expression<Func<T, int>> selector) => Root.Sum(selector);
+    public LinqTerminal<long?> Sum(Expression<Func<T, int?>> selector) => Root.Sum(selector);
+    public LinqTerminal<long> Sum(Expression<Func<T, long>> selector) => Root.Sum(selector);
+    public LinqTerminal<long?> Sum(Expression<Func<T, long?>> selector) => Root.Sum(selector);
+    public LinqTerminal<decimal> Sum(Expression<Func<T, decimal>> selector) => Root.Sum(selector);
+    public LinqTerminal<decimal?> Sum(Expression<Func<T, decimal?>> selector) => Root.Sum(selector);
+    public LinqTerminal<TResult> Min<TResult>(Expression<Func<T, TResult>> selector) => Root.Min(selector);
+    public LinqTerminal<TResult> Max<TResult>(Expression<Func<T, TResult>> selector) => Root.Max(selector);
 }

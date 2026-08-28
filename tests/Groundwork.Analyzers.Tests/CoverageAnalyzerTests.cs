@@ -264,6 +264,47 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Reduction_terminals_are_covered_for_sync_and_async_closed_surface_calls()
+    {
+        var source = WithSchema(
+            SchemaWithIndex("ix_status_amount", "status ASC, amount ASC", "ix_status_created", "status ASC, created_at ASC")) +
+            QuerySource("""
+                var sum = db.Table<Ticket>().Where(t => t.Status == status).Sum(t => t.Amount);
+                var minimum = db.Table<Ticket>().Where(t => t.Status == status).Min(t => t.CreatedAt);
+                var maximum = db.Table<Ticket>().Where(t => t.Status == status).Max(t => t.Amount);
+                var asyncSum = db.Table<Ticket>().Where(t => t.Status == status).SumAsync(executor, t => t.Amount);
+                var asyncMinimum = db.Table<Ticket>().Where(t => t.Status == status).MinAsync(executor, t => t.CreatedAt);
+                var asyncMaximum = db.Table<Ticket>().Where(t => t.Status == status).MaxAsync(executor, t => t.Amount);
+                """);
+
+        var diagnostics = await Analyze(source);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_LINQ_112");
+    }
+
+    [Fact]
+    public async Task Reduction_terminals_reject_non_orderable_columns()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Min(t => t.IsOpen);"));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_112");
+    }
+
+    [Fact]
+    public async Task Reduction_target_must_be_present_in_the_covering_index()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).Sum(t => t.Amount);"));
+
+        var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
+        Assert.Contains("reduction column", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Distinct_projection_without_a_covering_index_reports_the_projection_refusal()
     {
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
@@ -647,7 +688,9 @@ public sealed class CoverageAnalyzerTests
             "{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}," +
             "{\"name\":\"status\",\"type\":\"String\",\"nullable\":true}," +
             "{\"name\":\"other\",\"type\":\"String\",\"nullable\":true}," +
-            "{\"name\":\"created_at\",\"type\":\"DateTimeOffset\",\"nullable\":false}]," +
+            "{\"name\":\"created_at\",\"type\":\"DateTimeOffset\",\"nullable\":false}," +
+            "{\"name\":\"amount\",\"type\":\"Decimal\",\"nullable\":true}," +
+            "{\"name\":\"is_open\",\"type\":\"Boolean\",\"nullable\":false}]," +
             "\"key\":[\"id\"],\"indexes\":[" + indexes + "]}]}";
     }
 
@@ -658,7 +701,7 @@ public sealed class CoverageAnalyzerTests
         using System.Threading.Tasks;
         using Groundwork.Schema;
         using static QueryHost;
-        [GwTable("tickets")] public sealed class Ticket { public string Id { get; set; } = ""; public string Status { get; set; } = ""; public string Other { get; set; } = ""; public DateTimeOffset CreatedAt { get; set; } }
+        [GwTable("tickets")] public sealed class Ticket { public string Id { get; set; } = ""; public string Status { get; set; } = ""; public string Other { get; set; } = ""; public DateTimeOffset CreatedAt { get; set; } public decimal? Amount { get; set; } public bool IsOpen { get; set; } }
         public sealed class Db { public Query<T> Table<T>() => new Query<T>(); }
         public sealed class Query<T>
         {
@@ -673,6 +716,12 @@ public sealed class CoverageAnalyzerTests
             public Query<T> Take(int count) => this;
             public Query<TResult> Select<TResult>(Func<T, TResult> selector) => new Query<TResult>();
             public Query<T> Distinct() => this;
+            public decimal Sum(Func<T, decimal?> selector) => 0;
+            public DateTimeOffset Min(Func<T, DateTimeOffset> selector) => default;
+            public decimal? Max(Func<T, decimal?> selector) => null;
+            public Task SumAsync(object executor, Func<T, decimal?> selector) => Task.CompletedTask;
+            public Task MinAsync(object executor, Func<T, DateTimeOffset> selector) => Task.CompletedTask;
+            public Task MaxAsync(object executor, Func<T, decimal?> selector) => Task.CompletedTask;
             public Task First() => Task.CompletedTask;
             public Task FirstOrDefault() => Task.CompletedTask;
             public Task FirstAsync() => Task.CompletedTask;
@@ -683,7 +732,7 @@ public sealed class CoverageAnalyzerTests
             public Task SingleOrDefaultAsync() => Task.CompletedTask;
             public Task ToListAsync() => Task.CompletedTask;
         }
-        public static class QueryHost { public static Db db = new Db(); public static bool enabled; public static bool c0, c1, c2, c3, c4, c5, c6; public static string status = "open"; public const string term = "open"; public static DateTimeOffset from; }
+        public static class QueryHost { public static Db db = new Db(); public static object executor = new object(); public static bool enabled; public static bool c0, c1, c2, c3, c4, c5, c6; public static string status = "open"; public const string term = "open"; public static DateTimeOffset from; }
         """;
 
     private sealed class InMemoryAdditionalText(string path, string content) : AdditionalText

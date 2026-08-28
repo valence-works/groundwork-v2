@@ -172,6 +172,60 @@ public sealed class LinqFrontEndTests
     }
 
     [Fact]
+    public void Reduction_terminals_lower_to_the_covered_column_and_preserve_result_type()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query
+            .Where(ticket => ticket.IsOpen);
+
+        var sumInt = query.Sum(ticket => ticket.TenantId).Request;
+        var sumLong = query.Sum(ticket => ticket.LongValue).Request;
+        var sumDecimal = query.Sum(ticket => ticket.Amount).Request;
+        var minimum = query.Min(ticket => ticket.CreatedAt).Request;
+        var maximum = query.Max(ticket => ticket.Status).Request;
+
+        Assert.IsType<ResultShape.Sum>(sumInt.Result);
+        Assert.IsType<ResultShape.Sum>(sumLong.Result);
+        Assert.IsType<ResultShape.Sum>(sumDecimal.Result);
+        Assert.IsType<ResultShape.Min>(minimum.Result);
+        Assert.IsType<ResultShape.Max>(maximum.Result);
+        Assert.Equal(nameof(Ticket.TenantId), ((ResultShape.Sum)sumInt.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.LongValue), ((ResultShape.Sum)sumLong.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.Amount), ((ResultShape.Sum)sumDecimal.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.CreatedAt), ((ResultShape.Min)minimum.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.Status), ((ResultShape.Max)maximum.Result).Column.Name);
+        Assert.Equal(nameof(Ticket.TenantId), Assert.Single(sumInt.Projection.Columns).Name);
+        Assert.Equal(nameof(Ticket.Status), Assert.Single(maximum.Projection.Columns).Name);
+    }
+
+    [Fact]
+    public void Reduction_terminals_reject_non_portable_or_unmapped_columns()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query;
+
+        var min = Assert.Throws<LinqTranslationException>(() => query.Min(ticket => ticket.IsOpen));
+        var max = Assert.Throws<LinqTranslationException>(() => query.Max(ticket => ticket.TagIds));
+
+        Assert.Contains(min.Diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-112");
+        Assert.Contains(max.Diagnostics, diagnostic => diagnostic.Code == "GW-LINQ-101");
+    }
+
+    [Fact]
+    public async Task Async_reductions_preserve_scalar_results_and_empty_sum_identity()
+    {
+        var query = new GwQueryDatabase().Table(Tickets).Query.Where(ticket => ticket.IsOpen);
+        var executor = new ScalarExecutor();
+
+        Assert.Equal(17L, await query.SumAsync(executor, ticket => ticket.TenantId));
+        Assert.IsType<ResultShape.Sum>(executor.LastRequest!.Result);
+        Assert.Equal(nameof(Ticket.TenantId), ((ResultShape.Sum)executor.LastRequest.Result).Column.Name);
+
+        executor.Value = null;
+        Assert.Equal(0L, await query.SumAsync(executor, ticket => ticket.TenantId));
+        Assert.Null(await query.SumAsync(executor, ticket => (int?)ticket.TenantId));
+        Assert.Null(await query.MinAsync(executor, ticket => (DateTimeOffset?)ticket.OptionalAt));
+    }
+
+    [Fact]
     public async Task Async_single_detects_an_over_one_result_from_the_adapter()
     {
         var query = new GwQueryDatabase().Table(Tickets).Query
@@ -235,6 +289,21 @@ public sealed class LinqFrontEndTests
         public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult((long)rows.Count);
 
         public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(rows.Count != 0);
+    }
+
+    private sealed class ScalarExecutor : IGwQueryExecutor
+    {
+        public object? Value { get; set; } = 17L;
+        public QueryRequest? LastRequest { get; private set; }
+
+        public Task<IReadOnlyList<T>> ToListAsync<T>(QueryRequest request, GwTableModel<T>? model = null, CancellationToken cancellationToken = default)
+        {
+            LastRequest = request;
+            return Task.FromResult<IReadOnlyList<T>>(Value is null ? Array.Empty<T>() : new[] { (T)Value });
+        }
+
+        public Task<long> CountAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(0L);
+        public Task<bool> AnyAsync(QueryRequest request, CancellationToken cancellationToken = default) => Task.FromResult(false);
     }
 
     [Fact]
