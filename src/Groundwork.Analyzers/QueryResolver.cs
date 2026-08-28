@@ -193,7 +193,15 @@ internal static class QueryResolver
                 if (invocation.ArgumentList.Arguments.Count != 1 ||
                     !TryGetInt(invocation.ArgumentList.Arguments[0].Expression, model, out var limit))
                     return QueryResolution.Unresolved("Take requires a compile-time integer bound", invocation);
-                state.Limit = limit;
+                if (limit < 0)
+                    return QueryResolution.Unresolved("Take requires a non-negative integer bound", invocation);
+                if (limit == 0)
+                {
+                    state.IsEmpty = true;
+                    state.Limit = null;
+                }
+                else
+                    state.Limit = limit;
                 continue;
             }
 
@@ -202,6 +210,8 @@ internal static class QueryResolver
                 if (invocation.ArgumentList.Arguments.Count != 1 ||
                     !TryGetInt(invocation.ArgumentList.Arguments[0].Expression, model, out var offset))
                     return QueryResolution.Unresolved("Skip requires a compile-time integer bound", invocation);
+                if (offset < 0)
+                    return QueryResolution.Unresolved("Skip requires a non-negative integer bound", invocation);
                 state.Offset = offset;
                 continue;
             }
@@ -351,7 +361,7 @@ internal static class QueryResolver
             for (var index = 0; index < optionalPredicates.Count; index++)
                 if ((mask & (1 << index)) != 0)
                     terms.Add(optionalPredicates[index]);
-            var predicate = terms.Count switch
+            var predicate = state.IsEmpty ? Predicate.AlwaysFalse.Instance : terms.Count switch
             {
                 0 => Predicate.AlwaysTrue.Instance,
                 1 => terms[0],
@@ -556,7 +566,7 @@ internal static class QueryResolver
                 .Where(member => member is not null)
                 .Select(member => member!),
             TupleExpressionSyntax tuple => tuple.Arguments.Select(argument => argument.Expression),
-            ObjectCreationExpressionSyntax created when created.Initializer is not null => created.Initializer.Expressions,
+            ObjectCreationExpressionSyntax created => ProjectionArgumentsAndInitializers(created),
             _ => null
         };
         if (members is null)
@@ -568,6 +578,18 @@ internal static class QueryResolver
             columns.AddRange(nested);
         }
         return true;
+    }
+
+    private static IEnumerable<ExpressionSyntax> ProjectionArgumentsAndInitializers(ObjectCreationExpressionSyntax created)
+    {
+        if (created.Initializer is null)
+        {
+            foreach (var argument in created.ArgumentList?.Arguments ?? [])
+                yield return argument.Expression;
+            yield break;
+        }
+        foreach (var expression in created.Initializer.Expressions)
+            yield return expression is AssignmentExpressionSyntax assignment ? assignment.Right : expression;
     }
 
     private static bool TryParsePredicate(
@@ -766,7 +788,7 @@ internal static class QueryResolver
     private static bool TryGetInt(ExpressionSyntax expression, SemanticModel model, out int value)
     {
         var constant = model.GetConstantValue(expression);
-        if (constant.HasValue && constant.Value is int number && number > 0)
+        if (constant.HasValue && constant.Value is int number)
         {
             value = number;
             return true;
@@ -819,6 +841,7 @@ internal static class QueryResolver
         public bool Distinct { get; set; }
         public int? Offset { get; set; }
         public int? Limit { get; set; }
+        public bool IsEmpty { get; set; }
         public ScanAcceptance? AcceptedScan { get; set; }
     }
 

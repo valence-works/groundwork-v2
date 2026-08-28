@@ -26,6 +26,40 @@ public sealed class LinqExecutorTests
         public string Unmapped = "untouched";
     }
 
+    private sealed class StatusDto
+    {
+        public string? Status { get; init; }
+    }
+
+    private sealed class ConstructorStatusDto
+    {
+        public ConstructorStatusDto(string? status) => Status = status;
+        public string? Status { get; }
+    }
+
+    [Fact]
+    public async Task Async_cardinality_materializes_anonymous_and_constructor_projections()
+    {
+        using var fixture = Fixture.Open();
+
+        var anonymous = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new { ticket.Status })
+            .FirstOrDefaultAsync(fixture.Executor);
+        var initialized = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new StatusDto { Status = ticket.Status })
+            .FirstAsync(fixture.Executor);
+        var constructed = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new ConstructorStatusDto(ticket.Status))
+            .SingleAsync(fixture.Executor);
+
+        Assert.Equal("open", anonymous.Status);
+        Assert.Equal("open", initialized.Status);
+        Assert.Equal("open", constructed.Status);
+    }
+
     [Fact]
     public async Task Executor_materializes_mapped_columns_and_leaves_unmapped_members_alone()
     {

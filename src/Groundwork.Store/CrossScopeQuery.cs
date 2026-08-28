@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -93,6 +94,8 @@ public static class CrossScopeQueryMaterializer
             values[ScopeTokenColumn] = ScopeToken(row.Scope);
             return new SourceRow(row.Scope, values);
         }).ToArray();
+        if (request.Distinct)
+            rows = DistinctRows(request, rows);
         var totalCount = request.Result.IncludesTotalCount ? rows.LongLength : (long?)null;
 
         if (request.Paging.ContinuationToken is { } token)
@@ -142,8 +145,9 @@ public static class CrossScopeQueryMaterializer
     }
 
     /// <summary>
-    /// Pairs a provider-native page with the internal scope projection used to produce it. The
-    /// native renderer has already applied continuation, ordering, offset, and the expanded limit.
+    /// Pairs a provider-native page with the internal scope projection used to produce it. For a
+    /// distinct request, matching is performed after projected-value de-duplication so a scope
+    /// cannot drift when duplicate raw rows precede the visible row.
     /// </summary>
     public static CrossScopeQueryResult FromNativePage(
         QueryMaterializedResult materialized,
@@ -156,8 +160,18 @@ public static class CrossScopeQueryMaterializer
         var pageRows = nativeRows
             .Where(row => !row.TryGetValue("__groundwork_count_only", out var marker) ||
                           Convert.ToInt64(marker ?? 0, CultureInfo.InvariantCulture) == 0)
-            .Take(materialized.Rows.Count)
             .ToArray();
+        var used = new HashSet<int>();
+        pageRows = materialized.Rows.Select(resultRow =>
+        {
+            for (var index = 0; index < pageRows.Length; index++)
+                if (!used.Contains(index) && SameMaterializedRow(resultRow, pageRows[index]))
+                {
+                    used.Add(index);
+                    return pageRows[index];
+                }
+            return null;
+        }).Where(row => row is not null).Select(row => row!).ToArray();
         if (pageRows.Length != materialized.Rows.Count)
             throw new InvalidOperationException("The native cross-scope page did not retain one scope for every materialized row.");
 
@@ -173,6 +187,69 @@ public static class CrossScopeQueryMaterializer
             materialized.NextContinuationToken,
             materialized.SelectedIndex,
             materialized.IndexHintApplied);
+    }
+
+    private static SourceRow[] DistinctRows(QueryRequest request, IReadOnlyList<SourceRow> source)
+    {
+        var result = new List<SourceRow>(source.Count);
+        foreach (var row in source)
+        {
+            if (!result.Any(existing => SameProjection(request, existing.Values, row.Values)))
+                result.Add(row);
+        }
+        return result.ToArray();
+    }
+
+    private static bool SameMaterializedRow(
+        IReadOnlyDictionary<string, object?> materialized,
+        IReadOnlyDictionary<string, object?> native)
+    {
+        foreach (var (column, value) in materialized)
+        {
+            native.TryGetValue(column, out var nativeValue);
+            if (!SameValue(value, nativeValue))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool SameProjection(
+        QueryRequest request,
+        IReadOnlyDictionary<string, object?> left,
+        IReadOnlyDictionary<string, object?> right)
+    {
+        var columns = request.Projection.AllColumns
+            ? left.Keys.Where(name => !IsInternalField(name)).Union(
+                right.Keys.Where(name => !IsInternalField(name)), StringComparer.Ordinal)
+            : request.Projection.Columns.Where(column => !IsInternalField(column.Name)).Select(column => column.Name);
+        foreach (var column in columns)
+        {
+            left.TryGetValue(column, out var leftValue);
+            right.TryGetValue(column, out var rightValue);
+            if (!SameValue(leftValue, rightValue))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool SameValue(object? left, object? right)
+    {
+        if (ReferenceEquals(left, right)) return true;
+        if (left is null || right is null) return false;
+        if (left is byte[] leftBytes && right is byte[] rightBytes)
+            return leftBytes.SequenceEqual(rightBytes);
+        if (left is IReadOnlyDictionary<string, object?> leftDictionary && right is IReadOnlyDictionary<string, object?> rightDictionary)
+            return leftDictionary.Count == rightDictionary.Count && leftDictionary.All(pair =>
+                rightDictionary.TryGetValue(pair.Key, out var value) && SameValue(pair.Value, value));
+        if (left is IEnumerable leftSequence && right is IEnumerable rightSequence && left is not string && right is not string)
+            return leftSequence.Cast<object?>().SequenceEqual(rightSequence.Cast<object?>(), new StructuralValueComparer());
+        return Equals(left, right);
+    }
+
+    private sealed class StructuralValueComparer : IEqualityComparer<object?>
+    {
+        public new bool Equals(object? left, object? right) => SameValue(left, right);
+        public int GetHashCode(object? value) => value?.GetHashCode() ?? 0;
     }
 
     private static IReadOnlyDictionary<string, object?> Project(

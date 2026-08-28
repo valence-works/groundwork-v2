@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using Groundwork.Query.Model;
 
 namespace Groundwork.Query.Linq.Execution;
 
@@ -15,8 +16,8 @@ internal static class LinqRowMaterializer
     private static readonly MethodInfo ReadMethod =
         typeof(LinqRowMaterializer).GetMethod(nameof(Read), BindingFlags.NonPublic | BindingFlags.Static)!;
 
-    internal static Func<IReadOnlyDictionary<string, object?>, T> For<T>(GwTableModel<T>? model) =>
-        Materializers<T>.For(model);
+    internal static Func<IReadOnlyDictionary<string, object?>, T> For<T>(GwTableModel<T>? model, Projection? projection = null) =>
+        Materializers<T>.For(model, projection);
 
     /// <summary>Reads one mapped column, leaving the member at its default when the row omits it.</summary>
     private static TMember Read<TMember>(IReadOnlyDictionary<string, object?> row, string column)
@@ -34,18 +35,33 @@ internal static class LinqRowMaterializer
         private static readonly ConditionalWeakTable<GwTableModel<T>, Func<IReadOnlyDictionary<string, object?>, T>> ByModel = new();
         private static Func<IReadOnlyDictionary<string, object?>, T>? inferred;
 
-        internal static Func<IReadOnlyDictionary<string, object?>, T> For(GwTableModel<T>? model) =>
+        internal static Func<IReadOnlyDictionary<string, object?>, T> For(GwTableModel<T>? model, Projection? projection) =>
             model is null
-                ? inferred ??= Build(null)
-                : ByModel.GetValue(model, static key => Build(key));
+                ? projection is null
+                    ? inferred ??= Build(null, null)
+                    : Build(null, projection)
+                : ByModel.GetValue(model, static key => Build(key, null));
 
-        private static Func<IReadOnlyDictionary<string, object?>, T> Build(GwTableModel<T>? model)
+        private static Func<IReadOnlyDictionary<string, object?>, T> Build(GwTableModel<T>? model, Projection? projection)
         {
             if (typeof(T) == typeof(IReadOnlyDictionary<string, object?>))
                 return static row => (T)row;
 
             var row = Expression.Parameter(typeof(IReadOnlyDictionary<string, object?>), "row");
-            var mappings = model is null
+            var mappings = model is null && projection is not null
+                ? projection.Columns.Select((column, index) =>
+                {
+                    var member = typeof(T).GetMembers(BindingFlags.Public | BindingFlags.Instance)
+                        .FirstOrDefault(candidate =>
+                            (candidate is PropertyInfo or FieldInfo) &&
+                            string.Equals(candidate.Name, column.Name, StringComparison.OrdinalIgnoreCase));
+                    member ??= typeof(T).GetMembers(BindingFlags.Public | BindingFlags.Instance)
+                        .Where(candidate => candidate is PropertyInfo { CanWrite: true } or FieldInfo { IsInitOnly: false })
+                        .OrderBy(candidate => candidate.MetadataToken)
+                        .ElementAtOrDefault(index);
+                    return (Member: member?.Name ?? column.Name, Column: column.Name);
+                })
+                : model is null
                 ? typeof(T)
                     .GetMembers(BindingFlags.Public | BindingFlags.Instance)
                     .Where(member => member is PropertyInfo or FieldInfo)
@@ -67,8 +83,38 @@ internal static class LinqRowMaterializer
                     Expression.Constant(columnName, typeof(string)))));
             }
 
+            var constructor = typeof(T).GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                .Where(candidate => candidate.GetParameters().Length != 0)
+                .Select(candidate => new
+                {
+                    Constructor = candidate,
+                    Arguments = candidate.GetParameters().Select((parameter, index) =>
+                    {
+                        var column = projection?.Columns.FirstOrDefault(item =>
+                            string.Equals(item.Name, parameter.Name, StringComparison.OrdinalIgnoreCase));
+                        column ??= projection is not null && index < projection.Columns.Length
+                            ? projection.Columns[index]
+                            : null;
+                        return column is null
+                            ? null
+                            : Expression.Call(ReadMethod.MakeGenericMethod(parameter.ParameterType), row,
+                                Expression.Constant(column.Name, typeof(string)));
+                    }).ToArray()
+                })
+                .FirstOrDefault(candidate => candidate.Arguments.All(argument => argument is not null));
+
+            if (constructor is not null && bindings.Count == 0)
+            {
+                return Expression.Lambda<Func<IReadOnlyDictionary<string, object?>, T>>(
+                    Expression.New(constructor.Constructor, constructor.Arguments!),
+                    row).Compile();
+            }
+
+            var defaultConstructor = typeof(T).GetConstructor(Type.EmptyTypes);
+            if (defaultConstructor is null)
+                throw new InvalidOperationException($"Type '{typeof(T).FullName}' requires a public constructor whose parameters match the query projection.");
             return Expression.Lambda<Func<IReadOnlyDictionary<string, object?>, T>>(
-                Expression.MemberInit(Expression.New(typeof(T)), bindings),
+                Expression.MemberInit(Expression.New(defaultConstructor), bindings),
                 row).Compile();
         }
     }

@@ -1007,6 +1007,44 @@ public sealed class InMemoryProviderTests
         Assert.Equal("GW-QUERY-013", tokenFailure.Code);
     }
 
+    [Fact]
+    public void Privileged_cross_scope_distinct_deduplicates_before_paging_and_keeps_the_first_scope()
+    {
+        var table = new TableId("cross-scope-distinct");
+        var value = new ColumnRef(table, "value", QueryType.String, isNullable: true);
+        var request = new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(value, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(value),
+            Paging.OffsetLimit(1, 1),
+            distinct: true);
+        var source = new CrossScopeQueryRow[]
+        {
+            new(new StorageScope("tenant-a"), new Dictionary<string, object?> { ["value"] = "a" }),
+            new(new StorageScope("tenant-b"), new Dictionary<string, object?> { ["value"] = "a" }),
+            new(new StorageScope("tenant-c"), new Dictionary<string, object?> { ["value"] = "b" })
+        };
+
+        var result = CrossScopeQueryMaterializer.Materialize(request, QueryRenderOptions.Default, source);
+
+        var row = Assert.Single(result.Rows);
+        Assert.Equal("tenant-c", row.Scope.Value);
+        Assert.Equal("b", row.Values["value"]);
+
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> native = new[]
+        {
+            new Dictionary<string, object?> { ["value"] = "a", [CrossScopeQueryMaterializer.RawScopeColumn] = "tenant-a" },
+            new Dictionary<string, object?> { ["value"] = "a", [CrossScopeQueryMaterializer.RawScopeColumn] = "tenant-b" },
+            new Dictionary<string, object?> { ["value"] = "b", [CrossScopeQueryMaterializer.RawScopeColumn] = "tenant-c" }
+        };
+        var materialized = QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default, native,
+            sourceIncludesRequestedOffset: true);
+        var paired = CrossScopeQueryMaterializer.FromNativePage(
+            materialized, native, CrossScopeQueryMaterializer.RawScopeColumn);
+        Assert.Equal("tenant-c", Assert.Single(paired.Rows).Scope.Value);
+    }
+
     private sealed class RecordingAccessObserver : IStorageAccessObserver
     {
         public List<StorageAccessEvent> Events { get; } = [];

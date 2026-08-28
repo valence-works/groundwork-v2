@@ -210,6 +210,29 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Take_zero_is_resolved_as_an_empty_query()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.Status).Take(0).FirstAsync();"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Projection_initializers_and_constructors_are_resolved_for_distinct_and_cardinality()
+    {
+        var source = QuerySource("""
+            public sealed class StatusDto { public string Status { get; set; } = ""; }
+            public sealed class ConstructorStatusDto { public ConstructorStatusDto(string status) { Status = status; } public string Status { get; } }
+            var initialized = db.Table<Ticket>().Select(t => new StatusDto { Status = t.Status }).Distinct().ToListAsync();
+            var constructed = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new ConstructorStatusDto(t.Status)).FirstAsync();
+            """);
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + source);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Distinct_projection_without_a_covering_index_reports_the_projection_refusal()
     {
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
