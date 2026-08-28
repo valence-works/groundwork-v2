@@ -381,7 +381,7 @@ public abstract class RelationalQueryRenderer
                 if (request.Projection.AllColumns)
                 {
                     source = baseCte + ", __groundwork_distinct AS (SELECT DISTINCT * FROM __groundwork_base WHERE " + baseWhere + ") " +
-                        "SELECT * FROM __groundwork_distinct";
+                        "SELECT * FROM __groundwork_distinct WHERE 1 = 1";
                 }
                 else
                 {

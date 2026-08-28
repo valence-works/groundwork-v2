@@ -629,6 +629,10 @@ public sealed class MongoQueryRenderer
                 { "__groundwork_distinct_first", new BsonDocument("$first", "$$ROOT") }
             }));
             data.Add(new BsonDocument("$replaceWith", "$__groundwork_distinct_first"));
+            // $group does not preserve the order of its input. Restore the same portable ordinal
+            // ordering on the de-duplicated rows before applying continuation or paging.
+            if (sort.ElementCount != 0)
+                data.Add(new BsonDocument("$sort", sort.DeepClone().AsBsonDocument));
             if (cursor is not null)
                 data.Add(new BsonDocument("$match", RenderContinuation(order, cursor)));
         }

@@ -191,34 +191,11 @@ public static class QueryResultMaterializer
                 : request.Projection.Columns
                     .Where(column => !IsInternalField(column.Name))
                     .Select(column => new KeyValuePair<string, object?>(column.Name, row.TryGetValue(column.Name, out var value) ? value : null));
-            var key = string.Join("|", fields.Select(pair => EscapeDistinctValue(pair.Key) + "=" + EscapeDistinctValue(pair.Value)));
+            var key = string.Join("|", fields.Select(pair => pair.Key + "=" + QueryStructuralIdentity.ForDistinct(pair.Value)));
             if (seen.Add(key))
                 result.Add(row);
         }
         return result;
-    }
-
-    private static string EscapeDistinctValue(string name, object? value) =>
-        name + ":" + EscapeDistinctValue(value);
-
-    private static string EscapeDistinctValue(object? value)
-    {
-        if (value is null)
-            return "null";
-        var text = value switch
-        {
-            byte[] bytes => Convert.ToBase64String(bytes),
-            IReadOnlyDictionary<string, object?> dictionary => "{" + string.Join(",", dictionary
-                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
-                .Select(pair => EscapeDistinctValue(pair.Key) + "=" + EscapeDistinctValue(pair.Value))) + "}",
-            DateTimeOffset instant => instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
-            decimal number => number.ToString("G29", CultureInfo.InvariantCulture),
-            Guid guid => guid.ToString("N"),
-            IEnumerable sequence when value is not string => "[" + string.Join(",", sequence.Cast<object?>().Select(EscapeDistinctValue)) + "]",
-            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
-            _ => value.ToString() ?? string.Empty
-        };
-        return value.GetType().FullName + ":" + text.Length.ToString(CultureInfo.InvariantCulture) + ":" + text;
     }
 
     private static bool IsInternalField(string name) =>
@@ -410,6 +387,7 @@ public static class QueryRequestExecution
             var columns = projection.Columns.ToList();
             foreach (var term in order.Where(term => !request.Distinct ||
                          options.SearchKeyColumns.Values.Any(mapping =>
+                             !string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal) &&
                              string.Equals(mapping.PhysicalColumn, term.Column.Name, StringComparison.Ordinal))))
             {
                 if (!columns.Any(column => string.Equals(column.Name, term.Column.Name, StringComparison.Ordinal)))

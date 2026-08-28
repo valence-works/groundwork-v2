@@ -83,6 +83,41 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Relational_all_column_distinct_continuation_has_an_explicit_outer_predicate()
+    {
+        var tokenRequest = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.Keyset(2),
+            distinct: true);
+        var options = new QueryRenderOptions(tieBreakColumns: [Id]);
+        var token = QueryContinuationToken.Encode(tokenRequest, options,
+            [QueryConstant.Of(Name, "Alice"), QueryConstant.Of(Id, 42L)]);
+        var request = new QueryRequest(
+            tokenRequest.Table,
+            tokenRequest.Where,
+            tokenRequest.Order,
+            tokenRequest.Projection,
+            Paging.Continuation(token, 2),
+            distinct: true);
+
+        var commands = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Contains("SELECT * FROM __groundwork_distinct WHERE 1 = 1 AND", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("SELECT * FROM __groundwork_distinct AND", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
     public void Native_distinct_and_portable_terminal_ordering_are_visible_in_each_renderer()
     {
         var text = new ColumnRef(Table, "name", QueryType.String, isNullable: true, maxLength: 100);
@@ -99,6 +134,20 @@ public sealed class QueryRendererTests
         Assert.Contains("ROW_NUMBER", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("CONVERT(varbinary(max)", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("DATALENGTH", sqlServerDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+
+        var distinctOptions = QueryRenderOptions.Default with
+        {
+            TieBreakColumns = [Id],
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                [text.Name] = new QuerySearchKeyColumn(text.Name, text.Name, QuerySearchKeyPolicy.Ordinal, text.MaxLength),
+                [Id.Name] = new QuerySearchKeyColumn(Id.Name, Id.Name, QuerySearchKeyPolicy.Ordinal)
+            }
+        };
+        var distinctWithIdentity = QueryRequestExecution.ForPage(distinct, distinctOptions);
+        var sqliteDistinct = new SqliteQueryRenderer().Render(distinctWithIdentity, distinctOptions);
+        Assert.Contains("PARTITION BY \"name\"", sqliteDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PARTITION BY \"name\" COLLATE GROUNDWORK_UTF16_ORDINAL, \"id\"", sqliteDistinct.CommandText, StringComparison.OrdinalIgnoreCase);
 
         var postgresMin = new PostgreSqlQueryRenderer().Render(new QueryRequest(
             Table,
@@ -120,6 +169,22 @@ public sealed class QueryRendererTests
         var mongoText = string.Join("\n", mongoMin.Pipeline.Select(stage => stage.ToString()));
         Assert.Contains("$function", mongoText, StringComparison.Ordinal);
         Assert.Contains("$first", mongoText, StringComparison.Ordinal);
+
+        var mongoDistinct = new MongoQueryRenderer().Render(distinct);
+        var distinctGroupIndex = mongoDistinct.Pipeline
+            .Select((stage, index) => (stage, index))
+            .Single(item => item.stage.Contains("$group"))
+            .index;
+        var distinctSortIndex = mongoDistinct.Pipeline
+            .Select((stage, index) => (stage, index))
+            .Where(item => item.stage.Contains("$sort"))
+            .Select(item => item.index)
+            .Last();
+        var distinctSkipIndex = mongoDistinct.Pipeline
+            .Select((stage, index) => (stage, index))
+            .Single(item => item.stage.Contains("$skip"))
+            .index;
+        Assert.InRange(distinctSortIndex, distinctGroupIndex + 1, distinctSkipIndex - 1);
     }
 
     [Fact]

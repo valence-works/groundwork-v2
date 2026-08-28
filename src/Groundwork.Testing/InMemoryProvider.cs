@@ -966,7 +966,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
                     .OrderBy(pair => pair.Key, StringComparer.Ordinal)
                 : request.Projection.Columns.Select(column => new KeyValuePair<string, object?>(
                     column.Name, row.TryGetValue(column.Name, out var value) ? value : null));
-            var identity = string.Join("|", fields.Select(pair => pair.Key + "=" + ValueIdentity(pair.Value)));
+            var identity = string.Join("|", fields.Select(pair => pair.Key + "=" + QueryStructuralIdentity.ForDistinct(pair.Value)));
             if (seen.Add(identity))
                 result.Add(row);
         }
@@ -977,7 +977,7 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
         IReadOnlyDictionary<string, object?> row,
         IReadOnlyList<ColumnRef> columns) => string.Concat(columns.Select(column =>
     {
-        var identity = ValueIdentity(row.TryGetValue(column.Name, out var value) ? value : null);
+        var identity = QueryStructuralIdentity.ForDistinct(row.TryGetValue(column.Name, out var value) ? value : null);
         return identity.Length.ToString(CultureInfo.InvariantCulture) + ":" + identity;
     }));
 
@@ -1062,20 +1062,6 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
             return CompareBytes(leftBytes, rightBytes);
         return ((IComparable)left).CompareTo(right);
     }
-
-    private static string ValueIdentity(object? value) => value switch
-    {
-        null => "n:",
-        string text => "s:" + text,
-        int number => "i32:" + number.ToString(CultureInfo.InvariantCulture),
-        long number => "i64:" + number.ToString(CultureInfo.InvariantCulture),
-        decimal number => "d:" + number.ToString(CultureInfo.InvariantCulture),
-        bool flag => flag ? "bool:1" : "bool:0",
-        Guid guid => "g:" + guid.ToString("D"),
-        byte[] bytes => "b:" + Convert.ToBase64String(bytes),
-        DateTimeOffset instant => "t:" + instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
-        _ => value.GetType().FullName + ":" + (value.ToString() ?? string.Empty)
-    };
 
     private static byte[] GuidBytes(Guid value)
     {

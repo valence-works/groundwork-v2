@@ -1740,6 +1740,51 @@ public sealed class InMemoryProviderTests
         Assert.Equal("b", Assert.Single(second.Rows)["value"]);
     }
 
+    [Fact]
+    public void In_memory_distinct_identity_does_not_collide_on_delimiter_bearing_values()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://distinct-identity");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("distinct-identity"),
+            Name = "DistinctIdentity",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "left", Type = PortableType.String },
+                new ColumnDefinition { Name = "right", Type = PortableType.String }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one",
+            ["left"] = "A|right=s:B",
+            ["right"] = "C"
+        }));
+        session.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "two",
+            ["left"] = "A",
+            ["right"] = "B|right=s:C"
+        }));
+
+        var table = new TableId(unit.Name);
+        var left = new ColumnRef(table, "left", QueryType.String, isNullable: true);
+        var right = new ColumnRef(table, "right", QueryType.String, isNullable: true);
+        var result = session.Query(new QueryRequest(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(left, right),
+            Paging.OffsetLimit(0, 10),
+            distinct: true));
+
+        Assert.Equal(2, result.Rows.Count);
+    }
+
     private sealed class ExternalFactory : IStorageProviderFactory
     {
         private readonly InMemoryProviderFactory inner = new();

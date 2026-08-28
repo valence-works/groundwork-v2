@@ -196,7 +196,7 @@ public sealed class LinqExecutionDifferentialTests
                 continuationRequest.Projection,
                 Paging.Continuation(firstDistinctPage.NextContinuationToken!, 1),
                 distinct: true), matrix.Unit.CreateQueryRenderOptions());
-            Assert.Equal([null], secondDistinctPage.Rows.Select(row => row["region"]));
+            Assert.Equal(["us"], secondDistinctPage.Rows.Select(row => row["region"]));
         }
 
         var reductionStatus = new ColumnRef(continuationTable, "status", QueryType.String, isNullable: false, maxLength: 32);
