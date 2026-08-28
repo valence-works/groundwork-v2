@@ -58,7 +58,7 @@ public static class QuerySearchKeyRewriter
         return ReferenceEquals(where, request.Where) && order.Equals(request.Order)
             ? request
             : new QueryRequest(request.Table, where, order, request.Projection, request.Paging,
-                request.Result, request.LatestPerKey, request.AcceptedScan)
+                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
             {
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,

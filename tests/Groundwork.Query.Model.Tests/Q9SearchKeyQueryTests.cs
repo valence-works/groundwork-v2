@@ -18,7 +18,8 @@ public sealed class Q9SearchKeyQueryTests
             Predicate.AlwaysTrue.Instance,
             [new OrderTerm(name, OrderDirection.Descending, NullOrder.Last)],
             Projection.ColumnsOnly(name),
-            Paging.OffsetLimit(0, 1));
+            Paging.OffsetLimit(0, 1),
+            distinct: true);
         var mapping = new QuerySearchKeyColumn(
             "name",
             "__groundwork_search_name",
@@ -34,6 +35,7 @@ public sealed class Q9SearchKeyQueryTests
         var rewritten = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
         var term = Assert.Single(rewritten.Order);
         Assert.Equal("__groundwork_search_name", term.Column.Name);
+        Assert.True(rewritten.Distinct);
         Assert.Equal(OrderDirection.Descending, term.Direction);
         Assert.Equal(NullOrder.Last, term.NullOrder);
         var execution = QueryRequestExecution.ForPage(request, options);
@@ -125,6 +127,33 @@ public sealed class Q9SearchKeyQueryTests
         Assert.Equal("|006F|0070", range.Lower!.Value.Value);
         Assert.Equal("|006F|0071", range.Upper!.Value.Value);
         Assert.False(PortableQuerySemantics.Validate(rewritten).Refusals.Any());
+    }
+
+    [Fact]
+    public void Folded_prefix_with_distinct_projection_remains_portable_after_rewrite()
+    {
+        var id = new ColumnRef(Table, "id", QueryType.Int64, false);
+        var folded = new ColumnRef(Table, "folded", QueryType.String, true, 64,
+            stringComparison: QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase);
+        var request = new QueryRequest(
+            Table,
+            new Predicate.StartsWith(folded, "Op"),
+            [new OrderTerm(id, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(id, folded),
+            Paging.OffsetLimit(0, 10),
+            distinct: true);
+        var options = QueryRenderOptions.Default with
+        {
+            SearchKeyColumns = new Dictionary<string, QuerySearchKeyColumn>
+            {
+                ["folded"] = new("folded", "__groundwork_search_folded", QuerySearchKeyPolicy.UnicodeOrdinalIgnoreCase, 384)
+            }
+        };
+
+        var rewritten = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+
+        Assert.True(rewritten.Distinct);
+        Assert.True(PortableQuerySemantics.Validate(rewritten).IsPortable);
     }
 
     [Fact]

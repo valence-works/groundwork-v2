@@ -109,6 +109,8 @@ Only compile shapes for which `Validate` returns **no** refusals.
   before paging.
 - You must supply the corresponding explicit null order. **`NullOrder.ProviderDefault` is refused**
   (`GW-SEM-ORDER-004`) — that is exactly the setting that makes two databases disagree.
+- `First` and `FirstOrDefault` cardinality requests require an explicit deterministic order
+  (`GW-SEM-ORDER-006`); the model bounds them to one and two rows respectively.
 - Latest-per-key requires a **non-null `DateTimeOffset`** timestamp (`GW-SEM-LATEST-001`).
 
 > The UTC-tick and network-byte-GUID decisions are the binding v2 record. They deliberately supersede
@@ -135,6 +137,7 @@ Only compile shapes for which `Validate` returns **no** refusals.
 | `GW-SEM-ORDER-003` | Range ordering on a non-orderable type |
 | `GW-SEM-ORDER-004` | `ProviderDefault` null ordering |
 | `GW-SEM-ORDER-005` | Boolean ordering |
+| `GW-SEM-ORDER-006` | First/FirstOrDefault without an explicit deterministic order |
 | `GW-SEM-LATEST-001` | Latest-per-key needs a non-null `DateTimeOffset` |
 | `GW-SEM-UNKNOWN-001` | Unrecognised predicate node |
 

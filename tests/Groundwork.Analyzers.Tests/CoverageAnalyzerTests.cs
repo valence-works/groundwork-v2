@@ -200,6 +200,98 @@ public sealed class CoverageAnalyzerTests
         Assert.True(diagnostic.Location.GetLineSpan().StartLinePosition.Line > 0);
     }
 
+    [Fact]
+    public async Task Distinct_projection_is_covered_by_an_index_on_the_projected_column()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).OrderBy(t => t.Status).Select(t => new { t.Status }).Distinct().Take(1).ToListAsync();"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Unbounded_distinct_projection_reports_the_scan_refusal()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().ToListAsync();"));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_005");
+    }
+
+    [Fact]
+    public async Task Unbounded_distinct_projection_accepts_an_explicit_scan()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status", "status ASC"), allowAcceptedScans: true) +
+            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().AcceptScan(\"GW-SCAN-DISTINCT\", \"distinct report\", \"query-team\", \"2027-01-01\").ToListAsync();"),
+            now: new DateTimeOffset(2026, 8, 28, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_905");
+        Assert.DoesNotContain(diagnostics, item => item.Id is "GW_COVER_005" or "GW_COVER_006" or "GW_COVER_901");
+    }
+
+    [Fact]
+    public async Task Take_zero_is_resolved_as_an_empty_query()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.Status).Take(0).FirstAsync();"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Take_zero_first_terminals_still_require_deterministic_order()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var first = db.Table<Ticket>().Take(0).FirstAsync(); var fallback = db.Table<Ticket>().Take(0).FirstOrDefaultAsync();"));
+
+        Assert.Equal(2, diagnostics.Count(item => item.Id == "GW_COVER_016"));
+        Assert.All(diagnostics, item => Assert.Contains("deterministic order", item.GetMessage(), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Projection_initializers_and_constructors_are_resolved_for_distinct_and_cardinality()
+    {
+        var source = QuerySource("""
+            public sealed class StatusDto { public string Status { get; set; } = ""; }
+            public sealed class ConstructorStatusDto { public ConstructorStatusDto(string status) { Status = status; } public string Status { get; } }
+            var initialized = db.Table<Ticket>().Where(t => t.Status == "open").OrderBy(t => t.Status).Select(t => new StatusDto { Status = t.Status }).Distinct().Take(1).ToListAsync();
+            var constructed = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new ConstructorStatusDto(t.Status)).FirstAsync();
+            """);
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + source);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Distinct_projection_without_a_covering_index_reports_the_projection_refusal()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Where(t => t.Status == status).Select(t => new { t.Status }).Distinct().ToListAsync();"));
+
+        var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
+        Assert.Contains("not index-covered", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task First_without_an_order_reports_the_deterministic_order_refusal()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().FirstAsync();"));
+
+        var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_016"));
+        Assert.Contains("deterministic order", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ordered_first_is_covered_by_the_requested_order_index()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_created", "created_at ASC")) +
+            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.CreatedAt).FirstAsync();"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
     /// <summary>
     /// The declared key is a coverage candidate. This schema declares an index on an unrelated
     /// column, so nothing but the key itself can cover the read.
@@ -573,8 +665,22 @@ public sealed class CoverageAnalyzerTests
             public Query<T> Where(Func<T, bool> predicate) => this;
             public Query<T> WhereIf(bool condition, Func<T, bool> predicate) => this;
             public Query<T> AcceptScan(string id, string reason, string owner, string expiresOn) => this;
+            public Query<T> OrderBy<TKey>(Func<T, TKey> selector) => this;
             public Query<T> OrderByDescending<TKey>(Func<T, TKey> selector) => this;
+            public Query<T> ThenBy<TKey>(Func<T, TKey> selector) => this;
+            public Query<T> ThenByDescending<TKey>(Func<T, TKey> selector) => this;
+            public Query<T> Skip(int count) => this;
             public Query<T> Take(int count) => this;
+            public Query<TResult> Select<TResult>(Func<T, TResult> selector) => new Query<TResult>();
+            public Query<T> Distinct() => this;
+            public Task First() => Task.CompletedTask;
+            public Task FirstOrDefault() => Task.CompletedTask;
+            public Task FirstAsync() => Task.CompletedTask;
+            public Task FirstOrDefaultAsync() => Task.CompletedTask;
+            public Task Single() => Task.CompletedTask;
+            public Task SingleOrDefault() => Task.CompletedTask;
+            public Task SingleAsync() => Task.CompletedTask;
+            public Task SingleOrDefaultAsync() => Task.CompletedTask;
             public Task ToListAsync() => Task.CompletedTask;
         }
         public static class QueryHost { public static Db db = new Db(); public static bool enabled; public static bool c0, c1, c2, c3, c4, c5, c6; public static string status = "open"; public const string term = "open"; public static DateTimeOffset from; }

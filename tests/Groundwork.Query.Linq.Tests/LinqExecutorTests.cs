@@ -26,6 +26,111 @@ public sealed class LinqExecutorTests
         public string Unmapped = "untouched";
     }
 
+    private sealed class StatusDto
+    {
+        public string? Status { get; init; }
+    }
+
+    private sealed class ConstructorStatusDto
+    {
+        public ConstructorStatusDto(string? status) => Status = status;
+        public string? Status { get; }
+    }
+
+    private sealed record StatusRecord(string? Status);
+
+    private sealed class SettableConstructorStatusDto
+    {
+        public SettableConstructorStatusDto(string? status) => Status = status;
+        public string? Status { get; set; }
+        public string? Identifier { get; set; }
+    }
+
+    [Fact]
+    public async Task Async_cardinality_materializes_anonymous_and_constructor_projections()
+    {
+        using var fixture = Fixture.Open();
+
+        var anonymous = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new { ticket.Status })
+            .FirstOrDefaultAsync(fixture.Executor);
+        var initialized = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new StatusDto { Status = ticket.Status })
+            .FirstAsync(fixture.Executor);
+        var constructed = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new ConstructorStatusDto(ticket.Status))
+            .SingleAsync(fixture.Executor);
+
+        Assert.Equal("open", anonymous.Status);
+        Assert.Equal("open", initialized.Status);
+        Assert.Equal("open", constructed.Status);
+    }
+
+    [Fact]
+    public async Task Async_cardinality_materializes_scalar_records_and_settable_constructor_projections()
+    {
+        using var fixture = Fixture.Open();
+
+        var scalar = await fixture.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => ticket.Status)
+            .Distinct()
+            .FirstAsync(fixture.Executor);
+        var record = await fixture.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new StatusRecord(ticket.Status))
+            .Distinct()
+            .FirstOrDefaultAsync(fixture.Executor);
+        var settable = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new SettableConstructorStatusDto(ticket.Status) { Identifier = ticket.Id })
+            .SingleAsync(fixture.Executor);
+
+        Assert.Equal("open", scalar);
+        Assert.Equal("open", record.Status);
+        Assert.Equal("open", settable.Status);
+        Assert.Equal("a", settable.Identifier);
+    }
+
+    [Fact]
+    public async Task Distinct_executor_applies_windows_after_deduplicating_the_provider_source()
+    {
+        using var fixture = Fixture.Open(withDuplicateStatus: true);
+        var query = fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => ticket.Status)
+            .Distinct()
+            .AcceptScan("GW-SCAN-DISTINCT", "distinct paging test", "query-tests", new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero));
+
+        var page = await fixture.Executor.ToListAsync<string>(query.Take(2).ToQueryRequest());
+        Assert.Equal(["closed", "open"], page);
+
+        var afterDuplicate = await query.Skip(1).FirstAsync(fixture.Executor);
+        Assert.Equal("open", afterDuplicate);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => query.SingleAsync(fixture.Executor));
+    }
+
+    [Fact]
+    public async Task Unbounded_distinct_executor_requires_an_accepted_scan()
+    {
+        using var fixture = Fixture.Open();
+        var request = fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => ticket.Status)
+            .Distinct()
+            .ToQueryRequest();
+
+        var refusal = await Assert.ThrowsAsync<QueryCoverageException>(() =>
+            fixture.Executor.ToListAsync<string>(request));
+
+        Assert.Equal("GW-COVER-005", refusal.Code);
+    }
+
     [Fact]
     public async Task Executor_materializes_mapped_columns_and_leaves_unmapped_members_alone()
     {
@@ -74,6 +179,32 @@ public sealed class LinqExecutorTests
 
         Assert.Equal(["Ake", "Zebra"], first.Rows.Select(row => row["status"]));
         Assert.Equal(["Åke", "Äke"], second.Rows.Select(row => row["status"]));
+    }
+
+    [Fact]
+    public async Task Executor_distinct_continuation_preserves_provider_locale_ordering()
+    {
+        using var fixture = Fixture.Open(localeOrder: true);
+        var table = new TableId(Fixture.TableName);
+        var status = new ColumnRef(table, "status", QueryType.String, true, 32);
+        QueryRequest Request(Paging paging) => new(
+            table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(status, OrderDirection.Ascending, NullOrder.First)],
+            Projection.ColumnsOnly(status),
+            paging,
+            ResultShape.Rows.Instance,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-DISTINCT-LOCALE",
+                "distinct continuation test",
+                "query-tests",
+                new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero)),
+            distinct: true);
+
+        var first = fixture.Session.Query(Request(Paging.Keyset(2)));
+        var second = await fixture.Executor.ToListAsync<string>(Request(Paging.Continuation(first.NextContinuationToken!, 2)));
+
+        Assert.Equal(["Åke", "Äke"], second);
     }
 
     [Fact]
@@ -472,7 +603,7 @@ public sealed class LinqExecutorTests
             new GwColumn<Ticket>(nameof(Ticket.Optional), "optional", QueryType.Int64, IsNullable: true)
         ]);
 
-        internal static Fixture Open(bool withJsonIndex = false, bool localeOrder = false)
+        internal static Fixture Open(bool withJsonIndex = false, bool localeOrder = false, bool withDuplicateStatus = false)
         {
             var connection = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
             var unit = new StorageUnit
@@ -512,7 +643,9 @@ public sealed class LinqExecutorTests
             };
             connection.Schema.Apply(unit);
             var session = connection.OpenSession(unit, StorageAccess.Global);
-            var statuses = localeOrder ? new[] { "Ake", "Åke", "Äke", "Öke", "Zebra" } : ["open"];
+            var statuses = localeOrder
+                ? new[] { "Ake", "Åke", "Äke", "Öke", "Zebra" }
+                : withDuplicateStatus ? ["closed", "closed", "open"] : ["open"];
             for (var index = 0; index < statuses.Length; index++)
             {
                 session.Insert(new StorageValues(new Dictionary<string, object?>

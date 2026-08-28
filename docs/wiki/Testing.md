@@ -246,7 +246,7 @@ Assert.Equal(0, RecordTable<Customer>.AccessorReflectionInspectionCount);
 | `Groundwork.Concurrency.Tests` | W2 concurrency invariants |
 | `Groundwork.ProviderCommands.Tests` | W1 native conditional write path + session-scoped provider-command observation |
 | `Groundwork.StreamCapabilities.Tests` | Sequences, idempotency, retention, lifecycle, aggregation |
-| `Groundwork.Query.Linq.Tests` | The 250-case LINQ corpus and its 10 locked diagnostic codes |
+| `Groundwork.Query.Linq.Tests` | The 250-case predicate corpus, query-shape lowering coverage, and its 10 locked predicate diagnostic codes |
 | `Groundwork.Packaging.Tests` | Package layout and allowlist |
 | `Groundwork.Samples.EventLog.Tests` | Kernel-only second-family conformance on all five providers |
 
