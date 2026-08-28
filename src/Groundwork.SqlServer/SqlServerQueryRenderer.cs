@@ -8,8 +8,12 @@ namespace Groundwork.SqlServer;
 /// <summary>SQL Server's one native renderer for the normalized v2 query contract.</summary>
 public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
 {
-    /// <summary>SQL Server's real bound on bound parameters in one statement.</summary>
-    public const int ParameterBudget = 2_100;
+    /// <summary>
+    /// The caller-owned parameter ceiling for one SQL Server command. SQL Server accepts 2,100
+    /// parameters in a statement, but Microsoft.Data.SqlClient sends parameterized commands
+    /// through sp_executesql and consumes two of those slots for its wrapper.
+    /// </summary>
+    public const int ParameterBudget = 2_098;
 
     public SqlServerQueryRenderer()
         : base(new SqlServerDialect(), ParameterBudget, supportsIndexHints: true)

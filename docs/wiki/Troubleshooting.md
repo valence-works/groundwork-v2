@@ -187,8 +187,9 @@ Default cap is 1,000. Chunk the query, or reshape it as a range/join-free lookup
 
 ### Parameter budget exceeded
 
-SQLite 999, SQL Server 2,100, PostgreSQL 65,535 — including cursor and page parameters. Reduce
-membership size or page width.
+SQLite 999, SQL Server 2,098 caller-owned parameters, PostgreSQL 65,535 — including cursor and page
+parameters. SQL Server's 2,100 statement limit reserves two slots for the `Microsoft.Data.SqlClient`
+`sp_executesql` wrapper. Reduce membership size or page width.
 
 ### Pages repeat or skip rows
 
