@@ -139,6 +139,24 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
+    public void Always_false_queries_still_validate_nonportable_ordering()
+    {
+        var boolean = new ColumnRef(Table, "is_open", QueryType.Boolean);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysFalse.Instance,
+            [new OrderTerm(boolean, OrderDirection.Ascending, NullOrder.First)],
+            Projection.All,
+            Paging.None,
+            ResultShape.First.Instance);
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_is_open", "is_open")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+    }
+
+    [Fact]
     public void Provider_default_null_ordering_is_refused()
     {
         var result = Check(

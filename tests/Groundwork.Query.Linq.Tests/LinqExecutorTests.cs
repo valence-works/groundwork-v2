@@ -37,6 +37,14 @@ public sealed class LinqExecutorTests
         public string? Status { get; }
     }
 
+    private sealed record StatusRecord(string? Status);
+
+    private sealed class SettableConstructorStatusDto
+    {
+        public SettableConstructorStatusDto(string? status) => Status = status;
+        public string? Status { get; set; }
+    }
+
     [Fact]
     public async Task Async_cardinality_materializes_anonymous_and_constructor_projections()
     {
@@ -58,6 +66,32 @@ public sealed class LinqExecutorTests
         Assert.Equal("open", anonymous.Status);
         Assert.Equal("open", initialized.Status);
         Assert.Equal("open", constructed.Status);
+    }
+
+    [Fact]
+    public async Task Async_cardinality_materializes_scalar_records_and_settable_constructor_projections()
+    {
+        using var fixture = Fixture.Open();
+
+        var scalar = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => ticket.Status)
+            .Distinct()
+            .FirstAsync(fixture.Executor);
+        var record = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new StatusRecord(ticket.Status))
+            .Distinct()
+            .FirstOrDefaultAsync(fixture.Executor);
+        var settable = await fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => new SettableConstructorStatusDto(ticket.Status))
+            .Distinct()
+            .SingleAsync(fixture.Executor);
+
+        Assert.Equal("open", scalar);
+        Assert.Equal("open", record.Status);
+        Assert.Equal("open", settable.Status);
     }
 
     [Fact]

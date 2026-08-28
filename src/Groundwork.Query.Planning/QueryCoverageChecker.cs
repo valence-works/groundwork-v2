@@ -21,7 +21,10 @@ public static class QueryCoverageChecker
             throw new ArgumentException("Index candidates cannot contain null references.", nameof(indexes));
 
         var constraints = ConstraintSet.Create(request.Where);
-        if (request.Where is Predicate.AlwaysFalse &&
+        var hasNonportableOrder = request.Order.Any(order =>
+            order.NullOrder == NullOrder.ProviderDefault ||
+            order.Column.Type is QueryType.Boolean or QueryType.Double or QueryType.Binary);
+        if (request.Where is Predicate.AlwaysFalse && !hasNonportableOrder &&
             !(request.Result.RequiresDeterministicOrder && request.Order.Length == 0))
         {
             if (request.AcceptedScan?.Allowed == true)

@@ -48,6 +48,11 @@ internal static class LinqRowMaterializer
                 return static row => (T)row;
 
             var row = Expression.Parameter(typeof(IReadOnlyDictionary<string, object?>), "row");
+            if (projection is not null && projection.Columns.Length == 1 && IsScalarType(typeof(T)))
+                return Expression.Lambda<Func<IReadOnlyDictionary<string, object?>, T>>(
+                    Expression.Call(ReadMethod.MakeGenericMethod(typeof(T)), row,
+                        Expression.Constant(projection.Columns[0].Name, typeof(string))),
+                    row).Compile();
             var mappings = model is null && projection is not null
                 ? projection.Columns.Select((column, index) =>
                 {
@@ -103,19 +108,27 @@ internal static class LinqRowMaterializer
                 })
                 .FirstOrDefault(candidate => candidate.Arguments.All(argument => argument is not null));
 
-            if (constructor is not null && bindings.Count == 0)
+            var defaultConstructor = typeof(T).GetConstructor(Type.EmptyTypes);
+            if (constructor is not null && (bindings.Count == 0 || defaultConstructor is null))
             {
                 return Expression.Lambda<Func<IReadOnlyDictionary<string, object?>, T>>(
                     Expression.New(constructor.Constructor, constructor.Arguments!),
                     row).Compile();
             }
 
-            var defaultConstructor = typeof(T).GetConstructor(Type.EmptyTypes);
             if (defaultConstructor is null)
                 throw new InvalidOperationException($"Type '{typeof(T).FullName}' requires a public constructor whose parameters match the query projection.");
             return Expression.Lambda<Func<IReadOnlyDictionary<string, object?>, T>>(
                 Expression.MemberInit(Expression.New(defaultConstructor), bindings),
                 row).Compile();
+        }
+
+        private static bool IsScalarType(Type type)
+        {
+            type = Nullable.GetUnderlyingType(type) ?? type;
+            return type.IsPrimitive || type.IsEnum || type == typeof(string) || type == typeof(decimal) ||
+                type == typeof(Guid) || type == typeof(DateTime) || type == typeof(DateTimeOffset) ||
+                type == typeof(TimeSpan) || type == typeof(byte[]);
         }
     }
 }
