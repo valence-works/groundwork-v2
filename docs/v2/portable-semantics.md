@@ -34,9 +34,11 @@ which `Validate` returns no refusals.
   Unicode-normalization semantics are refused; malformed UTF-16 is rejected at
   binding. Evaluating a refused folded policy remains deterministic and never
   invokes runtime `OrdinalIgnoreCase` behavior.
-- Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` values are portable.
-  No numeric coercion or rounding is performed. Binary floating point is
-  refused for predicates, ordering, and indexes.
+- Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` values are portable
+  for comparison. No numeric coercion or rounding is performed. Binary floating
+  point is storable but not comparable: a `Double` column is declarable and
+  round-trips bit-for-bit on every supported store, and is refused for
+  predicates, ordering, and indexes.
 - Boolean equality and total complements are portable. Direct Boolean ranges,
   ordered column comparisons, and ordering require a future explicit three-state
   projected key and are refused until that projection is present.

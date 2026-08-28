@@ -19,11 +19,26 @@ provider or produce a different plan on each. v2 instead offers **declared eleme
 **latest-per-key**, and expects you to issue two queries where a join would have been used. This is
 `GW-LINQ-104`.
 
-### Why is `double`/`float` unusable?
+### Can I store a `double`?
 
-Binary floating-point comparison, rounding, and index behavior differ across stores, so an index seek
-and a scan can disagree about the same row. Use `Int32`, `Int64`, or declared `Decimal(18,4)`
-(`GW-SEM-TYPE-006`).
+Yes — `PortableType.Double` is storable on all four providers and round-trips bit-for-bit. You cannot
+*compare* one. Binary floating-point comparison, rounding, and index behavior differ across stores, so
+an index seek and a scan can disagree about the same row; predicates and ordering are refused
+(`GW-SEM-TYPE-006`), and a key, index, or grouping column is refused at declaration
+(`GW-PORT-012`). Use `Int32`, `Int64`, or declared `Decimal(18,4)` for a value you query on.
+
+### Why was my `double` write refused?
+
+Because it was NaN, an infinity, or negative zero (`GW-VALUE-DOUBLE-001`). Those are the values the
+four stores do not agree on: SQL Server refuses all three of the first kind, SQLite refuses NaN, and
+SQLite and MongoDB both return positive zero for a stored negative zero. Groundwork refuses them at
+the write rather than storing a value a different provider would hand back differently.
+
+### Why is there no `Single`?
+
+SQLite `REAL` and BSON `double` are both IEEE-754 binary64. A `Single` column would be a widened
+binary64 column on half the supported providers, which is a different bargain from the one `Double`
+makes. Declare `Double`.
 
 ### Why do I have to name a null order on every sort term?
 

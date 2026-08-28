@@ -79,6 +79,18 @@ public sealed record CoverageIndex
     public ImmutableArray<CoverageIndexColumn> Columns { get; }
     public IndexMissingValueBehavior MissingValues { get; }
 
+    /// <summary>
+    /// Whether this candidate is the unit's declared key rather than a declared secondary index.
+    /// It is set by <see cref="CoverageCandidates.Derive"/>, the one place candidates are derived.
+    /// The checker reads it to recognise the one predicate shape a point read answers — a
+    /// conjunction of single-value equalities over every key column, which matches at most one row
+    /// — and withholds the index suggestion there, because no index improves on a single key
+    /// lookup. Naming the key's columns is not itself that shape: a disjunction, a range, or an
+    /// equality over part of a composite key can name exactly those columns and still need an
+    /// index, and each keeps the ordinary suggestion.
+    /// </summary>
+    public bool IsDeclaredKey { get; init; }
+
     public string Declaration =>
         "[GwIndex(\"" + Escape(Name) + "\", " +
         "\"" + Escape(string.Join(", ", Columns.Select(column =>

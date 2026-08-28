@@ -78,7 +78,12 @@ Only compile shapes for which `Validate` returns **no** refusals.
 - Only exact `Int32`, `Int64`, and declared `Decimal(18,4)` are portable.
 - **No numeric coercion or rounding is performed.**
 - Portable `Decimal` requires exactly `decimal(18,4)` (`GW-SEM-DECIMAL-001`).
-- Binary floating point is refused for predicates, ordering, and indexes (`GW-SEM-TYPE-006`).
+- Binary floating point is **storable but not comparable**. `PortableType.Double` can be declared,
+  written, and read back bit-for-bit, and is refused in predicates and indexes (`GW-SEM-TYPE-006`),
+  in ordering (`GW-SEM-ORDER-001`), and as a key, index, or grouping column (`GW-PORT-012`).
+  Equality is refused along with the rest: exact binary64 equality is well defined but is the trap
+  the type is known for, and admitting it would mean admitting the type into the query model and
+  then refusing every other operation on it one at a time.
 
 ### Booleans
 - Equality and total complements are portable.
@@ -118,7 +123,7 @@ Only compile shapes for which `Validate` returns **no** refusals.
 | `GW-SEM-TYPE-002` | Double membership |
 | `GW-SEM-TYPE-004` | Untyped/null constant reference |
 | `GW-SEM-TYPE-005` | Constant type must match column/set type exactly |
-| `GW-SEM-TYPE-006` | Binary floating point in predicate/index |
+| `GW-SEM-TYPE-006` | Binary floating point in a predicate or index — the column is declarable and storable, only uncomparable |
 | `GW-SEM-TYPE-007` | Element set without an exact declared element type |
 | `GW-SEM-TEXT-001` | Non-portable text comparison policy |
 | `GW-SEM-TEXT-003` | Non-portable substring anchor |

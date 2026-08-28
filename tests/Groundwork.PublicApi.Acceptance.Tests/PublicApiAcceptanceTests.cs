@@ -9,13 +9,18 @@ public sealed class PublicApiAcceptanceTests
     public void Clean_room_consumer_runs_from_packed_public_packages()
     {
         var repository = FindRepositoryRoot();
-        var packageDirectory = Path.Combine(repository, "artifacts", "packages");
+        // A directory of this suite's own: Groundwork.Packaging.Tests reuses whatever it finds at
+        // artifacts/packages if the expected files exist there, without checking how they were
+        // built. Packing into that same directory here — without ContinuousIntegrationBuild, which
+        // this fallback does not set — would hand Packaging.Tests artifacts that fail its Source
+        // Link assertions whenever this suite runs first in the same working tree.
+        var packageDirectory = Path.Combine(repository, "artifacts", "acceptance-packages");
         if (!Directory.Exists(packageDirectory) || !Directory.EnumerateFiles(packageDirectory, "Groundwork.Documents.*.nupkg").Any())
         {
             var pack = Process.Start(new ProcessStartInfo
             {
                 FileName = "dotnet",
-                Arguments = "pack Groundwork.slnx --configuration Release --output artifacts/packages --nologo -m:1 -v:q",
+                Arguments = "pack Groundwork.slnx --configuration Release --output artifacts/acceptance-packages --nologo -m:1 -v:q",
                 WorkingDirectory = repository,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

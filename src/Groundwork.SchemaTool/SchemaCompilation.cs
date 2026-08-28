@@ -152,6 +152,7 @@ public static class SchemaCompilation
         SchemaValueType.Guid => PortableType.Guid,
         SchemaValueType.Binary => PortableType.Binary,
         SchemaValueType.Json => PortableType.Json,
+        SchemaValueType.Double => PortableType.Double,
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 }

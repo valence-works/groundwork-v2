@@ -224,6 +224,12 @@ internal static class ExactAppendCodec
                     writer.WriteByte(20);
                     writer.WriteString(CanonicalJsonValue(value));
                     return;
+                // The same tag and bit-exact encoding the untyped path already uses for a double,
+                // so a declared Double column fingerprints identically to an undeclared one.
+                case PortableType.Double when value is double number:
+                    writer.WriteByte(13);
+                    writer.WriteInt64(BitConverter.DoubleToInt64Bits(number));
+                    return;
                 default:
                     throw new ArgumentException($"Value '{value?.GetType().FullName ?? "null"}' cannot be encoded as declared {type}.", nameof(value));
             }

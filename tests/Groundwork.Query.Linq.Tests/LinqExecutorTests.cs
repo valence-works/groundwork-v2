@@ -56,6 +56,42 @@ public sealed class LinqExecutorTests
         Assert.Contains("Add: [GwIndex(", refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The unit declares an index on <c>status</c> only, so nothing but the declared key can admit
+    /// a read filtered on <c>id</c>.
+    /// </summary>
+    [Fact]
+    public async Task Declared_key_equality_is_admitted_without_a_declared_index()
+    {
+        using var fixture = Fixture.Open();
+
+        var rows = await fixture.Table.Query
+            .Where(ticket => ticket.Id == "a")
+            .ToListAsync(fixture.Executor);
+
+        Assert.Equal("a", Assert.Single(rows).Id);
+    }
+
+    /// <summary>
+    /// The declared-versus-deployed intersection guards declared indexes, which a rolling deploy can
+    /// be missing. The key is not one of them: the coordinator emits it as the PRIMARY KEY of the
+    /// CREATE TABLE, so it exists exactly when the table does.
+    /// </summary>
+    [Fact]
+    public async Task Declared_key_admits_a_query_even_when_the_catalog_reports_no_indexes()
+    {
+        using var fixture = Fixture.Open();
+        var executor = new GwLinqExecutor(
+            fixture.Session,
+            new ProbeConnection(fixture.Connection, new EmptyCatalog()));
+
+        var rows = await new GwQueryDatabase(executor).Table(Fixture.Model).Query
+            .Where(ticket => ticket.Id == "a")
+            .ToListAsync(executor);
+
+        Assert.Equal("a", Assert.Single(rows).Id);
+    }
+
     [Fact]
     public async Task Declared_index_the_catalog_does_not_carry_cannot_rescue_a_query()
     {

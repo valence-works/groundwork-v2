@@ -178,12 +178,11 @@ Apply it from the deployment step with `groundwork apply --schema groundwork.sch
 --provider <alias> --safe`; runtime is inspect-only by default.
 ```
 
-> **The classification here is a temporary duplicate.** The kernel already owns both rules —
-> `PhysicalSchemaInspection` decides column drift versus index drift, and
-> `PhysicalSchemaPlanProtection` decides what an auto-apply may execute. Neither is reachable through
-> `IStorageProviderConnection` yet, so this package maps the public `SchemaDiff` onto the same intent
-> by hand. It can therefore disagree with what the provider's own admission would do at the first
-> session open, in either direction.
+> **The classification here is a temporary duplicate.** Provider schema executors decide column
+> drift versus index drift from their native catalogs, and `PhysicalSchemaPlanProtection` decides
+> what an auto-apply may execute. Neither is reachable through `IStorageProviderConnection` yet, so
+> this package maps the public `SchemaDiff` onto the same intent by hand. It can therefore disagree
+> with what the provider's own admission would do at the first session open, in either direction.
 > [#201](https://github.com/valence-works/groundwork-v2/issues/201) removes the duplicate by exposing
 > runtime admission on the Store contract.
 
