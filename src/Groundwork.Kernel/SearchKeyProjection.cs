@@ -109,6 +109,7 @@ public static class SearchKeyProjection
     public static StorageUnit Expand(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        StorageDeclarationReferenceValidation.ThrowIfInvalid(source);
         foreach (var column in (source.Columns ?? []).Where(column => column.LocaleSortKey is not null))
         {
             var refusal = PortableLocaleOrdering.ValidateDeclaration(column, $"columns.{column.Name}.localeSortKey");

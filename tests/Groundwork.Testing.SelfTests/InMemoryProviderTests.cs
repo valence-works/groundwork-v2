@@ -1112,7 +1112,8 @@ public sealed class InMemoryProviderTests
             [
                 new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
                 new ColumnDefinition { Name = reservedName, Type = PortableType.String }
-            ]
+            ],
+            Indexes = []
         };
 
         var failure = Assert.Throws<ArgumentException>(() => connection.Schema.Apply(unit));

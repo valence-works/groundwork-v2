@@ -620,6 +620,75 @@ public sealed class ProviderCommandTests
     }
 
     [Fact]
+    public void SQLite_schema_apply_refuses_every_builder_reference_rule_before_schema_io()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var cases = new[]
+        {
+            (Unit("missing_key", key: []), "GW-DECL-KEY-001", "key"),
+            (Unit("undeclared_key", key: ["missing"]), "GW-DECL-KEY-002", "key.columns[0]"),
+            (Unit("duplicate_key", key: ["id", "id"]), "GW-DECL-KEY-003", "key.columns"),
+            (Unit("undeclared_index", indexes: [Index("by_missing", "missing")]),
+                "GW-DECL-INDEX-001", "indexes.by_missing.columns[0]"),
+            (Unit("blank_index", indexes: [Index("by_blank", "")]),
+                "GW-DECL-INDEX-001", "indexes.by_blank.columns[0]"),
+            (Unit("duplicate_index", indexes: [Index("by_id", "id", "id")]),
+                "GW-DECL-INDEX-002", "indexes.by_id.columns"),
+            (Unit("json_index", indexes: [Index("by_payload", "payload")], includeJson: true),
+                "GW-DECL-INDEX-003", "indexes.by_payload.columns[0]"),
+            (Unit("compound_invalid", key: ["missing"]) with
+                {
+                    Columns =
+                    [
+                        new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                        new ColumnDefinition { Name = ProviderOwnedColumns.Scope, Type = PortableType.String }
+                    ]
+                },
+                "GW-DECL-KEY-002", "key.columns[0]")
+        };
+
+        foreach (var (unit, code, path) in cases)
+        {
+            var refusal = Assert.Throws<ArgumentException>(() => connection.Schema.Apply(unit));
+            Assert.Contains(code, refusal.Message, StringComparison.Ordinal);
+            Assert.Contains(path, refusal.Message, StringComparison.Ordinal);
+
+            using var catalog = new SqliteConnection(store.ConnectionString);
+            catalog.Open();
+            using var command = catalog.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$name;";
+            command.Parameters.AddWithValue("$name", unit.Name);
+            Assert.Equal(0L, command.ExecuteScalar());
+        }
+
+        static StorageUnit Unit(
+            string suffix,
+            IReadOnlyList<string>? key = null,
+            IReadOnlyList<IndexDefinition>? indexes = null,
+            bool includeJson = false) => new()
+        {
+            Id = new StorageUnitId("invalid-references-" + suffix),
+            Name = "invalid_references_" + suffix,
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, MaxLength = 64, IsNullable = false },
+                .. includeJson
+                    ? new ColumnDefinition[] { new() { Name = "payload", Type = PortableType.Json } }
+                    : []
+            ],
+            Key = new KeyDefinition { Columns = key ?? ["id"] },
+            Indexes = indexes ?? []
+        };
+
+        static IndexDefinition Index(string name, params string[] columns) => new()
+        {
+            Name = name,
+            Columns = columns.Select(column => new IndexColumn(column)).ToArray()
+        };
+    }
+
+    [Fact]
     public void SQLite_optimistic_schema_synthesizes_zero_default_and_returns_first_version_one()
     {
         using var store = TemporarySqliteStore.Create();

@@ -144,13 +144,9 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
         // will never run.
         cancellationToken.ThrowIfCancellationRequested();
         gate.Value.EnsureCovered(admitted, DateTimeOffset.UtcNow);
-        // Deliberately no render options. Passing the unit's declared index metadata would buy
-        // optional index-selection evidence and cost correctness: that conversion is eager over
-        // every declared index and refuses a non-queryable one (GW-QUERY-018), so a single JSON
-        // index column would fail every query against the unit — including ones that never touch
-        // it. Declaration validation does not catch it either, because the guard that refuses a
-        // JSON index key runs only in the fluent builder, not in Schema.Apply. The provider adds
-        // its own identity tie-breaks regardless, so nothing the executor needs is lost.
+        // Deliberately no render options. The coverage gate already admitted the request, while
+        // converting every declared index here would make execution depend on metadata for indexes
+        // the query never selected. The provider contributes its own identity tie-breaks.
         return session.QueryAsync(executed, options: null, cancellationToken).AsTask();
     }
 

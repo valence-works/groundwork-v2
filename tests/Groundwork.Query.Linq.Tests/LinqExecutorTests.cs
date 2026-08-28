@@ -364,23 +364,6 @@ public sealed class LinqExecutorTests
     }
 
     [Fact]
-    public async Task Unrelated_non_queryable_index_column_does_not_fail_every_query_on_the_unit()
-    {
-        using var fixture = Fixture.Open(withJsonIndex: true);
-
-        // A JSON column cannot be a portable query index key, but Schema.Apply accepts a unit that
-        // declares one: the guard that refuses it (GW-DECL-INDEX-003) runs only in the fluent
-        // builder, and a hand-built StorageUnit never passes through it. So the executor must not
-        // eagerly convert every declared index — doing so refuses this query with GW-QUERY-018 over
-        // an index it never needed.
-        var rows = await fixture.Table.Query
-            .Where(ticket => ticket.Status == "open")
-            .ToListAsync(fixture.Executor);
-
-        Assert.Equal("a", Assert.Single(rows).Id);
-    }
-
-    [Fact]
     public async Task Supplying_a_known_budget_does_not_cost_callers_the_explicit_null_connection()
     {
         using var fixture = Fixture.Open();
@@ -603,7 +586,7 @@ public sealed class LinqExecutorTests
             new GwColumn<Ticket>(nameof(Ticket.Optional), "optional", QueryType.Int64, IsNullable: true)
         ]);
 
-        internal static Fixture Open(bool withJsonIndex = false, bool localeOrder = false, bool withDuplicateStatus = false)
+        internal static Fixture Open(bool localeOrder = false, bool withDuplicateStatus = false)
         {
             var connection = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
             var unit = new StorageUnit
@@ -627,18 +610,12 @@ public sealed class LinqExecutorTests
                             : null
                     },
                     new() { Name = "weight", Type = PortableType.Int32, IsNullable = false },
-                    new() { Name = "optional", Type = PortableType.Int64 },
-                    .. withJsonIndex
-                        ? new ColumnDefinition[] { new() { Name = "payload", Type = PortableType.Json, MaxLength = 64 } }
-                        : []
+                    new() { Name = "optional", Type = PortableType.Int64 }
                 ],
                 Key = new KeyDefinition { Columns = ["id"] },
                 Indexes =
                 [
-                    new() { Name = "ix_status", Columns = [new IndexColumn("status")] },
-                    .. withJsonIndex
-                        ? new IndexDefinition[] { new() { Name = "ix_payload", Columns = [new IndexColumn("payload")] } }
-                        : []
+                    new() { Name = "ix_status", Columns = [new IndexColumn("status")] }
                 ]
             };
             connection.Schema.Apply(unit);

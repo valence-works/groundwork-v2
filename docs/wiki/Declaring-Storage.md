@@ -155,7 +155,8 @@ Violations are `GW-PORT-010`, reported with the offending name and the correctiv
 provider refuses the declaration **before** any schema I/O, so a bad name never reaches the database.
 
 Reserved provider-owned logical names include `__groundwork_scope` and `__groundwork_scope_token`.
-Provider authors can reuse `ProviderOwnedColumns.ValidateLogicalDeclaration(unit)` to enforce this.
+Provider authors can reuse `ProviderOwnedColumns.ValidateLogicalDeclaration(unit)` to enforce this
+and the shared key/index reference rules before physicalization.
 
 ## Validating before you deploy
 
