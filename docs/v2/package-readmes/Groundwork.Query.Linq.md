@@ -7,9 +7,10 @@ A **closed** LINQ front-end: `IGwQueryable<T>`, with `Table<T>()`, `Where`, `Whe
 require an explicit deterministic order; `Single` and `SingleOrDefault` use a bounded over-one
 probe. Reductions select one mapped column: `Sum` accepts `Int32`, `Int64`, and `Decimal` (integer
 results are nullable `Int64`/`Decimal`), while `Min` and `Max` accept closed overloads for orderable columns
-and return null for empty or all-null input. Async reduction adapters are intentionally deferred to
-the provider execution work tracked by #150; use `LinqTerminal<TResult>.ExecuteAsync(...)` to
-connect a reduction request to an adapter without materializing source rows.
+and return null for empty or all-null input. `SumAsync`, `MinAsync`, and `MaxAsync` use
+`IGwQueryExecutor.ReduceAsync`, which reads one provider-produced scalar row and cannot silently
+fall back to ordinary row materialization. Providers apply distinct and input paging before the
+native reduction.
 
 Deliberately *not* `IQueryable`. An open provider surface is what lets an expression compile
 happily and then fall back to client-side evaluation, or fail at runtime on one database and not

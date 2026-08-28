@@ -30,6 +30,13 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
         };
     }
 
+    protected override string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression)
+    {
+        if (reduction is ResultShape.Sum && reduction.Column.Type == QueryType.Decimal)
+            return "CASE WHEN COUNT(" + valueExpression + ") = 0 THEN NULL ELSE groundwork_decimal_sum(" + valueExpression + ") END";
+        return base.RenderReductionAggregate(reduction, valueExpression);
+    }
+
     protected override bool RequiresExplicitSelection(ColumnRef column) =>
         string.Equals(column.Name, CrossScopeQueryMaterializer.ScopeTokenColumn, StringComparison.Ordinal);
 

@@ -40,12 +40,12 @@ internal sealed class LinqExecutionMatrix : IDisposable
     /// <summary>The row set every provider is loaded with, in declaration order.</summary>
     internal static IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows { get; } =
     [
-        new Dictionary<string, object?> { ["id"] = 1L, ["status"] = "open", ["region"] = "eu", ["sort_key"] = 30 },
-        new Dictionary<string, object?> { ["id"] = 2L, ["status"] = "open", ["region"] = null, ["sort_key"] = 10 },
-        new Dictionary<string, object?> { ["id"] = 3L, ["status"] = "closed", ["region"] = "eu", ["sort_key"] = 20 },
-        new Dictionary<string, object?> { ["id"] = 4L, ["status"] = "open", ["region"] = "us", ["sort_key"] = 40 },
-        new Dictionary<string, object?> { ["id"] = 5L, ["status"] = "open", ["region"] = "eu", ["sort_key"] = 20 },
-        new Dictionary<string, object?> { ["id"] = 6L, ["status"] = "closed", ["region"] = null, ["sort_key"] = 50 }
+        new Dictionary<string, object?> { ["id"] = 1L, ["status"] = "open", ["region"] = "eu", ["sort_key"] = 30, ["amount"] = 10, ["long_amount"] = 100L, ["decimal_amount"] = 10.00m },
+        new Dictionary<string, object?> { ["id"] = 2L, ["status"] = "open", ["region"] = null, ["sort_key"] = 10, ["amount"] = null, ["long_amount"] = null, ["decimal_amount"] = null },
+        new Dictionary<string, object?> { ["id"] = 3L, ["status"] = "closed", ["region"] = "eu", ["sort_key"] = 20, ["amount"] = 7, ["long_amount"] = 70L, ["decimal_amount"] = 7.50m },
+        new Dictionary<string, object?> { ["id"] = 4L, ["status"] = "open", ["region"] = "us", ["sort_key"] = 40, ["amount"] = 4, ["long_amount"] = 40L, ["decimal_amount"] = 4.00m },
+        new Dictionary<string, object?> { ["id"] = 5L, ["status"] = "open", ["region"] = "eu", ["sort_key"] = 20, ["amount"] = 10, ["long_amount"] = 100L, ["decimal_amount"] = 10.00m },
+        new Dictionary<string, object?> { ["id"] = 6L, ["status"] = "closed", ["region"] = null, ["sort_key"] = 50, ["amount"] = null, ["long_amount"] = null, ["decimal_amount"] = null }
     ];
 
     /// <summary>
@@ -108,7 +108,10 @@ internal sealed class LinqExecutionMatrix : IDisposable
             new() { Name = "id", Type = PortableType.Int64, IsNullable = false },
             new() { Name = "status", Type = PortableType.String, IsNullable = false, MaxLength = 32 },
             new() { Name = "region", Type = PortableType.String, IsNullable = true, MaxLength = 32 },
-            new() { Name = "sort_key", Type = PortableType.Int32, IsNullable = false }
+            new() { Name = "sort_key", Type = PortableType.Int32, IsNullable = false },
+            new() { Name = "amount", Type = PortableType.Int32 },
+            new() { Name = "long_amount", Type = PortableType.Int64 },
+            new() { Name = "decimal_amount", Type = PortableType.Decimal, Precision = 18, Scale = 4 }
         ],
         Key = new KeyDefinition { Columns = ["id"] },
         Indexes =
@@ -119,7 +122,10 @@ internal sealed class LinqExecutionMatrix : IDisposable
             {
                 Name = "ix_region_desc_sort",
                 Columns = [new IndexColumn("region", SortDirection.Descending), new IndexColumn("sort_key")]
-            }
+            },
+            new() { Name = "ix_status_amount", Columns = [new IndexColumn("status"), new IndexColumn("amount")] },
+            new() { Name = "ix_status_long", Columns = [new IndexColumn("status"), new IndexColumn("long_amount")] },
+            new() { Name = "ix_status_decimal", Columns = [new IndexColumn("status"), new IndexColumn("decimal_amount")] }
         ]
     };
 
@@ -128,7 +134,11 @@ internal sealed class LinqExecutionMatrix : IDisposable
         new GwColumn<Ticket>(nameof(Ticket.Id), "id", QueryType.Int64, IsNullable: false),
         new GwColumn<Ticket>(nameof(Ticket.Status), "status", QueryType.String, IsNullable: false, MaxLength: 32),
         new GwColumn<Ticket>(nameof(Ticket.Region), "region", QueryType.String, IsNullable: true, MaxLength: 32),
-        new GwColumn<Ticket>(nameof(Ticket.SortKey), "sort_key", QueryType.Int32, IsNullable: false)
+        new GwColumn<Ticket>(nameof(Ticket.SortKey), "sort_key", QueryType.Int32, IsNullable: false),
+        new GwColumn<Ticket>(nameof(Ticket.Amount), "amount", QueryType.Int32),
+        new GwColumn<Ticket>(nameof(Ticket.LongAmount), "long_amount", QueryType.Int64),
+        new GwColumn<Ticket>(nameof(Ticket.DecimalAmount), "decimal_amount", QueryType.Decimal,
+            DecimalPrecision: 18, DecimalScale: 4)
     ]);
 
     private static string Required(string name)
@@ -155,6 +165,9 @@ internal sealed class Ticket
     public string Status { get; set; } = string.Empty;
     public string? Region { get; set; }
     public int SortKey { get; set; }
+    public int? Amount { get; set; }
+    public long? LongAmount { get; set; }
+    public decimal? DecimalAmount { get; set; }
 
     public override string ToString() => $"{Id}/{Status}/{Region ?? "<null>"}/{SortKey}";
 }

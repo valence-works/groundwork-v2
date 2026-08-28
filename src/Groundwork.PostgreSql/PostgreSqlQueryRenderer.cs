@@ -17,6 +17,13 @@ public sealed class PostgreSqlQueryRenderer : RelationalQueryRenderer
 
     protected override string ProviderName => "PostgreSQL";
 
+    protected override string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression)
+    {
+        if (reduction is ResultShape.Sum && reduction.Column.Type is QueryType.Int32 or QueryType.Int64)
+            return "CASE WHEN COUNT(" + valueExpression + ") = 0 THEN NULL ELSE CAST(SUM(" + valueExpression + ") AS bigint) END";
+        return base.RenderReductionAggregate(reduction, valueExpression);
+    }
+
     protected override object? AdaptParameter(QueryType type, object? value) => type == QueryType.DateTimeOffset && value is DateTimeOffset timestamp
         ? timestamp.ToUniversalTime().Ticks
         : value;

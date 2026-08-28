@@ -120,6 +120,71 @@ public sealed class LinqExecutionDifferentialTests
     }
 
     [SkippableFact]
+    public async Task Linq_cardinality_distinct_and_nullable_reductions_agree_on_every_provider()
+    {
+        using var matrix = LinqExecutionMatrix.OpenAll();
+
+        var first = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .OrderBy(ticket => ticket.SortKey)
+            .FirstAsync(provider.Executor));
+        Assert.Equal(2L, first.Id);
+
+        var empty = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "archived")
+            .OrderBy(ticket => ticket.SortKey)
+            .FirstOrDefaultAsync(provider.Executor));
+        Assert.Null(empty);
+
+        var one = await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Id == 4L)
+            .SingleAsync(provider.Executor));
+        Assert.Equal(4L, one.Id);
+
+        foreach (var provider in matrix.Providers)
+            await Assert.ThrowsAsync<InvalidOperationException>(() => provider.Table.Query
+                .Where(ticket => ticket.Status == "open")
+                .SingleAsync(provider.Executor));
+
+        // Select has no mapped result model, so this intentionally exercises the executor's scalar
+        // materializer directly. The region index makes the distinct source covered.
+        var distinct = await AssertSameAsync(matrix, provider => provider.Executor.ToListAsync<string?>(provider.Table.Query
+            .Where(ticket => ticket.Region == "eu" || ticket.Region == "us" || ticket.Region == null)
+            .OrderBy(ticket => ticket.Region)
+            .Select(ticket => ticket.Region)
+            .Distinct()
+            .Take(2)
+            .ToQueryRequest()));
+        Assert.Equal(["eu", "us"], distinct);
+
+        Assert.Equal(24L, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .SumAsync(provider.Executor, ticket => ticket.Amount)));
+        Assert.Equal(240L, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .SumAsync(provider.Executor, ticket => ticket.LongAmount)));
+        Assert.Equal(24.00m, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .SumAsync(provider.Executor, ticket => ticket.DecimalAmount)));
+        Assert.Equal(4, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MinAsync(provider.Executor, ticket => ticket.Amount)));
+        Assert.Equal(10L, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MaxAsync(provider.Executor, ticket => ticket.LongAmount)));
+        Assert.Equal(4.00m, await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "open")
+            .MinAsync(provider.Executor, ticket => ticket.DecimalAmount)));
+
+        Assert.Null(await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "closed" && ticket.Amount == null)
+            .SumAsync(provider.Executor, ticket => ticket.Amount)));
+        Assert.Null(await AssertSameAsync(matrix, provider => provider.Table.Query
+            .Where(ticket => ticket.Status == "archived")
+            .MaxAsync(provider.Executor, ticket => ticket.LongAmount)));
+    }
+
+    [SkippableFact]
     public async Task Uncovered_shapes_are_refused_with_the_same_code_and_fix_on_every_provider()
     {
         using var matrix = LinqExecutionMatrix.OpenAll();
@@ -262,6 +327,7 @@ public sealed class LinqExecutionDifferentialTests
     private static string Describe<TResult>(TResult value) => value switch
     {
         IReadOnlyList<Ticket> tickets => string.Join(" | ", tickets),
+        IReadOnlyList<string?> values => string.Join(" | ", values.Select(value => value ?? "<null>")),
         null => "<null>",
         _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "<null>"
     };

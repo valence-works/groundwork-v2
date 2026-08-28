@@ -69,6 +69,33 @@ public static class QueryResultMaterializer
         var effectiveSource = source
             .Where(row => !row.TryGetValue("__groundwork_count_only", out var marker) || Convert.ToInt64(marker ?? 0, CultureInfo.InvariantCulture) == 0)
             .ToArray();
+
+        // A reduction is already a one-row provider result. Its input paging, ordering, distinct
+        // and latest-per-key semantics were applied inside the native reduction command, so the
+        // result row must not be paged or reduced a second time here. Keeping this branch ahead of
+        // the ordinary row materializer also means a scalar result can never silently turn into
+        // the first raw source row when a provider forgets to render its reduction shape.
+        if (request.Result is ResultShape.Reduction)
+        {
+            if (effectiveSource.Length != 1)
+                throw new InvalidOperationException(
+                    "A native reduction must materialize exactly one provider result row.");
+            var reduced = effectiveSource[0];
+
+            var fields = request.Projection.AllColumns
+                ? reduced.Where(pair => !IsInternalField(pair.Key))
+                : request.Projection.Columns
+                    .Where(column => !IsInternalField(column.Name) && reduced.ContainsKey(column.Name))
+                    .Select(column => new KeyValuePair<string, object?>(column.Name, reduced[column.Name]));
+            return new QueryMaterializedResult(
+                new[] { (IReadOnlyDictionary<string, object?>)new ReadOnlyDictionary<string, object?>(
+                    fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal)) },
+                null,
+                null,
+                selectedIndex,
+                indexHintApplied);
+        }
+
         if (request.Distinct)
             effectiveSource = DistinctRows(request, effectiveSource).ToArray();
 
@@ -353,6 +380,13 @@ public static class QueryRequestExecution
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
         request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+
+        // Reduction commands apply their input window before the provider-side aggregate. Adding
+        // the ordinary page look-ahead here would change Sum/Min/Max semantics (Take(n) would
+        // become Take(n+1)), while a client-side re-page would aggregate the wrong input.
+        if (request.Result is ResultShape.Reduction)
+            return request;
+
         var order = options.GetEffectiveOrder(request);
         var projection = request.Projection;
         if (!projection.AllColumns)

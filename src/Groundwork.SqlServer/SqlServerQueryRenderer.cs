@@ -22,6 +22,13 @@ public sealed class SqlServerQueryRenderer : RelationalQueryRenderer
 
     protected override string RenderCountAggregate() => "COUNT_BIG(*)";
 
+    protected override string RenderReductionAggregate(ResultShape.Reduction reduction, string valueExpression)
+    {
+        if (reduction is ResultShape.Sum && reduction.Column.Type == QueryType.Int32)
+            return "CASE WHEN COUNT(" + valueExpression + ") = 0 THEN NULL ELSE SUM(CAST(" + valueExpression + " AS bigint)) END";
+        return base.RenderReductionAggregate(reduction, valueExpression);
+    }
+
     protected override bool RequiresOrderForOffset => true;
 
     protected override string RenderIndexHint(string indexName) =>

@@ -688,6 +688,13 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
             }
 
             var selectedIndex = renderOptions.FindPinnedIndex()?.Name;
+            if (request.Result is ResultShape.Reduction reduction)
+            {
+                var reduced = ReduceRows(reduction, request, rows);
+                return QueryResultMaterializer.Materialize(request, renderOptions, [reduced], selectedIndex,
+                    sourceIncludesRequestedOffset: true,
+                    sourceIncludesContinuation: true);
+            }
             if (!request.Result.IncludesTotalCount)
                 return QueryResultMaterializer.Materialize(request, renderOptions, rows, selectedIndex, sourceIncludesRequestedOffset: false);
 
@@ -873,6 +880,36 @@ internal sealed class InMemoryStorageSession : IStorageSession, IProviderBoundSt
                 .OrderByDescending(row => ((DateTimeOffset)row[latest.Timestamp.Name]!).UtcTicks)
                 .Aggregate((best, candidate) => CompareTie(candidate, best, tieBreakColumns) < 0 ? candidate : best))
             .ToList();
+    }
+
+    private static IReadOnlyDictionary<string, object?> ReduceRows(
+        ResultShape.Reduction reduction,
+        QueryRequest request,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        IEnumerable<IReadOnlyDictionary<string, object?>> input = rows;
+        if (request.Distinct)
+            input = input.GroupBy(row => row.TryGetValue(reduction.Column.Name, out var value) ? value : null).Select(group => group.First());
+        if (request.Paging.Offset is int offset)
+            input = input.Skip(offset);
+        if (request.Paging.Limit is int limit)
+            input = input.Take(limit);
+
+        var values = input
+            .Select(row => row.TryGetValue(reduction.Column.Name, out var value) ? value : null)
+            .Where(value => value is not null)
+            .ToArray();
+        object? result = reduction switch
+        {
+            ResultShape.Sum when reduction.Column.Type is QueryType.Int32 or QueryType.Int64 =>
+                values.Length == 0 ? null : values.Select(Convert.ToInt64).Aggregate(0L, checked((total, value) => total + value)),
+            ResultShape.Sum when reduction.Column.Type == QueryType.Decimal =>
+                values.Length == 0 ? null : values.Select(Convert.ToDecimal).Aggregate(0m, checked((total, value) => total + value)),
+            ResultShape.Min => values.Length == 0 ? null : values.Min(),
+            ResultShape.Max => values.Length == 0 ? null : values.Max(),
+            _ => throw new InvalidOperationException("The in-memory reduction column is not portable.")
+        };
+        return new Dictionary<string, object?>(StringComparer.Ordinal) { [reduction.Column.Name] = result };
     }
 
     private static string CompositeIdentity(

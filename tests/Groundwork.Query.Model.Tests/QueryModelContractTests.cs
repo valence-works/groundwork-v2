@@ -511,6 +511,27 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
+    public void Reduction_materialization_requires_exactly_one_native_scalar_row()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(Amount),
+            Paging.OffsetLimit(0, 2),
+            new ResultShape.Sum(Amount));
+
+        Assert.Throws<InvalidOperationException>(() => QueryResultMaterializer.Materialize(request,
+            QueryRenderOptions.Default,
+            [new Dictionary<string, object?> { ["amount"] = 1m }, new Dictionary<string, object?> { ["amount"] = 2m }]));
+        var result = QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default,
+            [new Dictionary<string, object?> { ["amount"] = 3L }]);
+
+        Assert.Equal(3L, Assert.Single(result.Rows)["amount"]);
+        Assert.Equal(2, QueryRequestExecution.ForProviderPage(request, QueryRenderOptions.Default).Paging.Limit);
+    }
+
+    [Fact]
     public void Cardinality_execution_does_not_expand_an_explicit_take()
     {
         var request = new QueryRequest(

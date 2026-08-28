@@ -81,6 +81,34 @@ public sealed class MongoQueryRenderer
                     $"{string.Join(", ", unproven)}; the declaration must include nulls or use an unpinned index.");
         }
 
+        if (request.Result is ResultShape.Reduction reduction)
+        {
+            var reductionProjection = new BsonDocument(reduction.Column.Name, 1);
+            var reductionPipeline = RenderReductionPipeline(
+                physicalCollectionName ?? request.Table.Value,
+                baseFilter,
+                cursor,
+                request.LatestPerKey,
+                order,
+                request,
+                reduction,
+                options,
+                sourcePrefix);
+            return new MongoQueryCommand(
+                filter,
+                new BsonDocument(order.Select(term =>
+                    new BsonElement(term.Column.Name, term.Direction == OrderDirection.Ascending ? 1 : -1))),
+                reductionProjection,
+                null,
+                null,
+                selectedIndex is null ? null : options.ResolvePhysicalIndexName(selectedIndex.Name),
+                false,
+                matchNone,
+                order.Select(term => term.Column.Name).ToArray(),
+                reductionPipeline,
+                expectedIndex?.Name);
+        }
+
         var projection = request.Projection.AllColumns
             ? new BsonDocument()
             : new BsonDocument(request.Projection.Columns.ToDictionary(column => column.Name, _ => (BsonValue)1));
@@ -101,6 +129,128 @@ public sealed class MongoQueryRenderer
             order.Select(term => term.Column.Name).ToArray(),
             pipeline,
             expectedIndex?.Name);
+    }
+
+    private IReadOnlyList<BsonDocument> RenderReductionPipeline(
+        string collectionName,
+        BsonDocument baseFilter,
+        IReadOnlyList<QueryConstant>? cursor,
+        LatestPerKey? latest,
+        IReadOnlyList<OrderTerm> order,
+        QueryRequest request,
+        ResultShape.Reduction reduction,
+        QueryRenderOptions options,
+        IReadOnlyList<BsonDocument>? sourcePrefix)
+    {
+        // Render the source with all native filtering, latest-per-key, continuation, and ordering
+        // stages first. A reduction is never a find followed by client-side row materialization.
+        var pipeline = RenderPipeline(collectionName, baseFilter, cursor, latest, order,
+            projection: new BsonDocument(),
+            paging: request.Distinct ? Paging.None : request.Paging,
+            includesTotalCount: false,
+            options,
+            sourcePrefix ?? Array.Empty<BsonDocument>()).Select(stage => stage.DeepClone().AsBsonDocument).ToList();
+
+        if (request.Distinct)
+        {
+            var group = new BsonDocument { { "_id", "$" + reduction.Column.Name } };
+            for (var index = 0; index < order.Count; index++)
+            {
+                var field = "__groundwork_distinct_order_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                group.Add(field, new BsonDocument("$first", "$" + order[index].Column.Name));
+            }
+            pipeline.Add(new BsonDocument("$group", group));
+
+            var projection = new BsonDocument { { "_id", 0 }, { reduction.Column.Name, "$_id" } };
+            for (var index = 0; index < order.Count; index++)
+            {
+                var field = "__groundwork_distinct_order_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                projection.Add(field, 1);
+            }
+            pipeline.Add(new BsonDocument("$project", projection));
+            AppendReductionOrder(pipeline, order, static (term, index) =>
+                "$__groundwork_distinct_order_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+            var cleanup = new BsonDocument { { "_id", 0 }, { reduction.Column.Name, 1 } };
+            pipeline.Add(new BsonDocument("$project", cleanup));
+            if (request.Paging.Offset is int offset)
+                pipeline.Add(new BsonDocument("$skip", offset));
+            if (request.Paging.Limit is int limit)
+                pipeline.Add(new BsonDocument("$limit", limit));
+        }
+
+        var value = "$" + reduction.Column.Name;
+        BsonValue reducedValue = reduction switch
+        {
+            ResultShape.Sum when reduction.Column.Type == QueryType.Decimal => new BsonDocument("$toDecimal", value),
+            ResultShape.Sum when reduction.Column.Type is QueryType.Int32 or QueryType.Int64 => new BsonDocument("$toLong", value),
+            _ => value
+        };
+        var accumulator = reduction switch
+        {
+            ResultShape.Sum => "$sum",
+            ResultShape.Min => "$min",
+            ResultShape.Max => "$max",
+            _ => throw new ArgumentOutOfRangeException(nameof(reduction), reduction, null)
+        };
+        pipeline.Add(new BsonDocument("$facet", new BsonDocument
+        {
+            {
+                "__groundwork_reduction", new BsonArray
+                {
+                    new BsonDocument("$match", new BsonDocument(reduction.Column.Name,
+                        new BsonDocument("$ne", BsonNull.Value))),
+                    new BsonDocument("$group", new BsonDocument
+                    {
+                        { "_id", BsonNull.Value },
+                        { "__groundwork_value", new BsonDocument(accumulator, reducedValue) }
+                    })
+                }
+            }
+        }));
+        pipeline.Add(new BsonDocument("$project", new BsonDocument
+        {
+            { "_id", 0 },
+            { reduction.Column.Name, new BsonDocument("$ifNull", new BsonArray
+                {
+                    new BsonDocument("$arrayElemAt", new BsonArray { "$__groundwork_reduction.__groundwork_value", 0 }),
+                    BsonNull.Value
+                }) }
+        }));
+        return pipeline;
+    }
+
+    private static void AppendReductionOrder(
+        ICollection<BsonDocument> pipeline,
+        IReadOnlyList<OrderTerm> order,
+        Func<OrderTerm, int, string> field)
+    {
+        if (order.Count == 0)
+            return;
+        var sort = new BsonDocument();
+        for (var index = 0; index < order.Count; index++)
+        {
+            var term = order[index];
+            var expression = field(term, index);
+            var rankName = "__groundwork_reduction_null_rank_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var nullRank = term.NullOrder == NullOrder.First ? 0 : 1;
+            var nonNullRank = term.NullOrder == NullOrder.First ? 1 : 0;
+            pipeline.Add(new BsonDocument("$set", new BsonDocument(rankName,
+                new BsonDocument("$cond", new BsonArray
+                {
+                    new BsonDocument("$eq", new BsonArray { expression, BsonNull.Value }),
+                    nullRank,
+                    nonNullRank
+                }))));
+            sort.Add(rankName, 1);
+            var orderName = term.Column.Type == QueryType.String
+                ? "__groundwork_reduction_ordinal_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : expression.TrimStart('$');
+            if (term.Column.Type == QueryType.String)
+                pipeline.Add(new BsonDocument("$set", new BsonDocument(orderName, RenderOrdinalKey(expression))));
+            sort.Add(orderName, term.Direction == OrderDirection.Ascending ? 1 : -1);
+        }
+        pipeline.Add(new BsonDocument("$sort", sort));
     }
 
     internal BsonDocument RenderAggregationSourcePredicate(Predicate predicate, string table, int inValueLimit = 1_000)

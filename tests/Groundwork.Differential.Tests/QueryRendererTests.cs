@@ -19,6 +19,40 @@ public sealed class QueryRendererTests
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Int32, isNullable: true);
 
     [Fact]
+    public void All_four_renderers_use_a_native_reduction_after_distinct_and_input_paging()
+    {
+        var request = new QueryRequest(
+            Table,
+            new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice")),
+            [new OrderTerm(Amount, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(Amount),
+            Paging.OffsetLimit(0, 2),
+            new ResultShape.Sum(Amount),
+            distinct: true);
+
+        var relational = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request),
+            new PostgreSqlQueryRenderer().Render(request),
+            new SqlServerQueryRenderer().Render(request)
+        };
+        Assert.All(relational, command =>
+        {
+            Assert.Contains("SUM", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("COUNT", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("ROW_NUMBER", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("amount", command.CommandText, StringComparison.OrdinalIgnoreCase);
+        });
+
+        var mongo = new MongoQueryRenderer().Render(request);
+        Assert.NotEmpty(mongo.Pipeline);
+        Assert.Contains("$group", mongo.Pipeline.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$facet", mongo.Pipeline.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$sum", mongo.Pipeline.ToString(), StringComparison.Ordinal);
+        Assert.Contains("$limit", mongo.Pipeline.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void All_four_renderers_preserve_the_normalized_result_shape_and_order()
     {
         var request = Request(

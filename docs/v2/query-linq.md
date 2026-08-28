@@ -57,6 +57,11 @@ lowered shape requires an intentional version bump.
 | `Sum(selector)` | `ResultShape.Sum`, over a mapped `Int32`, `Int64`, or `Decimal` column; results are nullable `Int64` or `Decimal` |
 | `Min(selector)` / `Max(selector)` | `ResultShape.Min` / `ResultShape.Max`, over closed overloads for mapped orderable columns; nulls are ignored and an empty/all-null input yields null |
 
+Every async reduction convenience (`SumAsync`, `MinAsync`, and `MaxAsync`) dispatches through
+`IGwQueryExecutor.ReduceAsync`. Providers must return one native scalar row; the runtime never
+materializes source rows and reduces them on the client. Input `Distinct`, ordering, and paging are
+applied natively before the aggregate, and integer sums are returned as nullable `Int64` values.
+
 The query-shape diagnostics are versioned separately from the predicate corpus:
 
 | Code | Query-shape refusal | Fix |
