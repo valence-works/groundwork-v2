@@ -32,7 +32,15 @@ public static class QueryCoverageChecker
                 Array.Empty<CoverageRefusal>(),
                 "The normalized predicate is always false and requires no provider read.");
         }
-        var suggested = SuggestIndex(request, constraints);
+        var declaredKey = candidates.FirstOrDefault(index => index.IsDeclaredKey);
+        // A point read answers exactly one predicate shape: a conjunction of single-value
+        // equalities over every column of the declared key, which can match at most one row. It
+        // does not answer a disjunction, a range, or a partial-key equality — all of which can
+        // mention precisely the key's columns. Only the shape the remedy is true of loses its
+        // index suggestion; every other shape keeps the ordinary one.
+        var isPointRead = declaredKey is not null &&
+            constraints.AreSingleValueEqualities(declaredKey.Columns.Length, declaredKey);
+        var suggested = isPointRead ? null : SuggestIndex(request, constraints);
 
         var refusals = new List<Refusal>();
         foreach (var order in request.Order)
@@ -113,13 +121,18 @@ public static class QueryCoverageChecker
         QueryRequest request,
         string reason,
         CoverageIndex? nearest,
-        CoverageIndex suggested)
+        CoverageIndex? suggested)
     {
         var nearestText = nearest is null
             ? "Nearest index: <none>."
             : "Nearest index '" + nearest.Name + "' (" + Describe(nearest) + ").";
+        var fix = suggested is null
+            ? "The predicate pins every column of the declared key, so at most one row can match and" +
+              " no index would improve on that. Read it directly instead: session.Read(key), or the" +
+              " typed Records read."
+            : "Add: " + suggested.Declaration;
         return "Query on '" + request.Table.Value + "' is not index-covered. " + reason + " " +
-               nearestText + " Add: " + suggested.Declaration +
+               nearestText + " " + fix +
                " Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").";
     }
 

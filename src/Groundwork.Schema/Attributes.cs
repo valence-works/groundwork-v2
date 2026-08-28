@@ -21,7 +21,10 @@ public enum SchemaValueType
     DateTimeOffset,
     Guid,
     Binary,
-    Json
+    Json,
+
+    /// <summary>Storage-only IEEE-754 binary64. See <c>PortableType.Double</c>.</summary>
+    Double
 }
 
 /// <summary>How a value for a column is obtained.</summary>

@@ -14,6 +14,10 @@ namespace Groundwork.SqlServer.Tests;
 /// engine decides: its <c>OFFSET…FETCH</c> chunk limit, its <c>MERGE</c> ledger upsert, and a
 /// <c>CASE</c> assignment whose arms include a null.
 /// </summary>
+// Shares the database LiveSqlServer claims with the provider, schema-tool and parity suites, so it
+// belongs in their collection. Outside it, xUnit gives this class a default collection of its own
+// and schedules it alongside the one whose fixture resets the catalog wholesale.
+[Collection(SqlServerLiveDatabase.Name)]
 public sealed class SqlServerDataMigrationTests
 {
     private const string MigrationId = "2026-08-normalize";

@@ -44,6 +44,7 @@ internal sealed class SqliteDialect : RelationalDialect
         PortableType.Decimal => "TEXT",
         PortableType.DateTimeOffset or PortableType.Guid or PortableType.Json => "TEXT",
         PortableType.Binary => "BLOB",
+        PortableType.Double => "REAL",
         _ => throw new ArgumentOutOfRangeException(nameof(definition))
     };
 

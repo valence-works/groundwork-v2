@@ -90,6 +90,7 @@ public static class MongoValueCodec
             PortableType.Guid => new BsonBinaryData(ExactGuid(value, column), GuidRepresentation.Standard),
             PortableType.Binary => EncodeBinary(value, column),
             PortableType.Json => EncodeJson(value, column),
+            PortableType.Double => new BsonDouble(ExactDouble(value, column)),
             _ => throw new ArgumentOutOfRangeException(nameof(column), column.Type, null)
         };
     }
@@ -112,6 +113,7 @@ public static class MongoValueCodec
             PortableType.Guid => value.AsBsonBinaryData.ToGuid(GuidRepresentation.Standard),
             PortableType.Binary => value.AsBsonBinaryData.Bytes.ToArray(),
             PortableType.Json => DecodeJson(value),
+            PortableType.Double => value.AsDouble,
             _ => throw new ArgumentOutOfRangeException(nameof(column), column.Type, null)
         };
     }
@@ -126,6 +128,7 @@ public static class MongoValueCodec
         PortableType.DateTimeOffset => "long",
         PortableType.Guid or PortableType.Binary => "binData",
         PortableType.Json => "object",
+        PortableType.Double => "double",
         _ => throw new ArgumentOutOfRangeException(nameof(column), column.Type, null)
     };
 
@@ -223,6 +226,12 @@ public static class MongoValueCodec
         long number => number,
         int number => number,
         _ => throw WrongType(value, column, typeof(long))
+    };
+
+    private static double ExactDouble(object value, ColumnDefinition column) => value switch
+    {
+        double number => number,
+        _ => throw WrongType(value, column, typeof(double))
     };
 
     private static bool ExactBoolean(object value, ColumnDefinition column) => value switch
