@@ -374,6 +374,96 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Schema_apply_renames_a_key_column_by_logical_id_and_carries_its_value()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-key-rename");
+        var initial = EvolutionUnit("schema-key-rename");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+
+        var renamed = initial with
+        {
+            Columns = [.. initial.Columns.Select(column => column.Name == "id"
+                ? column with { Name = "identifier", Id = column.LogicalId }
+                : column)],
+            Key = new KeyDefinition { Columns = ["identifier"] }
+        };
+
+        var diff = connection.Schema.Diff(renamed);
+        var change = Assert.Single(diff.Changes);
+        Assert.Equal(SchemaChangeKind.RenameColumn, change.Kind);
+        Assert.Equal("identifier", change.Identity);
+        Assert.True(connection.Schema.Apply(renamed).Applied);
+
+        var stored = connection.OpenSession(renamed, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["identifier"] = "customer-1" }));
+        Assert.NotNull(stored);
+        Assert.Equal("Ada", stored.Values.Values["name"]);
+        Assert.False(stored.Values.Values.ContainsKey("id"));
+        Assert.Equal("customer-1", stored.Values.Values["identifier"]);
+        Assert.True(connection.Schema.Diff(renamed).IsEmpty);
+    }
+
+    [Fact]
+    public void Schema_diff_refuses_dropping_a_key_column()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-key-drop");
+        var initial = EvolutionUnit("schema-key-drop");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var dropped = initial with
+        {
+            Columns = [.. initial.Columns.Where(column => column.Name != "id")],
+            Key = new KeyDefinition { Columns = ["name"] }
+        };
+
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(dropped));
+    }
+
+    [Fact]
+    public void Schema_diff_refuses_reordering_key_columns()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-key-reorder");
+        var initial = EvolutionUnit("schema-key-reorder");
+        initial = initial with
+        {
+            Columns = [.. initial.Columns.Select(column => column.Name == "name"
+                ? column with { IsNullable = false }
+                : column)],
+            Key = new KeyDefinition { Columns = ["id", "name"] }
+        };
+        Assert.True(connection.Schema.Apply(initial).Applied);
+
+        var reordered = initial with { Key = new KeyDefinition { Columns = ["name", "id"] } };
+
+        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(reordered));
+    }
+
+    [Fact]
+    public void Schema_apply_refuses_a_key_type_change_even_when_the_physical_name_is_renamed()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-key-type");
+        var initial = EvolutionUnit("schema-key-type");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        InsertEvolutionRow(connection, initial);
+        var retyped = initial with
+        {
+            Columns = [.. initial.Columns.Select(column => column.Name == "id"
+                ? column with { Name = "identifier", Id = column.LogicalId, Type = PortableType.Guid, MaxLength = null }
+                : column)],
+            Key = new KeyDefinition { Columns = ["identifier"] }
+        };
+
+        var result = connection.Schema.Apply(retyped);
+
+        Assert.False(result.Applied);
+        var stored = connection.OpenSession(initial, StorageAccess.Global).Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "customer-1" }));
+        Assert.NotNull(stored);
+        Assert.Equal("customer-1", stored.Values.Values["id"]);
+        Assert.False(stored.Values.Values.ContainsKey("identifier"));
+    }
+
+    [Fact]
     public void Schema_apply_renames_primary_storage_and_preserves_its_rows()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://schema-storage-rename");
