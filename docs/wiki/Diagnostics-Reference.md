@@ -71,6 +71,7 @@ Raised by `PortableQuerySemantics.Validate`. See **[Portable Semantics](Portable
 | `GW-SEM-ORDER-003` | Range ordering on a non-orderable type |
 | `GW-SEM-ORDER-004` | `NullOrder.ProviderDefault` |
 | `GW-SEM-ORDER-005` | Boolean ordering |
+| `GW-SEM-ORDER-006` | First/Single without an explicit deterministic order |
 | `GW-SEM-LATEST-001` | Latest-per-key needs a non-null `DateTimeOffset` |
 | `GW-SEM-UNKNOWN-001` | Unrecognised predicate node |
 
@@ -90,6 +91,7 @@ Raised by `PortableQuerySemantics.Validate`. See **[Portable Semantics](Portable
 | `GW-LINQ-108` | Unpinned string comparison | Use `Ordinal`/`OrdinalIgnoreCase` matching the column's folding |
 | `GW-LINQ-109` | Non-UTC clock | Use `DateTimeOffset.UtcNow` |
 | `GW-LINQ-110` | Decimal precision/scale | Value exceeds the declared decimal |
+| `GW-LINQ-111` | Cardinality query without deterministic order | Add an explicit `OrderBy` before `First` or `Single` |
 
 ---
 

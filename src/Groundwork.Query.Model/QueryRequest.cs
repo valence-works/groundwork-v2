@@ -88,6 +88,12 @@ public abstract record ResultShape
 {
     public abstract bool IncludesTotalCount { get; }
 
+    /// <summary>The maximum number of rows required to answer this result shape.</summary>
+    public virtual int? MaxRows => null;
+
+    /// <summary>Whether this result needs an explicit deterministic order.</summary>
+    public virtual bool RequiresDeterministicOrder => false;
+
     public sealed record Rows : ResultShape
     {
         public static Rows Instance { get; } = new();
@@ -100,6 +106,38 @@ public abstract record ResultShape
         public static TotalCount Instance { get; } = new();
         public static TotalCount Default => Instance;
         public override bool IncludesTotalCount => true;
+    }
+
+    public sealed record First : ResultShape
+    {
+        public static First Instance { get; } = new();
+        public override bool IncludesTotalCount => false;
+        public override int? MaxRows => 1;
+        public override bool RequiresDeterministicOrder => true;
+    }
+
+    public sealed record FirstOrDefault : ResultShape
+    {
+        public static FirstOrDefault Instance { get; } = new();
+        public override bool IncludesTotalCount => false;
+        public override int? MaxRows => 1;
+        public override bool RequiresDeterministicOrder => true;
+    }
+
+    public sealed record Single : ResultShape
+    {
+        public static Single Instance { get; } = new();
+        public override bool IncludesTotalCount => false;
+        public override int? MaxRows => 2;
+        public override bool RequiresDeterministicOrder => true;
+    }
+
+    public sealed record SingleOrDefault : ResultShape
+    {
+        public static SingleOrDefault Instance { get; } = new();
+        public override bool IncludesTotalCount => false;
+        public override int? MaxRows => 2;
+        public override bool RequiresDeterministicOrder => true;
     }
 }
 
@@ -126,8 +164,9 @@ public sealed record QueryRequest
         Projection projection,
         Paging paging,
         LatestPerKey? latestPerKey = null,
-        ScanAcceptance? acceptedScan = null)
-        : this(table, where, order, projection, paging, ResultShape.Rows.Instance, latestPerKey, acceptedScan)
+        ScanAcceptance? acceptedScan = null,
+        bool distinct = false)
+        : this(table, where, order, projection, paging, ResultShape.Rows.Instance, latestPerKey, acceptedScan, distinct)
     {
     }
 
@@ -139,7 +178,8 @@ public sealed record QueryRequest
         Paging paging,
         ResultShape result,
         LatestPerKey? latestPerKey = null,
-        ScanAcceptance? acceptedScan = null)
+        ScanAcceptance? acceptedScan = null,
+        bool distinct = false)
     {
         Table = table ?? throw new ArgumentNullException(nameof(table));
         Where = PredicateNormalizer.Normalize(where ?? throw new ArgumentNullException(nameof(where)));
@@ -151,6 +191,7 @@ public sealed record QueryRequest
         Result = result ?? throw new ArgumentNullException(nameof(result));
         LatestPerKey = latestPerKey;
         AcceptedScan = acceptedScan;
+        Distinct = distinct;
         CanonicalPredicate = PredicateCanonicalizer.ToCanonicalString(Where);
         ShapeFingerprint = QueryFingerprint.Create(this, includeResultShape: true);
         ContinuationFingerprint = QueryFingerprint.Create(this, includeResultShape: false, includePaging: false);
@@ -164,6 +205,8 @@ public sealed record QueryRequest
     public ResultShape Result { get; }
     public LatestPerKey? LatestPerKey { get; }
     public ScanAcceptance? AcceptedScan { get; }
+    /// <summary>Whether duplicate projected values are removed before paging or cardinality checks.</summary>
+    public bool Distinct { get; }
     public string CanonicalPredicate { get; internal init; }
     public string ShapeFingerprint { get; }
     public string ContinuationFingerprint { get; internal init; }
@@ -196,6 +239,7 @@ public static class QueryFingerprint
         foreach (var term in request.Order)
             builder.Append(PredicateCanonicalizer.Column(term.Column)).Append(':').Append(term.Direction).Append(':').Append(term.NullOrder).Append(';');
         builder.Append("|projection=").Append(request.Projection.AllColumns ? "all" : string.Join(";", request.Projection.Columns.Select(PredicateCanonicalizer.Column)));
+        builder.Append("|distinct=").Append(request.Distinct ? "true" : "false");
         if (includePaging)
             builder.Append("|paging=").Append(request.Paging.Offset?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.Limit?.ToString(CultureInfo.InvariantCulture) ?? "none").Append(':').Append(request.Paging.ContinuationToken is null ? "token" : "continuation");
         builder.Append("|latest=").Append(request.LatestPerKey is null ? "none" : PredicateCanonicalizer.Column(request.LatestPerKey.Key) + ":" + PredicateCanonicalizer.Column(request.LatestPerKey.Timestamp));

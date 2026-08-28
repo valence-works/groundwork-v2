@@ -283,6 +283,123 @@ public sealed class QueryModelContractTests
     }
 
     [Fact]
+    public void Cardinality_shapes_bound_rows_and_distinct_changes_the_shape_fingerprint()
+    {
+        var ordered = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Created, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(Name),
+            Paging.None,
+            ResultShape.First.Instance,
+            distinct: true);
+        var single = new QueryRequest(
+            Table,
+            ordered.Where,
+            ordered.Order,
+            ordered.Projection,
+            Paging.None,
+            ResultShape.Single.Instance);
+
+        Assert.Equal(1, ordered.Result.MaxRows);
+        Assert.Equal(2, single.Result.MaxRows);
+        Assert.True(ordered.Result.RequiresDeterministicOrder);
+        Assert.NotEqual(ordered.ShapeFingerprint, single.ShapeFingerprint);
+        Assert.NotEqual(ordered.ContinuationFingerprint, single.ContinuationFingerprint);
+        Assert.True(ordered.Distinct);
+    }
+
+    [Fact]
+    public void Cardinality_validation_requires_an_explicit_order()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.OffsetLimit(0, 1),
+            ResultShape.First.Instance);
+
+        var refusal = Assert.Single(PortableQuerySemantics.Validate(request).Refusals);
+
+        Assert.Equal("GW-SEM-ORDER-006", refusal.Code);
+        Assert.Equal("order", refusal.Path);
+    }
+
+    [Fact]
+    public void Cardinality_execution_request_preserves_offset_and_caps_the_provider_limit()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.OffsetLimit(5, 20),
+            ResultShape.Single.Instance);
+
+        var execution = QueryRequestExecution.ForResultShape(request);
+
+        Assert.Equal(5, execution.Paging.Offset);
+        Assert.Equal(2, execution.Paging.Limit);
+        Assert.Equal(request.ContinuationFingerprint, execution.ContinuationFingerprint);
+    }
+
+    [Fact]
+    public void Cardinality_page_execution_adds_the_shape_limit_when_request_is_unbounded()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.All,
+            Paging.None,
+            ResultShape.First.Instance);
+
+        var execution = QueryRequestExecution.ForPage(request, QueryRenderOptions.Default);
+
+        Assert.Equal(0, execution.Paging.Offset);
+        Assert.Equal(1, execution.Paging.Limit);
+    }
+
+    [Fact]
+    public void Distinct_materialization_removes_duplicate_projected_values_before_paging()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last)],
+            Projection.ColumnsOnly(Name),
+            Paging.OffsetLimit(0, 2),
+            distinct: true);
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> source =
+        [
+            new Dictionary<string, object?> { ["name"] = "Alice", ["amount"] = 1m },
+            new Dictionary<string, object?> { ["name"] = "Alice", ["amount"] = 2m },
+            new Dictionary<string, object?> { ["name"] = "Bob", ["amount"] = 3m }
+        ];
+
+        var result = QueryResultMaterializer.Materialize(request, QueryRenderOptions.Default, source);
+
+        Assert.Equal(["Alice", "Bob"], result.Rows.Select(row => row["name"]));
+    }
+
+    [Fact]
+    public void Cardinality_materialization_applies_empty_and_over_one_rules_after_distinct()
+    {
+        var ordered = ImmutableArray.Create(new OrderTerm(Name, OrderDirection.Ascending, NullOrder.Last));
+        var first = new QueryRequest(Table, Predicate.AlwaysTrue.Instance, ordered, Projection.All, Paging.None, ResultShape.First.Instance);
+        var single = new QueryRequest(Table, Predicate.AlwaysTrue.Instance, ordered, Projection.ColumnsOnly(Name), Paging.None, ResultShape.Single.Instance);
+        var distinctSingle = new QueryRequest(Table, Predicate.AlwaysTrue.Instance, ordered, Projection.ColumnsOnly(Name), Paging.None, ResultShape.Single.Instance, distinct: true);
+
+        Assert.Throws<InvalidOperationException>(() => QueryResultMaterializer.Materialize(first, QueryRenderOptions.Default, []));
+        Assert.Throws<InvalidOperationException>(() => QueryResultMaterializer.Materialize(single, QueryRenderOptions.Default,
+            [new Dictionary<string, object?> { ["name"] = "Alice" }, new Dictionary<string, object?> { ["name"] = "Bob" }]));
+        var result = QueryResultMaterializer.Materialize(distinctSingle, QueryRenderOptions.Default,
+            [new Dictionary<string, object?> { ["name"] = "Alice" }, new Dictionary<string, object?> { ["name"] = "Alice" }]);
+        Assert.Single(result.Rows);
+    }
+
+    [Fact]
     public void Total_count_results_stay_null_when_the_provider_omits_the_count_row()
     {
         var request = new QueryRequest(

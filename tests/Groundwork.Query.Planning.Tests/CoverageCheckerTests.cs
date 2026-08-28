@@ -214,6 +214,56 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
+    public void Distinct_projection_is_covered_when_all_projected_columns_are_indexed()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Paging.None,
+            Index("ix_status", "status"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.True(result.IsCovered, result.Refusal?.Message);
+        Assert.Equal("ix_status", result.Index!.Name);
+    }
+
+    [Fact]
+    public void Distinct_projection_requires_an_index_or_an_accepted_scan()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Paging.None,
+            Index("ix_other", "other"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+        Assert.Contains("Distinct requires every projected column", result.Refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("status", result.Refusal.SuggestedDeclaration, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cardinality_results_require_an_explicit_order()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.OffsetLimit(0, 1),
+            ResultShape.First.Instance);
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_created", "created_at")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Contains("deterministic order", result.Refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void An_always_false_predicate_needs_no_index_or_provider_read()
     {
         var result = QueryCoverageChecker.Check(
@@ -464,9 +514,11 @@ public sealed class CoverageCheckerTests
         ImmutableArray<OrderTerm> order,
         Paging paging,
         CoverageIndex index,
-        ResultShape? result = null) =>
+        ResultShape? result = null,
+        Projection? projection = null,
+        bool distinct = false) =>
         QueryCoverageChecker.Check(
-            new QueryRequest(Table, predicate, order, Projection.All, paging, result ?? ResultShape.Rows.Instance),
+            new QueryRequest(Table, predicate, order, projection ?? Projection.All, paging, result ?? ResultShape.Rows.Instance, distinct: distinct),
             [index]);
 
     private static CoverageIndex Index(string name, params object[] columns) =>

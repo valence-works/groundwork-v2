@@ -200,6 +200,44 @@ public sealed class CoverageAnalyzerTests
         Assert.True(diagnostic.Location.GetLineSpan().StartLinePosition.Line > 0);
     }
 
+    [Fact]
+    public async Task Distinct_projection_is_covered_by_an_index_on_the_projected_column()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().ToListAsync();"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Distinct_projection_without_a_covering_index_reports_the_projection_refusal()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().ToListAsync();"));
+
+        var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
+        Assert.Contains("Distinct requires every projected column", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task First_without_an_order_reports_the_deterministic_order_refusal()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().FirstAsync();"));
+
+        var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_016"));
+        Assert.Contains("deterministic order", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ordered_first_is_covered_by_the_requested_order_index()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_created", "created_at ASC")) +
+            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.CreatedAt).FirstAsync();"));
+
+        Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
     /// <summary>
     /// The declared key is a coverage candidate. This schema declares an index on an unrelated
     /// column, so nothing but the key itself can cover the read.
@@ -573,8 +611,22 @@ public sealed class CoverageAnalyzerTests
             public Query<T> Where(Func<T, bool> predicate) => this;
             public Query<T> WhereIf(bool condition, Func<T, bool> predicate) => this;
             public Query<T> AcceptScan(string id, string reason, string owner, string expiresOn) => this;
+            public Query<T> OrderBy<TKey>(Func<T, TKey> selector) => this;
             public Query<T> OrderByDescending<TKey>(Func<T, TKey> selector) => this;
+            public Query<T> ThenBy<TKey>(Func<T, TKey> selector) => this;
+            public Query<T> ThenByDescending<TKey>(Func<T, TKey> selector) => this;
+            public Query<T> Skip(int count) => this;
             public Query<T> Take(int count) => this;
+            public Query<TResult> Select<TResult>(Func<T, TResult> selector) => new Query<TResult>();
+            public Query<T> Distinct() => this;
+            public Task First() => Task.CompletedTask;
+            public Task FirstOrDefault() => Task.CompletedTask;
+            public Task FirstAsync() => Task.CompletedTask;
+            public Task FirstOrDefaultAsync() => Task.CompletedTask;
+            public Task Single() => Task.CompletedTask;
+            public Task SingleOrDefault() => Task.CompletedTask;
+            public Task SingleAsync() => Task.CompletedTask;
+            public Task SingleOrDefaultAsync() => Task.CompletedTask;
             public Task ToListAsync() => Task.CompletedTask;
         }
         public static class QueryHost { public static Db db = new Db(); public static bool enabled; public static bool c0, c1, c2, c3, c4, c5, c6; public static string status = "open"; public const string term = "open"; public static DateTimeOffset from; }

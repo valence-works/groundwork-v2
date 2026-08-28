@@ -54,6 +54,10 @@ public static class QueryCoverageChecker
                     "GW-COVER-016",
                     "Ordering this type is not portable; order a declared portable projection or key instead."));
         }
+        if (request.Result.RequiresDeterministicOrder && request.Order.Length == 0)
+            refusals.Add(new Refusal(
+                "GW-COVER-016",
+                "First and Single queries require an explicit deterministic order; add an OrderBy term."));
         if (constraints.HasUnsupportedRange)
             refusals.Add(new Refusal(
                 "GW-COVER-016",
@@ -62,9 +66,9 @@ public static class QueryCoverageChecker
             refusals.Add(new Refusal("GW-COVER-016", "A cross-column Or is not index-covered; only a single-column Or folded to In is portable."));
         if (constraints.HasNonCoveringPredicate)
             refusals.Add(new Refusal("GW-COVER-016", "The query contains a predicate that cannot be represented by an ordered index."));
-        if (request.Result.IncludesTotalCount && !constraints.HasBound)
+        if (request.Result.IncludesTotalCount && !constraints.HasBound && !request.Distinct)
             refusals.Add(new Refusal("GW-COVER-005", "An unbounded Count is not index-covered; full counts are scans."));
-        if (!constraints.HasBound && request.Order.Length == 0)
+        if (!constraints.HasBound && request.Order.Length == 0 && !request.Distinct)
             refusals.Add(new Refusal("GW-COVER-005", "An unfiltered query has no index bound."));
 
         var evaluated = candidates
@@ -213,8 +217,18 @@ public static class QueryCoverageChecker
             }
         }
 
-        var hasBoundedOrder = request.Order.Length != 0 && request.Paging.Limit is int limit && limit > 0;
-        if (!constraints.HasBound && !hasBoundedOrder)
+        if (request.Distinct && !ProjectionIsCovered(request.Projection, index))
+        {
+            return new Refusal(
+                "GW-COVER-006",
+                "Distinct requires every projected column to be present in the candidate index, or an explicit accepted scan.",
+                Priority: 1);
+        }
+
+        var hasBoundedOrder = request.Order.Length != 0 &&
+            ((request.Paging.Limit is int limit && limit > 0) || request.Result.MaxRows is int resultLimit && resultLimit > 0);
+        var hasDistinctProjection = request.Distinct && ProjectionIsCovered(request.Projection, index);
+        if (!constraints.HasBound && !hasBoundedOrder && !hasDistinctProjection)
         {
             return new Refusal(
                 "GW-COVER-005",
@@ -224,6 +238,11 @@ public static class QueryCoverageChecker
 
         return null;
     }
+
+    private static bool ProjectionIsCovered(Projection projection, CoverageIndex index) =>
+        !projection.AllColumns && projection.Columns.Length != 0 &&
+        projection.Columns.All(column => index.Columns.Any(indexColumn =>
+            string.Equals(indexColumn.Column, column.Name, StringComparison.Ordinal)));
 
     private static SortResolution? ResolveSortStart(
         CoverageIndex index,
@@ -299,6 +318,11 @@ public static class QueryCoverageChecker
         {
             if (!columns.Any(column => string.Equals(column.Column, order.Column.Name, StringComparison.Ordinal)))
                 columns.Add(new CoverageIndexColumn(order.Column.Name, order.Direction));
+        }
+        if (request.Distinct && !request.Projection.AllColumns)
+        {
+            foreach (var projection in request.Projection.Columns)
+                AddSuggestedColumn(columns, projection.Name, request.Order);
         }
         if (columns.Count == 0)
             columns.Add(new CoverageIndexColumn("<query-bound>"));

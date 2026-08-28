@@ -36,7 +36,10 @@ internal sealed class QueryResolution
 internal static class QueryResolver
 {
     internal static readonly ImmutableHashSet<string> TerminalNames =
-        ImmutableHashSet.Create(StringComparer.Ordinal, "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync");
+        ImmutableHashSet.Create(StringComparer.Ordinal,
+            "ToList", "ToListAsync", "Count", "CountAsync", "Any", "AnyAsync",
+            "First", "FirstOrDefault", "Single", "SingleOrDefault",
+            "FirstAsync", "FirstOrDefaultAsync", "SingleAsync", "SingleOrDefaultAsync");
 
     /// <summary>
     /// Gate that keeps LINQ-shaped terminals on unrelated types out of the analysis: the receiver
@@ -161,7 +164,27 @@ internal static class QueryResolver
                     return QueryResolution.Unresolved($"the {name} ordering expression is not a closed column selector", invocation);
                 state.Order.Add(new OrderTerm(
                     ToColumnRef(column, table),
-                    name.EndsWith("Descending", StringComparison.Ordinal) ? OrderDirection.Descending : OrderDirection.Ascending));
+                    name.EndsWith("Descending", StringComparison.Ordinal) ? OrderDirection.Descending : OrderDirection.Ascending,
+                    name.EndsWith("Descending", StringComparison.Ordinal) ? NullOrder.First : NullOrder.Last));
+                continue;
+            }
+
+            if (name == "Select")
+            {
+                var lambda = invocation.ArgumentList.Arguments.LastOrDefault()?.Expression;
+                if (lambda is null || !TryParseProjectionLambda(lambda, model, table, out var projection, cancellationToken))
+                    return QueryResolution.Unresolved("Select requires a closed mapped-column projection", invocation);
+                if (state.HasProjection)
+                    return QueryResolution.Unresolved("the query contains more than one Select projection", invocation);
+                state.Projection = projection;
+                continue;
+            }
+
+            if (name == "Distinct")
+            {
+                if (invocation.ArgumentList.Arguments.Count != 0)
+                    return QueryResolution.Unresolved("Distinct does not accept arguments", invocation);
+                state.Distinct = true;
                 continue;
             }
 
@@ -264,6 +287,9 @@ internal static class QueryResolver
         state.Offset = initialRequest.Paging.Offset;
         state.Limit = initialRequest.Paging.Limit;
         state.AcceptedScan = initialRequest.AcceptedScan;
+        state.Projection = initialRequest.Projection;
+        state.HasProjection = !initialRequest.Projection.AllColumns;
+        state.Distinct = initialRequest.Distinct;
         var optional = new List<Predicate>();
         foreach (var ifStatement in assignments)
         {
@@ -297,13 +323,17 @@ internal static class QueryResolver
         return ResolveChain(initializer, chain, tableInvocation, tableType, model, schema, cancellationToken);
     }
 
-    /// <summary>Mirrors the runtime terminal semantics of <c>Count()</c>/<c>Any()</c> and their async forms.</summary>
+    /// <summary>Mirrors the runtime terminal semantics of count, existence, and cardinality terminals.</summary>
     private static (ResultShape Result, Paging? PagingOverride) TerminalShape(InvocationExpressionSyntax terminal) =>
         terminal.Expression is MemberAccessExpressionSyntax member
             ? member.Name.Identifier.ValueText switch
             {
                 "Count" or "CountAsync" => ((ResultShape)ResultShape.TotalCount.Instance, Paging.None),
                 "Any" or "AnyAsync" => (ResultShape.Rows.Instance, Paging.OffsetLimit(0, 1)),
+                "First" or "FirstAsync" => (ResultShape.First.Instance, Paging.OffsetLimit(0, 1)),
+                "FirstOrDefault" or "FirstOrDefaultAsync" => (ResultShape.FirstOrDefault.Instance, Paging.OffsetLimit(0, 1)),
+                "Single" or "SingleAsync" => (ResultShape.Single.Instance, Paging.OffsetLimit(0, 2)),
+                "SingleOrDefault" or "SingleOrDefaultAsync" => (ResultShape.SingleOrDefault.Instance, Paging.OffsetLimit(0, 2)),
                 _ => (ResultShape.Rows.Instance, null)
             }
             : (ResultShape.Rows.Instance, null);
@@ -327,17 +357,21 @@ internal static class QueryResolver
                 1 => terms[0],
                 _ => new Predicate.And(terms)
             };
-            var paging = pagingOverride ?? (state.Limit.HasValue
-                ? Paging.OffsetLimit(state.Offset ?? 0, state.Limit.Value)
-                : Paging.None);
+            var paging = pagingOverride is { Limit: int cardinalityLimit }
+                ? Paging.OffsetLimit(state.Offset ?? pagingOverride.Offset ?? 0,
+                    state.Limit is int queryLimit ? Math.Min(queryLimit, cardinalityLimit) : cardinalityLimit)
+                : state.Limit is int limit
+                    ? Paging.OffsetLimit(state.Offset ?? 0, limit)
+                    : Paging.None;
             yield return new QueryRequest(
                 new TableId(state.Table.Name),
                 predicate,
                 state.Order.ToImmutableArray(),
-                Projection.All,
+                state.Projection,
                 paging,
                 result,
-                acceptedScan: state.AcceptedScan);
+                acceptedScan: state.AcceptedScan,
+                distinct: state.Distinct);
         }
     }
 
@@ -475,6 +509,65 @@ internal static class QueryResolver
             _ => null
         };
         return parameter is not null && TryGetColumn(body, parameter, model, table, out column, cancellationToken);
+    }
+
+    private static bool TryParseProjectionLambda(
+        ExpressionSyntax expression,
+        SemanticModel model,
+        AnalyzerTable table,
+        out Projection projection,
+        CancellationToken cancellationToken)
+    {
+        projection = null!;
+        if (expression is not LambdaExpressionSyntax lambda || lambda.Body is not ExpressionSyntax body)
+            return false;
+        var parameter = lambda switch
+        {
+            SimpleLambdaExpressionSyntax simple => model.GetDeclaredSymbol(simple.Parameter, cancellationToken),
+            ParenthesizedLambdaExpressionSyntax parenthesized when parenthesized.ParameterList.Parameters.Count == 1 => model.GetDeclaredSymbol(parenthesized.ParameterList.Parameters[0], cancellationToken),
+            _ => null
+        };
+        if (parameter is null || !TryGetProjectionColumns(body, parameter, model, table, out var columns, cancellationToken) || columns.Count == 0)
+            return false;
+        projection = Projection.ColumnsOnly(columns.Select(column => ToColumnRef(column, table)));
+        return true;
+    }
+
+    private static bool TryGetProjectionColumns(
+        ExpressionSyntax expression,
+        ISymbol parameter,
+        SemanticModel model,
+        AnalyzerTable table,
+        out List<AnalyzerColumn> columns,
+        CancellationToken cancellationToken)
+    {
+        columns = [];
+        expression = Unwrap(expression);
+        if (TryGetColumn(expression, parameter, model, table, out var column, cancellationToken))
+        {
+            columns.Add(column);
+            return true;
+        }
+
+        IEnumerable<ExpressionSyntax>? members = expression switch
+        {
+            AnonymousObjectCreationExpressionSyntax anonymous => anonymous.Initializers
+                .Select(initializer => initializer.Expression ?? initializer.NameEquals?.Name)
+                .Where(member => member is not null)
+                .Select(member => member!),
+            TupleExpressionSyntax tuple => tuple.Arguments.Select(argument => argument.Expression),
+            ObjectCreationExpressionSyntax created when created.Initializer is not null => created.Initializer.Expressions,
+            _ => null
+        };
+        if (members is null)
+            return false;
+        foreach (var member in members)
+        {
+            if (member is null || !TryGetProjectionColumns(member, parameter, model, table, out var nested, cancellationToken))
+                return false;
+            columns.AddRange(nested);
+        }
+        return true;
     }
 
     private static bool TryParsePredicate(
@@ -721,6 +814,9 @@ internal static class QueryResolver
         public AnalyzerTable Table { get; }
         public List<Predicate> MandatoryPredicates { get; } = new();
         public List<OrderTerm> Order { get; } = new();
+        public Projection Projection { get; set; } = Projection.All;
+        public bool HasProjection { get; set; }
+        public bool Distinct { get; set; }
         public int? Offset { get; set; }
         public int? Limit { get; set; }
         public ScanAcceptance? AcceptedScan { get; set; }

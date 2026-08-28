@@ -66,14 +66,17 @@ public static class QueryResultMaterializer
         if (source is null) throw new ArgumentNullException(nameof(source));
         var executionRequest = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
 
+        var effectiveSource = source
+            .Where(row => !row.TryGetValue("__groundwork_count_only", out var marker) || Convert.ToInt64(marker ?? 0, CultureInfo.InvariantCulture) == 0)
+            .ToArray();
+        if (request.Distinct)
+            effectiveSource = DistinctRows(request, effectiveSource).ToArray();
+
         var totalCount = request.Result.IncludesTotalCount &&
             source.FirstOrDefault(row => row.TryGetValue("__groundwork_total_count", out var value) && value is not null) is { } counted &&
             counted.TryGetValue("__groundwork_total_count", out var count) && count is not null
                 ? Convert.ToInt64(count, CultureInfo.InvariantCulture)
                 : (long?)null;
-        var effectiveSource = source
-            .Where(row => !row.TryGetValue("__groundwork_count_only", out var marker) || Convert.ToInt64(marker ?? 0, CultureInfo.InvariantCulture) == 0)
-            .ToArray();
         if (!sourceIncludesContinuation && request.Paging.ContinuationToken is { } token)
         {
             IReadOnlyList<QueryConstant> cursor;
@@ -86,12 +89,21 @@ public static class QueryResultMaterializer
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
             var order = options.GetEffectiveOrder(executionRequest);
-            effectiveSource = source.Where(row => IsAfter(row, order, cursor)).ToArray();
+            effectiveSource = effectiveSource.Where(row => IsAfter(row, order, cursor)).ToArray();
         }
         var offset = sourceIncludesRequestedOffset ? 0 : request.Paging.Offset ?? 0;
-        var limit = request.Paging.Limit;
+        var limit = request.Result.MaxRows ?? request.Paging.Limit;
         var hasMore = limit is int pageSize && effectiveSource.Count() > checked(offset + pageSize);
         var visible = effectiveSource.Skip(offset).Take(limit ?? int.MaxValue).ToArray();
+        switch (request.Result)
+        {
+            case ResultShape.First when visible.Length == 0:
+                throw new InvalidOperationException("Sequence contains no elements.");
+            case ResultShape.Single when visible.Length == 0:
+                throw new InvalidOperationException("Sequence contains no elements.");
+            case ResultShape.Single or ResultShape.SingleOrDefault when visible.Length > 1:
+                throw new InvalidOperationException("Sequence contains more than one element.");
+        }
         var effectiveOrder = options.GetEffectiveOrder(executionRequest);
         string? nextToken = null;
         if (hasMore && effectiveOrder.Length != 0 && visible.Length != 0)
@@ -121,6 +133,49 @@ public static class QueryResultMaterializer
             return (IReadOnlyDictionary<string, object?>)new ReadOnlyDictionary<string, object?>(fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
         }).ToArray();
         return new QueryMaterializedResult(rows, totalCount, nextToken, selectedIndex, indexHintApplied);
+    }
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> DistinctRows(
+        QueryRequest request,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> source)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<IReadOnlyDictionary<string, object?>>(source.Count);
+        foreach (var row in source)
+        {
+            var fields = request.Projection.AllColumns
+                ? row.Where(pair => !IsInternalField(pair.Key)).OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                : request.Projection.Columns
+                    .Where(column => !IsInternalField(column.Name))
+                    .Select(column => new KeyValuePair<string, object?>(column.Name, row.TryGetValue(column.Name, out var value) ? value : null));
+            var key = string.Join("|", fields.Select(pair => EscapeDistinctValue(pair.Key) + "=" + EscapeDistinctValue(pair.Value)));
+            if (seen.Add(key))
+                result.Add(row);
+        }
+        return result;
+    }
+
+    private static string EscapeDistinctValue(string name, object? value) =>
+        name + ":" + EscapeDistinctValue(value);
+
+    private static string EscapeDistinctValue(object? value)
+    {
+        if (value is null)
+            return "null";
+        var text = value switch
+        {
+            byte[] bytes => Convert.ToBase64String(bytes),
+            IReadOnlyDictionary<string, object?> dictionary => "{" + string.Join(",", dictionary
+                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => EscapeDistinctValue(pair.Key) + "=" + EscapeDistinctValue(pair.Value))) + "}",
+            DateTimeOffset instant => instant.UtcTicks.ToString(CultureInfo.InvariantCulture),
+            decimal number => number.ToString("G29", CultureInfo.InvariantCulture),
+            Guid guid => guid.ToString("N"),
+            IEnumerable sequence when value is not string => "[" + string.Join(",", sequence.Cast<object?>().Select(EscapeDistinctValue)) + "]",
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
+            _ => value.ToString() ?? string.Empty
+        };
+        return value.GetType().FullName + ":" + text.Length.ToString(CultureInfo.InvariantCulture) + ":" + text;
     }
 
     private static bool IsInternalField(string name) =>
@@ -185,6 +240,26 @@ public static class QueryResultMaterializer
 /// <summary>Builds the internal execution request without changing the public query binding.</summary>
 public static class QueryRequestExecution
 {
+    /// <summary>Bounds a direct model request for a First/Single result shape.</summary>
+    public static QueryRequest ForResultShape(QueryRequest request)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (request.Result.MaxRows is not int maxRows)
+            return request;
+        var paging = request.Paging.ContinuationToken is { } token
+            ? Paging.Continuation(token, maxRows)
+            : Paging.OffsetLimit(request.Paging.Offset ?? 0, maxRows);
+        return ReferenceEquals(paging, request.Paging)
+            ? request
+            : new QueryRequest(request.Table, request.Where, request.Order, request.Projection, paging,
+                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+            {
+                CanonicalPredicate = request.CanonicalPredicate,
+                ContinuationFingerprint = request.ContinuationFingerprint,
+                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+            };
+    }
+
     public static string ScopeBindingDiscriminator(string scope)
     {
         if (string.IsNullOrWhiteSpace(scope))
@@ -199,7 +274,7 @@ public static class QueryRequestExecution
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (predicate is null) throw new ArgumentNullException(nameof(predicate));
         return new QueryRequest(request.Table, predicate, request.Order, request.Projection, request.Paging,
-            request.Result, request.LatestPerKey, request.AcceptedScan)
+            request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -215,7 +290,7 @@ public static class QueryRequestExecution
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            ProbePaging(request.Paging, keepOffset: false), ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan)
+            ProbePaging(request.Paging, keepOffset: false), ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -228,7 +303,7 @@ public static class QueryRequestExecution
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan)
+            ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -256,7 +331,7 @@ public static class QueryRequestExecution
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (projection is null) throw new ArgumentNullException(nameof(projection));
         return new QueryRequest(request.Table, request.Where, request.Order, projection, request.Paging,
-            request.Result, request.LatestPerKey, request.AcceptedScan)
+            request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -285,16 +360,24 @@ public static class QueryRequestExecution
         var paging = request.Paging;
         if (request.Paging.Limit is int limit)
         {
-            var expandedLimit = checked(limit + 1);
+            var expandedLimit = request.Result.MaxRows is int maxRows
+                ? Math.Min(checked(limit + 1), maxRows)
+                : checked(limit + 1);
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, expandedLimit)
                 : request.Paging.Offset is int offset
                     ? Paging.OffsetLimit(offset, expandedLimit)
                     : Paging.Keyset(expandedLimit);
         }
+        else if (request.Result.MaxRows is int maxRows)
+        {
+            paging = request.Paging.ContinuationToken is { } token
+                ? Paging.Continuation(token, maxRows)
+                : Paging.OffsetLimit(request.Paging.Offset ?? 0, maxRows);
+        }
         return ReferenceEquals(projection, request.Projection) && ReferenceEquals(paging, request.Paging)
             ? request
-            : new QueryRequest(request.Table, request.Where, request.Order, projection, paging, request.Result, request.LatestPerKey, request.AcceptedScan)
+            : new QueryRequest(request.Table, request.Where, request.Order, projection, paging, request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
             {
                 // The extra projected tie-break fields are an execution detail, not a new
                 // continuation identity. Keep the token bound to the caller's projection.

@@ -73,6 +73,8 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         return new GwQueryable<TResult>(null, executor, state with { Projection = Projection.ColumnsOnly(columns) });
     }
 
+    public IGwQueryable<T> Distinct() => New(state with { Distinct = true });
+
     public IGwQueryable<T> AcceptScan(string id, string reason, string owner, DateTimeOffset expiresOn) =>
         New(state with { AcceptedScan = ScanAcceptance.Allow(id, reason, owner, expiresOn) });
 
@@ -86,12 +88,33 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
             : (executor ?? throw new InvalidOperationException("Configure GwQueryDatabase with an IGwQueryExecutor before using ToListAsync."))
                 .ToListAsync<T>(ToQueryRequest(), model, cancellationToken);
 
-    public LinqTerminal<long> Count() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.None, ResultShape.TotalCount.Instance, state.LatestPerKey, state.AcceptedScan));
+    public LinqTerminal<long> Count() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.None, ResultShape.TotalCount.Instance, state.LatestPerKey, state.AcceptedScan, state.Distinct));
 
-    public LinqTerminal<bool> Any() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.OffsetLimit(0, 1), ResultShape.Rows.Instance, state.LatestPerKey, state.AcceptedScan));
+    public LinqTerminal<bool> Any() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.OffsetLimit(0, 1), ResultShape.Rows.Instance, state.LatestPerKey, state.AcceptedScan, state.Distinct));
+
+    public LinqTerminal<T> First() => new(CardinalityRequest(ResultShape.First.Instance, 1));
+
+    public LinqTerminal<T> FirstOrDefault() => new(CardinalityRequest(ResultShape.FirstOrDefault.Instance, 1));
+
+    public LinqTerminal<T> Single() => new(CardinalityRequest(ResultShape.Single.Instance, 2));
+
+    public LinqTerminal<T> SingleOrDefault() => new(CardinalityRequest(ResultShape.SingleOrDefault.Instance, 2));
 
     private GwTableModel<T> RequireModel() => model ?? throw new InvalidOperationException("A projection is terminal; apply filters and ordering before Select.");
     private GwQueryable<T> New(GwQueryState next) => new(model, executor, next);
+
+    private QueryRequest CardinalityRequest(ResultShape result, int limit)
+    {
+        if (state.Order.Length == 0)
+            throw new LinqTranslationException(new[]
+            {
+                new LinqDiagnostic("GW-LINQ-111", "First and Single queries require an explicit deterministic order; add an OrderBy term.", Expression.Empty())
+            });
+        var offset = state.Skip ?? 0;
+        var boundedLimit = state.Take is int take ? Math.Min(take, limit) : limit;
+        return new QueryRequest(state.Table, state.Where, state.Order, state.Projection,
+            Paging.OffsetLimit(offset, boundedLimit), result, state.LatestPerKey, state.AcceptedScan, state.Distinct);
+    }
 
     private OrderTerm Order<TKey>(Expression<Func<T, TKey>> selector, OrderDirection direction)
     {
@@ -137,10 +160,11 @@ internal sealed record GwQueryState(
     int? Take,
     LatestPerKey? LatestPerKey,
     ScanAcceptance? AcceptedScan,
-    bool RequiresScan = false)
+    bool RequiresScan = false,
+    bool Distinct = false)
 {
     public GwQueryState(TableId table)
-        : this(table, Predicate.AlwaysTrue.Instance, ImmutableArray<OrderTerm>.Empty, Projection.All, null, null, null, null, false)
+        : this(table, Predicate.AlwaysTrue.Instance, ImmutableArray<OrderTerm>.Empty, Projection.All, null, null, null, null, false, false)
     {
     }
 
@@ -152,6 +176,6 @@ internal sealed record GwQueryState(
                 new LinqDiagnostic("GW-LINQ-103", "Column-to-column comparison is allowed, but never index-covered — add `.AcceptScan(...)`", Expression.Empty())
             });
         var paging = Skip is null && Take is null ? Paging.None : Paging.OffsetLimit(Skip ?? 0, Take ?? int.MaxValue);
-        return new QueryRequest(Table, Where, Order, Projection, paging, ResultShape.Rows.Instance, LatestPerKey, AcceptedScan);
+        return new QueryRequest(Table, Where, Order, Projection, paging, ResultShape.Rows.Instance, LatestPerKey, AcceptedScan, Distinct);
     }
 }

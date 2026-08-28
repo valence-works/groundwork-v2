@@ -50,10 +50,16 @@ which `Validate` returns no refusals.
 - Guid equality and ordering use an RFC-4122/network-byte key. Binary equality
   and membership use exact bytes; binary range, prefix, and ordering are
   refused. Null and empty binary values remain distinct.
+- A `Distinct` request applies to its public projection before paging and cardinality checks.
+  Index coverage can admit an unbounded distinct read only when every projected column is present
+  in the candidate index; otherwise the caller must record an explicit accepted scan.
 - Ordering normalizes nulls-first ascending and nulls-last descending and
   appends the identity tie-break before paging. Callers must provide the
   corresponding explicit null order; `ProviderDefault` is refused. Guid
   ordering uses the same network-byte key; binary ordering is refused.
+- `First` and `Single` cardinality queries require a caller-supplied deterministic order. The
+  model refuses an un-ordered cardinality request with `GW-SEM-ORDER-006`; `First` reads at most
+  one row, while `Single` reads at most two so an over-one result can be detected.
 
 The accepted #230 gate records the UTC-tick and network-GUID decisions. They
 intentionally supersede the earlier exploratory wording that proposed BSON

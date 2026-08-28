@@ -1,7 +1,9 @@
 # Groundwork.Query.Linq
 
 A **closed** LINQ front-end: `IGwQueryable<T>`, with `Table<T>()`, `Where`, `WhereIf`, ordering,
-`Skip`/`Take`, and the `ToList`/`ToListAsync`, `Count`/`CountAsync`, `Any`/`AnyAsync` terminals.
+`Skip`/`Take`, mapped-column `Select`, `Distinct`, and the `ToList`/`ToListAsync`,
+`Count`/`CountAsync`, `Any`/`AnyAsync`, `First`/`FirstOrDefault`, and `Single`/`SingleOrDefault`
+terminals. Cardinality terminals require an explicit deterministic order.
 
 Deliberately *not* `IQueryable`. An open provider surface is what lets an expression compile
 happily and then fall back to client-side evaluation, or fail at runtime on one database and not

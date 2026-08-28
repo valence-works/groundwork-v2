@@ -86,7 +86,7 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var result = await ExecuteAsync(request, request, cancellationToken).ConfigureAwait(false);
+        var result = await ExecuteAsync(request, QueryRequestExecution.ForResultShape(request), cancellationToken).ConfigureAwait(false);
         var materialize = LinqRowMaterializer.For(model);
         var rows = new T[result.Rows.Count];
         for (var index = 0; index < rows.Length; index++)

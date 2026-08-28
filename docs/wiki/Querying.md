@@ -24,8 +24,10 @@ translate it, fall back to client evaluation, or throw. A closed surface accepts
 translate, and tells you *at build time* when you've stepped outside it.
 
 Supported: `Where`, `WhereIf`, `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenByDescending`, `Skip`,
-`Take`, `Select`, `LatestPer`, `AcceptScan`, and the terminals `ToList`, `ToListAsync`, `Count`,
-`Any`, `CountAsync`, `AnyAsync`.
+`Take`, mapped-column `Select`, `Distinct`, `LatestPer`, `AcceptScan`, and the terminals `ToList`,
+`ToListAsync`, `Count`, `Any`, `CountAsync`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, and
+`SingleOrDefault` (plus their async adapter forms). `First` and `Single` require an explicit
+deterministic order; `Distinct` removes duplicate projected values before paging.
 
 `ToQueryRequest()` is the provider-neutral boundary:
 
@@ -72,9 +74,11 @@ call**. Unsupported expression nodes are rejected rather than evaluated on the c
 | `GW-LINQ-108` | Unpinned string comparison | Use `Ordinal`/`OrdinalIgnoreCase` matching the column's folding |
 | `GW-LINQ-109` | Non-UTC clock | Use `DateTimeOffset.UtcNow` |
 | `GW-LINQ-110` | Decimal precision/scale overflow | The value exceeds the declared decimal |
+| `GW-LINQ-111` | Cardinality query without deterministic order | Add an explicit `OrderBy` before `First` or `Single` |
 
-These are locked by a **250-case conformance corpus** checked byte-for-byte in CI, so the codes and
-their fixes cannot drift.
+The predicate codes are locked by a **250-case conformance corpus** checked byte-for-byte in CI;
+the query-shape rows are covered by the model, lowering, and coverage suites so those contracts
+cannot drift either.
 
 ### Reusable predicate helpers
 

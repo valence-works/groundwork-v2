@@ -31,7 +31,11 @@ command. A pinned index that excludes null values is refused when the predicate 
 excluded null, except for match-none. This preserves the v1 sparse-index safety rule.
 
 `ResultShape.Rows` never adds a count expression. `ResultShape.TotalCount` adds the provider
-window-count projection. Provider sessions expose this through the public `IStorageSession.Query`
+window-count projection. `ResultShape.First` and `ResultShape.FirstOrDefault` execute with a
+one-row bound, while `ResultShape.Single` and `ResultShape.SingleOrDefault` use a two-row bound
+so an over-one result can be detected. All four cardinality shapes require an explicit order.
+`QueryRequest.Distinct` deduplicates the public projection before paging and cardinality checks.
+Provider sessions expose this through the public `IStorageSession.Query`
 operation, returning immutable rows, an optional `TotalCount`, and a bound next continuation token.
 The execution layer may project identity columns and null-rank fields internally; they are removed
 before materialization. `In` values are capped at 1,000 by default (`GW-QUERY-015`), and every

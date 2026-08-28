@@ -64,7 +64,11 @@ attribute, from referenced assemblies via `GroundworkSchemaMetadata`, or from a 
 `AdditionalFile` selected by `gw_schema_file`.
 
 The closed query surface it understands: `Table<T>()`, `Where`, `WhereIf`, ordering, `Skip`/`Take`,
-and the terminals `ToList`, `ToListAsync`, `Count`, `CountAsync`, `Any`, `AnyAsync`.
+mapped-column `Select`, `Distinct`, and the terminals `ToList`, `ToListAsync`, `Count`,
+`CountAsync`, `Any`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`, and `SingleOrDefault` (plus
+their async adapter forms). Cardinality terminals require an explicit deterministic order. A
+distinct projection is covered only when every projected column is present in the candidate index,
+unless the query carries an explicit accepted scan.
 
 - `WhereIf` is enumerated as **every 2ⁿ shape for n ≤ 6**.
 - The reassignment form `if (condition) q = q.Where(...)` is enumerated **up to 32 shapes**.
