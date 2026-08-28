@@ -96,6 +96,39 @@ public sealed class LinqExecutorTests
     }
 
     [Fact]
+    public async Task Distinct_executor_applies_windows_after_deduplicating_the_provider_source()
+    {
+        using var fixture = Fixture.Open(withDuplicateStatus: true);
+        var query = fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => ticket.Status)
+            .Distinct();
+
+        var page = await fixture.Executor.ToListAsync<string>(query.Take(2).ToQueryRequest());
+        Assert.Equal(["closed", "open"], page);
+
+        var afterDuplicate = await query.Skip(1).FirstAsync(fixture.Executor);
+        Assert.Equal("open", afterDuplicate);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => query.SingleAsync(fixture.Executor));
+    }
+
+    [Fact]
+    public async Task Unbounded_distinct_executor_requires_an_accepted_scan()
+    {
+        using var fixture = Fixture.Open();
+        var request = fixture.Table.Query
+            .OrderBy(ticket => ticket.Status)
+            .Select(ticket => ticket.Status)
+            .Distinct()
+            .ToQueryRequest();
+
+        var refusal = await Assert.ThrowsAsync<QueryCoverageException>(() =>
+            fixture.Executor.ToListAsync<string>(request));
+
+        Assert.Equal("GW-COVER-005", refusal.Code);
+    }
+
+    [Fact]
     public async Task Executor_materializes_mapped_columns_and_leaves_unmapped_members_alone()
     {
         using var fixture = Fixture.Open();
@@ -541,7 +574,7 @@ public sealed class LinqExecutorTests
             new GwColumn<Ticket>(nameof(Ticket.Optional), "optional", QueryType.Int64, IsNullable: true)
         ]);
 
-        internal static Fixture Open(bool withJsonIndex = false, bool localeOrder = false)
+        internal static Fixture Open(bool withJsonIndex = false, bool localeOrder = false, bool withDuplicateStatus = false)
         {
             var connection = new InMemoryProviderFactory().Create("memory://linq-executor-" + Guid.NewGuid().ToString("N"));
             var unit = new StorageUnit
@@ -581,7 +614,9 @@ public sealed class LinqExecutorTests
             };
             connection.Schema.Apply(unit);
             var session = connection.OpenSession(unit, StorageAccess.Global);
-            var statuses = localeOrder ? new[] { "Ake", "Åke", "Äke", "Öke", "Zebra" } : ["open"];
+            var statuses = localeOrder
+                ? new[] { "Ake", "Åke", "Äke", "Öke", "Zebra" }
+                : withDuplicateStatus ? ["closed", "closed", "open"] : ["open"];
             for (var index = 0; index < statuses.Length; index++)
             {
                 session.Insert(new StorageValues(new Dictionary<string, object?>

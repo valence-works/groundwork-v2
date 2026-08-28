@@ -204,9 +204,30 @@ public sealed class CoverageAnalyzerTests
     public async Task Distinct_projection_is_covered_by_an_index_on_the_projected_column()
     {
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
-            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().ToListAsync();"));
+            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new { t.Status }).Distinct().Take(1).ToListAsync();"));
 
         Assert.DoesNotContain(diagnostics, item => item.Id.StartsWith("GW_COVER_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Unbounded_distinct_projection_reports_the_scan_refusal()
+    {
+        var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) +
+            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().ToListAsync();"));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_005");
+    }
+
+    [Fact]
+    public async Task Unbounded_distinct_projection_accepts_an_explicit_scan()
+    {
+        var diagnostics = await Analyze(
+            WithSchema(SchemaWithIndex("ix_status", "status ASC"), allowAcceptedScans: true) +
+            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().AcceptScan(\"GW-SCAN-DISTINCT\", \"distinct report\", \"query-team\", \"2027-01-01\").ToListAsync();"),
+            now: new DateTimeOffset(2026, 8, 28, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_COVER_905");
+        Assert.DoesNotContain(diagnostics, item => item.Id is "GW_COVER_005" or "GW_COVER_006" or "GW_COVER_901");
     }
 
     [Fact]
@@ -234,7 +255,7 @@ public sealed class CoverageAnalyzerTests
         var source = QuerySource("""
             public sealed class StatusDto { public string Status { get; set; } = ""; }
             public sealed class ConstructorStatusDto { public ConstructorStatusDto(string status) { Status = status; } public string Status { get; } }
-            var initialized = db.Table<Ticket>().Select(t => new StatusDto { Status = t.Status }).Distinct().ToListAsync();
+            var initialized = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new StatusDto { Status = t.Status }).Distinct().Take(1).ToListAsync();
             var constructed = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new ConstructorStatusDto(t.Status)).FirstAsync();
             """);
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_status", "status ASC")) + source);
@@ -246,10 +267,10 @@ public sealed class CoverageAnalyzerTests
     public async Task Distinct_projection_without_a_covering_index_reports_the_projection_refusal()
     {
         var diagnostics = await Analyze(WithSchema(SchemaWithIndex("ix_other", "other ASC")) +
-            QuerySource("var result = db.Table<Ticket>().Select(t => new { t.Status }).Distinct().ToListAsync();"));
+            QuerySource("var result = db.Table<Ticket>().OrderBy(t => t.Status).Select(t => new { t.Status }).Distinct().Take(1).ToListAsync();"));
 
         var diagnostic = Assert.Single(diagnostics.Where(item => item.Id == "GW_COVER_006"));
-        Assert.Contains("Distinct requires every projected column", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("not index-covered", diagnostic.GetMessage(), StringComparison.Ordinal);
     }
 
     [Fact]

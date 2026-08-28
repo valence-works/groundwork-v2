@@ -101,10 +101,10 @@ public sealed class CoverageCorpusTests
             Paging.OffsetLimit(0, 20)),
             new CoverageIndex("ix_id_sparse", [new CoverageIndexColumn(Id.Name, isNullable: false)], IndexMissingValueBehavior.Excluded),
             true);
-        yield return Case("distinct-indexed-projection", Request(
+        yield return Case("distinct-unbounded-indexed-projection-refused", Request(
             Predicate.AlwaysTrue.Instance,
             projection: Projection.ColumnsOnly(Text),
-            distinct: true), Index(Text), true);
+            distinct: true), Index(Text), false);
         yield return Case("distinct-uncovered-projection", Request(
             Predicate.AlwaysTrue.Instance,
             projection: Projection.ColumnsOnly(Text),

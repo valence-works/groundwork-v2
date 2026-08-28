@@ -232,7 +232,22 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
-    public void Distinct_projection_is_covered_when_all_projected_columns_are_indexed()
+    public void Bounded_distinct_projection_is_covered_when_all_projected_columns_are_indexed()
+    {
+        var result = Check(
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Status, OrderDirection.Ascending, NullOrder.Last)],
+            Paging.OffsetLimit(0, 1),
+            Index("ix_status", "status"),
+            projection: Projection.ColumnsOnly(Status),
+            distinct: true);
+
+        Assert.True(result.IsCovered, result.Refusal?.Message);
+        Assert.Equal("ix_status", result.Index!.Name);
+    }
+
+    [Fact]
+    public void Unbounded_distinct_projection_is_not_covered_by_its_projection_index()
     {
         var result = Check(
             Predicate.AlwaysTrue.Instance,
@@ -242,8 +257,33 @@ public sealed class CoverageCheckerTests
             projection: Projection.ColumnsOnly(Status),
             distinct: true);
 
-        Assert.True(result.IsCovered, result.Refusal?.Message);
-        Assert.Equal("ix_status", result.Index!.Name);
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Unbounded_distinct_projection_accepts_a_live_scan_without_stale_marker()
+    {
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(Status),
+            Paging.None,
+            acceptedScan: ScanAcceptance.Allow(
+                "GW-SCAN-DISTINCT",
+                "distinct report",
+                "query-team",
+                new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero)),
+            distinct: true);
+
+        var result = QueryCoverageChecker.Check(request, [Index("ix_status", "status")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+        Assert.NotEqual("GW-COVER-901", result.Refusal.Code);
+        QueryCoverageEnforcer.EnsureCovered(request, [Index("ix_status", "status")],
+            new DateTimeOffset(2026, 8, 28, 0, 0, 0, TimeSpan.Zero));
     }
 
     [Fact]
