@@ -18,6 +18,14 @@ namespace Groundwork.Analyzers;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class CoverageAnalyzer : DiagnosticAnalyzer
 {
+    private readonly record struct AggregationInventoryKey(
+        string Id,
+        string Reason,
+        string Owner,
+        DateTimeOffset ExpiresOn,
+        int MaxGroups,
+        int MaxInputRows);
+
     private readonly Func<DateTimeOffset> clock;
 
     public CoverageAnalyzer()
@@ -58,7 +66,9 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             var schema = AnalyzerSchema.Read(start.Compilation, start.Options);
             var acceptedScansEnabled = HasAcceptedScanOptIn(start.Compilation);
             var acceptedAggregationsEnabled = HasAcceptedAggregationOptIn(start.Compilation);
-            var aggregationInventory = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+            // Identical metadata is one inventory entry; a changed expiry, owner, reason, or
+            // budget is a distinct entry and must not be hidden by an ID-only deduplication key.
+            var aggregationInventory = new ConcurrentDictionary<AggregationInventoryKey, byte>();
             var now = clock();
             var aggregationNow = NormalizeDate(now);
             start.RegisterSyntaxNodeAction(
@@ -74,7 +84,7 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
     private void AnalyzeAggregationAcceptance(
         SyntaxNodeAnalysisContext context,
         bool acceptedAggregationsEnabled,
-        ConcurrentDictionary<string, byte> inventory,
+        ConcurrentDictionary<AggregationInventoryKey, byte> inventory,
         DateTimeOffset now)
     {
         if (context.Node is not InvocationExpressionSyntax invocation ||
@@ -99,7 +109,8 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
         var expiry = TryGetDate(context.SemanticModel, invocation, 3, "expiresOn", out var expiryResolved);
         var groups = ConstantInt(context.SemanticModel, invocation, 4, "maxGroups", out var groupsResolved);
         var inputRows = ConstantInt(context.SemanticModel, invocation, 5, "maxInputRows", out var inputRowsResolved);
-        if (!idResolved || !reasonResolved || !ownerResolved || !expiryResolved || !groupsResolved || !inputRowsResolved)
+        if (!idResolved || !reasonResolved || !ownerResolved || !expiryResolved || expiry is not DateTimeOffset expiresOn ||
+            !groupsResolved || !inputRowsResolved)
         {
             context.ReportDiagnostic(Diagnostic.Create(
                 AnalyzerDiagnostics.For("GW-AGG-ADHOC-906"),
@@ -109,27 +120,26 @@ public sealed class CoverageAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (!inventory.TryAdd(id!, 0))
-            return;
-        if (expiry is DateTimeOffset expiresOn)
+        if (now >= expiresOn)
         {
-            if (now >= expiresOn)
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    AnalyzerDiagnostics.For("GW-AGG-ADHOC-903"),
-                    location,
-                    "GW-AGG-ADHOC-903: accepted aggregation '" + id + "' expired on " +
-                    expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "."));
-            }
-            else if (expiresOn - now <= TimeSpan.FromDays(30))
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    AnalyzerDiagnostics.For("GW-AGG-ADHOC-904"),
-                    location,
-                    "GW-AGG-ADHOC-904: accepted aggregation '" + id + "' expires on " +
-                    expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) +  "."));
-            }
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-903"),
+                location,
+                "GW-AGG-ADHOC-903: accepted aggregation '" + id + "' expired on " +
+                expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "."));
         }
+        else if (expiresOn - now <= TimeSpan.FromDays(30))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-AGG-ADHOC-904"),
+                location,
+                "GW-AGG-ADHOC-904: accepted aggregation '" + id + "' expires on " +
+                expiresOn.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) +  "."));
+        }
+
+        if (!inventory.TryAdd(new AggregationInventoryKey(
+                id!, reason!, owner!, expiresOn, groups!.Value, inputRows!.Value), 0))
+            return;
 
         if (acceptedAggregationsEnabled)
         {

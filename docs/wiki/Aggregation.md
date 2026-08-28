@@ -250,6 +250,9 @@ in with `[assembly: GwAllowAcceptedAggregations]`. The analyzer emits `GW-AGG-AD
 records, warns with `GW-AGG-ADHOC-904` during the final 30 days, and errors with
 `GW-AGG-ADHOC-903` after expiry; `GW-AGG-ADHOC-902` refuses an acceptance without the opt-in.
 `GW-AGG-ADHOC-906` fails closed when required acceptance metadata cannot be resolved to constants.
+Identical metadata repeated at multiple call sites may be emitted as one inventory record; any
+changed id, reason, owner, expiry, or budget is inventoried separately, and expiry diagnostics are
+evaluated at every call site.
 
 ## Next
 

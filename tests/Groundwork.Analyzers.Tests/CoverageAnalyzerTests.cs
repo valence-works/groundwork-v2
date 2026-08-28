@@ -606,6 +606,36 @@ public sealed class CoverageAnalyzerTests
         Assert.DoesNotContain(diagnostics, item => item.Id == "GW_AGG_ADHOC_906");
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Accepted_aggregation_duplicate_id_does_not_suppress_expiry_diagnostics(bool expiredFirst)
+    {
+        const string expired = "static readonly Groundwork.Kernel.AggregationAcceptance Expired = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0014\", \"shared report\", \"billing\", new System.DateTimeOffset(2026, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200);";
+        const string active = "static readonly Groundwork.Kernel.AggregationAcceptance Active = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0014\", \"shared report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200);";
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { " + (expiredFirst ? expired + active : active + expired) + " }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_AGG_ADHOC_903" && item.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(2, diagnostics.Count(item => item.Id == "GW_AGG_ADHOC_905"));
+    }
+
+    [Fact]
+    public async Task Accepted_aggregation_duplicate_id_with_conflicting_metadata_is_fully_inventoried()
+    {
+        var source = WithSchema("{\"tables\":[]}", allowAcceptedAggregations: true) +
+                     "class Use { static readonly Groundwork.Kernel.AggregationAcceptance Billing = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0015\", \"shared report\", \"billing\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 20, 200); static readonly Groundwork.Kernel.AggregationAcceptance Operations = Groundwork.Kernel.AggregationAcceptance.Allow(\"GW-AGG-0015\", \"shared report\", \"operations\", new System.DateTimeOffset(2027, 1, 1, 0, 0, 0, System.TimeSpan.Zero), 30, 300); }";
+
+        var diagnostics = await Analyze(source, now: new DateTimeOffset(2026, 12, 15, 0, 0, 0, TimeSpan.Zero));
+
+        var inventory = diagnostics.Where(item => item.Id == "GW_AGG_ADHOC_905").ToArray();
+        Assert.Equal(2, inventory.Length);
+        Assert.Contains(inventory, item => item.GetMessage().Contains("owner='billing'", StringComparison.Ordinal) && item.GetMessage().Contains("maxGroups='20'", StringComparison.Ordinal));
+        Assert.Contains(inventory, item => item.GetMessage().Contains("owner='operations'", StringComparison.Ordinal) && item.GetMessage().Contains("maxGroups='30'", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Accepted_aggregation_with_persian_calendar_expiry_fails_closed()
     {
