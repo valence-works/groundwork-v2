@@ -1,5 +1,7 @@
 using Microsoft.Data.Sqlite;
+using Groundwork.Kernel;
 using Groundwork.Sqlite;
+using Groundwork.Store;
 using Xunit;
 
 namespace Groundwork.Sqlite.Tests;
@@ -87,6 +89,127 @@ public sealed class SqliteTransactionCleanupTests
 
         // The pool was never cleared, so the same native handle — and its temp table — comes back out.
         Assert.Equal(0L, probe.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Exercises the guard through <see cref="SqliteUnitOfWork.Rollback"/> itself rather than calling
+    /// <see cref="SqliteTransactionCleanup.RollbackOrClearPool"/> directly. Deleting or miswiring the
+    /// forwarding call at that call site would leave the two tests above green while a real unit of
+    /// work still handed a poisoned connection back to the pool.
+    /// </summary>
+    [Fact]
+    public void SqliteUnitOfWork_Rollback_discards_the_connection_instead_of_returning_it_to_the_pool()
+    {
+        using var store = TemporaryStore.Create();
+
+        using (var connection = new SqliteConnection(store.ConnectionString))
+        {
+            connection.Open();
+            using (var create = connection.CreateCommand())
+            {
+                create.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
+                create.ExecuteNonQuery();
+            }
+
+            var transaction = connection.BeginTransaction();
+            transaction.Commit();
+
+            // The transaction is already completed, so the real Rollback() call this unit of work
+            // issues internally fails the same way the two tests above force directly.
+            var unitOfWork = new SqliteUnitOfWork(
+                owner: null!,
+                connection,
+                transaction,
+                units: [],
+                access: StorageAccess.Global,
+                options: BatchWriteOptions.Default);
+
+            Assert.Throws<InvalidOperationException>(unitOfWork.Rollback);
+        } // Rollback() already completed and disposed the connection; this using is now redundant.
+
+        using var reused = new SqliteConnection(store.ConnectionString);
+        reused.Open();
+        using var probe = reused.CreateCommand();
+        probe.CommandText = "SELECT COUNT(*) FROM marker;";
+        var failure = Assert.Throws<SqliteException>(() => probe.ExecuteScalar());
+        Assert.Contains("no such table", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Exercises the guard through <see cref="SqliteStorageSession"/>'s standalone single-write path
+    /// (<c>ExecuteWrite</c>'s catch block) rather than calling
+    /// <see cref="SqliteTransactionCleanup.RollbackOrClearPool"/> directly. A custom observer closes
+    /// the session's own connection the instant it is told a write is about to run — before the
+    /// INSERT statement reaches the driver — so the insert fails on a closed connection and the
+    /// session's own subsequent <c>Rollback()</c> call fails too, the same shape a ROLLBACK failing
+    /// under contention would produce.
+    /// </summary>
+    [Fact]
+    public void SqliteStorageSession_write_path_discards_the_connection_instead_of_returning_it_to_the_pool()
+    {
+        using var store = TemporaryStore.Create();
+        var unit = Unit();
+
+        using var providerConnection = (SqliteProviderConnection)new SqliteProviderFactory().Create(store.ConnectionString);
+        providerConnection.Schema.Apply(unit);
+
+        var sessionConnection = providerConnection.CreateIndependentConnection();
+        try
+        {
+            using (var marker = sessionConnection.CreateCommand())
+            {
+                marker.CommandText = "CREATE TEMP TABLE marker (id INTEGER);";
+                marker.ExecuteNonQuery();
+            }
+
+            var observer = new CloseConnectionOnWrite(sessionConnection);
+            var session = new SqliteStorageSession(
+                providerConnection, unit, StorageAccess.Global, sessionConnection, transaction: null, observer);
+
+            var values = new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = "row-1",
+                ["value"] = "value-1"
+            });
+
+            Assert.ThrowsAny<Exception>(() => session.Insert(values));
+        }
+        finally
+        {
+            sessionConnection.Dispose();
+        }
+
+        using var reused = new SqliteConnection(store.ConnectionString);
+        reused.Open();
+        using var probe = reused.CreateCommand();
+        probe.CommandText = "SELECT COUNT(*) FROM marker;";
+        var failure = Assert.Throws<SqliteException>(() => probe.ExecuteScalar());
+        Assert.Contains("no such table", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static StorageUnit Unit() => new()
+    {
+        Id = new StorageUnitId("cleanup"),
+        Name = "cleanup",
+        Columns =
+        [
+            new() { Name = "id", Type = PortableType.String, IsNullable = false },
+            new() { Name = "value", Type = PortableType.String }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
+
+    /// <summary>
+    /// Closes its connection the instant a write is about to run, so the write fails on a closed
+    /// connection before it reaches the driver, and the session's own recovery rollback fails too.
+    /// </summary>
+    private sealed class CloseConnectionOnWrite(SqliteConnection connection) : IProviderCommandObserver
+    {
+        public void Observe(ProviderCommandEvent command)
+        {
+            if (command.Kind == ProviderCommandKind.Write)
+                connection.Close();
+        }
     }
 
     private sealed class TemporaryStore : IDisposable
