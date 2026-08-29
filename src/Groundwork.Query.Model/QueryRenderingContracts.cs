@@ -259,7 +259,7 @@ public sealed record QueryRenderOptions
                 }
                 if (tieBreak.Table == join.TargetTable &&
                     !join.ColumnPairs.Any(pair =>
-                        ColumnRefIdentity.Same(pair.Target, tieBreak, tableQualified: true)))
+                        ColumnRefIdentity.SameQualifiedColumn(pair.Target, tieBreak)))
                 {
                     throw new ArgumentException(
                         "Target identity tie-breaks must belong to the declared reference target key.",
@@ -272,7 +272,9 @@ public sealed record QueryRenderOptions
         }
         foreach (var tieBreak in identity)
         {
-            if (terms.Any(term => ColumnRefIdentity.Same(term.Column, tieBreak, request.Join is not null)))
+            if (terms.Any(term => request.Join is null
+                    ? ColumnRefIdentity.SameName(term.Column, tieBreak)
+                    : ColumnRefIdentity.SameQualifiedColumn(term.Column, tieBreak)))
                 continue;
             terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
         }

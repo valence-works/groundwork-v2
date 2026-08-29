@@ -119,9 +119,11 @@ public sealed record ColumnRef
 
 internal static class ColumnRefIdentity
 {
-    internal static bool Same(ColumnRef left, ColumnRef right, bool tableQualified) =>
-        string.Equals(left.Name, right.Name, StringComparison.Ordinal) &&
-        (!tableQualified || left.Table == right.Table);
+    internal static bool SameName(ColumnRef left, ColumnRef right) =>
+        string.Equals(left.Name, right.Name, StringComparison.Ordinal);
+
+    internal static bool SameQualifiedColumn(ColumnRef left, ColumnRef right) =>
+        left.Table == right.Table && SameName(left, right);
 }
 
 public sealed class QueryConstant : IEquatable<QueryConstant>
