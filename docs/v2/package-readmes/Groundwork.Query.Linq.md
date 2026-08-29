@@ -1,7 +1,8 @@
 # Groundwork.Query.Linq
 
 A **closed** LINQ front-end: `IGwQueryable<T>`, with `Table<T>()`, `Where`, `WhereIf`, ordering,
-`Skip`/`Take`, mapped-column `Select`, `Distinct`, and the `ToList`/`ToListAsync`,
+`Skip`/`Take`, mapped-column `Select`, `Distinct`, one explicitly activated declared-reference
+`Join`, and the `ToList`/`ToListAsync`,
 `Count`/`CountAsync`, `Any`/`AnyAsync`, `First`/`FirstOrDefault`, `Single`/`SingleOrDefault`,
 `Sum`, `Min`, and `Max` terminals. `First` and `FirstOrDefault`
 require an explicit deterministic order; `Single` and `SingleOrDefault` use a bounded over-one
@@ -12,11 +13,18 @@ and return null for empty or all-null input. `SumAsync`, `MinAsync`, and `MaxAsy
 fall back to ordinary row materialization. Providers apply distinct and input paging before the
 native reduction.
 
+`GwTableModel<T>.Reference` binds one direct CLR navigation member to an existing
+provider-neutral `ReferenceJoin`. After `.Join(reference)`, exactly that navigation's two-level
+members lower to target-qualified columns; arbitrary, deeper, and multiple navigations remain
+outside the closed surface. Provider rendering and composite source/target materialization are
+separate capabilities and fail closed until their provider packages implement them.
+
 Deliberately *not* `IQueryable`. An open provider surface is what lets an expression compile
 happily and then fall back to client-side evaluation, or fail at runtime on one database and not
-another. A closed surface can be checked completely: every shape this package admits is a shape
-`Groundwork.Query.Planning` and `Groundwork.Analyzers` can prove is covered by a declared index
-before the code ships.
+another. A closed surface can be checked completely. `Groundwork.Query.Planning` proves the
+provider-neutral request; analyzer recognition of the new declared-navigation syntax is a separate
+versioned contract slice and fails closed until that slice is installed rather than admitting a
+joined query as source-only coverage.
 
 Execution needs an adapter — see
 [`Groundwork.Query.Linq.Sqlite`](https://www.nuget.org/packages/Groundwork.Query.Linq.Sqlite).

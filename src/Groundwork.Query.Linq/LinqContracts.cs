@@ -57,18 +57,26 @@ public sealed class GwTableModel<T>
         Name = name;
         var supplied = (columns ?? throw new ArgumentNullException(nameof(columns))).ToArray();
         if (supplied.Length == 0) throw new ArgumentException("At least one column is required.", nameof(columns));
-        this.columns = supplied.ToDictionary(x => x.MemberName, x => new ColumnRef(new TableId(name), x.ColumnName, x.Type,
+        var mappedColumns = supplied.ToDictionary(x => x.MemberName, x => new ColumnRef(new TableId(name), x.ColumnName, x.Type,
             x.IsNullable, x.MaxLength, x.DecimalPrecision, x.DecimalScale, x.StringComparison), StringComparer.Ordinal);
-        if (this.columns.Count != supplied.Length) throw new ArgumentException("Column members must be unique.", nameof(columns));
+        if (mappedColumns.Count != supplied.Length) throw new ArgumentException("Column members must be unique.", nameof(columns));
+        this.columns = new ReadOnlyDictionary<string, ColumnRef>(mappedColumns);
         var sets = (elementSets ?? Array.Empty<GwElementSet<T>>()).ToArray();
-        this.elementSets = sets.ToDictionary(x => x.MemberName, x => new ElementSetRef(x.SetName, x.ElementType), StringComparer.Ordinal);
-        if (this.elementSets.Count != sets.Length) throw new ArgumentException("Element-set members must be unique.", nameof(elementSets));
+        var mappedElementSets = sets.ToDictionary(x => x.MemberName, x => new ElementSetRef(x.SetName, x.ElementType), StringComparer.Ordinal);
+        if (mappedElementSets.Count != sets.Length) throw new ArgumentException("Element-set members must be unique.", nameof(elementSets));
+        this.elementSets = new ReadOnlyDictionary<string, ElementSetRef>(mappedElementSets);
     }
 
     public string Name { get; }
     public TableId Table => new(Name);
     public IReadOnlyDictionary<string, ColumnRef> Columns => columns;
     public IReadOnlyDictionary<string, ElementSetRef> ElementSets => elementSets;
+
+    /// <summary>Binds a typed navigation member to one provider-neutral declared-reference join.</summary>
+    public GwReference<T, TTarget> Reference<TTarget>(
+        Expression<Func<T, TTarget>> navigation,
+        GwTableModel<TTarget> target,
+        ReferenceJoin declaration) => new(this, target, navigation, declaration);
 
     public static GwTableModel<T> Infer(string name)
     {
@@ -104,6 +112,65 @@ public sealed class GwTableModel<T>
         ? value : throw new ArgumentException($"'{member}' is not a declared element set on '{typeof(T).Name}'.", nameof(member));
 }
 
+internal interface IGwNavigation
+{
+    string NavigationMember { get; }
+    IReadOnlyDictionary<string, ColumnRef> TargetColumns { get; }
+}
+
+/// <summary>
+/// A typed navigation bound to one provider-neutral declared reference. It can only be activated
+/// by <c>IGwQueryable.Join</c>.
+/// </summary>
+public sealed class GwReference<TSource, TTarget> : IGwNavigation
+{
+    internal GwReference(
+        GwTableModel<TSource> source,
+        GwTableModel<TTarget> target,
+        Expression<Func<TSource, TTarget>> navigation,
+        ReferenceJoin declaration)
+    {
+        Source = source ?? throw new ArgumentNullException(nameof(source));
+        Target = target ?? throw new ArgumentNullException(nameof(target));
+        if (navigation is null) throw new ArgumentNullException(nameof(navigation));
+        Declaration = declaration ?? throw new ArgumentNullException(nameof(declaration));
+
+        var body = navigation.Body;
+        while (body is UnaryExpression unary && unary.NodeType is ExpressionType.Convert or ExpressionType.ConvertChecked)
+            body = unary.Operand;
+        if (body is not MemberExpression member || member.Expression != navigation.Parameters[0])
+            throw new ArgumentException("A navigation must be one direct property or field on the source row.", nameof(navigation));
+        var memberType = member.Member switch
+        {
+            System.Reflection.PropertyInfo property => property.PropertyType,
+            System.Reflection.FieldInfo field => field.FieldType,
+            _ => null
+        };
+        if (memberType != typeof(TTarget))
+            throw new ArgumentException("The navigation member type must exactly match the target table model type.", nameof(navigation));
+        NavigationMember = member.Member.Name;
+
+        if (declaration.SourceTable != source.Table)
+            throw new ArgumentException("The declared reference source must match the source table model.", nameof(declaration));
+        if (declaration.TargetTable != target.Table)
+            throw new ArgumentException("The declared reference target must match the target table model.", nameof(declaration));
+        if (declaration.ColumnPairs.Any(pair =>
+                !source.Columns.Values.Contains(pair.Source) ||
+                !target.Columns.Values.Contains(pair.Target)))
+        {
+            throw new ArgumentException(
+                "Every declared reference column must exactly match its source or target table model.",
+                nameof(declaration));
+        }
+    }
+
+    public GwTableModel<TSource> Source { get; }
+    public GwTableModel<TTarget> Target { get; }
+    public string NavigationMember { get; }
+    public ReferenceJoin Declaration { get; }
+    IReadOnlyDictionary<string, ColumnRef> IGwNavigation.TargetColumns => Target.Columns;
+}
+
 public sealed record GwColumn<T>(string MemberName, string ColumnName, QueryType Type, bool IsNullable = true,
     int? MaxLength = null, byte? DecimalPrecision = null, byte? DecimalScale = null,
     QueryStringComparisonPolicy StringComparison = QueryStringComparisonPolicy.Ordinal);
@@ -114,6 +181,7 @@ public sealed record GwElementSet<T>(string MemberName, string SetName, QueryTyp
 public interface IGwQueryable<T>
 {
     QueryRequest ToQueryRequest();
+    IGwQueryable<T> Join<TTarget>(GwReference<T, TTarget> reference);
     IGwQueryable<T> Where(Expression<Func<T, bool>> predicate);
     IGwQueryable<T> WhereIf(bool condition, Expression<Func<T, bool>> predicate);
     IGwQueryable<T> OrderBy<TKey>(Expression<Func<T, TKey>> selector);
@@ -374,6 +442,7 @@ public sealed class GwQueryTable<T> : IGwQueryable<T>
     public IGwQueryable<T> AsQueryable() => Query;
     private IGwQueryable<T> Root => Query;
     public QueryRequest ToQueryRequest() => Root.ToQueryRequest();
+    public IGwQueryable<T> Join<TTarget>(GwReference<T, TTarget> reference) => Root.Join(reference);
     public IGwQueryable<T> Where(Expression<Func<T, bool>> predicate) => Root.Where(predicate);
     public IGwQueryable<T> WhereIf(bool condition, Expression<Func<T, bool>> predicate) => Root.WhereIf(condition, predicate);
     public IGwQueryable<T> OrderBy<TKey>(Expression<Func<T, TKey>> selector) => Root.OrderBy(selector);

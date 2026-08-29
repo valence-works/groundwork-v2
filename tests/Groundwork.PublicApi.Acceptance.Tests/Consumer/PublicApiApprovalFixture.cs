@@ -49,6 +49,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(Groundwork.Records.StorageDeclarationBuilder);
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
+        _ = typeof(GwReference<,>);
         _ = typeof(QueryCoverageException);
         _ = typeof(QueryCoverageCandidates);
         _ = typeof(RecordTable);
@@ -175,6 +176,28 @@ internal static class PublicApiApprovalFixture
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));
         _ = new Func<DocumentUnit<ApprovalDocument>, RowValues, DocumentReadResult<ApprovalDocument>>((unit, values) => unit.Read(values, null));
         _ = new Func<RecordTable<ApprovalRecord>, IGwQueryable<ApprovalRecord>>(table => table.Query.Where(row => row.Value == "approved"));
+        var approvalOrders = new GwTableModel<ApprovalOrder>("approval_orders",
+        [
+            new(nameof(ApprovalOrder.Id), "id", QueryType.Guid, false),
+            new(nameof(ApprovalOrder.CustomerId), "customer_id", QueryType.Guid, false)
+        ]);
+        var approvalCustomers = new GwTableModel<ApprovalCustomer>("approval_customers",
+        [
+            new(nameof(ApprovalCustomer.Id), "id", QueryType.Guid, false),
+            new(nameof(ApprovalCustomer.Name), "name", QueryType.String, false)
+        ]);
+        var approvalCustomerJoin = new ReferenceJoin("customer", approvalCustomers.Table,
+        [
+            new JoinColumnPair(
+                approvalOrders.Columns[nameof(ApprovalOrder.CustomerId)],
+                approvalCustomers.Columns[nameof(ApprovalCustomer.Id)])
+        ]);
+        var approvalCustomerReference = approvalOrders.Reference(
+            order => order.Customer,
+            approvalCustomers,
+            approvalCustomerJoin);
+        _ = new Func<IGwQueryable<ApprovalOrder>, IGwQueryable<ApprovalOrder>>(
+            query => query.Join(approvalCustomerReference).Where(order => order.Customer.Name == "approved"));
         _ = new Func<RecordTable<ApprovalRecord>, RecordAggregationBinding<string, long>>(table => table.Aggregate<string, long>(
             "summary",
             "value",
@@ -200,5 +223,7 @@ internal static class PublicApiApprovalFixture
 
     private sealed record ApprovalRecord(Guid Id, string Value);
     private sealed record ApprovalMetric(Guid Id, string Label, int Count, decimal Amount);
+    private sealed record ApprovalOrder(Guid Id, Guid CustomerId, ApprovalCustomer Customer);
+    private sealed record ApprovalCustomer(Guid Id, string Name);
     private sealed record ApprovalDocument(Guid Id, string Value);
 }

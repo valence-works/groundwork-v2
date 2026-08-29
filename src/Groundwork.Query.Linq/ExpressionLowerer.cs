@@ -20,30 +20,39 @@ public static class ExpressionLowerer
     internal static int ClosedAccessorCompilationCount => Volatile.Read(ref closedAccessorCompilations);
 
     public static Predicate Lower<T>(Expression<Func<T, bool>> expression, GwTableModel<T> model)
+        => Lower(expression, model, null);
+
+    internal static Predicate Lower<T>(Expression<Func<T, bool>> expression, GwTableModel<T> model, IGwNavigation? navigation)
     {
         if (expression is null) throw new ArgumentNullException(nameof(expression));
         if (model is null) throw new ArgumentNullException(nameof(model));
         var diagnostics = new List<LinqDiagnostic>();
-        var predicate = new LoweringVisitor<T>(expression.Parameters[0], model, diagnostics).Predicate(expression.Body);
+        var predicate = new LoweringVisitor<T>(expression.Parameters[0], model, navigation, diagnostics).Predicate(expression.Body);
         ThrowIfAny(diagnostics.Where(diagnostic => diagnostic.Code != "GW-LINQ-103").ToArray());
         return PredicateNormalizer.Normalize(predicate);
     }
 
     public static ColumnRef LowerColumn<T, TValue>(Expression<Func<T, TValue>> expression, GwTableModel<T> model)
+        => LowerColumn(expression, model, null);
+
+    internal static ColumnRef LowerColumn<T, TValue>(Expression<Func<T, TValue>> expression, GwTableModel<T> model, IGwNavigation? navigation)
     {
         if (expression is null) throw new ArgumentNullException(nameof(expression));
         var diagnostics = new List<LinqDiagnostic>();
-        var column = new LoweringVisitor<T>(expression.Parameters[0], model, diagnostics).Column(expression.Body);
+        var column = new LoweringVisitor<T>(expression.Parameters[0], model, navigation, diagnostics).Column(expression.Body);
         ThrowIfAny(diagnostics);
         return column;
     }
 
     public static IReadOnlyList<LinqDiagnostic> Diagnose<T>(Expression<Func<T, bool>> expression, GwTableModel<T> model)
+        => Diagnose(expression, model, null);
+
+    internal static IReadOnlyList<LinqDiagnostic> Diagnose<T>(Expression<Func<T, bool>> expression, GwTableModel<T> model, IGwNavigation? navigation)
     {
         if (expression is null) throw new ArgumentNullException(nameof(expression));
         if (model is null) throw new ArgumentNullException(nameof(model));
         var diagnostics = new List<LinqDiagnostic>();
-        _ = new LoweringVisitor<T>(expression.Parameters[0], model, diagnostics).Predicate(expression.Body);
+        _ = new LoweringVisitor<T>(expression.Parameters[0], model, navigation, diagnostics).Predicate(expression.Body);
         return diagnostics.AsReadOnly();
     }
 
@@ -332,11 +341,12 @@ public static class ExpressionLowerer
     {
         private readonly ParameterExpression parameter;
         private readonly GwTableModel<T> model;
+        private readonly IGwNavigation? navigation;
         private readonly ICollection<LinqDiagnostic> diagnostics;
 
-        public LoweringVisitor(ParameterExpression parameter, GwTableModel<T> model, ICollection<LinqDiagnostic> diagnostics)
+        public LoweringVisitor(ParameterExpression parameter, GwTableModel<T> model, IGwNavigation? navigation, ICollection<LinqDiagnostic> diagnostics)
         {
-            this.parameter = parameter; this.model = model; this.diagnostics = diagnostics;
+            this.parameter = parameter; this.model = model; this.navigation = navigation; this.diagnostics = diagnostics;
         }
 
         public AstPredicate Predicate(Expression source)
@@ -383,12 +393,9 @@ public static class ExpressionLowerer
         public ColumnRef Column(Expression source)
         {
             var expression = Unwrap(source);
-            if (expression is MemberExpression member && member.Expression == parameter && model.Columns.TryGetValue(member.Member.Name, out var column))
-                return column;
-            if (expression is MemberExpression nested && nested.Expression is MemberExpression inner &&
-                model.Columns.ContainsKey(inner.Member.Name) && nested.Member.Name is "Value")
-                return model.Column(inner.Member.Name);
-            Add("GW-LINQ-101", "The selected expression is not a mapped column; declare a computed column; expressions over columns are not portable", expression);
+            if (TryColumn(expression) is { } column) return column;
+            if (IsNavigation(expression)) AddNavigationRefusal(expression);
+            else Add("GW-LINQ-101", "The selected expression is not a mapped column; declare a computed column; expressions over columns are not portable", expression);
             return new ColumnRef(model.Table, "__invalid", QueryType.String);
         }
 
@@ -412,7 +419,7 @@ public static class ExpressionLowerer
             if (column is null)
             {
                 if (HasUnsupportedColumnMethod(left) || HasUnsupportedColumnMethod(right) || HasUnsupportedColumnMember(left) || HasUnsupportedColumnMember(right)) Add("GW-LINQ-101", "A member method/property on a column is not portable; declare a computed column; expressions over columns are not portable", binary);
-                else if (IsNavigation(left) || IsNavigation(right)) Add("GW-LINQ-104", "Navigation and Join are not portable; v2 has no joins; use a declared element set or two queries", binary);
+                else if (IsNavigation(left) || IsNavigation(right)) AddNavigationRefusal(binary);
                 else if (HasColumn(binary)) Add("GW-LINQ-102", "Arithmetic on columns is not portable; declare a computed column; expressions over columns are not portable", binary);
                 else Add("GW-LINQ-107", "The expression contains an opaque helper; mark it [GwQueryFragment]", binary);
                 return AstPredicate.AlwaysFalse.Instance;
@@ -461,7 +468,7 @@ public static class ExpressionLowerer
             }
             if (call.Method.Name == "Join")
             {
-                Add("GW-LINQ-104", "Navigation and Join are not portable; v2 has no joins; use a declared element set or two queries", call);
+                AddNavigationRefusal(call);
                 return AstPredicate.AlwaysFalse.Instance;
             }
             if (call.Method.Name == "GroupBy")
@@ -609,6 +616,10 @@ public static class ExpressionLowerer
             source = Unwrap(source);
             if (source is MemberExpression member && member.Expression == parameter && model.Columns.TryGetValue(member.Member.Name, out var column)) return column;
             if (source is MemberExpression value && value.Member.Name == "Value" && value.Expression is MemberExpression nullable && nullable.Expression == parameter && model.Columns.TryGetValue(nullable.Member.Name, out var nullableColumn)) return nullableColumn;
+            if (source is MemberExpression targetMember && targetMember.Expression is MemberExpression navigationMember &&
+                navigationMember.Expression == parameter && navigation is not null &&
+                string.Equals(navigationMember.Member.Name, navigation.NavigationMember, StringComparison.Ordinal) &&
+                navigation.TargetColumns.TryGetValue(targetMember.Member.Name, out var targetColumn)) return targetColumn;
             return null;
         }
 
@@ -620,7 +631,15 @@ public static class ExpressionLowerer
             return false;
         }
         private bool HasColumn(Expression source) => ContainsParameter(source, parameter);
-        private bool IsNavigation(Expression source) => Unwrap(source) is MemberExpression member && member.Expression is MemberExpression nested && HasColumn(nested);
+        private bool IsNavigation(Expression source)
+        {
+            source = Unwrap(source);
+            if (source is not MemberExpression member) return false;
+            if (member.Expression == parameter && navigation is not null &&
+                string.Equals(member.Member.Name, navigation.NavigationMember, StringComparison.Ordinal)) return true;
+            return member.Expression is MemberExpression nested && HasColumn(nested);
+        }
+        private void AddNavigationRefusal(Expression source) => Add("GW-LINQ-104", "Navigation and Join are not portable; v2 has no joins; use a declared element set or two queries", source);
         private bool HasUnsupportedColumnMethod(Expression source) => Unwrap(source) is MethodCallExpression call && call.Object is not null && HasColumn(call.Object) && call.Method.Name is "ToLower" or "ToUpper" or "Substring" or "Trim";
         private bool HasUnsupportedColumnMember(Expression source) => Unwrap(source) is MemberExpression member && member.Member.Name == "Length" && HasColumn(member.Expression!);
         private static bool ContainsGroupBy(MethodCallExpression call) => call.Method.Name == "GroupBy" || call.Object is MethodCallExpression nested && ContainsGroupBy(nested) || call.Arguments.Any(argument => Unwrap(argument) is MethodCallExpression nested && ContainsGroupBy(nested));
