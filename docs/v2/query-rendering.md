@@ -13,10 +13,17 @@ The aggregate command and its budget probe bind the same fragment parameters bef
 
 `Paging.Keyset(limit)` is the first keyset page. `Paging.Continuation` carries a typed tuple made
 with `QueryContinuationToken.Encode`; the tuple contains every requested order term followed by
-the explicitly supplied `QueryRenderOptions.TieBreakColumns`. Applications must supply their
-declared identity columns as tie-breaks so pages remain deterministic. Every order term must name
-its null rank. Offset paging remains available through `Paging.OffsetLimit` and is rendered only
-when requested.
+the explicitly supplied `QueryRenderOptions.TieBreakColumns`. For joined continuations, applications
+must supply their complete driving identity through `QueryRenderOptions.DrivingIdentityColumns`; the
+declaration must exactly match the provider-resolved source key, including portable type metadata and
+facets. The joined order includes that identity in declaration order even when the additional tie-break list is
+partial or a requested order term already names one of its columns. This preserves caller-selected
+sort priority while retaining a complete declaration-order identity suffix. Joined renderers alias
+each effective-order value with
+`QueryRequestExecution.ContinuationFieldName(index)` so qualified columns that share a logical name
+remain distinct inside the provider result. These fields are internal and never enter the public row.
+Every order term must name its null rank. Offset paging remains available through `Paging.OffsetLimit`
+and is rendered only when requested.
 
 The default index policy is provider-default and emits no native hint. A declaration must use
 `QueryIndexPinning.Pinned` before SQL Server or MongoDB can receive a hint. PostgreSQL and SQLite

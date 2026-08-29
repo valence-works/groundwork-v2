@@ -183,14 +183,20 @@ if (page.NextContinuationToken is { } token)
 }
 ```
 
-Three rules for correct pages:
+Four rules for correct pages:
 
 1. **Every order term must name its null rank.** `NullOrder.ProviderDefault` is refused
    (`GW-SEM-ORDER-004`).
-2. **You must supply your declared identity columns as `QueryRenderOptions.TieBreakColumns`.** The
-   continuation tuple contains every requested order term followed by those tie-breaks. Without them
-   pages are not deterministic.
-3. Ordering automatically normalizes nulls-first-ascending / nulls-last-descending and appends the
+2. **For joined continuations, you must supply your complete declared identity through
+   `QueryRenderOptions.DrivingIdentityColumns`.** It must exactly match the provider-resolved key,
+   including portable type metadata and facets. Joined continuations include that identity in
+   declaration order even when `TieBreakColumns` contains only additional tie-breaks or requested
+   order terms already name identity columns. Without a complete identity suffix, pages are not
+   deterministic.
+3. **Joined provider adapters must alias effective-order values with
+   `QueryRequestExecution.ContinuationFieldName(index)`.** These internal fields keep same-named
+   source and target cursor values distinct without leaking into the public row.
+4. Ordering automatically normalizes nulls-first-ascending / nulls-last-descending and appends the
    identity tie-break before paging.
 
 Continuation tokens are typed tuples built with `QueryContinuationToken.Encode`. Under privileged
