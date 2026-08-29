@@ -20,7 +20,7 @@ public sealed class QueryRendererTests
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Int32, isNullable: true);
 
     [Fact]
-    public void Relational_renderers_emit_a_qualified_inner_join_while_mongo_remains_closed()
+    public void All_native_renderers_emit_the_declared_inner_join()
     {
         var orders = new TableId("orders");
         var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
@@ -63,9 +63,229 @@ public sealed class QueryRendererTests
         Assert.Contains("[__groundwork_target].[region]", sqlServer.CommandText, StringComparison.Ordinal);
         Assert.All(new[] { sqlite, postgres, sqlServer }, command => Assert.Equal(2, command.Parameters.Length));
 
-        var refusal = Assert.Throws<QueryRenderException>(() => new MongoQueryRenderer().Render(request));
-        Assert.Equal("GW-QUERY-032", refusal.Code);
-        Assert.Contains("not yet render", refusal.Message, StringComparison.Ordinal);
+        var mongo = new MongoQueryRenderer().Render(
+            request,
+            physicalCollectionName: "orders__scope__physical",
+            physicalTargetCollectionName: "customers__scope__physical");
+        var lookup = Assert.Single(mongo.Pipeline.Where(stage => stage.Names.Single() == "$lookup"))["$lookup"].AsBsonDocument;
+        Assert.Equal("customers__scope__physical", lookup["from"].AsString);
+        Assert.Equal("__groundwork_target", lookup["as"].AsString);
+        Assert.Equal(new[] { "groundwork_join_source_0", "groundwork_join_source_1" },
+            lookup["let"].AsBsonDocument.Names.ToArray());
+        Assert.Equal("$customer_id", lookup["let"]["groundwork_join_source_0"].AsString);
+        Assert.Equal("$customer_region", lookup["let"]["groundwork_join_source_1"].AsString);
+
+        var targetMatch = lookup["pipeline"].AsBsonArray[0]
+            .AsBsonDocument["$match"].AsBsonDocument["$expr"].AsBsonDocument;
+        var equalities = targetMatch["$and"].AsBsonArray
+            .Select(value => value.AsBsonDocument["$eq"].AsBsonArray)
+            .ToArray();
+        Assert.Equal(2, equalities.Length);
+        Assert.Equal(new BsonString("$id"), equalities[0][0]);
+        Assert.Equal(new BsonString("$$groundwork_join_source_0"), equalities[0][1]);
+        Assert.Equal(new BsonString("$region"), equalities[1][0]);
+        Assert.Equal(new BsonString("$$groundwork_join_source_1"), equalities[1][1]);
+        Assert.Contains(mongo.Pipeline, stage => stage.Contains("$unwind"));
+    }
+
+    [Fact]
+    public void Mongo_join_qualifies_target_predicate_projection_and_order()
+    {
+        var orders = new TableId("orders");
+        var sourceName = new ColumnRef(orders, "name", QueryType.String, isNullable: true, maxLength: 100);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            new Predicate.And([
+                new Predicate.Equal(sourceName, QueryConstant.Of(sourceName, "order")),
+                new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice"))
+            ]),
+            [
+                new OrderTerm(sourceName, nullOrder: NullOrder.First),
+                new OrderTerm(Name, nullOrder: NullOrder.Last)
+            ],
+            Projection.ColumnsOnly(sourceName, Name),
+            Paging.None);
+
+        var command = new MongoQueryRenderer().Render(
+            request,
+            physicalCollectionName: "orders",
+            physicalTargetCollectionName: "customers");
+        var pipeline = string.Join("\n", command.Pipeline.Select(stage => stage.ToString()));
+
+        Assert.Contains("\"__groundwork_target.name\"", pipeline, StringComparison.Ordinal);
+        Assert.Contains("\"name\"", pipeline, StringComparison.Ordinal);
+        Assert.Contains("_groundwork_null_rank_1", pipeline, StringComparison.Ordinal);
+        Assert.Contains("$__groundwork_target.name", pipeline, StringComparison.Ordinal);
+        Assert.DoesNotContain("not yet render", pipeline, StringComparison.Ordinal);
+
+        var continuationValues = command.Pipeline
+            .Where(stage => stage.Names.Single() == "$set")
+            .SelectMany(stage => stage["$set"].AsBsonDocument.Elements)
+            .Where(element => element.Name.StartsWith("__groundwork_continuation_", StringComparison.Ordinal))
+            .ToDictionary(element => element.Name, element => element.Value.AsString, StringComparer.Ordinal);
+        Assert.Equal(command.AppliedOrder.Length, continuationValues.Count);
+        Assert.Equal("$name", continuationValues[QueryRequestExecution.ContinuationFieldName(0)]);
+        Assert.Equal("$__groundwork_target.name", continuationValues[QueryRequestExecution.ContinuationFieldName(1)]);
+        Assert.Equal("$__groundwork_target.id", continuationValues[QueryRequestExecution.ContinuationFieldName(2)]);
+
+        var finalProjection = command.Pipeline
+            .Where(stage => stage.Names.Single() == "$project")
+            .Select(stage => stage["$project"].AsBsonDocument)
+            .Last();
+        Assert.All(Enumerable.Range(0, command.AppliedOrder.Length), index =>
+            Assert.Equal(1, finalProjection[QueryRequestExecution.ContinuationFieldName(index)].AsInt32));
+    }
+
+    [Fact]
+    public void Mongo_joined_target_reduction_reads_the_nested_value_and_returns_a_plain_scalar()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(Amount),
+            Paging.None,
+            new ResultShape.Sum(Amount));
+
+        var command = new MongoQueryRenderer().Render(
+            request,
+            physicalCollectionName: "orders",
+            physicalTargetCollectionName: "customers");
+        var facet = Assert.Single(command.Pipeline.Where(stage => stage.Contains("$facet")));
+        var finalProjection = command.Pipeline.Last()["$project"].AsBsonDocument;
+
+        Assert.Contains("$__groundwork_target.amount", facet.ToString(), StringComparison.Ordinal);
+        Assert.True(finalProjection.Contains("amount"));
+        Assert.False(finalProjection.Contains("__groundwork_target.amount"));
+    }
+
+    [Fact]
+    public void Mongo_joined_distinct_uses_collision_safe_keys_for_same_named_columns()
+    {
+        var orders = new TableId("orders");
+        var sourceName = new ColumnRef(orders, "name", QueryType.String, isNullable: true, maxLength: 100);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, nullOrder: NullOrder.Last)],
+            Projection.ColumnsOnly(sourceName, Name),
+            Paging.None,
+            distinct: true);
+
+        var command = new MongoQueryRenderer().Render(
+            request,
+            physicalCollectionName: "orders",
+            physicalTargetCollectionName: "customers");
+        var group = command.Pipeline
+            .Where(stage => stage.Names.Single() == "$group")
+            .Single()["$group"].AsBsonDocument;
+        var distinctKey = group["_id"].AsBsonDocument;
+
+        Assert.All(distinctKey.Names, name => Assert.DoesNotContain('.', name));
+        Assert.Equal(new[] { "$name", "$__groundwork_target.name" },
+            distinctKey.Values.Select(value => value.AsString).ToArray());
+    }
+
+    [Fact]
+    public void Mongo_joined_latest_uses_collision_safe_aliases_for_target_paths_and_ties()
+    {
+        var orders = new TableId("orders");
+        var sourceName = new ColumnRef(orders, "name", QueryType.String, isNullable: true, maxLength: 100);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var targetTimestamp = new ColumnRef(Table, "createdAt", QueryType.DateTimeOffset, isNullable: false);
+        var targetTie = Id;
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, nullOrder: NullOrder.Last)],
+            Projection.ColumnsOnly(sourceName, Name),
+            Paging.None,
+            latestPerKey: new LatestPerKey(Name, targetTimestamp));
+        var options = new QueryRenderOptions(tieBreakColumns: [sourceName, targetTie])
+        {
+            LatestPartitionColumns = [sourceName]
+        };
+
+        var command = new MongoQueryRenderer().Render(
+            request,
+            options,
+            physicalCollectionName: "orders",
+            physicalTargetCollectionName: "customers");
+        var latestSort = command.Pipeline
+            .Where(stage => stage.Names.Single() == "$sort")
+            .First()["$sort"].AsBsonDocument;
+        var latestGroup = command.Pipeline
+            .Where(stage => stage.Names.Single() == "$group")
+            .Single()["$group"].AsBsonDocument["_id"].AsBsonDocument;
+
+        Assert.All(latestSort.Names, name => Assert.DoesNotContain('.', name));
+        Assert.All(latestGroup.Names, name => Assert.DoesNotContain('.', name));
+        Assert.Contains(command.Pipeline, stage => stage.ToString().Contains("$__groundwork_target.name", StringComparison.Ordinal));
+        Assert.Contains(command.Pipeline, stage => stage.ToString().Contains("_groundwork_latest_value_", StringComparison.Ordinal));
+        Assert.Contains(command.Pipeline, stage => stage.ToString().Contains("_groundwork_latest_tie_key_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Mongo_joined_mixed_not_is_not_pushed_to_either_side()
+    {
+        var orders = new TableId("orders");
+        var sourceName = new ColumnRef(orders, "name", QueryType.String, isNullable: true, maxLength: 100);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            new Predicate.Not(new Predicate.And([
+                new Predicate.Equal(sourceName, QueryConstant.Of(sourceName, "order")),
+                new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice"))
+            ])),
+            [],
+            Projection.All,
+            Paging.None);
+
+        var command = new MongoQueryRenderer().Render(
+            request,
+            physicalCollectionName: "orders",
+            physicalTargetCollectionName: "customers");
+        var sourceMatch = command.Pipeline[0]["$match"].AsBsonDocument;
+
+        Assert.Empty(sourceMatch);
+        var joinedMatches = command.Pipeline
+            .Where(stage => stage.Names.Single() == "$match")
+            .Select(stage => stage["$match"].AsBsonDocument)
+            .ToArray();
+        var fullJoinedMatch = joinedMatches.Single(match => match.Names.Contains("$or"));
+        Assert.Contains("__groundwork_target.name", fullJoinedMatch.ToString(), StringComparison.Ordinal);
+        Assert.Contains("\"name\"", fullJoinedMatch.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Mongo_joined_always_false_is_pushed_before_lookup()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(orders, join, Predicate.AlwaysFalse.Instance, [], Projection.All, Paging.None);
+
+        var command = new MongoQueryRenderer().Render(
+            request,
+            physicalCollectionName: "orders",
+            physicalTargetCollectionName: "customers");
+        var sourceMatch = command.Pipeline[0]["$match"].AsBsonDocument;
+
+        Assert.True(sourceMatch["_groundwork_match_none"].AsBoolean);
     }
 
     [Fact]

@@ -404,7 +404,8 @@ public sealed class SchemaSubject
         {
             Name = reference.Name,
             Columns = (reference.Columns ?? []).ToImmutableArray(),
-            TargetUnitId = reference.TargetUnitId
+            TargetUnitId = reference.TargetUnitId,
+            TargetScope = reference.TargetScope
         }).ToImmutableArray(),
         AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
@@ -483,7 +484,15 @@ public sealed class SchemaSubject
 
     private static string CanonicalReference(ReferenceDefinition reference) =>
         SchemaFingerprint.Canonicalize(
-            [reference.Name, reference.TargetUnitId.Value, .. reference.Columns]);
+            [
+                reference.Name,
+                reference.TargetUnitId.Value,
+                .. reference.Columns,
+                .. CanonicalTargetScope(reference)
+            ]);
+
+    private static string[] CanonicalTargetScope(ReferenceDefinition reference) =>
+        reference.TargetScope is { } scope ? [$"target-scope:{scope}"] : [];
 
     private static AggregationProfile Snapshot(AggregationProfile profile) =>
         AggregationProfileSnapshot.Capture(profile);

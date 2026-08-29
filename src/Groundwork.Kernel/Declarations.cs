@@ -366,6 +366,13 @@ public sealed record ReferenceDefinition
 
     /// <summary>The logical identity of the unit whose declared key is referenced.</summary>
     public required StorageUnitId TargetUnitId { get; init; }
+
+    /// <summary>
+    /// The target's scope policy as resolved when the relationship was declared or compiled.
+    /// A null value preserves legacy hand-built and persisted declarations; providers must fail
+    /// closed before reading target metadata when it is absent.
+    /// </summary>
+    public ScopePolicy? TargetScope { get; init; }
 }
 
 public sealed record IndexColumn(string Column, SortDirection Direction = SortDirection.Ascending);

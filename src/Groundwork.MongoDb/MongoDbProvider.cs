@@ -195,17 +195,97 @@ internal sealed class MongoProviderState
 
         EnsureSameDeclaration(appliedState.Snapshot.Subject.Definition, declaration);
 
+        MongoAppliedUnit resolved;
         lock (gate)
         {
             if (units.TryGetValue(declaration.Id, out var raced))
             {
                 EnsureSameDeclaration(raced.Declaration, declaration);
-                return raced;
+                resolved = raced;
             }
-            units.Add(declaration.Id, applied);
-            return applied;
+            else
+            {
+                units.Add(declaration.Id, applied);
+                resolved = applied;
+            }
         }
+        return resolved;
     }
+
+    internal MongoAppliedUnit ResolveReferenceTarget(
+        StorageUnit source,
+        ReferenceJoin join,
+        MongoStorageAccess access)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(join);
+        ArgumentNullException.ThrowIfNull(access);
+
+        var references = source.References
+            .Where(candidate => string.Equals(candidate.Name, join.ReferenceName, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        if (references.Length != 1)
+            throw InvalidReferenceJoin(join, "does not name exactly one applied source reference");
+
+        var reference = references[0];
+        if (reference.TargetScope is null)
+            throw InvalidReferenceJoin(
+                join,
+                "does not carry persisted target scope metadata and cannot be admitted safely");
+
+        if (source.Scope != reference.TargetScope)
+        {
+            throw new InvalidOperationException(
+                $"GW-ACCESS-003: declared reference join '{join.ReferenceName}' crosses storage scope policies and was refused before provider I/O.");
+        }
+
+        if (!TryGet(reference.TargetUnitId, out var target))
+        {
+            var targetState = ReadAppliedState(reference.TargetUnitId);
+            if (targetState is null || targetState.Snapshot.Subject.Evolution.RetiresPrimaryStorage)
+                throw InvalidReferenceJoin(join, "targets a storage unit that is not currently applied");
+
+            var candidate = new MongoAppliedUnit(
+                MongoDeclarationSnapshot.Clone(targetState.Snapshot.Subject.Definition),
+                targetState.Snapshot.Subject.Name);
+            lock (gate)
+            {
+                target = units.TryGetValue(reference.TargetUnitId, out var raced)
+                    ? raced
+                    : units[reference.TargetUnitId] = candidate;
+            }
+        }
+        if (target.Declaration.Scope != reference.TargetScope)
+        {
+            throw InvalidReferenceJoin(
+                join,
+                $"persists target scope {target.Declaration.Scope} but the reference requires {reference.TargetScope}; schema history is inconsistent");
+        }
+
+        ValidateScope(target.Declaration, access);
+        if (!string.Equals(join.SourceTable.Value, source.Name, StringComparison.Ordinal) ||
+            !string.Equals(join.TargetTable.Value, target.Declaration.Name, StringComparison.Ordinal) ||
+            !reference.Columns.SequenceEqual(
+                join.ColumnPairs.Select(pair => pair.Source.Name),
+                StringComparer.Ordinal) ||
+            !target.Declaration.Key.Columns.SequenceEqual(
+                join.ColumnPairs.Select(pair => pair.Target.Name),
+                StringComparer.Ordinal))
+        {
+            throw InvalidReferenceJoin(join, "does not match the applied reference and complete target key");
+        }
+        if (!CollectionExists(target.CollectionName))
+            throw InvalidReferenceJoin(join, "targets a storage unit whose primary collection is absent");
+        _ = MongoSchemaCoordinator.EnsureAdmission(this, target, access);
+        RegisterScope(target, access);
+        return target;
+    }
+
+    private static QueryRenderException InvalidReferenceJoin(ReferenceJoin join, string reason) =>
+        new(
+            "GW-QUERY-032",
+            $"Declared reference join '{join.ReferenceName}' {reason}; MongoDB refused it before issuing a query command.");
 
     private static void EnsureSameDeclaration(StorageUnit applied, StorageUnit requested)
     {
@@ -315,7 +395,9 @@ internal sealed class MongoProviderState
     }
 }
 
-internal sealed record MongoAppliedUnit(StorageUnit Declaration, string CollectionName);
+internal sealed record MongoAppliedUnit(
+    StorageUnit Declaration,
+    string CollectionName);
 
 internal sealed record MongoScopeRegistration(StorageScope Scope, string Token, string CollectionName);
 
@@ -858,6 +940,15 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        if (request.Join is not null && request.Result is not ResultShape.Reduction)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-032",
+                "MongoDB join rendering is available, but composite source/target result materialization has not landed yet.");
+        }
+        var targetApplied = request.Join is null
+            ? null
+            : state.ResolveReferenceTarget(Unit, request.Join, Access);
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var executionSource = Access.Policy == ScopePolicy.Scoped
             ? QueryRequestExecution.WithProviderPredicate(request, request.Where,
@@ -871,7 +962,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
-        var command = new MongoQueryRenderer().Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName);
+        var reduction = executionSource.Result as ResultShape.Reduction;
+        var reductionColumn = reduction is null ? null : ResolveReductionColumn(reduction, targetApplied);
+        var renderer = new MongoQueryRenderer();
+        var command = targetApplied is null
+            ? renderer.Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName)
+            : renderer.Render(
+                executionRequest,
+                renderOptions,
+                collection.CollectionNamespace.CollectionName,
+                MongoSchemaCoordinator.CollectionName(targetApplied, Access));
         commandObserver?.Observe(new ProviderCommandEvent("mongodb.query", "MongoDB.Aggregate(page)", ProviderCommandKind.Read, IsProbe: false));
         List<BsonDocument> documents;
         long? facetTotalCount = null;
@@ -925,16 +1025,21 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         var rows = documents.Select(document =>
         {
             var row = new Dictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var column in Unit.Columns)
+            if (reductionColumn is not null &&
+                document.TryGetValue(reduction!.Column.Name, out var reducedValue))
             {
-                if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
-                    continue;
-                if (document.TryGetValue(column.Name, out var value))
+                row[reduction.Column.Name] = reduction is ResultShape.Sum { Column.Type: QueryType.Int32 }
+                    ? (reducedValue.IsBsonNull ? null : reducedValue.ToInt64())
+                    : MongoValueCodec.Decode(reducedValue, reductionColumn);
+            }
+            else if (reductionColumn is null)
+            {
+                foreach (var column in Unit.Columns)
                 {
-                    row[column.Name] = executionSource.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
-                        string.Equals(sum.Column.Name, column.Name, StringComparison.Ordinal)
-                        ? (value.IsBsonNull ? null : value.ToInt64())
-                        : MongoValueCodec.Decode(value, column);
+                    if (MongoDocumentMapper.IsSystemOwnedToken(Unit, column))
+                        continue;
+                    if (document.TryGetValue(column.Name, out var value))
+                        row[column.Name] = MongoValueCodec.Decode(value, column);
                 }
             }
             if (document.TryGetValue("__groundwork_total_count", out var count))
@@ -988,6 +1093,41 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             sourceIncludesDistinct: true);
     }
 
+    private ColumnDefinition ResolveReductionColumn(
+        ResultShape.Reduction reduction,
+        MongoAppliedUnit? targetApplied)
+    {
+        StorageUnit declaration;
+        if (string.Equals(reduction.Column.Table.Value, Unit.Name, StringComparison.Ordinal))
+        {
+            declaration = Unit;
+        }
+        else if (targetApplied is not null &&
+                 string.Equals(
+                     reduction.Column.Table.Value,
+                     targetApplied.Declaration.Name,
+                     StringComparison.Ordinal))
+        {
+            declaration = targetApplied.Declaration;
+        }
+        else
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-032",
+                $"Reduction column '{reduction.Column}' does not belong to the applied source or joined target.");
+        }
+
+        var column = declaration.Columns.SingleOrDefault(candidate =>
+            string.Equals(candidate.Name, reduction.Column.Name, StringComparison.Ordinal));
+        if (column is null || QueryTypeOf(column.Type) != reduction.Column.Type)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-032",
+                $"Reduction column '{reduction.Column}' does not match its applied storage declaration.");
+        }
+        return column;
+    }
+
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
         QueryRenderOptions? options = null) =>
@@ -1013,6 +1153,11 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             throw new ArgumentException(
                 $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
                 nameof(request));
+        if (request.Join is not null)
+        {
+            throw new InvalidOperationException(
+                "GW-ACCESS-003: privileged cross-scope queries refuse joins because one audited query cannot bind a single same-scope target collection.");
+        }
         StorageAccessValidation.ObservePrivilegedQuery(
             StorageAccess.PrivilegedAcrossScopes(Access.Audit!),
             Unit);

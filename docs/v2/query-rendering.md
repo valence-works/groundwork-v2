@@ -47,10 +47,20 @@ Server index is attached only to that driving alias; it is never copied to the t
 PostgreSQL keep both relations optimizer-selected. The join equality itself binds no values, and
 both sides' predicate values, continuation values, and page values consume one shared provider
 parameter budget. Mongo `$lookup` is a separate renderer capability, and composite public
-source/target row materialization is owned by the Records join materializer rather than the SQL
-renderer. Provider execution through the ordinary dictionary result reader therefore remains
-fail-closed before provider I/O until that composite materializer lands, preventing duplicate
-source/target field labels from being collapsed into one dictionary slot.
+source/target row materialization is owned by the Records join materializer rather than either
+renderer. MongoDB renders the reference as one `$lookup` whose pipeline compares the ordered
+source columns with the target key under `$expr`. Runtime admission resolves the target's exact
+physical collection from its applied schema history and applies the source session's same-scope
+route; it never infers a target collection by rewriting the source name. The reference snapshot
+persists the target scope policy, so a missing or unequal policy is refused before MongoDB reads
+target history. Builders record the source's required same-scope policy even for identity-only
+references. Applied declarations that predate this metadata must be reapplied before opening with
+a newly built declaration; a direct legacy declaration that still omits it fails closed before join I/O.
+Target fields remain
+nested under `__groundwork_target`, so same-named source and target columns cannot collide. Joined
+scalar reductions can execute over that native pipeline. Public joined rows still fail closed
+before provider I/O until the composite materializer lands, and privileged cross-scope queries
+refuse joins with `GW-ACCESS-003` before audit observation or provider commands.
 
 An empty `In` normalizes to match-none; a pinned declaration is still carried on the native
 command. A pinned index that excludes null values is refused when the predicate could match an

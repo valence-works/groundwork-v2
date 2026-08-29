@@ -98,6 +98,8 @@ internal static class PublicApiApprovalFixture
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Reference("customer", new StorageUnitId("customer"), "customer_id"));
+        _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
+            builder.Reference("customer", new StorageUnitId("customer"), ScopePolicy.Global, "customer_id"));
         _ = new Func<ColumnBuilder, ColumnBuilder>(column => column.LocaleOrder("sv-SE", 12));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.ValidatePortableDefaults(unit));
@@ -126,6 +128,8 @@ internal static class PublicApiApprovalFixture
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
         _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
             builder.Reference("customer", new StorageUnitId("customer"), "customer_id"));
+        _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
+            builder.Reference("customer", new StorageUnitId("customer"), ScopePolicy.Global, "customer_id"));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
             (session, operation, values) => session.AppendWithOutcomes(operation, values));
         _ = new Func<IStorageSession, StorageKey, IReadOnlyDictionary<string, object?>, WriteOutcome>(

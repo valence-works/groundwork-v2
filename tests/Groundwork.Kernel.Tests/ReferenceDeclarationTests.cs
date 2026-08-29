@@ -28,6 +28,27 @@ public sealed class ReferenceDeclarationTests
         Assert.Equal("customer", reference.Name);
         Assert.Equal(["customer_tenant", "customer_id"], reference.Columns);
         Assert.Equal(target.Id, reference.TargetUnitId);
+        Assert.Equal(target.Scope, reference.TargetScope);
+    }
+
+    [Fact]
+    public void Identity_only_builder_reference_records_the_required_same_scope_policy()
+    {
+        var source = SourceBuilder()
+            .Reference("customer", new StorageUnitId("customer"), "customer_id")
+            .Build();
+
+        Assert.Equal(ScopePolicy.Global, Assert.Single(source.References).TargetScope);
+    }
+
+    [Fact]
+    public void Identity_and_scope_reference_persists_the_explicit_target_scope()
+    {
+        var source = SourceBuilder()
+            .Reference("customer", new StorageUnitId("customer"), ScopePolicy.Global, "customer_id")
+            .Build();
+
+        Assert.Equal(ScopePolicy.Global, Assert.Single(source.References).TargetScope);
     }
 
     [Fact]
@@ -164,6 +185,35 @@ public sealed class ReferenceDeclarationTests
             .Build());
 
         Assert.NotEqual(subjectReferencingCustomer.Fingerprint, subjectReferencingAccount.Fingerprint);
+    }
+
+    [Fact]
+    public void Reference_target_scope_participates_in_snapshot_fingerprint_and_applied_state()
+    {
+        var target = GuidTarget();
+        var scopedReference = new SchemaSubject(SourceBuilder()
+            .Reference("customer", target, "customer_id")
+            .Build());
+        var legacyReference = new SchemaSubject(SourceBuilder().Build() with
+        {
+            References =
+            [
+                new ReferenceDefinition
+                {
+                    Name = "customer",
+                    Columns = ["customer_id"],
+                    TargetUnitId = target.Id
+                }
+            ]
+        });
+
+        Assert.NotEqual(scopedReference.Fingerprint, legacyReference.Fingerprint);
+        Assert.Equal(ScopePolicy.Global, Assert.Single(scopedReference.Definition.References).TargetScope);
+
+        var restored = PhysicalSchemaAppliedStateSerializer.Deserialize(
+            PhysicalSchemaAppliedStateSerializer.Serialize(AppliedState(scopedReference.Definition)));
+
+        Assert.Equal(ScopePolicy.Global, Assert.Single(restored.Snapshot.Subject.References).TargetScope);
     }
 
     [Fact]

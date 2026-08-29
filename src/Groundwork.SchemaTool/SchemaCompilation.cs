@@ -9,7 +9,7 @@ public static class SchemaCompilation
     public static IReadOnlyList<StorageUnit> Compile(SchemaDocument schema)
     {
         ArgumentNullException.ThrowIfNull(schema);
-        var units = schema.Tables.Select(Compile).ToArray();
+        var units = EnrichReferenceTargetScopes(schema.Tables.Select(Compile).ToArray());
         SchemaSubject.ValidateManifest(units);
         return units;
     }
@@ -145,7 +145,7 @@ public static class SchemaCompilation
     {
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(targets);
-        var units = schema.Tables.Select(Compile).ToArray();
+        var units = EnrichReferenceTargetScopes(schema.Tables.Select(Compile).ToArray());
         SchemaSubject.ValidateManifestWithoutCrossUnitReferences(units);
         var refusals = StorageReferenceValidation.ValidateManifestBySource(units)
             .GroupBy(result => result.SourceUnitId)
@@ -161,6 +161,26 @@ public static class SchemaCompilation
             return refusals.TryGetValue(unit.Id, out var unitRefusals)
                 ? target.WithPlanningRefusals(unitRefusals)
                 : target;
+        }).ToArray();
+    }
+
+    private static IReadOnlyList<StorageUnit> EnrichReferenceTargetScopes(IReadOnlyList<StorageUnit> units)
+    {
+        var targets = units
+            .GroupBy(unit => unit.Id.Value, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Count() == 1 ? group.Single() : null,
+                StringComparer.Ordinal);
+
+        return units.Select(unit => unit with
+        {
+            References = (unit.References ?? []).Select(reference =>
+                reference.TargetScope is null &&
+                targets.TryGetValue(reference.TargetUnitId.Value, out var target) &&
+                target is not null
+                    ? reference with { TargetScope = target.Scope }
+                    : reference).ToArray()
         }).ToArray();
     }
 

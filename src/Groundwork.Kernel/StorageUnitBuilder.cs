@@ -170,11 +170,27 @@ public sealed class StorageDeclarationBuilder
     /// <summary>
     /// Declares a logical-only relationship by target identity. This form is used when a canonical
     /// schema is assembled before all units exist; target-dependent validation occurs when the
-    /// complete manifest is validated.
+    /// complete manifest is validated. The built reference records this source's scope as the
+    /// target policy required by the same-scope invariant.
     /// </summary>
     public StorageDeclarationBuilder Reference(string name, StorageUnitId targetUnitId, params string[] columns)
     {
         state.AddReference(name, targetUnitId, columns);
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a logical-only relationship by target identity and its known scope policy. This
+    /// explicit form lets callers preserve independently resolved target metadata; providers
+    /// refuse a policy that differs from the source before reading target state.
+    /// </summary>
+    public StorageDeclarationBuilder Reference(
+        string name,
+        StorageUnitId targetUnitId,
+        ScopePolicy targetScope,
+        params string[] columns)
+    {
+        state.AddReference(name, targetUnitId, targetScope, columns);
         return this;
     }
 
@@ -510,15 +526,23 @@ internal sealed class StorageDeclarationState
     public void AddReference(string name, StorageUnit target, IEnumerable<string> columnNames)
     {
         ArgumentNullException.ThrowIfNull(target);
-        AddReference(name, target.Id, columnNames, new SchemaSubject(target).Definition);
+        AddReference(name, target.Id, target.Scope, columnNames, new SchemaSubject(target).Definition);
     }
 
     public void AddReference(string name, StorageUnitId targetUnitId, IEnumerable<string> columnNames) =>
-        AddReference(name, targetUnitId, columnNames, target: null);
+        AddReference(name, targetUnitId, targetScope: null, columnNames, target: null);
+
+    public void AddReference(
+        string name,
+        StorageUnitId targetUnitId,
+        ScopePolicy targetScope,
+        IEnumerable<string> columnNames) =>
+        AddReference(name, targetUnitId, targetScope, columnNames, target: null);
 
     private void AddReference(
         string name,
         StorageUnitId targetUnitId,
+        ScopePolicy? targetScope,
         IEnumerable<string> columnNames,
         StorageUnit? target)
     {
@@ -531,7 +555,8 @@ internal sealed class StorageDeclarationState
             {
                 Name = referenceName,
                 Columns = Array.AsReadOnly(snapshot),
-                TargetUnitId = targetUnitId
+                TargetUnitId = targetUnitId,
+                TargetScope = targetScope
             },
             target));
     }
@@ -557,7 +582,7 @@ internal sealed class StorageDeclarationState
             Columns = Array.AsReadOnly(columns.ToArray()),
             Key = new KeyDefinition { Columns = Array.AsReadOnly((key?.Columns ?? []).ToArray()) },
             Indexes = Array.AsReadOnly(indexes.ToArray()),
-            References = Array.AsReadOnly(references.Select(reference => reference.SnapshotDefinition()).ToArray()),
+            References = Array.AsReadOnly(references.Select(reference => reference.SnapshotDefinition(scope)).ToArray()),
             AggregationProfiles = Array.AsReadOnly(aggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()),
             Scope = scope,
             ForeignColumns = foreignColumns,
@@ -640,9 +665,10 @@ internal sealed class StorageDeclarationState
 
 internal sealed record ReferenceDeclarationState(ReferenceDefinition Definition, StorageUnit? Target)
 {
-    public ReferenceDefinition SnapshotDefinition() => Definition with
+    public ReferenceDefinition SnapshotDefinition(ScopePolicy sourceScope) => Definition with
     {
-        Columns = Array.AsReadOnly((Definition.Columns ?? []).ToArray())
+        Columns = Array.AsReadOnly((Definition.Columns ?? []).ToArray()),
+        TargetScope = Definition.TargetScope ?? sourceScope
     };
 }
 

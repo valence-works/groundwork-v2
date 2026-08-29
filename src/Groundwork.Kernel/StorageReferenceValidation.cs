@@ -136,6 +136,14 @@ internal static class StorageReferenceValidation
                 "both units must use the same scope policy.",
                 $"{path}.targetUnitId"));
         }
+        else if (reference.TargetScope is not null && reference.TargetScope != target.Scope)
+        {
+            findings.Add(new DeclarationFinding(
+                "GW-DECL-REF-003",
+                $"Reference '{reference.Name}' records a {reference.TargetScope} target scope, but target unit " +
+                $"'{target.Id.Value}' is declared {target.Scope}; the persisted relationship metadata is inconsistent.",
+                $"{path}.targetScope"));
+        }
 
         return findings;
     }

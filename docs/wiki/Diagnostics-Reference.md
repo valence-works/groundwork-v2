@@ -129,7 +129,7 @@ Published codes appear in messages; Roslyn ids use underscores.
 | `GW-QUERY-020` | Query rendering refusal |
 | `GW-QUERY-030` | Query rendering refusal |
 | `GW-QUERY-031` | `ColumnRef` policy does not match the schema's persisted search-key mapping |
-| `GW-QUERY-032` | A declared-reference join reached a provider or execution/materialization path whose capability has not landed yet (currently Mongo rendering, in-memory/batched execution, and relational composite result materialization); the request fails closed instead of executing only its driving table or collapsing duplicate source/target fields |
+| `GW-QUERY-032` | A declared-reference join reached an execution/materialization path whose capability has not landed yet (currently in-memory/batched execution and relational or MongoDB composite result materialization); the request fails closed instead of executing only its driving table or collapsing duplicate source/target fields |
 
 ---
 
@@ -246,7 +246,7 @@ Raised by `Groundwork.Extensions.DependencyInjection`, carried on
 | --- | --- |
 | `GW-ACCESS-001` | Cross-scope query without privileged access |
 | `GW-ACCESS-002` | Provider session does not advertise privileged cross-scope queries |
-| `GW-ACCESS-003` | Point operation under privileged access (ambiguous) |
+| `GW-ACCESS-003` | Point operation under privileged access, or a declared-reference join whose persisted target scope differs from its source scope |
 | `GW-ACCESS-004`…`006` | Additional access-context refusals |
 
 ---
