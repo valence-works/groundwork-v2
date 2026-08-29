@@ -187,7 +187,27 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
             }
 
             var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-            return new SqliteUnitOfWork(this, transactional, transaction, units, access, options, observer);
+            var lifetime = new RelationalUnitOfWorkLifetime(
+                transactional,
+                transaction,
+                supportsAsync: false,
+                disposeTransaction: true,
+                rollback: () => SqliteTransactionCleanup.RollbackOrClearPool(transaction, transactional));
+            return new RelationalUnitOfWork(
+                units,
+                options,
+                unit =>
+                {
+                    var session = new SqliteStorageSession(
+                        this,
+                        SqliteSchemaCoordinator.Physicalize(unit),
+                        access,
+                        transactional,
+                        transaction,
+                        observer);
+                    return new RelationalUnitOfWorkSession(session, session.Close);
+                },
+                lifetime);
         }
         catch
         {

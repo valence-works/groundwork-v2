@@ -1,7 +1,6 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using System.Collections.Immutable;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
@@ -18,10 +17,14 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
     private readonly NpgsqlTransaction? transaction;
-    private NpgsqlTransaction? activeTransaction;
-    private readonly AsyncLocal<bool> batchFallbackScope = new();
-    private readonly AsyncLocal<bool> writeExecutionScope = new();
-    private bool closed;
+    private readonly RelationalSessionExecution execution;
+    private readonly RelationalSessionPointReads pointReads;
+    private readonly RelationalSessionCrud crud;
+    private readonly RelationalSessionQueries queries;
+    private readonly RelationalSessionAggregations aggregations;
+    private readonly RelationalSessionSetMutations setMutations;
+    private readonly RelationalSessionAppends appends;
+    private readonly RelationalSessionRetention retention;
 
     /// <summary>
     /// True when this session was opened through <c>OpenOwnedSession</c> and must return its connection on
@@ -47,6 +50,59 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         this.connection = connection;
         this.transaction = transaction;
         commandObserver = observer;
+        execution = new RelationalSessionExecution(
+            access,
+            transaction,
+            ownsConnection,
+            new PostgreSqlSessionExecutionAdapter(owner, connection),
+            nameof(PostgreSqlStorageSession));
+        pointReads = new RelationalSessionPointReads(
+            unit,
+            access,
+            UserColumns,
+            VersionColumn,
+            Command,
+            new PostgreSqlPointReadAdapter(this),
+            observer,
+            "postgresql");
+        crud = new RelationalSessionCrud(
+            unit,
+            UserColumns,
+            SequenceColumn,
+            VersionColumn,
+            "PostgreSQL",
+            (key, mode) => ReadCore(key, mode),
+            new PostgreSqlCrudAdapter(this));
+        queries = new RelationalSessionQueries(
+            unit,
+            access,
+            connection,
+            new PostgreSqlQueryRenderer(),
+            PhysicalIndexNames,
+            FromDatabase,
+            AssertExplainPlan,
+            observer,
+            "postgresql");
+        aggregations = new RelationalSessionAggregations(
+            unit,
+            access,
+            connection,
+            new PostgreSqlDialect(),
+            FromDatabase,
+            observer,
+            "postgresql.aggregate");
+        setMutations = new RelationalSessionSetMutations(
+            unit,
+            access,
+            new PostgreSqlQueryRenderer(),
+            unit.Columns.FirstOrDefault(column => column.Name == PostgreSqlSchemaCoordinator.VersionColumn)?.Name,
+            Command,
+            (command, name, value, column) =>
+                Add((NpgsqlCommand)command, name, ConvertValue(value, column), column.Name),
+            observer,
+            "postgresql");
+        appends = new RelationalSessionAppends(unit, access, new PostgreSqlAppendAdapter(this));
+        retention = new RelationalSessionRetention(unit, access, new PostgreSqlRetentionAdapter(this));
     }
 
     /// <summary>
@@ -83,39 +139,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private ValueTask<QueryMaterializedResult> QueryCore(
         QueryRequest request,
         QueryRenderOptions? options,
-        RelationalExecution mode) => Execute(async () =>
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        StorageAccessValidation.EnsureOrdinaryQuery(Access);
-        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
-            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var executionSource = WithScopePredicate(request);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
-        {
-            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
-                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = PhysicalIndexNames(),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
-        };
-        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
-        var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("postgresql.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            if (executionSource.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
-                string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
-                return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
-            var column = RelationalQueryResultReader.ResolveColumnDefinition(Unit, executionSource, renderOptions, name);
-            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        }, activeTransaction ?? transaction, mode).ConfigureAwait(false);
-        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
-        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true,
-            sourceIncludesDistinct: true);
-    }, mode);
+        RelationalExecution mode) => Execute(
+            () => queries.Query(request, options, execution.Transaction, mode),
+            mode);
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
@@ -131,70 +157,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private ValueTask<CrossScopeQueryResult> QueryAcrossScopesCore(
         QueryRequest request,
         QueryRenderOptions? options,
-        RelationalExecution mode) => Execute(async () =>
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        if (!Access.IsPrivilegedAcrossScopes)
-            throw new InvalidOperationException(
-                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
-        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
-            throw new ArgumentException(
-                $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
-                nameof(request));
-        StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
-
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var scopeToken = new ColumnRef(
-            new TableId(Unit.Name),
-            CrossScopeQueryMaterializer.ScopeTokenColumn,
-            QueryType.String,
-            isNullable: false);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
-            new[] { scopeToken }
-                .Concat(Unit.Key.Columns
-                    .Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn)
-                    .Select(QueryColumn)
-                    .Where(column => column is not null)
-                    .Select(column => column!))) with
-        {
-            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
-                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(
-                    column => column.Name,
-                    column => QueryTypeOf(column.Type),
-                    StringComparer.Ordinal)))
-                .ToImmutableArray(),
-            PhysicalIndexNames = PhysicalIndexNames(),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
-            LatestPartitionColumns = [scopeToken]
-        };
-        var executionSource = QueryRequestExecution.WithProviderPredicate(
-            request,
-            request.Where,
-            CrossScopeQueryMaterializer.BindingDiscriminator(Access));
-        var executionRequest = EnsureScopeProjection(
-            QueryRequestExecution.ForPage(executionSource, renderOptions));
-        var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("postgresql.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        }, transaction: null, mode).ConfigureAwait(false);
-        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
-        var materialized = QueryResultMaterializer.Materialize(
-            executionSource,
-            renderOptions,
-            rows,
-            command.SelectedIndex,
-            command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-        return CrossScopeQueryMaterializer.FromNativePage(
-            materialized,
-            rows,
-            PostgreSqlSchemaCoordinator.ScopeColumn);
-    }, mode);
+        RelationalExecution mode) => Execute(
+            () => queries.QueryAcrossScopes(request, options, mode),
+            mode);
 
     public AggregationResult Aggregate(AggregationQuery query) =>
         AggregateCore(query, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -204,42 +169,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         CancellationToken cancellationToken = default) =>
         AggregateCore(query, RelationalExecution.Asynchronous(cancellationToken));
 
-    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) => Execute(async () =>
-    {
-        ArgumentNullException.ThrowIfNull(query);
-        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
-        var decode = (string name, object? value) =>
-        {
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        };
-        return await (Unit.Scope == ScopePolicy.Scoped
-            ? RelationalAggregationExecutor.ExecuteScoped(
-                connection,
-                activeTransaction ?? transaction,
-                new PostgreSqlDialect(),
-                Unit,
-                profile,
-                query,
-                decode,
-                PostgreSqlSchemaCoordinator.ScopeColumn,
-                Access.Scope!,
-                mode,
-                commandObserver,
-                "postgresql.aggregate")
-            : RelationalAggregationExecutor.Execute(
-            connection,
-            activeTransaction ?? transaction,
-            new PostgreSqlDialect(),
-            Unit,
-            profile,
-            query,
-            decode,
-            mode,
-            commandObserver,
-            "postgresql.aggregate")).ConfigureAwait(false);
-    }, mode);
+    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) =>
+        Execute(() => aggregations.Aggregate(query, execution.Transaction, mode), mode);
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {
@@ -254,10 +185,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             PostgreSqlExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
     }
 
-    private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
-        ? request
-        : RelationalQueryExecution.BindScope(request, PostgreSqlSchemaCoordinator.ScopeColumn, Access.Scope!.Value);
-
     public StoredEntry? Read(StorageKey key) =>
         ReadEntry(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
 
@@ -266,29 +193,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<StoredEntry?> ReadEntry(StorageKey key, RelationalExecution mode)
     {
-        StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(async () => PublicEntry(await ReadCore(
-            key, mode, observerOperation: "postgresql.read", isProbe: false).ConfigureAwait(false)), mode);
+        pointReads.ValidatePublicRead();
+        return Execute(() => pointReads.ReadPublic(key, mode), mode);
     }
-
-    private QueryRequest EnsureScopeProjection(QueryRequest request)
-    {
-        if (request.Projection.AllColumns || request.Projection.Columns.Any(column =>
-                string.Equals(column.Name, PostgreSqlSchemaCoordinator.ScopeColumn, StringComparison.Ordinal)))
-            return request;
-        var scope = new ColumnRef(
-            new TableId(Unit.Name),
-            PostgreSqlSchemaCoordinator.ScopeColumn,
-            QueryType.String,
-            isNullable: false);
-        return QueryRequestExecution.WithProjection(
-            request,
-            Projection.ColumnsOnly([.. request.Projection.Columns, scope]));
-    }
-
-    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
-        ? null
-        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
         InsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -301,9 +208,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return Mutate(values, options, Mutation.Insert, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Insert);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) =>
@@ -317,9 +223,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return Mutate(values, options, Mutation.Update, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Update);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
@@ -333,9 +238,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return Mutate(values, options, Mutation.Upsert, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Upsert);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
@@ -392,38 +296,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
-        return ExecuteWrite(async () =>
-        {
-            if (Unit.Concurrency.IsNone)
-            {
-                var (noneWhere, noneParameters) = KeyPredicate(key.Values);
-                using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
-                AddParameters(noneCommand, noneParameters);
-                commandObserver?.Observe(new ProviderCommandEvent("postgresql.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
-                return (await mode.ExecuteNonQuery(noneCommand).ConfigureAwait(false)) == 0
-                    ? new WriteOutcome(WriteOutcomeStatus.NotFound)
-                    : new WriteOutcome(WriteOutcomeStatus.Deleted);
-            }
-
-            var existing = await ReadCore(key, mode).ConfigureAwait(false);
-            ValidateExpected(options, existing, Mutation.Delete);
-            if (existing is null)
-                return new WriteOutcome(WriteOutcomeStatus.NotFound);
-            var (where, parameters) = KeyPredicate(key.Values);
-            if (VersionColumn is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
-            {
-                where += $" AND {Quote(VersionColumn.Name)}=@expected";
-                parameters["@expected"] = options.Precondition.Version!.Value;
-            }
-            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
-            AddParameters(command, parameters);
-            commandObserver?.Observe(new ProviderCommandEvent("postgresql.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            var affected = await mode.ExecuteNonQuery(command).ConfigureAwait(false);
-            return affected == 0
-                ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
-                : new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-        }, mode);
+        var operation = crud.PrepareDelete(key, options);
+        return ExecuteWrite(() => crud.Delete(operation, mode), mode);
     }
 
     public WriteOutcome CompareAndDelete(
@@ -460,7 +334,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
                 options.Precondition.Version != existing.Version)
                 return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
-            if (!MatchesExpected(existing, expected))
+            if (!RelationalSessionPolicy.MatchesExpected(Unit, existing, expected))
                 return new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
 
             var (where, parameters) = KeyPredicate(canonicalKey.Values);
@@ -492,14 +366,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         }, mode);
     }
 
-    private bool MatchesExpected(StoredEntry existing, IReadOnlyDictionary<string, object?> expected) =>
-        expected.All(pair =>
-        {
-            var definition = Column(pair.Key);
-            return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
-                CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
-        });
-
     public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
         UpdateWhere(where, assignments, RelationalExecution.Synchronous).GetAwaiter().GetResult();
 
@@ -514,23 +380,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         IReadOnlyDictionary<string, object?> assignments,
         RelationalExecution mode)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
-        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
-        return ExecuteWrite(async () =>
-        {
-            var rendered = new PostgreSqlQueryRenderer().RenderUpdateWhere(
-                Unit.Name, ScopedSetPredicate(where), columns, VersionColumn?.Name);
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            for (var index = 0; index < columns.Length; index++)
-            {
-                Add(command, rendered.AssignmentParameters[index],
-                    ConvertValue(physical[columns[index]], Column(columns[index])), columns[index]);
-            }
-            Observe("postgresql.update-where", rendered.CommandText, ProviderCommandKind.Write);
-            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
-        }, mode);
+        var operation = setMutations.PrepareUpdateWhere(where, assignments);
+        return ExecuteWrite(() => operation(mode), mode);
     }
 
     public SetMutationResult DeleteWhere(Predicate where) =>
@@ -543,24 +394,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<SetMutationResult> DeleteWhere(Predicate where, RelationalExecution mode)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        return ExecuteWrite(async () =>
-        {
-            var rendered = new PostgreSqlQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            Observe("postgresql.delete-where", rendered.CommandText, ProviderCommandKind.Write);
-            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
-        }, mode);
+        var operation = setMutations.PrepareDeleteWhere(where);
+        return ExecuteWrite(() => operation(mode), mode);
     }
-
-    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
-        where,
-        Unit.Name,
-        Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn)
-            ? PostgreSqlSchemaCoordinator.ScopeColumn
-            : null,
-        Access.Scope?.Value);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ApplyRetention(options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -568,53 +404,12 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     public ValueTask<RetentionResult> ApplyRetentionAsync(RetentionExecutionOptions? options = null) =>
         ApplyRetention(options, RelationalExecution.Asynchronous(options?.CancellationToken ?? CancellationToken.None));
 
-    private ValueTask<RetentionResult> ApplyRetention(RetentionExecutionOptions? options, RelationalExecution mode) =>
-        ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions(), mode), mode);
-
-    private async ValueTask<RetentionResult> ApplyRetentionCore(RetentionExecutionOptions options, RelationalExecution mode)
+    private ValueTask<RetentionResult> ApplyRetention(
+        RetentionExecutionOptions? options,
+        RelationalExecution mode)
     {
-        if (options.MaxRowsPerBatch <= 0)
-            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
-        var declaration = Unit.Retention ??
-            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
-        var keepNewest = RetentionSessionExtensions.EffectiveKeepNewest(Unit, options);
-        var keyColumns = Unit.Key.Columns;
-        var partition = declaration.PartitionColumns.Count == 0
-            ? string.Empty
-            : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
-        var scope = Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn)
-            ? $" WHERE {Quote(PostgreSqlSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
-            : string.Empty;
-        var keys = string.Join(", ", keyColumns.Select(Quote));
-        var ordering = string.Join(", ", [
-            $"{Quote(declaration.OrderColumn)} DESC",
-            .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
-        var equality = string.Join(" AND ", keyColumns.Select(column =>
-            $"target.{Quote(column)}=victim.{Quote(column)}"));
-        var deleted = 0;
-        var batches = 0;
-        while (true)
-        {
-            options.CancellationToken.ThrowIfCancellationRequested();
-            using var command = Command($"WITH ranked AS (" +
-                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
-                $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
-                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
-                $"DELETE FROM {Quote(Unit.Name)} AS target USING victims AS victim WHERE {equality};");
-            Add(command, "keep", keepNewest);
-            Add(command, "limit", options.MaxRowsPerBatch);
-            if (Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn))
-                Add(command, "__groundwork_scope", Access.Scope!.Value);
-            var affected = await mode.ExecuteNonQuery(command).ConfigureAwait(false);
-            commandObserver?.Observe(new ProviderCommandEvent("postgresql.retention-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            if (affected == 0)
-                break;
-            deleted += affected;
-            batches++;
-            if (affected < options.MaxRowsPerBatch)
-                break;
-        }
-        return new RetentionResult(deleted, batches);
+        var operation = retention.Prepare(options);
+        return ExecuteWrite(() => retention.Apply(operation, mode), mode);
     }
 
     public StorageInspection Inspect() =>
@@ -651,93 +446,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         RetentionExecutionOptions? options,
         RelationalExecution mode)
     {
-        var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
-            $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
-        declaration.Validate(Unit);
-        options ??= new RetentionExecutionOptions();
-        RetentionSessionExtensions.ValidateExecutionOptions(options);
-        RetentionOperationCodec.ValidateOperation(operationId);
-        return ExecuteWrite(() => ApplyExactRetentionCore(operationId, declaration, options, mode), mode);
-    }
-
-    private async ValueTask<RetentionOperationResult> ApplyExactRetentionCore(
-        OperationId operationId,
-        RetentionIdempotencyDeclaration declaration,
-        RetentionExecutionOptions options,
-        RelationalExecution mode)
-    {
-        await EnsureLedgerTable(declaration.LedgerName, mode).ConfigureAwait(false);
-        var providerNow = await ProviderNow(mode).ConfigureAwait(false);
-        var scope = Access.Scope?.Value ?? string.Empty;
-        var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
-        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE ctid IN (SELECT ctid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
-        {
-            Add(reclaim, "reclaim_unit", Unit.Id.Value);
-            Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
-            await mode.ExecuteNonQuery(reclaim).ConfigureAwait(false);
-        }
-
-        var existing = await ReadRetentionLedger(declaration.LedgerName, operationId, scope, mode).ConfigureAwait(false);
-        if (existing is not null)
-        {
-            var (committedAt, storedFingerprint, storedResult) = existing.Value;
-            if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-            {
-                if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
-                    throw new InvalidOperationException("GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
-                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                return RetentionOperationCodec.DeserializeResult(storedResult) with { Status = RetentionOperationStatus.Replayed };
-            }
-
-            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            await mode.ExecuteNonQuery(deleteExpired).ConfigureAwait(false);
-        }
-
-        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;"))
-        {
-            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
-            Add(insertLedger, "committed_at", FormatLedgerTime(providerNow));
-            Add(insertLedger, "fingerprint", fingerprint);
-            Add(insertLedger, "result", string.Empty);
-            if ((await mode.ExecuteNonQuery(insertLedger).ConfigureAwait(false)) == 0)
-            {
-                var raced = await ReadRetentionLedger(declaration.LedgerName, operationId, scope, mode).ConfigureAwait(false);
-                if (raced is null || string.IsNullOrEmpty(raced.Value.storedFingerprint) || string.IsNullOrEmpty(raced.Value.storedResult))
-                    throw new InvalidOperationException("GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
-                if (!string.Equals(raced.Value.storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, raced.Value.storedFingerprint, fingerprint);
-                return RetentionOperationCodec.DeserializeResult(raced.Value.storedResult) with { Status = RetentionOperationStatus.Replayed };
-            }
-        }
-
-        var retention = await ApplyRetentionCore(options, mode).ConfigureAwait(false);
-        var result = new RetentionOperationResult(RetentionOperationStatus.Executed, retention.DeletedRows, retention.Batches, retention.Completed);
-        using var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-        AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
-        Add(complete, "result", RetentionOperationCodec.SerializeResult(result));
-        await mode.ExecuteNonQuery(complete).ConfigureAwait(false);
-        return result;
-    }
-
-    private async ValueTask<(DateTimeOffset committedAt, string? storedFingerprint, string? storedResult)?> ReadRetentionLedger(
-        string table,
-        OperationId operationId,
-        string scope,
-        RelationalExecution mode)
-    {
-        using var command = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(table)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-        AddLedgerParameters(command, Unit.Id.Value, scope, operationId.Nonce);
-        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
-        var reader = readerScope.Reader;
-        if (!(await mode.Read(reader).ConfigureAwait(false)))
-            return null;
-        return (
-            DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture),
-            reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture));
+        var operation = retention.PrepareExact(operationId, options);
+        return ExecuteWrite(() => retention.ApplyExact(operation, mode), mode);
     }
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values) =>
@@ -754,16 +464,24 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         IReadOnlyList<StorageValues> values,
         RelationalExecution mode)
     {
-        var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        foreach (var value in values)
-            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
-        var execution = await ExecuteWrite(
-            () => AppendCore(operationId, values, declaration, exactOutcomes: false, mode), mode).ConfigureAwait(false);
-        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
-        return new WriteOutcome(execution.Status);
+        var operation = appends.Prepare(operationId, values, exactOutcomes: false);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        RelationalAppendResult result;
+        try
+        {
+            result = await ExecuteWrite(() => appends.Append(operation, mode), mode).ConfigureAwait(false);
+        }
+        catch
+        {
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
+            throw;
+        }
+        await CompleteOnAppend(
+            registration,
+            onAppend && result.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            mode).ConfigureAwait(false);
+        return new WriteOutcome(result.Status);
     }
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
@@ -780,132 +498,31 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         IReadOnlyList<StorageValues> values,
         RelationalExecution mode)
     {
-        var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        foreach (var value in values)
-            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
-        var outcome = await ExecuteWrite(async () => (await AppendCore(
-            operationId, values, declaration, exactOutcomes: true, mode).ConfigureAwait(false)).ToReport(), mode)
-            .ConfigureAwait(false);
-        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
+        var operation = appends.Prepare(operationId, values, exactOutcomes: true);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        AppendOutcomeReport outcome;
+        try
+        {
+            outcome = await ExecuteWrite(async () => (await appends.Append(
+                operation, mode).ConfigureAwait(false)).ToReport(), mode).ConfigureAwait(false);
+        }
+        catch
+        {
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
+            throw;
+        }
+        await CompleteOnAppend(
+            registration,
+            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            mode).ConfigureAwait(false);
         return outcome;
-    }
-
-    private async ValueTask<AppendExecution> AppendCore(
-        OperationId operationId,
-        IReadOnlyList<StorageValues> values,
-        AppendIdempotencyDeclaration declaration,
-        bool exactOutcomes,
-        RelationalExecution mode)
-    {
-        await EnsureLedgerTable(declaration.LedgerName, mode).ConfigureAwait(false);
-        var providerNow = await ProviderNow(mode).ConfigureAwait(false);
-        var scope = Access.Scope?.Value ?? string.Empty;
-        var fingerprint = ExactAppendCodec.Fingerprint(Unit, values);
-        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE ctid IN (SELECT ctid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
-        {
-            Add(reclaim, "reclaim_unit", Unit.Id.Value);
-            Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
-            await mode.ExecuteNonQuery(reclaim).ConfigureAwait(false);
-        }
-
-        var expiredExisting = false;
-        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
-        {
-            AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
-            await using var readerScope = await mode.ExecuteReader(existing).ConfigureAwait(false);
-            var reader = readerScope.Reader;
-            if (await mode.Read(reader).ConfigureAwait(false))
-            {
-                var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-                if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-                {
-                    var storedFingerprint = reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture);
-                    var storedResult = reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture);
-                    if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
-                    {
-                        if (!exactOutcomes)
-                            return new AppendExecution(WriteOutcomeStatus.Replayed, null);
-                        throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
-                    }
-                    if (!exactOutcomes)
-                        return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
-                    if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                        throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
-                }
-                expiredExisting = true;
-            }
-        }
-        if (expiredExisting)
-        {
-            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            await mode.ExecuteNonQuery(deleteExpired).ConfigureAwait(false);
-        }
-
-        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;"))
-        {
-            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
-            Add(insertLedger, "committed_at", FormatLedgerTime(providerNow));
-            Add(insertLedger, "fingerprint", fingerprint);
-            Add(insertLedger, "result", string.Empty);
-            if ((await mode.ExecuteNonQuery(insertLedger).ConfigureAwait(false)) == 0)
-            {
-                using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-                AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
-                await using var readerScope = await mode.ExecuteReader(replay).ConfigureAwait(false);
-                var reader = readerScope.Reader;
-                if (!(await mode.Read(reader).ConfigureAwait(false)) || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
-                {
-                    if (!exactOutcomes)
-                        return new AppendExecution(WriteOutcomeStatus.Replayed, null);
-                    throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
-                }
-                var storedFingerprint = Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!;
-                if (!exactOutcomes)
-                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
-                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
-            }
-        }
-
-        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, PostgreSqlSchemaCoordinator.ScopeColumn);
-        var writes = values
-            .Select(value => RowWrite.Insert(logicalUnit, value))
-            .ToArray();
-        IReadOnlyList<RowWriteOutcome> outcomes;
-        if (SequenceColumn is not null)
-        {
-            var sequenced = new List<RowWriteOutcome>(writes.Length);
-            foreach (var write in writes)
-                sequenced.Add(await InsertAppendSequence(write, mode).ConfigureAwait(false));
-            outcomes = sequenced;
-        }
-        else
-        {
-            outcomes = await ApplyBatchCore(writes, mode).ConfigureAwait(false);
-        }
-        if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
-            throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
-        var report = new AppendExecution(WriteOutcomeStatus.Inserted, outcomes.Select(outcome => outcome.Outcome).ToArray());
-        using (var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
-        {
-            AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
-            Add(complete, "result", ExactAppendCodec.SerializeOutcomes(report.Outcomes!));
-            await mode.ExecuteNonQuery(complete).ConfigureAwait(false);
-        }
-        return report;
     }
 
     private async ValueTask<RowWriteOutcome> InsertAppendSequence(RowWrite write, RelationalExecution mode)
     {
         var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
-        ValidateValues(values.Values, requireAllNonNullable: true);
+        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, requireAllNonNullable: true);
         return new RowWriteOutcome(write, await InsertCore(values, mode).ConfigureAwait(false));
     }
 
@@ -1036,24 +653,24 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private static string FormatLedgerTime(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
-    internal void Close() => closed = true;
+    internal void Close() => execution.Close();
 
-    public bool IsReleased => closed;
+    public bool IsReleased => execution.IsReleased;
 
     public void Dispose()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             connection.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             await connection.DisposeAsync().ConfigureAwait(false);
     }
@@ -1067,7 +684,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             return ApplyBatchFallback(writes, mode);
         if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes, mode);
-        if (HasSecondaryUniqueIndex(writes[0].Unit))
+        if (RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes, mode);
         var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
         return physicalWrites[0].Mode switch
@@ -1083,7 +700,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         writes.Count != 0 &&
         SequenceColumn is null &&
         writes.All(write => write.Options.Precondition.Kind == WritePreconditionKind.Unconditional) &&
-        !HasSecondaryUniqueIndex(writes[0].Unit) &&
+        !RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit) &&
         writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() == 1 &&
         writes[0].Mode is RowWriteMode.Insert or RowWriteMode.Upsert;
 
@@ -1092,7 +709,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
         foreach (var write in writes)
         {
-            ValidateValues(write.Values!.Values, requireAllNonNullable: true);
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", write.Values!.Values, requireAllNonNullable: true);
             if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
                 return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         }
@@ -1130,7 +747,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
         foreach (var write in writes)
         {
-            ValidateValues(write.Values!.Values, requireAllNonNullable: false);
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", write.Values!.Values, requireAllNonNullable: false);
             if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
                 return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         }
@@ -1228,9 +845,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         // -> Execute tried to acquire that same non-reentrant gate. Keep the fallback in an operation-
         // local scope so it reuses the active transaction instead of waiting on itself.
         var outcomes = new List<RowWriteOutcome>(writes.Count);
-        var previousScope = batchFallbackScope.Value;
-        batchFallbackScope.Value = true;
-        try
+        using (execution.EnterBatchFallback())
         {
             foreach (var write in writes)
             {
@@ -1249,53 +864,13 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             }
             return outcomes;
         }
-        finally
-        {
-            batchFallbackScope.Value = previousScope;
-        }
     }
 
-    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
-        logicalUnit.Indexes.Any(index => index.IsUnique &&
-            !index.Columns.Select(column => column.Column)
-                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
-    private ColumnRef? QueryColumn(string name)
+    private async ValueTask<WriteOutcome> Mutate(RelationalCrudMutation operation, RelationalExecution mode)
     {
-        var column = Unit.Columns.Single(item => item.Name == name);
-        return column.Type switch
-        {
-            PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
-            PortableType.Int32 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int32, column.IsNullable),
-            PortableType.Int64 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int64, column.IsNullable),
-            PortableType.Decimal => new ColumnRef(new TableId(Unit.Name), name, QueryType.Decimal, column.IsNullable, null,
-                column.Precision is int precision ? checked((byte)precision) : null,
-                column.Scale is int scale ? checked((byte)scale) : null),
-            PortableType.String => new ColumnRef(new TableId(Unit.Name), name, QueryType.String, column.IsNullable, column.MaxLength),
-            PortableType.DateTimeOffset => new ColumnRef(new TableId(Unit.Name), name, QueryType.DateTimeOffset, column.IsNullable),
-            PortableType.Guid => new ColumnRef(new TableId(Unit.Name), name, QueryType.Guid, column.IsNullable),
-            PortableType.Binary => new ColumnRef(new TableId(Unit.Name), name, QueryType.Binary, column.IsNullable, column.MaxLength),
-            _ => null
-        };
-    }
-
-    private static QueryType? QueryTypeOf(PortableType type) => type switch
-    {
-        PortableType.Boolean => QueryType.Boolean,
-        PortableType.Int32 => QueryType.Int32,
-        PortableType.Int64 => QueryType.Int64,
-        PortableType.Decimal => QueryType.Decimal,
-        PortableType.String => QueryType.String,
-        PortableType.DateTimeOffset => QueryType.DateTimeOffset,
-        PortableType.Guid => QueryType.Guid,
-        PortableType.Binary => QueryType.Binary,
-        _ => null
-    };
-
-    private async ValueTask<WriteOutcome> Mutate(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode)
-    {
-        var outcome = await MutateCore(values, options, mutation, mode).ConfigureAwait(false);
+        var outcome = await ExecuteWrite(() => crud.Mutate(operation, mode), mode).ConfigureAwait(false);
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            mutation is Mutation.Insert or Mutation.Upsert)
+            operation.Kind is RelationalCrudKind.Insert or RelationalCrudKind.Upsert)
             await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return outcome;
     }
@@ -1309,54 +884,35 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             : Cleanup();
     }
 
-    private ValueTask<WriteOutcome> MutateCore(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode) => ExecuteWrite(async () =>
+    private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible)
     {
-        ArgumentNullException.ThrowIfNull(values);
-        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        ValidateValues(values.Values, mutation == Mutation.Insert,
-            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
+        return eligible && transaction is null
+            ? OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value)
+            : null;
+    }
 
-        // A provider sequence has no caller-visible key until the insert commits. Treat an
-        // upsert without a generated key as an insert; accepting a synthetic read here would
-        // both defeat the native identity and make the returned generated value ambiguous.
-        if (SequenceColumn is not null &&
-            (mutation is Mutation.Insert or Mutation.Upsert) &&
-            !values.Values.ContainsKey(SequenceColumn.Name))
-        {
-            ValidateExpected(options, null, mutation);
-            return await InsertCore(values, mode, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted)
-                .ConfigureAwait(false);
-        }
-
-        var key = KeyFromValues(values.Values);
-        // None mode has no token to inspect. Keep direct writes single-statement and let the
-        // database report uniqueness/not-found from the write itself.
-        var existing = Unit.Concurrency.IsNone ? null : await ReadCore(key, mode).ConfigureAwait(false);
-        if (mutation == Mutation.Insert && existing is not null)
-            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
-        if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        if (mutation == Mutation.Upsert && SequenceColumn is not null &&
-            values.Values.ContainsKey(SequenceColumn.Name) && existing is null && Unit.Concurrency.IsOptimistic)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        ValidateExpected(options, existing, mutation);
-        return await (mutation switch
-        {
-            Mutation.Insert => InsertCore(values, mode),
-            Mutation.Update => UpdateCore(values, key, existing!, options, mode),
-            Mutation.Upsert when SequenceColumn is not null && values.Values.ContainsKey(SequenceColumn.Name) =>
-                UpdateCore(values, key, existing!, options, mode),
-            Mutation.Upsert => UpsertCore(values, key, existing, options, exactOutcome: false, mode),
-            Mutation.ConditionalUpsert => UpsertCore(values, key, existing, options, exactOutcome: true, mode),
-            _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null)
-        }).ConfigureAwait(false);
-    }, mode);
+    private ValueTask CompleteOnAppend(
+        OnAppendRetentionCoordinator.AppendRegistration? registration,
+        bool cleanupRequired,
+        RelationalExecution mode)
+    {
+        async ValueTask Cleanup() =>
+            await ApplyRetention(new RetentionExecutionOptions(), mode).ConfigureAwait(false);
+        if (registration is not null)
+            return registration.Complete(cleanupRequired, Cleanup);
+        if (!cleanupRequired)
+            return ValueTask.CompletedTask;
+        return transaction is null
+            ? OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup)
+            : Cleanup();
+    }
 
     private async ValueTask<WriteOutcome> ConditionalUpsertCore(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        ValidateValues(values.Values, requireAllNonNullable: false);
+        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, requireAllNonNullable: false);
         if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumn is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
 
@@ -1491,6 +1047,33 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         }
     }
 
+    private async ValueTask<WriteOutcome> DeleteCore(
+        StorageKey key,
+        StoredEntry? existing,
+        WriteOptions? options,
+        RelationalExecution mode)
+    {
+        var (where, parameters) = KeyPredicate(key.Values);
+        if (VersionColumn is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+        {
+            where += $" AND {Quote(VersionColumn.Name)}=@expected";
+            parameters["@expected"] = options.Precondition.Version!.Value;
+        }
+        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+        AddParameters(command, parameters);
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "postgresql.delete",
+            command.CommandText,
+            ProviderCommandKind.Write,
+            IsProbe: false));
+        var affected = await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+        if (affected != 0)
+            return new WriteOutcome(WriteOutcomeStatus.Deleted, existing?.Version);
+        return new WriteOutcome(
+            Unit.Concurrency.IsNone ? WriteOutcomeStatus.NotFound : WriteOutcomeStatus.ConcurrencyConflict,
+            existing?.Version);
+    }
+
     private async ValueTask<WriteOutcome> UpdateCore(
         StorageValues values,
         StorageKey key,
@@ -1600,24 +1183,13 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         RelationalExecution mode,
         bool forUpdate = false,
         string? observerOperation = null,
-        bool isProbe = true)
-    {
-        var (where, parameters) = KeyPredicate(key.Values);
-        var columns = UserColumns.Concat(VersionColumn is null ? [] : [VersionColumn]).ToArray();
-        var locking = forUpdate ? " FOR UPDATE" : string.Empty;
-        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where}{locking};");
-        AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
-        var reader = readerScope.Reader;
-        if (!(await mode.Read(reader).ConfigureAwait(false)))
-            return null;
-        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        for (var index = 0; index < UserColumns.Count; index++)
-            values[UserColumns[index].Name] = FromDatabase(reader.GetValue(index), UserColumns[index]);
-        var version = VersionColumn is null ? (long?)null : reader.GetInt64(UserColumns.Count);
-        return new StoredEntry(new StorageValues(values), version);
-    }
+        bool isProbe = true) => await pointReads.Read(
+            key,
+            mode,
+            forUpdate,
+            observerOperation,
+            exactStringKeys: false,
+            isProbe).ConfigureAwait(false);
 
     private StorageKey KeyFromValues(IReadOnlyDictionary<string, object?> values) =>
         new(Unit.Key.Columns.Where(column => column != PostgreSqlSchemaCoordinator.ScopeColumn)
@@ -1674,122 +1246,18 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         return index is null ? null : new PostgreSqlDialect().IndexFilter(index);
     }
 
-    private void ValidateValues(
-        IReadOnlyDictionary<string, object?> values,
-        bool requireAllNonNullable,
-        bool allowGeneratedLocator = false)
-    {
-        var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
-        var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
-        if (unknown is not null)
-            throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
-        foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
-            if (values.ContainsKey(generated.Name) && !allowGeneratedLocator)
-                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by PostgreSQL; it may only be supplied as the locator for Update or Upsert.", nameof(values));
-        if (!requireAllNonNullable)
-            return;
-        foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
-        {
-            if (column.Generation == ColumnGeneration.ProviderSequence)
-                continue;
-            if (!values.TryGetValue(column.Name, out var value) || value is null)
-                throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
-        }
-    }
+    private ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode) =>
+        execution.Execute(operation, mode);
 
-    private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
-    {
-        if (VersionColumn is null)
-            return;
-        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
-        if (mutation == Mutation.Insert)
-            return;
-
-        if (mutation == Mutation.Upsert)
-        {
-            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
-                throw new ConcurrencyConflictException(existing.Version);
-            if (precondition.Kind == WritePreconditionKind.IfVersion &&
-                (existing is null || precondition.Version != existing.Version))
-                throw new ConcurrencyConflictException(existing?.Version);
-            return;
-        }
-        if (precondition.Kind == WritePreconditionKind.IfVersion &&
-            (existing is null || precondition.Version != existing.Version))
-            throw new ConcurrencyConflictException(existing?.Version);
-    }
-
-    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
-    {
-        // Serialized for the whole operation: a cached session is shared by concurrent callers and Npgsql
-        // refuses concurrent commands on one connection. Reads need this as much as writes — a colliding
-        // read is what surfaces on SQL Server as "already an open DataReader". An owned session has an
-        // independent connection, and a batch fallback marks its own logical execution scope; neither path
-        // may wait for this session's non-reentrant gate a second time.
-        using var lease = ownsConnection || batchFallbackScope.Value
-            ? null
-            : await owner.EnterGate(mode).ConfigureAwait(false);
-        try
-        {
-            ThrowIfClosed();
-            return await operation().ConfigureAwait(false);
-        }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
-        }
-    }
-
-    private async ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "write");
-        ThrowIfClosed();
-        if (transaction is not null || batchFallbackScope.Value)
-            return await Translate(operation).ConfigureAwait(false);
-        if (writeExecutionScope.Value)
-            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        using var lease = ownsConnection
-            ? null
-            : await owner.EnterGate(mode).ConfigureAwait(false);
-        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        var write = (NpgsqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.ReadCommitted).ConfigureAwait(false);
-        activeTransaction = write;
-        var previousScope = writeExecutionScope.Value;
-        writeExecutionScope.Value = true;
-        try
-        {
-            var result = await Translate(operation).ConfigureAwait(false);
-            await mode.Commit(write).ConfigureAwait(false);
-            return result;
-        }
-        catch (Exception failure)
-        {
-            await WriteFailureCleanup.Run(failure, () => mode.Rollback(write)).ConfigureAwait(false);
-            throw;
-        }
-        finally
-        {
-            writeExecutionScope.Value = previousScope;
-            activeTransaction = null;
-            await mode.Dispose(write).ConfigureAwait(false);
-        }
-    }
-
-    private static async ValueTask<T> Translate<T>(Func<ValueTask<T>> operation)
-    {
-        try { return await operation().ConfigureAwait(false); }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
-        }
-    }
+    private ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode) =>
+        execution.ExecuteWrite(operation, mode);
 
     private NpgsqlCommand Command(string sql)
     {
-        ThrowIfClosed();
+        execution.EnsureOpen();
         var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Transaction = activeTransaction ?? transaction;
+        command.Transaction = (NpgsqlTransaction?)execution.Transaction;
         return command;
     }
 
@@ -1847,32 +1315,349 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
-    private void ThrowIfClosed()
+    private sealed class PostgreSqlAppendAdapter(PostgreSqlStorageSession session) : IRelationalAppendAdapter
     {
-        owner.ThrowIfDisposed();
-        if (closed)
-            throw new ObjectDisposedException(nameof(PostgreSqlStorageSession));
+        public async ValueTask<DateTimeOffset> PrepareLedger(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            await session.EnsureLedgerTable(operation.Declaration.LedgerName, execution).ConfigureAwait(false);
+            return await session.ProviderNow(execution).ConfigureAwait(false);
+        }
+
+        public async ValueTask ReclaimExpired(
+            RelationalAppendOperation operation,
+            DateTimeOffset cutoff,
+            RelationalExecution execution)
+        {
+            using var reclaim = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE ctid IN " +
+                $"(SELECT ctid FROM {Quote(operation.Declaration.LedgerName)} WHERE " +
+                $"{Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);");
+            session.Add(reclaim, "reclaim_unit", operation.Unit.Id.Value);
+            session.Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
+            await execution.ExecuteNonQuery(reclaim).ConfigureAwait(false);
+        }
+
+        public async ValueTask<RelationalAppendLedgerEntry?> ReadLedger(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            using var existing = session.Command(
+                $"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(existing, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            await using var readerScope = await execution.ExecuteReader(existing).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (!(await execution.Read(reader).ConfigureAwait(false)))
+                return null;
+            return new RelationalAppendLedgerEntry(
+                DateTimeOffset.Parse(
+                    Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture));
+        }
+
+        public async ValueTask DeleteLedger(
+            RelationalAppendOperation operation,
+            RelationalAppendLedgerEntry existing,
+            RelationalExecution execution)
+        {
+            using var delete = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce " +
+                $"AND {Quote(LedgerCommittedAt)}=@observed_committed_at;");
+            session.AddLedgerParameters(delete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(delete, "observed_committed_at", FormatLedgerTime(existing.CommittedAt));
+            await execution.ExecuteNonQuery(delete).ConfigureAwait(false);
+        }
+
+        public async ValueTask<bool> TryClaimLedger(
+            RelationalAppendOperation operation,
+            DateTimeOffset providerNow,
+            RelationalExecution execution)
+        {
+            using var insert = session.Command(
+                $"INSERT INTO {Quote(operation.Declaration.LedgerName)} " +
+                $"({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, " +
+                $"{Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) " +
+                $"VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result) " +
+                $"ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;");
+            session.AddLedgerParameters(insert, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(insert, "committed_at", FormatLedgerTime(providerNow));
+            session.Add(insert, "fingerprint", operation.Fingerprint);
+            session.Add(insert, "result", string.Empty);
+            return await execution.ExecuteNonQuery(insert).ConfigureAwait(false) == 1;
+        }
+
+        public async ValueTask<RelationalAppendReplayEntry?> ReadClaimWinner(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            using var replay = session.Command(
+                $"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(replay, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            await using var readerScope = await execution.ExecuteReader(replay).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (!(await execution.Read(reader).ConfigureAwait(false)))
+                return null;
+            return new RelationalAppendReplayEntry(
+                reader.IsDBNull(0) ? null : Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture),
+                reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture));
+        }
+
+        public async ValueTask<IReadOnlyList<RowWriteOutcome>> InsertPayload(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            var logicalUnit = IdempotencyRules.LogicalUnit(
+                operation.Unit,
+                PostgreSqlSchemaCoordinator.ScopeColumn);
+            var writes = operation.Values
+                .Select(value => RowWrite.Insert(logicalUnit, value))
+                .ToArray();
+            if (session.SequenceColumn is null)
+                return await session.ApplyBatchCore(writes, execution).ConfigureAwait(false);
+
+            var outcomes = new List<RowWriteOutcome>(writes.Length);
+            foreach (var write in writes)
+                outcomes.Add(await session.InsertAppendSequence(write, execution).ConfigureAwait(false));
+            return outcomes;
+        }
+
+        public async ValueTask<bool> CompleteLedger(
+            RelationalAppendOperation operation,
+            string serializedOutcomes,
+            RelationalExecution execution)
+        {
+            using var complete = session.Command(
+                $"UPDATE {Quote(operation.Declaration.LedgerName)} SET {Quote(LedgerResult)}=@result " +
+                $"WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope " +
+                $"AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(complete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(complete, "result", serializedOutcomes);
+            return await execution.ExecuteNonQuery(complete).ConfigureAwait(false) == 1;
+        }
     }
 
-    private enum Mutation
+    private sealed class PostgreSqlRetentionAdapter(
+        PostgreSqlStorageSession session) : IRelationalRetentionAdapter
     {
-        Insert,
-        Update,
-        Upsert,
-        ConditionalUpsert,
-        Delete
+        public async ValueTask<int> DeleteBatch(
+            RelationalRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            var keyColumns = operation.Unit.Key.Columns;
+            var partition = operation.Declaration.PartitionColumns.Count == 0
+                ? string.Empty
+                : $"PARTITION BY {string.Join(", ", operation.Declaration.PartitionColumns.Select(Quote))} ";
+            var scoped = operation.Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn);
+            var scope = scoped
+                ? $" WHERE {Quote(PostgreSqlSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+                : string.Empty;
+            var keys = string.Join(", ", keyColumns.Select(Quote));
+            var ordering = string.Join(", ", [
+                $"{Quote(operation.Declaration.OrderColumn)} DESC",
+                .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+            var equality = string.Join(" AND ", keyColumns.Select(column =>
+                $"target.{Quote(column)}=victim.{Quote(column)}"));
+            using var command = session.Command($"WITH ranked AS (" +
+                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(operation.Unit.Name)}{scope}), victims AS (" +
+                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
+                $"DELETE FROM {Quote(operation.Unit.Name)} AS target USING victims AS victim WHERE {equality};");
+            session.Add(command, "keep", operation.KeepNewest);
+            session.Add(command, "limit", operation.Options.MaxRowsPerBatch);
+            if (scoped)
+                session.Add(command, "__groundwork_scope", operation.Scope);
+            var affected = await execution.ExecuteNonQuery(command).ConfigureAwait(false);
+            session.Observe("postgresql.retention-delete", command.CommandText, ProviderCommandKind.Write);
+            return affected;
+        }
+
+        public async ValueTask<DateTimeOffset> PrepareLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            await session.EnsureLedgerTable(operation.Declaration.LedgerName, execution).ConfigureAwait(false);
+            return await session.ProviderNow(execution).ConfigureAwait(false);
+        }
+
+        public async ValueTask ReclaimExpired(
+            RelationalExactRetentionOperation operation,
+            DateTimeOffset cutoff,
+            RelationalExecution execution)
+        {
+            using var reclaim = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE ctid IN (" +
+                $"SELECT ctid FROM {Quote(operation.Declaration.LedgerName)} " +
+                $"WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);");
+            session.Add(reclaim, "reclaim_unit", operation.Unit.Id.Value);
+            session.Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
+            await execution.ExecuteNonQuery(reclaim).ConfigureAwait(false);
+        }
+
+        public async ValueTask<RelationalRetentionLedgerEntry?> ReadLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            using var command = session.Command(
+                $"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(command, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            await using var readerScope = await execution.ExecuteReader(command).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (!(await execution.Read(reader).ConfigureAwait(false)))
+                return null;
+            return new RelationalRetentionLedgerEntry(
+                DateTimeOffset.Parse(
+                    Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture));
+        }
+
+        public async ValueTask DeleteLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalRetentionLedgerEntry existing,
+            RelationalExecution execution)
+        {
+            using var delete = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce " +
+                $"AND {Quote(LedgerCommittedAt)}=@observed_committed_at;");
+            session.AddLedgerParameters(delete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(delete, "observed_committed_at", FormatLedgerTime(existing.CommittedAt));
+            await execution.ExecuteNonQuery(delete).ConfigureAwait(false);
+        }
+
+        public async ValueTask<bool> TryClaimLedger(
+            RelationalExactRetentionOperation operation,
+            DateTimeOffset providerNow,
+            RelationalExecution execution)
+        {
+            using var insert = session.Command(
+                $"INSERT INTO {Quote(operation.Declaration.LedgerName)} " +
+                $"({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, " +
+                $"{Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) " +
+                $"VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result) " +
+                $"ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;");
+            session.AddLedgerParameters(insert, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(insert, "committed_at", FormatLedgerTime(providerNow));
+            session.Add(insert, "fingerprint", operation.Fingerprint);
+            session.Add(insert, "result", string.Empty);
+            return await execution.ExecuteNonQuery(insert).ConfigureAwait(false) == 1;
+        }
+
+        public async ValueTask<RelationalRetentionReplayEntry?> ReadClaimWinner(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            using var replay = session.Command(
+                $"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(replay, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            await using var readerScope = await execution.ExecuteReader(replay).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (!(await execution.Read(reader).ConfigureAwait(false)))
+                return null;
+            return new RelationalRetentionReplayEntry(
+                reader.IsDBNull(0) ? null : Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture),
+                reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture));
+        }
+
+        public async ValueTask<bool> CompleteLedger(
+            RelationalExactRetentionOperation operation,
+            string serializedResult,
+            RelationalExecution execution)
+        {
+            using var complete = session.Command(
+                $"UPDATE {Quote(operation.Declaration.LedgerName)} SET {Quote(LedgerResult)}=@result " +
+                $"WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope " +
+                $"AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(complete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(complete, "result", serializedResult);
+            return await execution.ExecuteNonQuery(complete).ConfigureAwait(false) == 1;
+        }
     }
 
-    private sealed record AppendExecution(WriteOutcomeStatus Status, IReadOnlyList<WriteOutcome>? Outcomes)
+    private sealed class PostgreSqlSessionExecutionAdapter(
+        PostgreSqlProviderConnection owner,
+        NpgsqlConnection connection) : IRelationalSessionExecutionAdapter
     {
-        internal AppendOutcomeReport ToReport() =>
-            new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
+        public bool SerializeAmbientReads => true;
+
+        public void EnsureUsable() => owner.ThrowIfDisposed();
+
+        public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
+            owner.EnterGate(execution);
+
+        public ValueTask<DbTransaction> BeginWrite(RelationalExecution execution) =>
+            execution.BeginTransaction(connection, IsolationLevel.ReadCommitted);
+
+        public ValueTask Rollback(DbTransaction transaction, RelationalExecution execution) =>
+            execution.Rollback(transaction);
     }
 
-    private sealed class ConcurrencyConflictException(long? version = null) : Exception
+    private sealed class PostgreSqlPointReadAdapter(
+        PostgreSqlStorageSession session) : IRelationalPointReadAdapter
     {
-        public long? Version { get; } = version;
+        public string QuoteIdentifier(string identifier) => Quote(identifier);
+
+        public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys) =>
+            $"{Quote(column.Name)}={parameter}";
+
+        public void Bind(DbCommand command, string parameter, object? value, ColumnDefinition column) =>
+            session.Add((NpgsqlCommand)command, parameter.TrimStart('@'), ConvertValue(value, column), column.Name);
+
+        public object? Decode(object value, ColumnDefinition column) => FromDatabase(value, column);
+
+        public string LockingClause(bool forUpdate) => forUpdate ? " FOR UPDATE" : string.Empty;
     }
+
+    private sealed class PostgreSqlCrudAdapter(
+        PostgreSqlStorageSession session) : IRelationalCrudAdapter
+    {
+        public ValueTask<WriteOutcome> Insert(
+            StorageValues values,
+            WriteOutcomeStatus status,
+            RelationalExecution execution) =>
+            session.InsertCore(values, execution, status);
+
+        public ValueTask<WriteOutcome> Update(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.UpdateCore(values, key, existing, options, execution);
+
+        public ValueTask<WriteOutcome> Upsert(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.SequenceColumn is not null && values.Values.ContainsKey(session.SequenceColumn.Name)
+                ? session.UpdateCore(values, key, existing, options, execution)
+                : session.UpsertCore(values, key, existing, options, exactOutcome: false, execution);
+
+        public ValueTask<WriteOutcome> Delete(
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.DeleteCore(key, existing, options, execution);
+    }
+
 }
 
 internal sealed class OwnedPostgreSqlStorageSession : PostgreSqlStorageSession, IOwnedStorageSession

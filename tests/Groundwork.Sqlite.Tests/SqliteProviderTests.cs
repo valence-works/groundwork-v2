@@ -265,6 +265,31 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Point_read_access_is_refused_before_owned_session_lifecycle_checks()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("read-access-order"),
+            Name = "read_access_order",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Scope = ScopePolicy.Scoped
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenOwnedSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("sqlite-proof", "read-access-order")));
+        session.Dispose();
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+
+        Assert.StartsWith("GW-ACCESS-003:", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Provider_disposal_cannot_miss_a_registering_legacy_session()
     {
         using var store = TemporaryStore.Create();
@@ -347,6 +372,51 @@ public sealed class SqliteProviderTests
         connection.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => { _ = stale.Detail; });
+    }
+
+    [Fact]
+    public void Optimistic_delete_reports_a_conflict_when_the_delete_affects_no_row()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("zero-row-delete"),
+            Name = "zero_row_delete",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var values = new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one",
+            ["value"] = "value"
+        });
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(values).Status);
+        using (var raw = new SqliteConnection(store.ConnectionString))
+        {
+            raw.Open();
+            using var trigger = raw.CreateCommand();
+            trigger.CommandText =
+                "CREATE TRIGGER ignore_zero_row_delete BEFORE DELETE ON zero_row_delete " +
+                "BEGIN SELECT RAISE(IGNORE); END;";
+            trigger.ExecuteNonQuery();
+        }
+
+        var outcome = session.Delete(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "one" }),
+            WriteOptions.IfVersion(1));
+
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, outcome.Status);
+        Assert.Equal(1, outcome.Version);
+        Assert.NotNull(session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" })));
     }
 
     [Fact]

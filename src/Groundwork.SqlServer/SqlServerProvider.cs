@@ -188,7 +188,26 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
             }
 
             var transaction = connection.BeginTransaction(IsolationLevel.Serializable);
-            return new SqlServerUnitOfWork(this, connection, transaction, units, access, options, observer);
+            var lifetime = new RelationalUnitOfWorkLifetime(
+                connection,
+                transaction,
+                supportsAsync: true,
+                disposeTransaction: true);
+            return new RelationalUnitOfWork(
+                units,
+                options,
+                unit =>
+                {
+                    var session = new SqlServerStorageSession(
+                        this,
+                        SqlServerSchemaCoordinator.Physicalize(unit),
+                        access,
+                        connection,
+                        transaction,
+                        observer);
+                    return new RelationalUnitOfWorkSession(session, session.Close);
+                },
+                lifetime);
         }
         catch
         {

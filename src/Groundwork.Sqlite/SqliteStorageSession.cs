@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Data;
-using System.Collections.Immutable;
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
@@ -16,10 +16,14 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
     private readonly SqliteTransaction? transaction;
-    private SqliteTransaction? activeTransaction;
-    private readonly AsyncLocal<bool> batchFallbackScope = new();
-    private readonly AsyncLocal<bool> writeExecutionScope = new();
-    private bool closed;
+    private readonly RelationalSessionExecution execution;
+    private readonly RelationalSessionPointReads pointReads;
+    private readonly RelationalSessionCrud crud;
+    private readonly RelationalSessionRetention retention;
+    private readonly RelationalSessionQueries queries;
+    private readonly RelationalSessionAggregations aggregations;
+    private readonly RelationalSessionSetMutations setMutations;
+    private readonly RelationalSessionAppends appends;
 
     /// <summary>
     /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
@@ -43,6 +47,67 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        execution = new RelationalSessionExecution(
+            access,
+            transaction,
+            ownsConnection,
+            new SqliteSessionExecutionAdapter(owner, connection, RollbackOrRetire),
+            nameof(SqliteStorageSession));
+        pointReads = new RelationalSessionPointReads(
+            unit,
+            access,
+            UserColumns,
+            VersionColumnDefinition,
+            Command,
+            new SqlitePointReadAdapter(),
+            observer,
+            "sqlite");
+        crud = new RelationalSessionCrud(
+            unit,
+            UserColumns,
+            SequenceColumnDefinition,
+            VersionColumnDefinition,
+            "SQLite",
+            (key, readExecution) => pointReads.Read(key, readExecution),
+            new SqliteCrudAdapter(this));
+        retention = new RelationalSessionRetention(
+            unit,
+            access,
+            new SqliteRetentionAdapter(this));
+        queries = new RelationalSessionQueries(
+            unit,
+            access,
+            connection,
+            new SqliteQueryRenderer(),
+            PhysicalIndexNames,
+            FromSqlite,
+            (command, renderOptions, _) =>
+            {
+                AssertExplainPlan(command, renderOptions);
+                return default;
+            },
+            observer,
+            "sqlite");
+        aggregations = new RelationalSessionAggregations(
+            unit,
+            access,
+            connection,
+            new SqliteDialect(),
+            FromSqlite,
+            observer,
+            "sqlite.aggregate");
+        setMutations = new RelationalSessionSetMutations(
+            unit,
+            access,
+            new SqliteQueryRenderer(),
+            unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.VersionColumn)?.Name,
+            Command,
+            (command, name, value, column) => ((SqliteCommand)command).Parameters.AddWithValue(
+                "@" + name,
+                ToSqlite(value, column) ?? DBNull.Value),
+            observer,
+            "sqlite");
+        appends = new RelationalSessionAppends(unit, access, new SqliteAppendAdapter(this));
     }
 
     /// <summary>
@@ -68,16 +133,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         StringComparer.Ordinal);
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
-    {
-        var (executionSource, renderOptions, command) = PrepareQuery(request, options);
-        var rows = RelationalQueryResultReader.Read(connection, command,
-            (name, value) => DecodeQueryValue(name, value, executionSource, renderOptions), activeTransaction ?? transaction);
-        AssertExplainPlan(command, renderOptions);
-        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true,
-            sourceIncludesDistinct: true);
-    });
+        queries.Query(request, options, execution.Transaction, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
 
     /// <summary>
     /// Reads the page on the async ADO.NET surface so the token still interrupts the native
@@ -90,16 +147,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         Completed(cancellationToken, () => Execute(() =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var (executionSource, renderOptions, command) = PrepareQuery(request, options);
-            var rows = RelationalQueryResultReader.Read(
-                    connection, command, (name, value) => DecodeQueryValue(name, value, executionSource, renderOptions), activeTransaction ?? transaction,
+            return queries.Query(
+                    request,
+                    options,
+                    execution.Transaction,
                     RelationalExecution.Asynchronous(cancellationToken))
                 .GetAwaiter().GetResult();
-            AssertExplainPlan(command, renderOptions);
-            return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-                sourceIncludesRequestedOffset: true,
-                sourceIncludesContinuation: true,
-                sourceIncludesDistinct: true);
         }));
 
     public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
@@ -196,155 +249,18 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         return ValueTask.FromResult(operation());
     }
 
-    private (QueryRequest ExecutionSource, QueryRenderOptions RenderOptions, RelationalQueryCommand Command) PrepareQuery(
-        QueryRequest request,
-        QueryRenderOptions? options)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        StorageAccessValidation.EnsureOrdinaryQuery(Access);
-        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
-            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var executionSource = WithScopePredicate(request);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != SqliteSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
-        {
-            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
-                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = PhysicalIndexNames(),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
-        };
-        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
-        var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        return (executionSource, renderOptions, command);
-    }
-
-    private object? DecodeQueryValue(string name, object? value)
-    {
-        if (name == "__groundwork_total_count") return value;
-        var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-        return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-    }
-
-    private object? DecodeQueryValue(
-        string name,
-        object? value,
-        QueryRequest request,
-        QueryRenderOptions options)
-    {
-        if (request.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
-            string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
-            return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
-        if (name == "__groundwork_total_count") return value;
-        var column = RelationalQueryResultReader.ResolveColumnDefinition(Unit, request, options, name);
-        return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-    }
-
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
         QueryRenderOptions? options = null) => Execute(() =>
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        if (!Access.IsPrivilegedAcrossScopes)
-            throw new InvalidOperationException(
-                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
-        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
-            throw new ArgumentException(
-                $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
-                nameof(request));
-        StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
-
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var table = new TableId(Unit.Name);
-        var scopeToken = new ColumnRef(
-            table,
-            CrossScopeQueryMaterializer.ScopeTokenColumn,
-            QueryType.String,
-            isNullable: false);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
-            new[] { scopeToken }
-                .Concat(Unit.Key.Columns
-                    .Where(name => name != SqliteSchemaCoordinator.ScopeColumn)
-                    .Select(QueryColumn)
-                    .Where(column => column is not null)
-                    .Select(column => column!))) with
-        {
-            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
-                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(
-                    column => column.Name,
-                    column => QueryTypeOf(column.Type),
-                    StringComparer.Ordinal)))
-                .ToImmutableArray(),
-            PhysicalIndexNames = PhysicalIndexNames(),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
-            LatestPartitionColumns = [scopeToken]
-        };
-        var executionSource = QueryRequestExecution.WithProviderPredicate(
-            request,
-            request.Where,
-            CrossScopeQueryMaterializer.BindingDiscriminator(Access));
-        var executionRequest = EnsureScopeProjection(
-            QueryRequestExecution.ForPage(executionSource, renderOptions));
-        var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-        });
-        AssertExplainPlan(command, renderOptions);
-        var materialized = QueryResultMaterializer.Materialize(
-            executionSource,
-            renderOptions,
-            rows,
-            command.SelectedIndex,
-            command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-        return CrossScopeQueryMaterializer.FromNativePage(
-            materialized,
-            rows,
-            SqliteSchemaCoordinator.ScopeColumn);
-    });
+            queries.QueryAcrossScopes(request, options, RelationalExecution.Synchronous)
+                .GetAwaiter().GetResult());
 
     public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
-    {
-        ArgumentNullException.ThrowIfNull(query);
-        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
-        var mode = RelationalExecution.Synchronous;
-        var decode = (string name, object? value) =>
-        {
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-        };
-        return (Unit.Scope == ScopePolicy.Scoped
-            ? RelationalAggregationExecutor.ExecuteScoped(
-                connection,
-                activeTransaction ?? transaction,
-                new SqliteDialect(),
-                Unit,
-                profile,
+        aggregations.Aggregate(
                 query,
-                decode,
-                SqliteSchemaCoordinator.ScopeColumn,
-                Access.Scope!,
-                mode,
-                commandObserver,
-                "sqlite.aggregate")
-            : RelationalAggregationExecutor.Execute(
-            connection,
-            activeTransaction ?? transaction,
-            new SqliteDialect(),
-            Unit,
-            profile,
-            query,
-            decode,
-            mode,
-            commandObserver,
-            "sqlite.aggregate")).GetAwaiter().GetResult();
-    });
+                execution.Transaction,
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
@@ -363,54 +279,26 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             SqliteExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
     }
 
-    private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
-        ? request
-        : RelationalQueryExecution.BindScope(request, SqliteSchemaCoordinator.ScopeColumn, Access.Scope!.Value);
-
     public StoredEntry? Read(StorageKey key)
     {
-        StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => PublicEntry(ReadCore(key, observerOperation: "sqlite.read", isProbe: false)));
+        pointReads.ValidatePublicRead();
+        return Execute(() => pointReads.ReadPublic(key, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
     }
-
-    private QueryRequest EnsureScopeProjection(QueryRequest request)
-    {
-        if (request.Projection.AllColumns || request.Projection.Columns.Any(column =>
-                string.Equals(column.Name, SqliteSchemaCoordinator.ScopeColumn, StringComparison.Ordinal)))
-            return request;
-        var scope = new ColumnRef(
-            new TableId(Unit.Name),
-            SqliteSchemaCoordinator.ScopeColumn,
-            QueryType.String,
-            isNullable: false);
-        return QueryRequestExecution.WithProjection(
-            request,
-            Projection.ColumnsOnly([.. request.Projection.Columns, scope]));
-    }
-
-    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
-        ? null
-        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return Mutate(values, options, Mutation.Insert);
+        return Mutate(crud.PrepareMutation(values, options, RelationalCrudKind.Insert));
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return Mutate(values, options, Mutation.Update);
+        return Mutate(crud.PrepareMutation(values, options, RelationalCrudKind.Update));
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return Mutate(values, options, Mutation.Upsert);
+        return Mutate(crud.PrepareMutation(values, options, RelationalCrudKind.Upsert));
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null)
@@ -454,36 +342,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     public WriteOutcome Delete(StorageKey key, WriteOptions? options = null)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
-        return ExecuteWrite(() =>
-        {
-            if (Unit.Concurrency.IsNone)
-            {
-                var (noneWhere, noneParameters) = KeyPredicate(key.Values);
-                using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
-                commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
-                AddParameters(noneCommand, noneParameters);
-                return noneCommand.ExecuteNonQuery() == 0
-                    ? new WriteOutcome(WriteOutcomeStatus.NotFound)
-                    : new WriteOutcome(WriteOutcomeStatus.Deleted);
-            }
-
-            var existing = ReadCore(key);
-            ValidateExpected(options, existing, Mutation.Delete);
-            if (existing is null)
-                return new WriteOutcome(WriteOutcomeStatus.NotFound);
-            var (where, parameters) = KeyPredicate(key.Values);
-            if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
-            {
-                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
-                parameters["@expected"] = options.Precondition.Version!.Value;
-            }
-            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
-            commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            AddParameters(command, parameters);
-            command.ExecuteNonQuery();
-            return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-        });
+        var operation = crud.PrepareDelete(key, options);
+        return ExecuteWrite(() => crud.Delete(
+                operation,
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
     }
 
     public WriteOutcome CompareAndDelete(
@@ -538,41 +401,16 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
                 options.Precondition.Version != existing.Version)
                 return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
-            return MatchesExpected(existing, expected)
+            return RelationalSessionPolicy.MatchesExpected(Unit, existing, expected)
                 ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
                 : new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
         });
     }
 
-    private bool MatchesExpected(StoredEntry existing, IReadOnlyDictionary<string, object?> expected) =>
-        expected.All(pair =>
-        {
-            var definition = Column(pair.Key);
-            return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
-                CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
-        });
-
     public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
-        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
-        return ExecuteWrite(() =>
-        {
-            var rendered = new SqliteQueryRenderer().RenderUpdateWhere(
-                Unit.Name, ScopedSetPredicate(where), columns, VersionColumnDefinition?.Name);
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            for (var index = 0; index < columns.Length; index++)
-            {
-                command.Parameters.AddWithValue(
-                    "@" + rendered.AssignmentParameters[index],
-                    ToSqlite(physical[columns[index]], Column(columns[index])) ?? DBNull.Value);
-            }
-            commandObserver?.Observe(new ProviderCommandEvent(
-                "sqlite.update-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            return new SetMutationResult(command.ExecuteNonQuery());
-        });
+        var operation = setMutations.PrepareUpdateWhere(where, assignments);
+        return ExecuteWrite(() => operation(RelationalExecution.Synchronous).GetAwaiter().GetResult());
     }
 
     public ValueTask<SetMutationResult> UpdateWhereAsync(
@@ -583,16 +421,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     public SetMutationResult DeleteWhere(Predicate where)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        return ExecuteWrite(() =>
-        {
-            var rendered = new SqliteQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            commandObserver?.Observe(new ProviderCommandEvent(
-                "sqlite.delete-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            return new SetMutationResult(command.ExecuteNonQuery());
-        });
+        var operation = setMutations.PrepareDeleteWhere(where);
+        return ExecuteWrite(() => operation(RelationalExecution.Synchronous).GetAwaiter().GetResult());
     }
 
     public ValueTask<SetMutationResult> DeleteWhereAsync(
@@ -600,11 +430,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         CancellationToken cancellationToken = default) =>
         Completed(cancellationToken, () => DeleteWhere(where));
 
-    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
-        where, Unit.Name, ScopeColumnDefinition?.Name, Access.Scope?.Value);
-
-    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
-        ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        var operation = retention.Prepare(options);
+        return ExecuteWrite(() => retention.Apply(operation, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
+    }
 
     public StorageInspection Inspect() => Execute(() =>
     {
@@ -622,181 +453,47 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
     {
-        var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
-            $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
-        declaration.Validate(Unit);
-        options ??= new RetentionExecutionOptions();
-        RetentionSessionExtensions.ValidateExecutionOptions(options);
-        RetentionOperationCodec.ValidateOperation(operationId);
-        return ExecuteWrite(() => ApplyExactRetentionCore(operationId, declaration, options));
-    }
-
-    private RetentionOperationResult ApplyExactRetentionCore(
-        OperationId operationId,
-        RetentionIdempotencyDeclaration declaration,
-        RetentionExecutionOptions options)
-    {
-        EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = ProviderNow();
-        var scope = Access.Scope?.Value ?? string.Empty;
-        var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
-        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE rowid IN (SELECT rowid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);") )
-        {
-            reclaim.Parameters.AddWithValue("@reclaim_unit", Unit.Id.Value);
-            reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
-            reclaim.ExecuteNonQuery();
-        }
-
-        var existing = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
-        if (existing is not null)
-        {
-            var (committedAt, storedFingerprint, storedResult) = existing.Value;
-            if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-            {
-                if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
-                    throw new InvalidOperationException(
-                        "GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
-                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                return RetentionOperationCodec.DeserializeResult(storedResult) with { Status = RetentionOperationStatus.Replayed };
-            }
-
-            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            deleteExpired.ExecuteNonQuery();
-        }
-
-        using (var insertLedger = Command($"INSERT OR IGNORE INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result);"))
-        {
-            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
-            insertLedger.Parameters.AddWithValue("@committed_at", FormatLedgerTime(providerNow));
-            insertLedger.Parameters.AddWithValue("@fingerprint", fingerprint);
-            insertLedger.Parameters.AddWithValue("@result", string.Empty);
-            if (insertLedger.ExecuteNonQuery() == 0)
-            {
-                var raced = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
-                if (raced is null || string.IsNullOrEmpty(raced.Value.storedFingerprint) || string.IsNullOrEmpty(raced.Value.storedResult))
-                    throw new InvalidOperationException(
-                        "GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
-                if (!string.Equals(raced.Value.storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, raced.Value.storedFingerprint, fingerprint);
-                return RetentionOperationCodec.DeserializeResult(raced.Value.storedResult) with { Status = RetentionOperationStatus.Replayed };
-            }
-        }
-
-        // Exact retention executes inside this same transaction. Cancellation or any
-        // provider failure rolls back both deletes and the placeholder ledger row.
-        var retention = ApplyRetentionCore(options);
-        var result = new RetentionOperationResult(
-            RetentionOperationStatus.Executed,
-            retention.DeletedRows,
-            retention.Batches,
-            retention.Completed);
-        using var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-        AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
-        complete.Parameters.AddWithValue("@result", RetentionOperationCodec.SerializeResult(result));
-        complete.ExecuteNonQuery();
-        return result;
-    }
-
-    private (DateTimeOffset committedAt, string? storedFingerprint, string? storedResult)? ReadRetentionLedger(
-        string table,
-        OperationId operationId,
-        string scope)
-    {
-        using var command = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(table)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-        AddLedgerParameters(command, Unit.Id.Value, scope, operationId.Nonce);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
-            return null;
-        return (
-            DateTimeOffset.Parse(reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            reader.IsDBNull(1) ? null : reader.GetString(1),
-            reader.IsDBNull(2) ? null : reader.GetString(2));
+        var operation = retention.PrepareExact(operationId, options);
+        return ExecuteWrite(() => retention.ApplyExact(operation, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
     }
 
     private RetentionResult ApplyRetentionCore(RetentionExecutionOptions options)
-    {
-        if (options.MaxRowsPerBatch <= 0)
-            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
-        var declaration = Unit.Retention ??
-            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
-        var keepNewest = RetentionSessionExtensions.EffectiveKeepNewest(Unit, options);
-        var keyColumns = Unit.Key.Columns;
-        var partition = declaration.PartitionColumns.Count == 0
-            ? string.Empty
-            : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
-        var scope = Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn)
-            ? $" WHERE {Quote(SqliteSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
-            : string.Empty;
-        var keys = string.Join(", ", keyColumns.Select(Quote));
-        var ordering = string.Join(", ", [
-            $"{Quote(declaration.OrderColumn)} DESC",
-            .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
-        var equality = string.Join(" AND ", keyColumns.Select(column =>
-            $"target.{Quote(column)}=victim.{Quote(column)}"));
-        var deleted = 0;
-        var batches = 0;
-        while (true)
-        {
-            options.CancellationToken.ThrowIfCancellationRequested();
-            using var command = Command($"WITH ranked AS (" +
-                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
-                $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
-                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
-                $"DELETE FROM {Quote(Unit.Name)} AS target WHERE EXISTS (SELECT 1 FROM victims AS victim WHERE {equality});");
-            command.Parameters.AddWithValue("@keep", keepNewest);
-            command.Parameters.AddWithValue("@limit", options.MaxRowsPerBatch);
-            if (Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
-                command.Parameters.AddWithValue("@__groundwork_scope", Access.Scope!.Value);
-            var affected = command.ExecuteNonQuery();
-            commandObserver?.Observe(new ProviderCommandEvent("sqlite.retention-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            if (affected == 0)
-                break;
-            deleted += affected;
-            batches++;
-            if (affected < options.MaxRowsPerBatch)
-                break;
-        }
-        return new RetentionResult(deleted, batches);
-    }
+        => retention.Apply(
+                retention.Prepare(options),
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
-        var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        foreach (var value in values)
-            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
+        var operation = appends.Prepare(operationId, values, exactOutcomes: false);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
-        AppendExecution execution;
+        RelationalAppendResult result;
         try
         {
-            execution = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: false));
+            result = ExecuteWrite(() => appends.Append(operation, RelationalExecution.Synchronous)
+                .GetAwaiter().GetResult());
         }
         catch
         {
             CompleteOnAppend(registration, cleanupRequired: false);
             throw;
         }
-        CompleteOnAppend(registration, onAppend && execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
-        return new WriteOutcome(execution.Status);
+        CompleteOnAppend(registration, onAppend && result.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed);
+        return new WriteOutcome(result.Status);
     }
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
-        var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        foreach (var value in values)
-            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
+        var operation = appends.Prepare(operationId, values, exactOutcomes: true);
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
         var registration = BeginOnAppend(onAppend);
         AppendOutcomeReport outcome;
         try
         {
-            outcome = ExecuteWrite(() => AppendCore(operationId, values, declaration, exactOutcomes: true).ToReport());
+            outcome = ExecuteWrite(() => appends.Append(operation, RelationalExecution.Synchronous)
+                .GetAwaiter().GetResult().ToReport());
         }
         catch
         {
@@ -809,109 +506,10 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         return outcome;
     }
 
-    private AppendExecution AppendCore(
-        OperationId operationId,
-        IReadOnlyList<StorageValues> values,
-        AppendIdempotencyDeclaration declaration,
-        bool exactOutcomes)
-    {
-        EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = ProviderNow();
-        var scope = Access.Scope?.Value ?? string.Empty;
-        var fingerprint = ExactAppendCodec.Fingerprint(Unit, values);
-        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE rowid IN (SELECT rowid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
-        {
-            reclaim.Parameters.AddWithValue("@reclaim_unit", Unit.Id.Value);
-            reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
-            reclaim.ExecuteNonQuery();
-        }
-
-        var expiredExisting = false;
-        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
-        {
-            AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
-            using var reader = existing.ExecuteReader();
-            if (reader.Read())
-            {
-                var committedAt = DateTimeOffset.Parse(reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-                if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-                {
-                    var storedFingerprint = reader.IsDBNull(1) ? null : reader.GetString(1);
-                    var storedResult = reader.IsDBNull(2) ? null : reader.GetString(2);
-                    if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
-                    {
-                        if (!exactOutcomes)
-                            return new AppendExecution(WriteOutcomeStatus.Replayed, null);
-                        throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
-                    }
-                    if (!exactOutcomes)
-                        return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
-                    if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                        throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
-                }
-                expiredExisting = true;
-            }
-        }
-
-        if (expiredExisting)
-        {
-            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            deleteExpired.ExecuteNonQuery();
-        }
-
-        using (var insertLedger = Command($"INSERT OR IGNORE INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result);"))
-        {
-            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
-            insertLedger.Parameters.AddWithValue("@committed_at", FormatLedgerTime(providerNow));
-            insertLedger.Parameters.AddWithValue("@fingerprint", fingerprint);
-            insertLedger.Parameters.AddWithValue("@result", string.Empty);
-            if (insertLedger.ExecuteNonQuery() == 0)
-            {
-                using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-                AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
-                using var reader = replay.ExecuteReader();
-                if (!reader.Read() || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(reader.GetString(1)))
-                {
-                    if (!exactOutcomes)
-                        return new AppendExecution(WriteOutcomeStatus.Replayed, null);
-                    throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
-                }
-                var storedFingerprint = reader.GetString(0);
-                if (!exactOutcomes)
-                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(reader.GetString(1)));
-                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(reader.GetString(1)));
-            }
-        }
-
-        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, SqliteSchemaCoordinator.ScopeColumn);
-        var writes = values
-            .Select(value => RowWrite.Insert(logicalUnit, value))
-            .ToArray();
-        var outcomes = SequenceColumnDefinition is not null
-            ? writes.Select(InsertAppendSequence).ToArray()
-            : ApplyBatchCore(writes);
-        if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
-            throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
-        var report = new AppendExecution(WriteOutcomeStatus.Inserted, outcomes.Select(outcome => outcome.Outcome).ToArray());
-        using (var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
-        {
-            AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
-            complete.Parameters.AddWithValue("@result", ExactAppendCodec.SerializeOutcomes(report.Outcomes!));
-            complete.ExecuteNonQuery();
-        }
-        return report;
-    }
-
     private RowWriteOutcome InsertAppendSequence(RowWrite write)
     {
         var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
-        ValidateValues(values.Values, requireAllNonNullable: true);
+        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", values.Values, requireAllNonNullable: true);
         return new RowWriteOutcome(write, InsertCore(values.Values, WriteOutcomeStatus.Inserted));
     }
 
@@ -998,24 +596,24 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
     }
 
-    internal void Close() => closed = true;
+    internal void Close() => execution.Close();
 
-    public bool IsReleased => closed;
+    public bool IsReleased => execution.IsReleased;
 
     public void Dispose()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             connection.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             await connection.DisposeAsync().ConfigureAwait(false);
     }
@@ -1033,7 +631,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         // upserts are the provider-native multi-row path.
         if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes);
-        if (HasSecondaryUniqueIndex(writes[0].Unit))
+        if (RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes);
         var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
 
@@ -1050,7 +648,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         writes.Count != 0 &&
         SequenceColumnDefinition is null &&
         writes.All(write => write.Options.Precondition.Kind == WritePreconditionKind.Unconditional) &&
-        !HasSecondaryUniqueIndex(writes[0].Unit) &&
+        !RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit) &&
         writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() == 1 &&
         writes[0].Mode is RowWriteMode.Insert or RowWriteMode.Upsert;
 
@@ -1059,7 +657,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
         foreach (var write in writes)
         {
-            ValidateValues(write.Values!.Values, requireAllNonNullable: true);
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", write.Values!.Values, requireAllNonNullable: true);
             var writeColumns = UserColumns
                 .Where(column => write.Values!.Values.ContainsKey(column.Name))
                 .Select(column => column.Name)
@@ -1118,7 +716,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         var supplied = UserColumns.Where(column => writes[0].Values!.Values.ContainsKey(column.Name)).ToArray();
         foreach (var write in writes)
         {
-            ValidateValues(write.Values!.Values, requireAllNonNullable: false);
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", write.Values!.Values, requireAllNonNullable: false);
             var writeColumns = UserColumns
                 .Where(column => write.Values!.Values.ContainsKey(column.Name))
                 .Select(column => column.Name)
@@ -1215,9 +813,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes)
     {
-        var previousScope = batchFallbackScope.Value;
-        batchFallbackScope.Value = true;
-        try
+        using (execution.EnterBatchFallback())
         {
             return writes.Select(write => new RowWriteOutcome(write, write.Mode switch
             {
@@ -1231,62 +827,18 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
                 _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
             })).ToArray();
         }
-        finally
-        {
-            batchFallbackScope.Value = previousScope;
-        }
     }
 
-    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
-        logicalUnit.Indexes.Any(index => index.IsUnique &&
-            !index.Columns.Select(column => column.Column)
-                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
-    private ColumnRef? QueryColumn(string name)
-    {
-        var column = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition])
-            .Single(item => item.Name == name);
-        return column.Type switch
-        {
-            PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
-            PortableType.Int32 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int32, column.IsNullable),
-            PortableType.Int64 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int64, column.IsNullable),
-            PortableType.Decimal => new ColumnRef(new TableId(Unit.Name), name, QueryType.Decimal, column.IsNullable, null,
-                column.Precision is int precision ? checked((byte)precision) : null,
-                column.Scale is int scale ? checked((byte)scale) : null),
-            PortableType.String => new ColumnRef(new TableId(Unit.Name), name, QueryType.String, column.IsNullable, column.MaxLength),
-            PortableType.DateTimeOffset => new ColumnRef(new TableId(Unit.Name), name, QueryType.DateTimeOffset, column.IsNullable),
-            PortableType.Guid => new ColumnRef(new TableId(Unit.Name), name, QueryType.Guid, column.IsNullable),
-            PortableType.Binary => new ColumnRef(new TableId(Unit.Name), name, QueryType.Binary, column.IsNullable, column.MaxLength),
-            _ => null
-        };
-    }
-
-    private static QueryType? QueryTypeOf(PortableType type) => type switch
-    {
-        PortableType.Boolean => QueryType.Boolean,
-        PortableType.Int32 => QueryType.Int32,
-        PortableType.Int64 => QueryType.Int64,
-        PortableType.Decimal => QueryType.Decimal,
-        PortableType.String => QueryType.String,
-        PortableType.DateTimeOffset => QueryType.DateTimeOffset,
-        PortableType.Guid => QueryType.Guid,
-        PortableType.Binary => QueryType.Binary,
-        _ => null
-    };
-
-    private WriteOutcome Mutate(
-        StorageValues values,
-        WriteOptions? options,
-        Mutation mutation,
-        bool exactOutcome = false)
+    private WriteOutcome Mutate(RelationalCrudMutation operation)
     {
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            mutation is Mutation.Insert or Mutation.Upsert;
+            operation.Kind is RelationalCrudKind.Insert or RelationalCrudKind.Upsert;
         var registration = BeginOnAppend(onAppend);
         WriteOutcome outcome;
         try
         {
-            outcome = MutateCore(values, options, mutation, exactOutcome);
+            outcome = ExecuteWrite(() => crud.Mutate(operation, RelationalExecution.Synchronous)
+                .GetAwaiter().GetResult());
         }
         catch
         {
@@ -1349,88 +901,19 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             Cleanup();
     }
 
-    private WriteOutcome MutateCore(
+    private WriteOutcome UpdateCore(
         StorageValues values,
-        WriteOptions? options,
-        Mutation mutation,
-        bool exactOutcome = false) => ExecuteWrite(() =>
+        StorageKey key,
+        StoredEntry? existing,
+        WriteOptions? options)
     {
-        ArgumentNullException.ThrowIfNull(values);
-        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        ValidateValues(values.Values, mutation == Mutation.Insert,
-            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
-        if (SequenceColumnDefinition is not null &&
-            (mutation is Mutation.Insert or Mutation.Upsert) &&
-            !values.Values.ContainsKey(SequenceColumnDefinition.Name))
-        {
-            ValidateExpected(options, null, mutation);
-            return InsertCore(values.Values, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted);
-        }
-        var key = new StorageKey(LogicalKeyColumns.ToDictionary(
-            column => column, column => values.Values.TryGetValue(column, out var value) ? value : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
-            StringComparer.Ordinal));
-        // None mode has no token to inspect. Keep direct writes single-statement and let the
-        // database report uniqueness/not-found from the write itself.
-        var existing = Unit.Concurrency.IsNone ? null : ReadCore(key);
-        if (mutation == Mutation.Insert && existing is not null)
-            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
-        if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        if (mutation == Mutation.Upsert && SequenceColumnDefinition is not null &&
-            values.Values.ContainsKey(SequenceColumnDefinition.Name) && existing is null && Unit.Concurrency.IsOptimistic)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        ValidateExpected(options, existing, mutation);
-
         var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
-        var columns = supplied.ToList();
-        if (VersionColumnDefinition is not null)
-            columns.Add(VersionColumnDefinition);
-        if (Unit.Scope == ScopePolicy.Scoped)
-            columns.Add(ScopeColumnDefinition!);
-
-        if (mutation == Mutation.Upsert && (SequenceColumnDefinition is null ||
-            !values.Values.ContainsKey(SequenceColumnDefinition.Name)))
-            return Upsert(values, existing, columns, exactOutcome, options);
         var sets = supplied.Where(column => !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal))
             .Select(column => $"{Quote(column.Name)}=@{column.Name}").ToList();
         var parameters = BuildParameters(values.Values, supplied);
-        if (mutation == Mutation.Insert)
-        {
-            if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = 1L;
-            if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = Access.Scope!.Value;
-            var returning = SequenceColumnDefinition is null ? string.Empty : $" RETURNING {Quote(SequenceColumnDefinition.Name)};";
-            using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}) VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))}){returning}");
-            AddParameters(insert, parameters);
-            commandObserver?.Observe(new ProviderCommandEvent("sqlite.insert", insert.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            try
-            {
-                if (SequenceColumnDefinition is null)
-                {
-                    insert.ExecuteNonQuery();
-                    return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? (long?)null : 1);
-                }
-
-                object? generatedValue;
-                using (var reader = insert.ExecuteReader())
-                {
-                    if (!reader.Read())
-                        return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
-                    generatedValue = FromSqlite(reader.GetValue(0), SequenceColumnDefinition);
-                }
-                RecordHighWater(generatedValue);
-                return new WriteOutcome(
-                    WriteOutcomeStatus.Inserted,
-                    VersionColumnDefinition is null ? null : 1,
-                    generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
-                    {
-                        [SequenceColumnDefinition.Name] = generatedValue
-                    });
-            }
-            catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation); }
-        }
-
         var (where, keyParameters) = KeyPredicate(key.Values);
-        foreach (var pair in keyParameters) parameters[pair.Key] = pair.Value;
+        foreach (var pair in keyParameters)
+            parameters[pair.Key] = pair.Value;
         if (VersionColumnDefinition is not null)
         {
             sets.Add($"{Quote(VersionColumnDefinition.Name)}={Quote(VersionColumnDefinition.Name)}+1");
@@ -1456,13 +939,61 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
                 ? WriteOutcomeStatus.NotFound
                 : WriteOutcomeStatus.ConcurrencyConflict, existing?.Version);
         return new WriteOutcome(WriteOutcomeStatus.Updated, VersionColumnDefinition is null ? null : existing!.Version + 1);
-    });
+    }
+
+    private WriteOutcome UpsertCore(
+        StorageValues values,
+        StorageKey key,
+        StoredEntry? existing,
+        WriteOptions? options)
+    {
+        if (SequenceColumnDefinition is not null && values.Values.ContainsKey(SequenceColumnDefinition.Name))
+            return UpdateCore(values, key, existing, options);
+
+        var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
+        var columns = supplied.ToList();
+        if (VersionColumnDefinition is not null)
+            columns.Add(VersionColumnDefinition);
+        if (Unit.Scope == ScopePolicy.Scoped)
+            columns.Add(ScopeColumnDefinition!);
+        return Upsert(values, existing, columns, options);
+    }
+
+    private WriteOutcome DeleteCore(
+        StorageKey key,
+        StoredEntry? existing,
+        WriteOptions? options)
+    {
+        if (Unit.Concurrency.IsNone)
+        {
+            var (noneWhere, noneParameters) = KeyPredicate(key.Values);
+            using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
+            commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
+            AddParameters(noneCommand, noneParameters);
+            return noneCommand.ExecuteNonQuery() == 0
+                ? new WriteOutcome(WriteOutcomeStatus.NotFound)
+                : new WriteOutcome(WriteOutcomeStatus.Deleted);
+        }
+
+        var (where, parameters) = KeyPredicate(key.Values);
+        if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+        {
+            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+            parameters["@expected"] = options.Precondition.Version!.Value;
+        }
+        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+        commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
+        AddParameters(command, parameters);
+        return command.ExecuteNonQuery() == 0
+            ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing!.Version)
+            : new WriteOutcome(WriteOutcomeStatus.Deleted, existing!.Version);
+    }
 
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        ValidateValues(values.Values, requireAllNonNullable: false);
+        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQLite", values.Values, requireAllNonNullable: false);
 
         var key = new StorageKey(LogicalKeyColumns.ToDictionary(
             column => column,
@@ -1634,7 +1165,6 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         StorageValues values,
         StoredEntry? existing,
         IReadOnlyList<ColumnDefinition> columns,
-        bool exactOutcome,
         WriteOptions? options)
     {
         var updateColumns = columns.Where(column =>
@@ -1666,11 +1196,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         {
             command.ExecuteNonQuery();
             var version = VersionColumnDefinition is null ? (long?)null : existing is null ? 1 : existing.Version + 1;
-            return new WriteOutcome(
-                exactOutcome
-                    ? existing is null ? WriteOutcomeStatus.Inserted : WriteOutcomeStatus.Updated
-                    : WriteOutcomeStatus.Upserted,
-                version);
+            return new WriteOutcome(WriteOutcomeStatus.Upserted, version);
         }
         catch (SqliteException exception) when (new SqliteDialect().TryMapUniqueViolation(exception, out _)) { return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing?.Version); }
     }
@@ -1678,62 +1204,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private StoredEntry? ReadCore(
         StorageKey key,
         string? observerOperation = null,
-        bool isProbe = true)
-    {
-        var (where, parameters) = KeyPredicate(key.Values);
-        var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
-        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
-        AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlite.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
-        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        for (var i = 0; i < UserColumns.Count; i++) values[UserColumns[i].Name] = FromSqlite(reader.GetValue(i), UserColumns[i]);
-        return new StoredEntry(new StorageValues(values), VersionColumnDefinition is null ? null : Convert.ToInt64(reader.GetValue(UserColumns.Count), CultureInfo.InvariantCulture));
-    }
-
-    private void ValidateValues(
-        IReadOnlyDictionary<string, object?> values,
-        bool requireAllNonNullable,
-        bool allowGeneratedLocator = false)
-    {
-        var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
-        var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
-        if (unknown is not null) throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
-        foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
-            if (values.ContainsKey(generated.Name) && !allowGeneratedLocator)
-                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by SQLite; it may only be supplied as the locator for Update or Upsert.", nameof(values));
-        if (requireAllNonNullable)
-            foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
-            {
-                if (column.Generation == ColumnGeneration.ProviderSequence)
-                    continue;
-                if (!values.TryGetValue(column.Name, out var value) || value is null)
-                    throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
-            }
-    }
-
-    private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
-    {
-        if (VersionColumnDefinition is null) return;
-        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
-        if (mutation == Mutation.Insert)
-        {
-            return;
-        }
-        if (mutation == Mutation.Upsert)
-        {
-            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
-                throw new ConcurrencyConflictException(existing.Version);
-            if (precondition.Kind == WritePreconditionKind.IfVersion &&
-                (existing is null || precondition.Version != existing.Version))
-                throw new ConcurrencyConflictException(existing?.Version);
-            return;
-        }
-        if (precondition.Kind == WritePreconditionKind.IfVersion &&
-            (existing is null || precondition.Version != existing.Version))
-            throw new ConcurrencyConflictException(existing?.Version);
-    }
+        bool isProbe = true) => pointReads.Read(
+            key,
+            RelationalExecution.Synchronous,
+            observerOperation: observerOperation,
+            isProbe: isProbe).GetAwaiter().GetResult();
 
     private (string Predicate, Dictionary<string, object?> Parameters) KeyPredicate(IReadOnlyDictionary<string, object?> values)
     {
@@ -1759,10 +1234,10 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private SqliteCommand Command(string sql)
     {
-        ThrowIfClosed();
+        execution.EnsureOpen();
         var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Transaction = activeTransaction ?? transaction;
+        command.Transaction = (SqliteTransaction?)execution.Transaction;
         return command;
     }
 
@@ -1771,69 +1246,17 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         foreach (var pair in parameters) command.Parameters.AddWithValue(pair.Key, pair.Value ?? DBNull.Value);
     }
 
-    private T Execute<T>(Func<T> operation)
-    {
-        ThrowIfClosed();
-        try
-        {
-            if (transaction is not null || batchFallbackScope.Value) return operation();
-            if (ownsConnection)
-            {
-                owner.ThrowIfDisposed();
-                return operation();
-            }
-            lock (owner.Gate) { owner.ThrowIfDisposed(); return operation(); }
-        }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
-        }
-    }
+    private T Execute<T>(Func<T> operation) =>
+        execution.Execute(
+                () => ValueTask.FromResult(operation()),
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
 
-    private T ExecuteWrite<T>(Func<T> operation)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "write");
-        ThrowIfClosed();
-        if (transaction is not null || batchFallbackScope.Value) return Translate(operation);
-        if (writeExecutionScope.Value)
-            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        if (ownsConnection)
-        {
-            owner.ThrowIfDisposed();
-            return ExecuteWriteTransaction(operation);
-        }
-        lock (owner.Gate)
-        {
-            owner.ThrowIfDisposed();
-            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-            return ExecuteWriteTransaction(operation);
-        }
-    }
-
-    private T ExecuteWriteTransaction<T>(Func<T> operation)
-    {
-        using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-        activeTransaction = writeTransaction;
-        var previousScope = writeExecutionScope.Value;
-        writeExecutionScope.Value = true;
-        try
-        {
-            var result = Translate(operation);
-            writeTransaction.Commit();
-            return result;
-        }
-        catch (Exception failure)
-        {
-            WriteFailureCleanup.Run(failure,
-                () => RollbackOrRetire(writeTransaction));
-            throw;
-        }
-        finally
-        {
-            writeExecutionScope.Value = previousScope;
-            activeTransaction = null;
-        }
-    }
+    private T ExecuteWrite<T>(Func<T> operation) =>
+        execution.ExecuteWrite(
+                () => ValueTask.FromResult(operation()),
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
 
     private void RollbackOrRetire(SqliteTransaction writeTransaction)
     {
@@ -1846,21 +1269,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             // ClearPool marks the checked-out native handle non-poolable but leaves it open. A
             // failed rollback can leave the native transaction active, so this session must not
             // attempt another write against that handle before it is retired.
-            closed = true;
+            execution.Close();
             if (owner.UsesSharedSessionConnection)
                 owner.Dispose();
             else
                 connection.Close();
             throw;
-        }
-    }
-
-    private static T Translate<T>(Func<T> operation)
-    {
-        try { return operation(); }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
         }
     }
 
@@ -1885,19 +1299,350 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private static object? FromSqlite(object value, ColumnDefinition definition) =>
         SqliteDialect.ReadPortableValue(value, definition);
 
-    private void ThrowIfClosed()
+    private sealed class SqliteCrudAdapter(SqliteStorageSession session) : IRelationalCrudAdapter
     {
-        owner.ThrowIfDisposed();
-        if (closed) throw new ObjectDisposedException(nameof(SqliteStorageSession));
+        public ValueTask<WriteOutcome> Insert(
+            StorageValues values,
+            WriteOutcomeStatus status,
+            RelationalExecution execution) =>
+            ValueTask.FromResult(session.InsertCore(values.Values, status));
+
+        public ValueTask<WriteOutcome> Update(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            ValueTask.FromResult(session.UpdateCore(values, key, existing, options));
+
+        public ValueTask<WriteOutcome> Upsert(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            ValueTask.FromResult(session.UpsertCore(values, key, existing, options));
+
+        public ValueTask<WriteOutcome> Delete(
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            ValueTask.FromResult(session.DeleteCore(key, existing, options));
     }
 
-    private enum Mutation { Insert, Update, Upsert, Delete }
-    private sealed record AppendExecution(WriteOutcomeStatus Status, IReadOnlyList<WriteOutcome>? Outcomes)
+    private sealed class SqliteRetentionAdapter(SqliteStorageSession session) : IRelationalRetentionAdapter
     {
-        internal AppendOutcomeReport ToReport() =>
-            new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
+        public ValueTask<int> DeleteBatch(
+            RelationalRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            var declaration = operation.Declaration;
+            var keyColumns = operation.Unit.Key.Columns;
+            var partition = declaration.PartitionColumns.Count == 0
+                ? string.Empty
+                : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+            var scope = operation.Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn)
+                ? $" WHERE {Quote(SqliteSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+                : string.Empty;
+            var keys = string.Join(", ", keyColumns.Select(Quote));
+            var ordering = string.Join(", ", [
+                $"{Quote(declaration.OrderColumn)} DESC",
+                .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+            var equality = string.Join(" AND ", keyColumns.Select(column =>
+                $"target.{Quote(column)}=victim.{Quote(column)}"));
+            using var command = session.Command(
+                $"WITH ranked AS (" +
+                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(operation.Unit.Name)}{scope}), victims AS (" +
+                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
+                $"DELETE FROM {Quote(operation.Unit.Name)} AS target WHERE EXISTS (SELECT 1 FROM victims AS victim WHERE {equality});");
+            command.Parameters.AddWithValue("@keep", operation.KeepNewest);
+            command.Parameters.AddWithValue("@limit", operation.Options.MaxRowsPerBatch);
+            if (operation.Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
+                command.Parameters.AddWithValue("@__groundwork_scope", operation.Scope);
+            var affected = command.ExecuteNonQuery();
+            session.commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlite.retention-delete",
+                command.CommandText,
+                ProviderCommandKind.Write,
+                IsProbe: false));
+            return ValueTask.FromResult(affected);
+        }
+
+        public ValueTask<DateTimeOffset> PrepareLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            session.EnsureLedgerTable(operation.Declaration.LedgerName);
+            return ValueTask.FromResult(session.ProviderNow());
+        }
+
+        public ValueTask ReclaimExpired(
+            RelationalExactRetentionOperation operation,
+            DateTimeOffset cutoff,
+            RelationalExecution execution)
+        {
+            using var reclaim = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE rowid IN " +
+                $"(SELECT rowid FROM {Quote(operation.Declaration.LedgerName)} " +
+                $"WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);");
+            reclaim.Parameters.AddWithValue("@reclaim_unit", operation.Unit.Id.Value);
+            reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
+            reclaim.ExecuteNonQuery();
+            return default;
+        }
+
+        public ValueTask<RelationalRetentionLedgerEntry?> ReadLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            using var existing = session.Command(
+                $"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(existing, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            using var reader = existing.ExecuteReader();
+            if (!reader.Read())
+                return ValueTask.FromResult<RelationalRetentionLedgerEntry?>(null);
+            return ValueTask.FromResult<RelationalRetentionLedgerEntry?>(new(
+                DateTimeOffset.Parse(
+                    reader.GetString(0),
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2)));
+        }
+
+        public ValueTask DeleteLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalRetentionLedgerEntry existing,
+            RelationalExecution execution)
+        {
+            using var delete = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce " +
+                $"AND {Quote(LedgerCommittedAt)}=@observed_committed_at;");
+            AddLedgerParameters(delete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            delete.Parameters.AddWithValue("@observed_committed_at", FormatLedgerTime(existing.CommittedAt));
+            delete.ExecuteNonQuery();
+            return default;
+        }
+
+        public ValueTask<bool> TryClaimLedger(
+            RelationalExactRetentionOperation operation,
+            DateTimeOffset providerNow,
+            RelationalExecution execution)
+        {
+            using var insert = session.Command(
+                $"INSERT OR IGNORE INTO {Quote(operation.Declaration.LedgerName)} " +
+                $"({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, " +
+                $"{Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) " +
+                "VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result);");
+            AddLedgerParameters(insert, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            insert.Parameters.AddWithValue("@committed_at", FormatLedgerTime(providerNow));
+            insert.Parameters.AddWithValue("@fingerprint", operation.Fingerprint);
+            insert.Parameters.AddWithValue("@result", string.Empty);
+            return ValueTask.FromResult(insert.ExecuteNonQuery() == 1);
+        }
+
+        public ValueTask<RelationalRetentionReplayEntry?> ReadClaimWinner(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            using var replay = session.Command(
+                $"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(replay, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            using var reader = replay.ExecuteReader();
+            if (!reader.Read())
+                return ValueTask.FromResult<RelationalRetentionReplayEntry?>(null);
+            return ValueTask.FromResult<RelationalRetentionReplayEntry?>(new(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        public ValueTask<bool> CompleteLedger(
+            RelationalExactRetentionOperation operation,
+            string serializedResult,
+            RelationalExecution execution)
+        {
+            using var complete = session.Command(
+                $"UPDATE {Quote(operation.Declaration.LedgerName)} SET {Quote(LedgerResult)}=@result " +
+                $"WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope " +
+                $"AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(complete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            complete.Parameters.AddWithValue("@result", serializedResult);
+            return ValueTask.FromResult(complete.ExecuteNonQuery() == 1);
+        }
     }
-    private sealed class ConcurrencyConflictException(long? version = null) : Exception { public long? Version { get; } = version; }
+
+    private sealed class SqliteAppendAdapter(SqliteStorageSession session) : IRelationalAppendAdapter
+    {
+        public ValueTask<DateTimeOffset> PrepareLedger(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            session.EnsureLedgerTable(operation.Declaration.LedgerName);
+            return ValueTask.FromResult(session.ProviderNow());
+        }
+
+        public ValueTask ReclaimExpired(
+            RelationalAppendOperation operation,
+            DateTimeOffset cutoff,
+            RelationalExecution execution)
+        {
+            using var reclaim = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE rowid IN " +
+                $"(SELECT rowid FROM {Quote(operation.Declaration.LedgerName)} " +
+                $"WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);");
+            reclaim.Parameters.AddWithValue("@reclaim_unit", operation.Unit.Id.Value);
+            reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
+            reclaim.ExecuteNonQuery();
+            return default;
+        }
+
+        public ValueTask<RelationalAppendLedgerEntry?> ReadLedger(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            using var existing = session.Command(
+                $"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(existing, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            using var reader = existing.ExecuteReader();
+            if (!reader.Read())
+                return ValueTask.FromResult<RelationalAppendLedgerEntry?>(null);
+            return ValueTask.FromResult<RelationalAppendLedgerEntry?>(new(
+                DateTimeOffset.Parse(
+                    reader.GetString(0),
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2)));
+        }
+
+        public ValueTask DeleteLedger(
+            RelationalAppendOperation operation,
+            RelationalAppendLedgerEntry existing,
+            RelationalExecution execution)
+        {
+            using var delete = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce " +
+                $"AND {Quote(LedgerCommittedAt)}=@observed_committed_at;");
+            AddLedgerParameters(delete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            delete.Parameters.AddWithValue("@observed_committed_at", FormatLedgerTime(existing.CommittedAt));
+            delete.ExecuteNonQuery();
+            return default;
+        }
+
+        public ValueTask<bool> TryClaimLedger(
+            RelationalAppendOperation operation,
+            DateTimeOffset providerNow,
+            RelationalExecution execution)
+        {
+            using var insert = session.Command(
+                $"INSERT OR IGNORE INTO {Quote(operation.Declaration.LedgerName)} " +
+                $"({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, " +
+                $"{Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) " +
+                "VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result);");
+            AddLedgerParameters(insert, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            insert.Parameters.AddWithValue("@committed_at", FormatLedgerTime(providerNow));
+            insert.Parameters.AddWithValue("@fingerprint", operation.Fingerprint);
+            insert.Parameters.AddWithValue("@result", string.Empty);
+            return ValueTask.FromResult(insert.ExecuteNonQuery() != 0);
+        }
+
+        public ValueTask<RelationalAppendReplayEntry?> ReadClaimWinner(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            using var replay = session.Command(
+                $"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(replay, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            using var reader = replay.ExecuteReader();
+            if (!reader.Read())
+                return ValueTask.FromResult<RelationalAppendReplayEntry?>(null);
+            return ValueTask.FromResult<RelationalAppendReplayEntry?>(new(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        public ValueTask<IReadOnlyList<RowWriteOutcome>> InsertPayload(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            var logicalUnit = IdempotencyRules.LogicalUnit(
+                operation.Unit,
+                SqliteSchemaCoordinator.ScopeColumn);
+            var writes = operation.Values
+                .Select(value => RowWrite.Insert(logicalUnit, value))
+                .ToArray();
+            IReadOnlyList<RowWriteOutcome> outcomes = session.SequenceColumnDefinition is not null
+                ? writes.Select(session.InsertAppendSequence).ToArray()
+                : session.ApplyBatchCore(writes);
+            return ValueTask.FromResult(outcomes);
+        }
+
+        public ValueTask<bool> CompleteLedger(
+            RelationalAppendOperation operation,
+            string serializedOutcomes,
+            RelationalExecution execution)
+        {
+            using var complete = session.Command(
+                $"UPDATE {Quote(operation.Declaration.LedgerName)} SET {Quote(LedgerResult)}=@result " +
+                $"WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope " +
+                $"AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(complete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            complete.Parameters.AddWithValue("@result", serializedOutcomes);
+            return ValueTask.FromResult(complete.ExecuteNonQuery() == 1);
+        }
+    }
+
+    private sealed class SqliteSessionExecutionAdapter(
+        SqliteProviderConnection owner,
+        SqliteConnection connection,
+        Action<SqliteTransaction> rollback) : IRelationalSessionExecutionAdapter
+    {
+        public bool SerializeAmbientReads => false;
+
+        public void EnsureUsable() => owner.ThrowIfDisposed();
+
+        public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
+            RelationalSessionExecution.EnterMonitor(owner.Gate);
+
+        public ValueTask<DbTransaction> BeginWrite(RelationalExecution execution) =>
+            ValueTask.FromResult<DbTransaction>(
+                connection.BeginTransaction(IsolationLevel.Serializable, deferred: false));
+
+        public ValueTask Rollback(DbTransaction transaction, RelationalExecution execution)
+        {
+            rollback((SqliteTransaction)transaction);
+            return default;
+        }
+    }
+
+    private sealed class SqlitePointReadAdapter : IRelationalPointReadAdapter
+    {
+        public string QuoteIdentifier(string identifier) => Quote(identifier);
+
+        public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys) =>
+            $"{Quote(column.Name)}={parameter}";
+
+        public void Bind(DbCommand command, string parameter, object? value, ColumnDefinition column) =>
+            ((SqliteCommand)command).Parameters.AddWithValue(
+                parameter,
+                ToSqlite(value, column) ?? DBNull.Value);
+
+        public object? Decode(object value, ColumnDefinition column) => FromSqlite(value, column);
+
+        public string LockingClause(bool forUpdate) => string.Empty;
+    }
 }
 
 internal sealed class OwnedSqliteStorageSession : SqliteStorageSession, IOwnedStorageSession
