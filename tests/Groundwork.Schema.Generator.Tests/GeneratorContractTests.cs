@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Groundwork.Schema;
 using Groundwork.Schema.Generator;
+using Groundwork.Query.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Text;
@@ -42,6 +43,11 @@ public sealed class GeneratorContractTests
         Assert.Contains(result.Generated, generated => generated.Contains("OrdinalIgnoreCase", StringComparison.Ordinal));
         Assert.Contains(result.Generated, generated => generated.Contains(".Descending(\"created_at\")", StringComparison.Ordinal));
         Assert.Contains(result.Generated, generated => generated.Contains("ExcludeMissingValues()", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("GwGeneratedRows.Register", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("static value => value.Status", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("\"CreatedAt\", \"created_at\"", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("GetMember(", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains(".Compile()", StringComparison.Ordinal));
         Assert.DoesNotContain(result.Generated, generated => generated.Contains("MissingValues =", StringComparison.Ordinal));
 
         var assemblyAttribute = result.OutputCompilation.Assembly.GetAttributes()
@@ -85,6 +91,330 @@ public sealed class GeneratorContractTests
                         column.Direction == Groundwork.Kernel.SortDirection.Descending)),
                     index.MissingValues == Groundwork.Kernel.MissingValueBehavior.Included,
                     index.IsUnique)))])));
+    }
+
+    [Fact]
+    public void Positional_record_columns_generate_from_symbols_with_exact_schema_column_names()
+    {
+        const string source = """
+            using System;
+            using Groundwork.Schema;
+
+            [GwTable("events")]
+            public sealed record Event(
+                [property: GwKey, GwColumn(Name = "event_id", Required = true)] Guid Id,
+                [property: GwColumn] DateTimeOffset CreatedAt);
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(result.Generated, generated => generated.Contains("\"Id\", \"event_id\"", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("\"CreatedAt\", \"created_at\"", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("new global::Event(", StringComparison.Ordinal));
+
+        var schema = result.OutputCompilation.Assembly.GetAttributes()
+            .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName);
+        var json = (string)schema.ConstructorArguments[0].Value!;
+        Assert.Contains("\"name\":\"event_id\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"name\":\"created_at\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Init_only_table_members_generate_an_object_initializer_materializer()
+    {
+        const string source = """
+            using Groundwork.Schema;
+
+            [GwTable("tickets")]
+            public sealed class Ticket
+            {
+                [GwKey, GwColumn(Name = "ticket_id", Required = true)]
+                public string Id { get; init; } = "";
+
+                [GwColumn]
+                public required string Status { get; init; }
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(result.Generated, generated => generated.Contains("new global::Ticket()", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("Id = global::Groundwork.Query.Linq.GwGeneratedRowValue.Read<string>", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("Status = global::Groundwork.Query.Linq.GwGeneratedRowValue.Read<string>", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Schema_only_consumers_do_not_receive_runtime_row_registrations()
+    {
+        const string source = "using Groundwork.Schema; [GwTable(\"tickets\")] public sealed class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; }";
+
+        var result = RunCore(source, Array.Empty<AdditionalText>(), includeGeneratedRows: false);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("GwGeneratedRows", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Inaccessible_schema_types_keep_the_compatibility_path_without_breaking_generation()
+    {
+        const string source = "using Groundwork.Schema; public sealed class Owner { [GwTable(\"tickets\")] private sealed class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; } }";
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("GwGeneratedRows.Register", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Select_lambdas_register_scalar_named_record_and_anonymous_projection_factories()
+    {
+        const string source = """
+            #nullable enable
+            using Groundwork.Query.Linq;
+            using Groundwork.Schema;
+
+            [GwTable("tickets")]
+            public sealed class Ticket
+            {
+                [GwKey, GwColumn] public string Id { get; init; } = "";
+                [GwColumn] public string? Status { get; init; }
+                [GwColumn] public int Amount { get; init; }
+            }
+
+            public sealed class StatusView
+            {
+                public StatusView(string? status) => Status = status;
+                public string? Status { get; }
+            }
+
+            public sealed class StatusInitView
+            {
+                public string? Status { get; init; }
+            }
+
+            public sealed record StatusRecord(string? Status);
+
+            public sealed class StatusTargetView
+            {
+                public StatusTargetView(string? status) => Status = status;
+                public string? Status { get; }
+            }
+
+            public sealed record DirectTableView(int Amount);
+
+            public static class Queries
+            {
+                public static void Use(IGwQueryable<Ticket> query)
+                {
+                    _ = query.Select(ticket => ticket.Status);
+                    _ = query.Select(ticket => new StatusView(ticket.Status));
+                    _ = query.Select(ticket => new StatusInitView { Status = ticket.Status });
+                    _ = query.Select(ticket => new StatusRecord(ticket.Status));
+                    _ = query.Select<StatusTargetView>(ticket => new(ticket.Status));
+                    _ = query.Select(ticket => new { ticket.Status, ticket.Amount });
+                }
+
+                public static void UseDirectTable(GwQueryTable<Ticket> table) =>
+                    _ = table.Select(ticket => new DirectTableView(ticket.Amount));
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(result.Generated, generated => generated.Contains("GwGeneratedRows.RegisterProjection", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("GwGeneratedRowValue.ReadProjection<string>(values, columns, 0)", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("new global::StatusView(", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("new global::StatusInitView() { Status =", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("new global::StatusRecord(", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("new global::StatusTargetView(", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("new { Status =", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("ReadProjection<int>(values, columns, 1)", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("new global::DirectTableView(", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Select_lambdas_register_a_declared_navigation_member_by_its_terminal_column()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Schema;
+
+            [GwTable("tickets")]
+            public sealed class Ticket
+            {
+                [GwKey, GwColumn] public string Id { get; init; } = "";
+                public Customer Customer { get; init; } = new();
+            }
+
+            [GwTable("customers")]
+            public sealed class Customer
+            {
+                [GwKey, GwColumn] public string Id { get; init; } = "";
+                [GwColumn] public string Name { get; init; } = "";
+            }
+
+            public static class Queries
+            {
+                public static void Use(IGwQueryable<Ticket> query) => _ = query.Select(ticket => ticket.Customer.Name);
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(result.Generated, generated => generated.Contains("RegisterProjection(typeof(string), 1", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("ReadProjection<string>(values, columns, 0)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Select_lambdas_skip_ambiguous_inaccessible_generic_and_computed_shapes()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Schema;
+
+            [GwTable("tickets")]
+            public sealed class Ticket
+            {
+                [GwKey, GwColumn] public string Id { get; init; } = "";
+                [GwColumn] public string Status { get; init; } = "";
+            }
+
+            public sealed class AmbiguousView
+            {
+                public AmbiguousView() { }
+                public AmbiguousView(string status) => Status = status;
+                public string Status { get; init; } = "";
+            }
+
+            public sealed class GenericView<T>
+            {
+                public GenericView(T status) => Status = status;
+                public T Status { get; }
+            }
+
+            public static class Queries
+            {
+                private sealed class HiddenView
+                {
+                    public HiddenView(string status) => Status = status;
+                    public string Status { get; }
+                }
+
+                public static void Use(IGwQueryable<Ticket> query)
+                {
+                    _ = query.Select(ticket => new AmbiguousView(ticket.Status));
+                    _ = query.Select(ticket => new AmbiguousView { Status = ticket.Status });
+                    _ = query.Select(ticket => new GenericView<string>(ticket.Status));
+                    _ = query.Select(ticket => new HiddenView(ticket.Status));
+                    _ = query.Select(ticket => ticket.Status.ToString());
+                }
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("GwGeneratedRows.RegisterProjection", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_generated_named_projection_factory_materializes_by_result_ordinal()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Schema;
+
+            [GwTable("tickets")]
+            public sealed class Ticket
+            {
+                [GwKey, GwColumn] public string Id { get; init; } = "";
+                [GwColumn] public string Status { get; init; } = "";
+            }
+
+            public sealed record StatusView(string Status);
+
+            public static class Queries
+            {
+                public static void Use(IGwQueryable<Ticket> query) => _ = query.Select(ticket => new StatusView(ticket.Status));
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        using var emitted = new MemoryStream();
+        Assert.True(result.OutputCompilation.Emit(emitted).Success);
+        var assembly = System.Reflection.Assembly.Load(emitted.ToArray());
+        var projectedType = assembly.GetType("StatusView")!;
+        var lookup = typeof(GwGeneratedRows).GetMethods()
+            .Single(method => method.Name == nameof(GwGeneratedRows.TryGetProjection) && method.IsGenericMethodDefinition)
+            .MakeGenericMethod(projectedType);
+        var arguments = new object?[] { 1, null };
+        Assert.True((bool)lookup.Invoke(null, arguments)!);
+        var materializer = (Delegate)arguments[1]!;
+        var value = materializer.DynamicInvoke(
+            new Dictionary<string, object?> { ["unrelated"] = "open" },
+            new[] { "unrelated" });
+        Assert.Equal("open", projectedType.GetProperty("Status")!.GetValue(value));
+    }
+
+    [Fact]
+    public void A_generated_anonymous_projection_factory_uses_the_source_anonymous_type()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Schema;
+
+            [GwTable("tickets")]
+            public sealed class Ticket
+            {
+                [GwKey, GwColumn] public string Id { get; init; } = "";
+                [GwColumn] public string Status { get; init; } = "";
+                [GwColumn] public int Amount { get; init; }
+            }
+
+            public static class Queries
+            {
+                public static void Register(IGwQueryable<Ticket> query) => _ = query.Select(ticket => new { ticket.Status, ticket.Amount });
+                public static object Create(Ticket ticket) => new { ticket.Status, ticket.Amount };
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        using var emitted = new MemoryStream();
+        Assert.True(result.OutputCompilation.Emit(emitted).Success);
+        var assembly = System.Reflection.Assembly.Load(emitted.ToArray());
+        var ticketType = assembly.GetType("Ticket")!;
+        var ticket = Activator.CreateInstance(ticketType)!;
+        ticketType.GetProperty("Status")!.SetValue(ticket, "open");
+        ticketType.GetProperty("Amount")!.SetValue(ticket, 7);
+        var anonymous = assembly.GetType("Queries")!.GetMethod("Create")!.Invoke(null, [ticket])!;
+        var anonymousType = anonymous.GetType();
+        var lookup = typeof(GwGeneratedRows).GetMethods()
+            .Single(method => method.Name == nameof(GwGeneratedRows.TryGetProjection) && method.IsGenericMethodDefinition)
+            .MakeGenericMethod(anonymousType);
+        var arguments = new object?[] { 2, null };
+        Assert.True((bool)lookup.Invoke(null, arguments)!);
+        var value = ((Delegate)arguments[1]!).DynamicInvoke(
+            new Dictionary<string, object?> { ["status"] = "closed", ["amount"] = 9 },
+            new[] { "status", "amount" })!;
+        Assert.Equal("closed", anonymousType.GetProperty("Status")!.GetValue(value));
+        Assert.Equal(9, anonymousType.GetProperty("Amount")!.GetValue(value));
     }
 
     [Fact]
@@ -578,11 +908,22 @@ public sealed class GeneratorContractTests
     }
 
     private static GeneratorRunResult Run(string source, params AdditionalText[] additionalFiles)
+        => RunCore(source, additionalFiles, includeGeneratedRows: true);
+
+    private static GeneratorRunResult RunCore(
+        string source,
+        IReadOnlyList<AdditionalText> additionalFiles,
+        bool includeGeneratedRows)
     {
+        var references = References(includeGeneratedRows
+            ? new[] { typeof(GroundworkSchemaAttribute), typeof(Groundwork.Kernel.StorageUnit), typeof(GwGeneratedRows), typeof(object) }
+            : new[] { typeof(GroundworkSchemaAttribute), typeof(Groundwork.Kernel.StorageUnit), typeof(object) });
+        if (!includeGeneratedRows)
+            references = references.Where(reference => !string.Equals(reference.Display, typeof(GwGeneratedRows).Assembly.Location, StringComparison.OrdinalIgnoreCase));
         var compilation = CSharpCompilation.Create(
             "GeneratorInput",
             [CSharpSyntaxTree.ParseText(SourceText.From(source, encoding: System.Text.Encoding.UTF8))],
-            References(typeof(GroundworkSchemaAttribute), typeof(Groundwork.Kernel.StorageUnit), typeof(object)),
+            references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         var driver = CSharpGeneratorDriver.Create(new SchemaGenerator())
             .AddAdditionalTexts(additionalFiles.ToImmutableArray());

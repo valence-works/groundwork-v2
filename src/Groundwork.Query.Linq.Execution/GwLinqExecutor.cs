@@ -1,6 +1,6 @@
 using System.Threading;
-using System.Globalization;
 using Groundwork.Kernel;
+using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
 using Groundwork.Store;
@@ -160,11 +160,6 @@ public sealed class GwLinqExecutor : IGwQueryExecutor
         if (value is TResult typed)
             return typed;
 
-        var targetType = Nullable.GetUnderlyingType(typeof(TResult)) ?? typeof(TResult);
-        if (targetType == typeof(Guid) && value is string guid)
-            return (TResult)(object)Guid.Parse(guid);
-        if (targetType == typeof(DateTimeOffset) && value is string timestamp)
-            return (TResult)(object)DateTimeOffset.Parse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-        return (TResult)Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
+        return GwGeneratedRowValue.ConvertValue<TResult>(value);
     }
 }

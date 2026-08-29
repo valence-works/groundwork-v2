@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using Groundwork.Query.Linq;
 
 namespace Groundwork.Records;
 
@@ -26,6 +27,8 @@ internal sealed class RecordAccessor<T>
 
     public static int ReflectionInspectionCount { get; private set; }
 
+    public static int DynamicCodeGenerationCount => CompilationCount;
+
     public static RecordAccessor<T> Instance => cached;
 
     public RowValues Write(T value, IReadOnlyList<Groundwork.Kernel.ColumnDefinition> columns)
@@ -47,6 +50,20 @@ internal sealed class RecordAccessor<T>
 
     private static RecordAccessor<T> Create()
     {
+        if (GwGeneratedRows.TryGet<T>(out var generated))
+        {
+            var generatedAccessor = generated!;
+            var generatedMembers = generatedAccessor.Members
+                .Select(member => new RecordMember(member.Name, member.ColumnName, member.MemberType, null))
+                .ToArray();
+            var generatedGetters = generatedAccessor.Members.Select(member => member.Getter).ToArray();
+            var columns = generatedMembers.ToDictionary(member => member.Name, member => member.ColumnName, StringComparer.Ordinal);
+            return new RecordAccessor<T>(
+                generatedMembers,
+                generatedGetters,
+                (values, optional) => generatedAccessor.Materialize(values, columns, optional));
+        }
+
         CompilationCount++;
         ReflectionInspectionCount++;
         var members = typeof(T)
@@ -61,7 +78,7 @@ internal sealed class RecordAccessor<T>
             })
             .Where(member => member is not null)
             .Cast<RecordMember>()
-            .OrderBy(member => member.Member.MetadataToken)
+            .OrderBy(member => member.Member!.MetadataToken)
             .ToArray();
         if (members.Length == 0)
             throw new ArgumentException($"'{typeof(T).FullName}' has no public instance columns.", nameof(T));
@@ -99,12 +116,12 @@ internal sealed class RecordAccessor<T>
             .Where(candidate => candidate.Parameters.Zip(candidate.BoundMembers)
                 .All(pair => pair.Second is not null && pair.First.ParameterType == pair.Second.MemberType))
             .Where(candidate => members.All(member =>
-                candidate.BoundMembers.Contains(member) || IsWritable(member.Member)))
+                candidate.BoundMembers.Contains(member) || IsWritable(member.Member!)))
             .OrderByDescending(candidate => candidate.Parameters.Length)
             .Select(candidate => candidate.Candidate)
             .FirstOrDefault();
 
-        if (constructor is null && (!typeof(T).IsValueType || members.Any(member => !IsWritable(member.Member))))
+        if (constructor is null && (!typeof(T).IsValueType || members.Any(member => !IsWritable(member.Member!))))
             throw new ArgumentException(
                 $"'{typeof(T).FullName}' must expose a public constructor and/or writable public members that initialize every declared member.", nameof(T));
 
@@ -204,4 +221,4 @@ internal sealed class EmptyColumns : HashSet<string>
     private EmptyColumns() : base(StringComparer.Ordinal) { }
 }
 
-internal sealed record RecordMember(string Name, string ColumnName, Type MemberType, MemberInfo Member);
+internal sealed record RecordMember(string Name, string ColumnName, Type MemberType, MemberInfo? Member);

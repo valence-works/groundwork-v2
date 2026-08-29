@@ -10,6 +10,11 @@
     <ProjectReference Include="../../src/Groundwork.Query.Linq/Groundwork.Query.Linq.csproj" />
     <ProjectReference Include="../../src/Groundwork.Query.Linq.Execution/Groundwork.Query.Linq.Execution.csproj" />
     <ProjectReference Include="../../src/Groundwork.Testing/Groundwork.Testing.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Schema/Groundwork.Schema.csproj"
+                      OutputItemType="Analyzer" />
+    <ProjectReference Include="../../src/Groundwork.Schema.Generator/Groundwork.Schema.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
     <ProjectReference Include="../Groundwork.Query.Linq.Fragments/Groundwork.Query.Linq.Fragments.csproj" />
   </ItemGroup>
 </Project>

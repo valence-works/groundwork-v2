@@ -5,6 +5,7 @@ using Groundwork.PostgreSql;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 using Groundwork.Records;
+using Groundwork.Schema;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Store;
@@ -123,8 +124,9 @@ static int RunRecordsBenchmark(string[] args)
         .Key(record => record.Id)
         .Column(record => record.Name, column => column.MaxLength(200))
         .Build();
-    var before = RecordTable<BenchmarkRecord>.AccessorCompilationCount;
-    var reflectionBefore = RecordTable<BenchmarkRecord>.AccessorReflectionInspectionCount;
+    var dynamicCodeBefore = RecordTable<BenchmarkRecord>.AccessorDynamicCodeGenerationCount;
+    if (!GwGeneratedRows.TryGet<BenchmarkRecord>(out _) || dynamicCodeBefore != 0)
+        throw new InvalidOperationException("The benchmark record did not use its source-generated accessor.");
     var record = new BenchmarkRecord(Guid.NewGuid(), "benchmark");
     var values = table.ToRowValues(record);
     for (var value = 0; value < count; value++)
@@ -133,13 +135,10 @@ static int RunRecordsBenchmark(string[] args)
         _ = table.FromRowValues(values);
     }
 
-    var compilationDelta = RecordTable<BenchmarkRecord>.AccessorCompilationCount - before;
-    var reflectionDelta = RecordTable<BenchmarkRecord>.AccessorReflectionInspectionCount - reflectionBefore;
-    if (compilationDelta != 0)
-        throw new InvalidOperationException($"Records accessors compiled {compilationDelta} times during {count} writes and materializations; expected zero hot-path compilations.");
-    if (reflectionDelta != 0)
-        throw new InvalidOperationException($"Records inspected members with reflection {reflectionDelta} times during {count} writes and materializations; expected zero hot-path inspections.");
-    Console.WriteLine($"provider=none workload=records writes={count} materializations={count} accessor_compilations={compilationDelta} reflection_inspections={reflectionDelta} reflection_hot_path=false");
+    var dynamicCodeDelta = RecordTable<BenchmarkRecord>.AccessorDynamicCodeGenerationCount - dynamicCodeBefore;
+    if (dynamicCodeDelta != 0)
+        throw new InvalidOperationException($"Records generated {dynamicCodeDelta} runtime accessors during {count} writes and materializations; expected source-generated accessors only.");
+    Console.WriteLine($"provider=none workload=records writes={count} materializations={count} dynamic_codegen={dynamicCodeDelta} dynamic_codegen_hot_path=false");
     return 0;
 }
 
@@ -217,4 +216,10 @@ sealed class BenchmarkTicket
     public int Id { get; set; }
 }
 
-sealed record BenchmarkRecord(Guid Id, string Name);
+[GwTable("benchmark_records")]
+sealed record BenchmarkRecord
+{
+    public BenchmarkRecord(Guid id, string name) => (Id, Name) = (id, name);
+    [GwKey, GwColumn(Name = "id", Required = true)] public Guid Id { get; init; }
+    [GwColumn(Name = "name", Length = 200, Required = true)] public string Name { get; init; }
+}

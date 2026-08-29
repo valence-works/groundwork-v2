@@ -6,11 +6,12 @@ not reference the typed declaration or the CLR row type.
 
 ## Mapping
 
-`RecordTable<T>.ToRowValues` compiles public property and field accessors once per CLR row type and
-caches them in a closed generic cache. `FromRowValues` chooses a public constructor that can account
-for every read-only member, then applies compiled assignments to every remaining writable member.
-It refuses shapes that cannot initialize every declared member. The hot path only invokes delegates
-and does not inspect `MemberInfo`, call `PropertyInfo.GetValue`, or call `Activator`.
+For a `[GwTable]` type, `Groundwork.Schema.Generator` emits direct getters and a constructor/member
+materializer and registers them from a module initializer. `RecordTable<T>.ToRowValues` and
+`FromRowValues` then invoke ordinary generated delegates: they do not compile expression trees,
+inspect `MemberInfo`, call `PropertyInfo.GetValue`, or call `Activator`. An ungenerated fluent-only
+type retains the preview compatibility fallback; add the generator and the schema attributes before
+using that type in native-AOT deployments.
 
 `ToRowValues` omits a system-owned optimistic token even if a CLR type happens to expose a member
 with the same name. Callers provide the expected version through `RecordWriteOptions`; the provider
@@ -91,6 +92,6 @@ Run the mapping benchmark with:
 dotnet run --project benchmarks/Groundwork.Benchmarks -- records --n 1000
 ```
 
-The command exercises both writes and materialization and fails if accessor compilation happens on
-either hot path. Repository CI captures this command through the manual `Performance evidence`
+The command exercises both writes and materialization and fails unless its generated row type uses
+zero runtime dynamic-code generation. Repository CI captures this command through the manual `Performance evidence`
 workflow rather than rerunning it during ordinary pull-request iteration.

@@ -59,6 +59,10 @@ internal static class PublicApiApprovalFixture
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
         _ = typeof(GwReference<,>);
+        _ = typeof(GwGeneratedRowMember<>);
+        _ = typeof(GwGeneratedRowAccessor<>);
+        _ = typeof(GwGeneratedRows);
+        _ = typeof(GwGeneratedRowValue);
         _ = typeof(QueryCoverageException);
         _ = typeof(QueryCoverageCandidates);
         _ = typeof(RecordTable);
@@ -106,6 +110,11 @@ internal static class PublicApiApprovalFixture
 
     public static void CompileCallableSurface()
     {
+        _ = new Action<Type, int, Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, object?>>(
+            GwGeneratedRows.RegisterProjection);
+        _ = GwGeneratedRows.TryGetProjection<ApprovalRecord>(1, out _);
+        _ = new Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, int, string>(
+            GwGeneratedRowValue.ReadProjection<string>);
         _ = new Func<string, IStorageProviderConnection>(connectionString => new SqliteProviderFactory().Create(connectionString));
         _ = new Func<IEnumerable<CapabilityDescriptor>, IReadOnlyList<CapabilityDescriptor>>(
             SchemaCapabilityAdmission.AdvertiseEnforcedConstraints);
@@ -231,6 +240,7 @@ internal static class PublicApiApprovalFixture
         var recordCustomers = RecordTable.For<ApprovalCustomer>("approval_record_customers")
             .Key(customer => customer.Id)
             .Build();
+        _ = RecordTable<ApprovalCustomer>.AccessorDynamicCodeGenerationCount;
         var recordOrders = RecordTable.For<ApprovalOrder>("approval_record_orders")
             .Key(order => order.Id)
             .Index("by_customer", order => order.CustomerId)

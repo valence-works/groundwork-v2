@@ -166,9 +166,10 @@ This trips people up, so it is worth being explicit.
 
 ## Mapping performance
 
-`ToRowValues` and `FromRowValues` compile accessors **once per CLR row type** and cache them in a
-closed generic cache. The hot path only invokes delegates — it does not inspect `MemberInfo`, call
-`PropertyInfo.GetValue`, or call `Activator`.
+For a `[GwTable]` type, the schema generator emits direct getters and constructor/member
+materialization and registers them when the assembly loads. `ToRowValues` and `FromRowValues` invoke
+those ordinary delegates with **zero runtime dynamic-code generation**. Fluent-only ungenerated
+types retain the preview compatibility fallback; source-generated accessors are the AOT path.
 
 `FromRowValues` chooses a public constructor that can account for every read-only member, then
 applies compiled assignments to remaining writable members. Shapes that cannot initialize every
@@ -177,8 +178,7 @@ declared member are refused.
 You can assert this in your own tests:
 
 ```csharp
-RecordTable<Customer>.AccessorCompilationCount        // should stop growing
-RecordTable<Customer>.AccessorReflectionInspectionCount
+RecordTable<Customer>.AccessorDynamicCodeGenerationCount // stays zero for generated rows
 ```
 
 The repository benchmark that enforces it:

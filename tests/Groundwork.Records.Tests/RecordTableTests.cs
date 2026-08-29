@@ -14,6 +14,9 @@ public sealed class RecordTableTests
     {
         var before = RecordTable<Customer>.AccessorCompilationCount;
         var reflectionBefore = RecordTable<Customer>.AccessorReflectionInspectionCount;
+        var dynamicCodeBefore = RecordTable<Customer>.AccessorDynamicCodeGenerationCount;
+        Assert.True(Groundwork.Query.Linq.GwGeneratedRows.TryGet<Customer>(out _));
+        Assert.Equal(0, dynamicCodeBefore);
         var table = CustomerTable();
         var afterBuild = RecordTable<Customer>.AccessorCompilationCount;
         var value = Customer.Create("Ada", "ada@example.test");
@@ -25,6 +28,7 @@ public sealed class RecordTableTests
         Assert.True(afterBuild >= before);
         Assert.Equal(afterBuild, RecordTable<Customer>.AccessorCompilationCount);
         Assert.Equal(reflectionBefore, RecordTable<Customer>.AccessorReflectionInspectionCount);
+        Assert.Equal(dynamicCodeBefore, RecordTable<Customer>.AccessorDynamicCodeGenerationCount);
         Assert.Equal(first.Values, second.Values);
         Assert.Equal(value, roundTrip);
         Assert.DoesNotContain("version", first.Values.Keys);

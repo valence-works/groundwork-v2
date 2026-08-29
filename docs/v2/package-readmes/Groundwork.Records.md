@@ -7,6 +7,8 @@ fixed grouping, reducers, and budgets and never creates an ad-hoc shape.
 Navigation-bearing tables can bind one declared reference and compile a terminal typed projection
 over both source and target records. Joined materialization keeps provider rows table-qualified and
 does not add reflection to the per-row path.
+`[GwTable]` row types use the direct accessors and constructor/member materializers emitted by
+`Groundwork.Schema.Generator`; `AccessorDynamicCodeGenerationCount` remains zero for that path.
 
 This package deliberately has **no provider dependency**, which means it also has no
 `table.Open(connection)`. That is the point: a library can declare its storage and stay

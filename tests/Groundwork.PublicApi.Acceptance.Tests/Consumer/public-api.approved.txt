@@ -35,6 +35,10 @@ Groundwork.Records.AggregationRowExtensions
 Groundwork.Records.IRecordAggregationStore
 Groundwork.Query.Model.QueryRequest
 Groundwork.Query.Linq.GwReference
+Groundwork.Query.Linq.GwGeneratedRowMember
+Groundwork.Query.Linq.GwGeneratedRowAccessor
+Groundwork.Query.Linq.GwGeneratedRows
+Groundwork.Query.Linq.GwGeneratedRowValue
 Groundwork.Query.Planning.QueryCoverageException
 Groundwork.Query.Planning.QueryCoverageCandidates
 Groundwork.Records.RecordTable

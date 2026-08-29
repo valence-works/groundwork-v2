@@ -2,22 +2,28 @@ using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
 
 namespace Groundwork.Query.Linq.Execution;
 
 /// <summary>
-/// Turns provider rows into mapped instances through a delegate compiled once per shape and cached,
-/// so a page of ten thousand rows costs no member lookup and no <see cref="Activator"/> call. The
-/// reflection is all in the build, never in the loop.
+/// Turns provider rows into mapped instances through a source-generated accessor when the CLR row
+/// participates in the generated schema. Ungenerated preview models retain the cached compatibility
+/// materializer; either way, a page does not rebuild the row shape in its per-row loop.
 /// </summary>
 internal static class LinqRowMaterializer
 {
+    private static int dynamicCodeGenerationCount;
+
     private static readonly MethodInfo ReadMethod =
         typeof(LinqRowMaterializer).GetMethod(nameof(Read), BindingFlags.NonPublic | BindingFlags.Static)!;
 
     internal static Func<IReadOnlyDictionary<string, object?>, T> For<T>(GwTableModel<T>? model, Projection? projection = null) =>
         Materializers<T>.For(model, projection);
+
+    internal static int DynamicCodeGenerationCount => Volatile.Read(ref dynamicCodeGenerationCount);
 
     /// <summary>Reads one mapped column, leaving the member at its default when the row omits it.</summary>
     private static TMember Read<TMember>(IReadOnlyDictionary<string, object?> row, string column)
@@ -47,12 +53,45 @@ internal static class LinqRowMaterializer
             if (typeof(T) == typeof(IReadOnlyDictionary<string, object?>))
                 return static row => (T)row;
 
+            var projectionColumns = projection is { AllColumns: false }
+                ? projection.Columns.Select(column => column.Name).ToArray()
+                : null;
+            if (projectionColumns is { Length: 1 } && IsScalarType(typeof(T)))
+                return row => GwGeneratedRowValue.ReadProjection<T>(row, projectionColumns, 0);
+
+            if (projectionColumns is not null &&
+                GwGeneratedRows.TryGetProjection<T>(projectionColumns.Length, out var generatedProjection))
+            {
+                var materializeProjection = generatedProjection!;
+                return row => materializeProjection(row, projectionColumns);
+            }
+
+            if (GwGeneratedRows.TryGet<T>(out var generated))
+            {
+                var generatedAccessor = generated!;
+                var columns = model is not null
+                    ? model.Columns.ToDictionary(column => column.Key, column => column.Value.Name, StringComparer.Ordinal)
+                    : projection is null or { AllColumns: true }
+                        ? generatedAccessor.Members.ToDictionary(
+                            member => member.Name,
+                            member => member.ColumnName,
+                            StringComparer.Ordinal)
+                    : generatedAccessor.Members.Select((member, index) => new
+                        {
+                            member.Name,
+                            Column = projection?.Columns.FirstOrDefault(column =>
+                                string.Equals(column.Name, member.Name, StringComparison.OrdinalIgnoreCase))?.Name
+                                ?? projection?.Columns.ElementAtOrDefault(index)?.Name
+                        })
+                        .Where(item => item.Column is not null)
+                        .ToDictionary(item => item.Name, item => item.Column!, StringComparer.Ordinal);
+                var optionalColumns = columns.Values.ToHashSet(StringComparer.Ordinal);
+                return row => generatedAccessor.Materialize(row, columns, optionalColumns);
+            }
+
+            Interlocked.Increment(ref dynamicCodeGenerationCount);
+
             var row = Expression.Parameter(typeof(IReadOnlyDictionary<string, object?>), "row");
-            if (projection is not null && projection.Columns.Length == 1 && IsScalarType(typeof(T)))
-                return Expression.Lambda<Func<IReadOnlyDictionary<string, object?>, T>>(
-                    Expression.Call(ReadMethod.MakeGenericMethod(typeof(T)), row,
-                        Expression.Constant(projection.Columns[0].Name, typeof(string))),
-                    row).Compile();
             var mappings = model is null && projection is not null
                 ? projection.Columns.Select((column, index) =>
                 {
