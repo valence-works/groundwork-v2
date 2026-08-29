@@ -942,7 +942,8 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
         if (request.Join is not null &&
             request.Result is not ResultShape.Reduction &&
-            request.Projection.AllColumns)
+            request.Projection.AllColumns &&
+            !QueryRequestExecution.IsProviderScalarProbe(request))
         {
             throw new QueryRenderException(
                 "GW-QUERY-032",

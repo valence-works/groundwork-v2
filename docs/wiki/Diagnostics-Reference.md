@@ -129,7 +129,7 @@ Published codes appear in messages; Roslyn ids use underscores.
 | `GW-QUERY-020` | Query rendering refusal |
 | `GW-QUERY-030` | Query rendering refusal |
 | `GW-QUERY-031` | `ColumnRef` policy does not match the schema's persisted search-key mapping |
-| `GW-QUERY-032` | A declared-reference join reached an unsupported or ambiguous execution shape, including joined `Projection.All`, in-memory/batched join execution, or a result column outside the applied source/target declarations; the request fails closed instead of collapsing duplicate fields or executing only its driving table |
+| `GW-QUERY-032` | A declared-reference join reached an unsupported or ambiguous execution shape, including joined `Projection.All` row materialization (scalar `Count()`/`Any()` remain supported), in-memory/batched join execution, or a result column outside the applied source/target declarations; the request fails closed instead of collapsing duplicate fields or executing only its driving table |
 
 ---
 

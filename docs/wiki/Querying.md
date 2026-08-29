@@ -62,8 +62,9 @@ navigation used without its matching `Join`, a different navigation, a deeper me
 second join, or an arbitrary LINQ `Join` remains refused. SQLite, PostgreSQL, and SQL Server render
 the node as one native qualified `INNER JOIN`; MongoDB renders one same-scope `$lookup`. Explicit
 joined rows use stable `table.column` fields and can be consumed by the terminal Records composite
-projection surface. Joined `Projection.All`, in-memory execution, and batched execution remain
-fail-closed rather than collapsing duplicate source/target fields.
+projection surface. Joined `Count()` and `Any()` are scalar provider operations and therefore do
+not require a composite materializer. Joined `Projection.All` row results, in-memory execution, and
+batched execution remain fail-closed rather than collapsing duplicate source/target fields.
 
 `ToQueryRequest()` is the provider-neutral boundary:
 

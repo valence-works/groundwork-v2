@@ -379,7 +379,8 @@ public static class QueryRequestExecution
             {
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,
-                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator,
+                ExecutionPurpose = request.ExecutionPurpose
             };
     }
 
@@ -401,7 +402,8 @@ public static class QueryRequestExecution
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
-            ContinuationBindingDiscriminator = bindingDiscriminator ?? request.ContinuationBindingDiscriminator
+            ContinuationBindingDiscriminator = bindingDiscriminator ?? request.ContinuationBindingDiscriminator,
+            ExecutionPurpose = request.ExecutionPurpose
         };
     }
 
@@ -413,26 +415,37 @@ public static class QueryRequestExecution
     public static QueryRequest ForProviderCount(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
-        return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
+        return new QueryRequest(request.Table, request.Where, request.Order,
+            ScalarProbeProjection(request),
             request.Distinct ? Paging.None : ProbePaging(request.Paging, keepOffset: false),
             ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
-            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator,
+            ExecutionPurpose = QueryExecutionPurpose.ProviderCount
         };
+    }
+
+    /// <summary>Returns whether a request is an internal scalar probe produced for provider execution.</summary>
+    public static bool IsProviderScalarProbe(QueryRequest request)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        return request.ExecutionPurpose is QueryExecutionPurpose.ProviderCount or QueryExecutionPurpose.ProviderExistence;
     }
 
     /// <summary>Builds a limit-1 existence probe over the caller's page window instead of its full page.</summary>
     public static QueryRequest ForExistenceProbe(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
-        return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
+        return new QueryRequest(request.Table, request.Where, request.Order,
+            ScalarProbeProjection(request),
             ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
-            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator,
+            ExecutionPurpose = QueryExecutionPurpose.ProviderExistence
         };
     }
 
@@ -450,6 +463,18 @@ public static class QueryRequestExecution
             ? Paging.Continuation(token, 1)
             : Paging.OffsetLimit(keepOffset ? paging.Offset ?? 0 : 0, 1);
 
+    private static Projection ScalarProbeProjection(QueryRequest request)
+    {
+        if (request.Join is null ||
+            !request.Projection.AllColumns ||
+            request.Distinct)
+        {
+            return request.Projection;
+        }
+
+        return Projection.ColumnsOnly(request.Join.ColumnPairs[0].Source);
+    }
+
     /// <summary>Builds a provider execution request with additional internal projection columns.</summary>
     public static QueryRequest WithProjection(QueryRequest request, Projection projection)
     {
@@ -460,7 +485,8 @@ public static class QueryRequestExecution
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
-            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+            ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator,
+            ExecutionPurpose = request.ExecutionPurpose
         };
     }
 
@@ -480,6 +506,7 @@ public static class QueryRequestExecution
         if (request.Result is ResultShape.Reduction)
             return request;
 
+        var scalarProbe = IsProviderScalarProbe(request);
         var order = options.GetEffectiveOrder(request);
         var projection = request.Projection;
         if (!projection.AllColumns)
@@ -500,7 +527,7 @@ public static class QueryRequestExecution
         }
 
         var paging = request.Paging;
-        if (request.Paging.Limit is int limit)
+        if (!scalarProbe && request.Paging.Limit is int limit)
         {
             var expandedLimit = request.Result.MaxRows is int maxRows
                 ? Math.Min(limit, maxRows)
@@ -511,7 +538,7 @@ public static class QueryRequestExecution
                     ? Paging.OffsetLimit(offset, expandedLimit)
                     : Paging.Keyset(expandedLimit);
         }
-        else if (request.Result.MaxRows is int maxRows)
+        else if (!scalarProbe && request.Result.MaxRows is int maxRows)
         {
             paging = request.Paging.ContinuationToken is { } token
                 ? Paging.Continuation(token, maxRows)
@@ -525,7 +552,8 @@ public static class QueryRequestExecution
                 // continuation identity. Keep the token bound to the caller's projection.
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,
-                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
+                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator,
+                ExecutionPurpose = request.ExecutionPurpose
             };
     }
 

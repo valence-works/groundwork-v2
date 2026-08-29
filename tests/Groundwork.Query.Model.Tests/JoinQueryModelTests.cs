@@ -312,6 +312,57 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_scalar_probes_avoid_row_materialization_without_changing_distinct_count_values()
+    {
+        var request = new QueryRequest(
+            Orders,
+            Join(),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+
+        var count = QueryRequestExecution.ForProviderCount(request);
+        var any = QueryRequestExecution.ForExistenceProbe(request);
+        var distinctCount = QueryRequestExecution.ForProviderCount(new QueryRequest(
+            request.Table,
+            request.Join!,
+            request.Where,
+            request.Order,
+            request.Projection,
+            request.Paging,
+            request.Result,
+            distinct: true));
+
+        Assert.True(QueryRequestExecution.IsProviderScalarProbe(count));
+        Assert.True(QueryRequestExecution.IsProviderScalarProbe(any));
+        Assert.False(QueryRequestExecution.IsProviderScalarProbe(request));
+        Assert.IsType<ResultShape.TotalCount>(count.Result);
+        Assert.IsType<ResultShape.Rows>(any.Result);
+        Assert.All(
+            new[]
+            {
+                QueryRequestExecution.WithProviderPredicate(count, Predicate.AlwaysTrue.Instance),
+                QueryRequestExecution.WithProjection(count, Projection.ColumnsOnly(OrderCustomerId)),
+                QueryRequestExecution.ForPage(count, QueryRenderOptions.Default)
+            },
+            transformed => Assert.True(QueryRequestExecution.IsProviderScalarProbe(transformed)));
+        Assert.Equal(OrderCustomerId, Assert.Single(count.Projection.Columns));
+        Assert.Equal(OrderCustomerId, Assert.Single(any.Projection.Columns));
+        Assert.True(distinctCount.Distinct);
+        Assert.True(distinctCount.Projection.AllColumns);
+        Assert.True(QueryRequestExecution.ForExistenceProbe(new QueryRequest(
+            request.Table,
+            request.Join!,
+            request.Where,
+            request.Order,
+            request.Projection,
+            request.Paging,
+            request.Result,
+            distinct: true)).Projection.AllColumns);
+    }
+
+    [Fact]
     public void Driving_table_search_key_rewrites_do_not_capture_same_named_target_columns()
     {
         var sourceName = new ColumnRef(Orders, "name", QueryType.String, isNullable: false);

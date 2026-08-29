@@ -169,6 +169,13 @@ public abstract record ResultShape
     }
 }
 
+internal enum QueryExecutionPurpose
+{
+    Ordinary,
+    ProviderCount,
+    ProviderExistence
+}
+
 public sealed record LatestPerKey
 {
     public LatestPerKey(ColumnRef key, ColumnRef timestamp)
@@ -290,6 +297,7 @@ public sealed record QueryRequest
     public string ContinuationFingerprint { get; internal init; }
 
     internal string? ContinuationBindingDiscriminator { get; init; }
+    internal QueryExecutionPurpose ExecutionPurpose { get; init; }
 }
 
 public sealed record QueryResult<T>
