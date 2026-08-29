@@ -680,11 +680,16 @@ public sealed class ProviderCapabilityValidator
 public static class WellKnownCapabilities
 {
     public static readonly CapabilityId AtomicCommit = new("groundwork.operational.atomic-commit");
+    public static readonly CapabilityId EnforcedConstraints = new("groundwork.schema.enforced-constraints");
 
     public static IReadOnlyList<CapabilityDescriptor> All { get; } = ImmutableArray.Create(
         new CapabilityDescriptor(
             AtomicCommit,
             "Atomic commit",
             "Cross-unit atomic commit across storage units.",
-            EvidenceGatedByDefault: true));
+            EvidenceGatedByDefault: true),
+        new CapabilityDescriptor(
+            EnforcedConstraints,
+            "Enforced physical constraints",
+            "The deployment enforces declared physical foreign keys and portable check constraints in its native catalog."));
 }

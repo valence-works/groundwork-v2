@@ -51,16 +51,17 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
-        "SQL Server", nativeBatch: true,
-        exactOutcomeCost: "one OUTPUT result per MERGE batch",
-        batchCost: "uses one durable table-valued-parameter MERGE batch; VALUES is a compatibility fallback",
-        exactAppendOutcomes: true,
-        durableHighWaterInspection: true,
-        exactRetention: true,
-        atomicCommit: true,
-        compareAndDelete: true,
-        setMutation: "Updates or deletes every row matching an index-covered portable predicate on SQL Server in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.");
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(
+        BatchWriteCapabilities.ForProvider(
+            "SQL Server", nativeBatch: true,
+            exactOutcomeCost: "one OUTPUT result per MERGE batch",
+            batchCost: "uses one durable table-valued-parameter MERGE batch; VALUES is a compatibility fallback",
+            exactAppendOutcomes: true,
+            durableHighWaterInspection: true,
+            exactRetention: true,
+            atomicCommit: true,
+            compareAndDelete: true,
+            setMutation: "Updates or deletes every row matching an index-covered portable predicate on SQL Server in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count."));
 
     /// <summary>
     /// Serializes the writes and connection bookkeeping of every session this connection owns.

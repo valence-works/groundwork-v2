@@ -68,6 +68,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RecordWriteOptions);
         _ = typeof(BatchWriteOptions);
         _ = typeof(SchemaChangeKind);
+        _ = typeof(SchemaCapabilityAdmission);
         _ = typeof(RowWrite);
         _ = typeof(AppendOutcomeReport);
         _ = typeof(IExactAppendStorageSession);
@@ -100,6 +101,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(KeyedBatchReadSessionExtensions);
         _ = typeof(SqliteProviderFactory);
         _ = typeof(InMemoryProviderFactory);
+        _ = WellKnownCapabilities.EnforcedConstraints;
     }
 
     public static void CompileCallableSurface()

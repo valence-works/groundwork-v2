@@ -45,6 +45,7 @@ Groundwork.Records.RecordTableStoreUnitOfWork
 Groundwork.Records.RecordWriteOptions
 Groundwork.Store.BatchWriteOptions
 Groundwork.Store.SchemaChangeKind
+Groundwork.Store.SchemaCapabilityAdmission
 Groundwork.Store.RetentionIdempotencyDeclaration
 Groundwork.Store.RetentionOperationResult
 Groundwork.Store.IStorageInspectionSession

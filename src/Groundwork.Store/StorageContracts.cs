@@ -744,6 +744,39 @@ public interface ISchemaCoordinator
     SchemaApplyResult Apply(StorageUnit desired);
 }
 
+/// <summary>Advertises and admits the deployment capability required by physically enforced constraints.</summary>
+public static class SchemaCapabilityAdmission
+{
+    public static IReadOnlyList<CapabilityDescriptor> AdvertiseEnforcedConstraints(
+        IEnumerable<CapabilityDescriptor> capabilities)
+    {
+        ArgumentNullException.ThrowIfNull(capabilities);
+        var snapshot = capabilities.ToList();
+        if (snapshot.All(capability => capability.Id != WellKnownCapabilities.EnforcedConstraints))
+            snapshot.Add(CapabilityRegistry.Default.Get(WellKnownCapabilities.EnforcedConstraints));
+        return Array.AsReadOnly(snapshot.ToArray());
+    }
+
+    public static void EnsureSupported(
+        StorageUnit unit,
+        IEnumerable<CapabilityDescriptor> capabilities)
+    {
+        ArgumentNullException.ThrowIfNull(unit);
+        ArgumentNullException.ThrowIfNull(capabilities);
+        var requiresEnforcement = unit.CheckConstraints.Count != 0 ||
+            unit.References.Any(reference => reference.Enforcement == ReferenceEnforcement.Physical);
+        if (!requiresEnforcement || capabilities.Any(
+                capability => capability.Id == WellKnownCapabilities.EnforcedConstraints))
+            return;
+
+        throw new NotSupportedException(
+            $"GW-SCHEMA-014: storage unit '{unit.Name}' declares physical constraint enforcement, but this " +
+            $"deployment does not advertise '{WellKnownCapabilities.EnforcedConstraints}'. Use a logical-only " +
+            "Reference(...) declaration instead of PhysicalReference(...) for relationships, validate checks " +
+            "in application logic, or target a relational deployment that advertises enforced constraints.");
+    }
+}
+
 /// <summary>
 /// Non-owning view over one declared storage unit. This interface is intentionally not disposable:
 /// a session opened from a provider connection is valid while that connection is alive, and a
@@ -1096,7 +1129,7 @@ public interface IStorageProviderConnection : IDisposable
 
     ISchemaCoordinator Schema { get; }
 
-    /// <summary>Provider capabilities relevant to staged writes and their outcome contract.</summary>
+    /// <summary>Capabilities the deployed provider can enforce for schema and storage operations.</summary>
     IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
 
     /// <summary>Opens a non-owning session view that remains valid while this connection is alive.</summary>

@@ -58,6 +58,7 @@ public sealed class K4CapabilitiesScopeIdentityStringComparisonTests
     public void Default_registry_contains_the_built_in_atomic_commit_capability()
     {
         Assert.True(CapabilityRegistry.Default.IsRegistered(WellKnownCapabilities.AtomicCommit));
+        Assert.True(CapabilityRegistry.Default.IsRegistered(WellKnownCapabilities.EnforcedConstraints));
     }
 
     [Fact]

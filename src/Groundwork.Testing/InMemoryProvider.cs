@@ -46,29 +46,31 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
     internal InMemoryProviderConnection(InMemoryDatabase database)
     {
         this.database = database;
+        Capabilities = BatchWriteCapabilities.ForProvider(
+            "the in-memory provider", nativeBatch: false,
+            exactOutcomeCost: "one provider operation per coalesced row",
+            batchCost: "uses provider-neutral per-row operations inside the transaction",
+            exactAppendOutcomes: true,
+            durableHighWaterInspection: true,
+            exactRetention: true,
+            atomicCommit: true,
+            compareAndDelete: true);
         Catalog = new InMemoryProviderCatalog(database);
-        Schema = new InMemorySchemaCoordinator(database);
+        Schema = new InMemorySchemaCoordinator(database, Capabilities);
     }
 
     public IProviderCatalog Catalog { get; }
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
-        "the in-memory provider", nativeBatch: false,
-        exactOutcomeCost: "one provider operation per coalesced row",
-        batchCost: "uses provider-neutral per-row operations inside the transaction",
-        exactAppendOutcomes: true,
-        durableHighWaterInspection: true,
-        exactRetention: true,
-        atomicCommit: true,
-        compareAndDelete: true);
+    public IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
+        SchemaCapabilityAdmission.EnsureSupported(unit, Capabilities);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
         return new InMemoryStorageSession(database, state, access, liveState: true, providerConnection: this, observer: observer);
@@ -82,6 +84,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(unit);
         ArgumentNullException.ThrowIfNull(access);
+        SchemaCapabilityAdmission.EnsureSupported(unit, Capabilities);
         PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         var state = database.GetState(unit, access);
         return new OwnedInMemoryStorageSession(database, state, access, this, observer);
@@ -113,6 +116,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         foreach (var unit in units)
         {
             ArgumentNullException.ThrowIfNull(unit);
+            SchemaCapabilityAdmission.EnsureSupported(unit, Capabilities);
             PortabilityValidator.EnsurePhysicalIdentifiers(unit);
         }
         var states = units.Select(unit => database.GetState(unit, access)).ToArray();
@@ -261,10 +265,14 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
 {
     internal static readonly ProviderIdentity Identity = new("InMemory", "1.0");
     private readonly InMemoryDatabase database;
+    private readonly IReadOnlyList<CapabilityDescriptor> capabilities;
 
-    internal InMemorySchemaCoordinator(InMemoryDatabase database)
+    internal InMemorySchemaCoordinator(
+        InMemoryDatabase database,
+        IReadOnlyList<CapabilityDescriptor> capabilities)
     {
         this.database = database;
+        this.capabilities = capabilities;
         Executor = new InMemoryPhysicalSchemaExecutor(database);
     }
 
@@ -274,6 +282,7 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         StorageUnit desired,
         GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
+        SchemaCapabilityAdmission.EnsureSupported(desired, capabilities);
         var physical = Prepare(desired);
         lock (database.Gate)
         {
@@ -286,6 +295,7 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
 
     public SchemaDiff Diff(StorageUnit desired)
     {
+        SchemaCapabilityAdmission.EnsureSupported(desired, capabilities);
         var physical = Prepare(desired);
         var target = Target(physical);
         using var lease = Executor.AcquireApplicationLock(target.Identity);
@@ -300,6 +310,7 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
 
     public SchemaApplyResult Apply(StorageUnit desired)
     {
+        SchemaCapabilityAdmission.EnsureSupported(desired, capabilities);
         var physical = Prepare(desired);
         var target = Target(physical);
         lock (database.Gate)

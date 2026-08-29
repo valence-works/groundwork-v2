@@ -353,6 +353,7 @@ would make it work, while an unauthorized one is waiting on an operator naming i
 | `GW-SCHEMA-011` | `groundwork adopt` found applied history already recorded for this target. Adoption records a catalog Groundwork has never applied; apply the pending plan instead | Invalid |
 | `GW-SCHEMA-012` | `groundwork adopt` was asked to adopt a subject declared retired, which describes no catalog to verify | Invalid |
 | `GW-SCHEMA-013` | The provider reported the deployed catalog invalid without naming what differs, so adoption refused rather than record an unproved claim | Invalid |
+| `GW-SCHEMA-014` | A storage unit declares a physical foreign key or check constraint, but the deployment does not advertise `groundwork.schema.enforced-constraints`. Use a logical-only `Reference(...)` (and application validation for checks), or target an advertising relational deployment | Unsupported deployment |
 
 `GW-SCHEMA-007` and `-008` replace the earlier use of `GW-RUNTIME-002` for startup auto-apply
 refusals. `GW-RUNTIME-002` now means only what its own row says: **index drift**.

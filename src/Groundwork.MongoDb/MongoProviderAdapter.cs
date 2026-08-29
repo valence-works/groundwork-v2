@@ -12,8 +12,17 @@ public sealed class MongoProviderFactory : IStorageProviderFactory
         new MongoStoreConnection(new MongoDbProviderFactory().Create(connectionString));
 }
 
-internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : IStorageProviderConnection, IQueryAdmissionProviderConnection
+internal sealed class MongoStoreConnection : IStorageProviderConnection, IQueryAdmissionProviderConnection
 {
+    private readonly IMongoProviderConnection inner;
+
+    internal MongoStoreConnection(IMongoProviderConnection inner)
+    {
+        this.inner = inner;
+        Catalog = new MongoStoreCatalog(inner.Catalog);
+        Schema = new MongoStoreSchema(inner.Schema, MongoDbProviderConnection.ConstraintCapabilities);
+    }
+
     /// <summary>
     /// MongoDB has no bound-parameter budget — its real bound is the 16 MB command document. Keep
     /// the keyed batch count effectively unbounded and reserve a conservative payload budget below
@@ -28,9 +37,9 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
         MaximumBatchReadPayloadBytes = 15L * 1024 * 1024
     };
 
-    public IProviderCatalog Catalog { get; } = new MongoStoreCatalog(inner.Catalog);
+    public IProviderCatalog Catalog { get; }
 
-    public ISchemaCoordinator Schema { get; } = new MongoStoreSchema(inner.Schema);
+    public ISchemaCoordinator Schema { get; }
 
     public IReadOnlyList<CapabilityDescriptor> Capabilities
     {
@@ -66,6 +75,7 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
 
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
+        SchemaCapabilityAdmission.EnsureSupported(unit, MongoDbProviderConnection.ConstraintCapabilities);
         var session = inner.OpenSession(unit, ToNative(access), observer);
         return inner.ProviderSequenceFit is ProviderFit.Supported
             ? new MongoExactStoreSession(session, commandObserver: observer, providerConnection: this)
@@ -77,6 +87,7 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
         StorageAccess access,
         IProviderCommandObserver? observer = null)
     {
+        SchemaCapabilityAdmission.EnsureSupported(unit, MongoDbProviderConnection.ConstraintCapabilities);
         var session = inner.OpenSession(unit, ToNative(access), observer);
         return inner.ProviderSequenceFit is ProviderFit.Supported
             ? new OwnedMongoExactStoreSession(session, commandObserver: observer, providerConnection: this)
@@ -99,6 +110,8 @@ internal sealed class MongoStoreConnection(IMongoProviderConnection inner) : ISt
         params StorageUnit[] units)
     {
         StorageAccessValidation.EnsureUnitOfWork(access);
+        foreach (var unit in units)
+            SchemaCapabilityAdmission.EnsureSupported(unit, MongoDbProviderConnection.ConstraintCapabilities);
         return new MongoStoreUnitOfWork(
             inner.BeginUnitOfWork(ToNative(access), observer, units),
             options,
@@ -132,16 +145,29 @@ internal sealed class MongoStoreCatalog(IMongoProviderCatalog inner) : IProvider
             index.SchemaVersion)).ToArray();
 }
 
-internal sealed class MongoStoreSchema(IMongoSchemaCoordinator inner) : ISchemaCoordinator
+internal sealed class MongoStoreSchema(
+    IMongoSchemaCoordinator inner,
+    IReadOnlyList<CapabilityDescriptor> capabilities) : ISchemaCoordinator
 {
     public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
         StorageUnit desired,
-        GroundworkRuntimeSchemaAdmissionOptions? options = null) =>
-        inner.InspectRuntimeAdmission(desired, options);
+        GroundworkRuntimeSchemaAdmissionOptions? options = null)
+    {
+        SchemaCapabilityAdmission.EnsureSupported(desired, capabilities);
+        return inner.InspectRuntimeAdmission(desired, options);
+    }
 
-    public SchemaDiff Diff(StorageUnit desired) => inner.Diff(desired);
+    public SchemaDiff Diff(StorageUnit desired)
+    {
+        SchemaCapabilityAdmission.EnsureSupported(desired, capabilities);
+        return inner.Diff(desired);
+    }
 
-    public SchemaApplyResult Apply(StorageUnit desired) => inner.Apply(desired);
+    public SchemaApplyResult Apply(StorageUnit desired)
+    {
+        SchemaCapabilityAdmission.EnsureSupported(desired, capabilities);
+        return inner.Apply(desired);
+    }
 }
 
 internal class MongoStoreSession(
