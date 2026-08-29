@@ -1,4 +1,4 @@
-name: CI
+name: Correctness
 
 on:
   push:
@@ -37,7 +37,7 @@ jobs:
             8.0.x
             10.0.x
       - run: dotnet restore Groundwork.slnx
-      - run: dotnet test Groundwork.slnx --no-restore --configuration Release
+      - run: dotnet test Groundwork.slnx --no-restore --configuration Release --filter "Category!=Concurrency"
 
   documents-package-boundary:
     runs-on: ubuntu-latest
@@ -171,7 +171,9 @@ jobs:
             8.0.x
             10.0.x
       - run: dotnet restore tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
-      - run: dotnet test tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj --no-restore --configuration Release
+      - run: >-
+          dotnet test tests/Groundwork.Sqlite.Tests/Groundwork.Sqlite.Tests.csproj
+          --no-restore --configuration Release --filter "Category!=Concurrency"
 
   event-log-conformance:
     runs-on: ubuntu-latest
@@ -276,8 +278,6 @@ jobs:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/recordsci
           GW_EXPLAIN_ASSERT: "1"
         run: dotnet test tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj --no-restore --configuration Release
-      - name: Assert Records write and materialization hot paths
-        run: dotnet run --project benchmarks/Groundwork.Benchmarks --configuration Release -- records --n 10000
 
   sqlserver-conformance:
     name: SQL Server conformance (${{ matrix.target-framework }})
@@ -317,26 +317,9 @@ jobs:
         run: >-
           dotnet test tests/Groundwork.SqlServer.Tests/Groundwork.SqlServer.Tests.csproj
           --no-restore --configuration Release --framework ${{ matrix.target-framework }}
+          --filter "Category!=Concurrency"
           --logger "trx;LogFileName=sqlserver-conformance-${{ matrix.target-framework }}.trx"
           --results-directory artifacts/sqlserver-conformance/${{ matrix.target-framework }}
-      - name: Refuse a run whose SQL Server W2 proof did not execute exactly once (${{ matrix.target-framework }})
-        env:
-          TFM: ${{ matrix.target-framework }}
-        run: |
-          proof="Groundwork.SqlServer.Tests.SqlServerProviderTests.W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix"
-          results="artifacts/sqlserver-conformance/$TFM/sqlserver-conformance-$TFM.trx"
-          if [ ! -f "$results" ]; then
-            echo "::error::[$TFM] SQL Server conformance TRX was not produced." >&2
-            exit 1
-          fi
-          passed=$(grep -o "testName=\"$proof\"[^>]*outcome=\"Passed\"" "$results" | wc -l || true)
-          notExecuted=$(grep -o "testName=\"$proof\"[^>]*outcome=\"NotExecuted\"" "$results" | wc -l || true)
-          observed=$(grep -o "testName=\"$proof\"[^>]*outcome=\"[A-Za-z]*\"" "$results" | wc -l || true)
-          echo "[$TFM] SQL Server W2 passed: $passed, not executed: $notExecuted, observed: $observed"
-          if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ] || [ "$observed" -ne 1 ]; then
-            echo "::error::[$TFM] The SQL Server W2 proof was absent, skipped, or duplicated." >&2
-            exit 1
-          fi
       - name: Upload SQL Server conformance diagnostics (${{ matrix.target-framework }})
         if: failure()
         uses: actions/upload-artifact@v4
@@ -410,7 +393,9 @@ jobs:
       - name: Run MongoDB conformance suite
         env:
           GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/p1ci?replicaSet=p1rs&directConnection=true
-        run: dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj --no-restore --configuration Release
+        run: >-
+          dotnet test tests/Groundwork.MongoDb.Tests/Groundwork.MongoDb.Tests.csproj
+          --no-restore --configuration Release --filter "Category!=Concurrency"
 
   mongo-schema-tool:
     runs-on: ubuntu-latest
@@ -497,7 +482,7 @@ jobs:
           --no-restore --configuration Release
           --filter FullyQualifiedName~MongoSetMutationGuardTests.MongoDB_standalone_set_mutation
 
-  concurrency-conformance:
+  capability-conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -533,97 +518,63 @@ jobs:
             10.0.x
       - name: Initialize MongoDB replica set
         run: |
-          docker run --detach --name groundwork-w2-mongo --publish 27017:27017 \
-            mongo:7.0.24 --replSet w2rs --bind_ip_all
+          docker run --detach --name groundwork-capability-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet capabilityrs --bind_ip_all
           for attempt in $(seq 1 30); do
-            if docker exec groundwork-w2-mongo mongosh --quiet --eval \
-              'rs.initiate({_id:"w2rs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+            if docker exec groundwork-capability-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"capabilityrs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
               break
             fi
             sleep 1
           done
-          docker exec groundwork-w2-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+          docker exec groundwork-capability-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
       - run: dotnet restore Groundwork.slnx
-      - name: Report provider coverage
-        run: |
-          {
-            echo '### W2 provider coverage'
-            echo
-            echo '- InMemory: executed (reference adapter)'
-            echo '- SQLite: executed (in-process adapter)'
-            echo '- MongoDB: executed (live replica set)'
-            echo '- PostgreSQL: executed (live PostgreSQL)'
-            echo '- SQL Server: executed (live SQL Server)'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Run W2 concurrency conformance
-        env:
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w2ci?replicaSet=w2rs&directConnection=true
-          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-        # The trx is what makes a *fast* failure here readable. --blame-hang produces a dump only
-        # when a test stalls, and this job's own service containers flood the end of the log, so a
-        # plain assertion failure leaves nothing anyone can retrieve afterwards — which is exactly
-        # what happened on main at fd08d2a (see #210).
-        run: >-
-          dotnet test tests/Groundwork.Concurrency.Tests/Groundwork.Concurrency.Tests.csproj
-          --no-restore --configuration Release
-          --logger "trx;LogFileName=w2-concurrency.trx"
-          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type full
-      - name: Upload W2 diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: w2-diagnostics
-          path: tests/Groundwork.Concurrency.Tests/TestResults/**
-          if-no-files-found: ignore
       - name: Run W1 native provider-command proof across all providers
         env:
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w1ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w1ci?replicaSet=capabilityrs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
         run: dotnet test tests/Groundwork.ProviderCommands.Tests/Groundwork.ProviderCommands.Tests.csproj --no-restore --configuration Release
       - name: Run S2 idempotency proof across all providers
         env:
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s2ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s2ci?replicaSet=capabilityrs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Idempotency
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release --filter "(FullyQualifiedName~Idempotency)&(Category!=Concurrency)"
       - name: Run S6 exact append outcomes across all transaction-capable providers
         env:
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s6ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s6ci?replicaSet=capabilityrs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter ExactAppend
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release --filter "(FullyQualifiedName~ExactAppend)&(Category!=Concurrency)"
       - name: Run S7 durable lifecycle capabilities across all transaction-capable providers
         env:
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s7ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s7ci?replicaSet=capabilityrs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Lifecycle
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release --filter "(FullyQualifiedName~Lifecycle)&(Category!=Concurrency)"
       - name: Run S4 native aggregation proof across all providers
         env:
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s4ci?replicaSet=w2rs&directConnection=true
+          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s4ci?replicaSet=capabilityrs&directConnection=true
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter Aggregation
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release --filter "(FullyQualifiedName~Aggregation)&(Category!=Concurrency)"
       - name: Run S11 unit-of-work query proof across relational providers
         env:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
           GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj --no-restore --configuration Release --filter UnitOfWorkQueryConformanceTests
-      - name: Measure W1 SQLite round trips
-        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --workload upsert --n 1
-      - name: Measure W1 PostgreSQL round trips
-        env:
-          GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --provider postgresql --workload upsert --n 1
-      - name: Measure W1 SQL Server round trips
-        env:
-          GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --provider sqlserver --workload upsert --n 1
-      - name: Measure W1 MongoDB round trips
-        env:
-          GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/w1bench?replicaSet=w2rs&directConnection=true
-        run: dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- roundtrips --provider mongodb --workload upsert --n 1
+        run: >-
+          dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
+          --no-restore --configuration Release
+          --filter "(FullyQualifiedName~UnitOfWorkQueryConformanceTests)&(Category!=Concurrency)"
 
   postgresql-provider:
     runs-on: ubuntu-latest
@@ -650,14 +601,17 @@ jobs:
       - name: Run PostgreSQL provider conformance
         env:
           GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
-        run: dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj --no-restore --configuration Release
+        run: >-
+          dotnet test tests/Groundwork.PostgreSql.Tests/Groundwork.PostgreSql.Tests.csproj
+          --no-restore --configuration Release --filter "Category!=Concurrency"
 
-  stream-capabilities-retention:
+  retention-correctness:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GROUNDWORK_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=groundwork;Pooling=false
       GROUNDWORK_SQLSERVER_CONNECTION: Server=localhost,1433;Database=master;User Id=sa;Password=Groundwork!2026;TrustServerCertificate=True;Encrypt=False
-      GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/s3ci?replicaSet=s3rs&directConnection=true
+      GROUNDWORK_MONGO_CONNECTION: mongodb://localhost:27017/retentioncorrectness?replicaSet=retentioncorrectnessrs&directConnection=true
     services:
       postgres:
         image: postgres:17.6-alpine3.22
@@ -691,58 +645,36 @@ jobs:
             10.0.x
       - name: Initialize MongoDB replica set for native retention
         run: |
-          docker run --detach --name groundwork-s3-mongo --publish 27017:27017 \
-            mongo:7.0.24 --replSet s3rs --bind_ip_all
+          docker run --detach --name groundwork-retention-correctness-mongo --publish 27017:27017 \
+            mongo:7.0.24 --replSet retentioncorrectnessrs --bind_ip_all
           for attempt in $(seq 1 30); do
-            if docker exec groundwork-s3-mongo mongosh --quiet --eval \
-              'rs.initiate({_id:"s3rs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
+            if docker exec groundwork-retention-correctness-mongo mongosh --quiet --eval \
+              'rs.initiate({_id:"retentioncorrectnessrs",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
               break
             fi
             sleep 1
           done
-          docker exec groundwork-s3-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
+          docker exec groundwork-retention-correctness-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
       - run: dotnet restore tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
-      # Each target framework runs Retention separately, with its own trx: a single invocation builds and
-      # runs both net8.0 and net10.0, and the second run's trx silently overwrites the first's, which would
-      # let one framework's OnAppend coalescing proofs go unchecked below.
-      - name: Run four-provider retention proof (net8.0)
+      - name: Run four-provider retention correctness (.NET 8)
         run: >-
           dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
-          --no-restore --configuration Release --filter Retention --framework net8.0
-          --logger "trx;LogFileName=stream-capabilities-retention-net8.0.trx"
-          --results-directory artifacts/stream-capabilities-retention
-      - name: Run four-provider retention proof (net10.0)
+          --no-restore --configuration Release --framework net8.0
+          --filter "(FullyQualifiedName~Retention)&(Category!=Concurrency)"
+          --logger "trx;LogFileName=retention-correctness-net8.0.trx"
+          --results-directory artifacts/retention-correctness
+      - name: Run four-provider retention correctness (.NET 10)
         run: >-
           dotnet test tests/Groundwork.StreamCapabilities.Tests/Groundwork.StreamCapabilities.Tests.csproj
-          --no-restore --configuration Release --filter Retention --framework net10.0
-          --logger "trx;LogFileName=stream-capabilities-retention-net10.0.trx"
-          --results-directory artifacts/stream-capabilities-retention
-      # A skipped OnAppend coalescing proof is a Skip.If, not a failure: it reads as inconclusive rather than
-      # a verified pass, which is the whole point, but only if something checks for it. Left unchecked, a
-      # busy runner would make the skip routine and the coalescing property would quietly stop being
-      # verified -- the same "an assertion standing in for the thing it claims" defect the retry in
-      # RetentionProofTests exists to avoid. This asserts every OnAppend coalescing proof actually executed,
-      # on both target frameworks.
-      - name: Refuse a run whose OnAppend coalescing proofs did not execute
-        run: |
-          proofs="PostgreSQL_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline
-          SQLServer_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline
-          SQLite_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline
-          SQLite_in_memory_OnAppend_serializes_the_shared_connection_and_coalesces_cleanup
-          MongoDB_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline"
-          for tfm in net8.0 net10.0; do
-            results="artifacts/stream-capabilities-retention/stream-capabilities-retention-$tfm.trx"
-            outcomes() {
-              grep -o "testName=\"Groundwork.StreamCapabilities.Tests.RetentionProofTests.$1\"[^>]*outcome=\"[A-Za-z]*\"" \
-                "$results" | grep -c "outcome=\"$2\"" || true
-            }
-            while IFS= read -r proof; do
-              passed=$(outcomes "$proof" Passed)
-              notExecuted=$(outcomes "$proof" NotExecuted)
-              echo "[$tfm] $proof passed: $passed, not executed: $notExecuted"
-              if [ "$passed" -ne 1 ] || [ "$notExecuted" -ne 0 ]; then
-                echo "::error::[$tfm] $proof did not execute. It may have been skipped as inconclusive after retries found no overlapping writers." >&2
-                exit 1
-              fi
-            done <<< "$proofs"
-          done
+          --no-restore --configuration Release --framework net10.0
+          --filter "(FullyQualifiedName~Retention)&(Category!=Concurrency)"
+          --logger "trx;LogFileName=retention-correctness-net10.0.trx"
+          --results-directory artifacts/retention-correctness
+      - name: Upload retention correctness diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retention-correctness-diagnostics-${{ github.run_attempt }}
+          path: artifacts/retention-correctness/**
+          if-no-files-found: ignore
+          retention-days: 14

@@ -187,6 +187,9 @@ The repository benchmark that enforces it:
 dotnet run --project benchmarks/Groundwork.Benchmarks -- records --n 1000
 ```
 
+The manual `Performance evidence` workflow captures the release/milestone result; ordinary pull
+requests use deterministic correctness tests instead.
+
 ## Using a custom execution boundary
 
 `IRecordStore` is the provider-neutral seam. `Groundwork.Records.Store` implements it over

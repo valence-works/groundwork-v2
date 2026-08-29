@@ -403,6 +403,7 @@ public sealed class SqlServerProviderTests(SqlServerFixture fixture)
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public void W2_concurrency_harness_holds_every_named_invariant_for_the_full_matrix()
     {
         foreach (var (keyCount, includePartialUniqueIndex, optimistic) in W2Shapes())

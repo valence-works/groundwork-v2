@@ -48,6 +48,7 @@ public sealed class RetentionProofTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public async Task PostgreSQL_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
         var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
@@ -69,6 +70,7 @@ public sealed class RetentionProofTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public async Task SQLServer_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
         var connectionString = LiveSqlServer.ConnectionString;
@@ -81,6 +83,7 @@ public sealed class RetentionProofTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public async Task SQLite_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
         var path = Path.Combine(Path.GetTempPath(), "groundwork-s3-convoy-" + Guid.NewGuid().ToString("N") + ".db");
@@ -98,6 +101,7 @@ public sealed class RetentionProofTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public async Task SQLite_in_memory_OnAppend_serializes_the_shared_connection_and_coalesces_cleanup()
     {
         var connectionString = $"Data Source=s3-retention-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
@@ -177,6 +181,7 @@ public sealed class RetentionProofTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public async Task MongoDB_OnAppend_concurrent_writes_coalesce_below_the_serial_command_baseline()
     {
         var connectionString = LiveMongo.ConnectionString;

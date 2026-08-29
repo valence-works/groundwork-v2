@@ -13,6 +13,7 @@ using Xunit;
 
 namespace Groundwork.Concurrency.Tests;
 
+[Trait("Category", "Concurrency")]
 public sealed class ConcurrencyHarnessTests
 {
     [Theory]

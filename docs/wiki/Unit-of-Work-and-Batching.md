@@ -205,6 +205,9 @@ dotnet run --project benchmarks/Groundwork.Benchmarks -- roundtrips --workload c
 Target: **one batch command** for a 1,000-row homogeneous upsert group on SQLite, PostgreSQL, SQL
 Server, and MongoDB aggregate commits. Select `OutcomeMode.Aggregate` for this target.
 
+Repository CI runs this measurement only through the manual `Performance evidence` workflow so
+ordinary correctness failures remain distinct from benchmark infrastructure and output.
+
 ## Next
 
 - **[Writing Data](Writing-Data)** — outcomes in detail
