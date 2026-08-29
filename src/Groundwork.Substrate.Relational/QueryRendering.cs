@@ -660,7 +660,7 @@ public abstract class RelationalQueryRenderer
                 expectedIndex?.Name,
                 indexHintApplied,
                 effectiveOrder.Select(term => term.Column.Name).ToArray(),
-                requiresCompositeMaterializer: true);
+                requiresCompositeMaterializer: request.Result is not ResultShape.Reduction);
         }
         finally
         {

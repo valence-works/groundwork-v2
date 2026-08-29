@@ -401,6 +401,13 @@ public sealed class QueryRendererTests
         foreach (var request in requests)
         {
             var rendered = new SqliteQueryRenderer().Render(request);
+            if (request.Result is ResultShape.Reduction)
+            {
+                var rows = RelationalQueryResultReader.Read(connection, rendered, (_, value) => value);
+                Assert.Single(rows);
+                Assert.Equal(60L, Convert.ToInt64(rows[0][Amount.Name], System.Globalization.CultureInfo.InvariantCulture));
+                continue;
+            }
             using var command = connection.CreateCommand();
             command.CommandText = rendered.CommandText;
             foreach (var parameter in rendered.Parameters)
