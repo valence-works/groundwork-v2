@@ -256,6 +256,28 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Joined_whole_record_projection_refuses_json_members_before_provider_io()
+    {
+        var customers = RecordTable.For<JoinedCustomer>("json_join_customers")
+            .Key(customer => customer.Id)
+            .Build();
+        var orders = RecordTable.For<JoinedJsonOrder>("json_join_orders")
+            .Key(order => order.Id)
+            .Index("by_customer", order => order.CustomerId)
+            .Reference("customer", order => order.Customer, customers, order => order.CustomerId)
+            .Build();
+        var reference = orders.Reference<JoinedCustomer>("customer");
+
+        var failure = Assert.Throws<ArgumentException>(() => orders.Select(
+            reference.Join(orders.Query),
+            reference,
+            (order, customer) => new ValueTuple<JoinedJsonOrder, JoinedCustomer>(order, customer)));
+
+        Assert.Contains(nameof(JoinedJsonOrder.Payload), failure.Message, StringComparison.Ordinal);
+        Assert.Contains("not a queryable scalar column", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Joined_record_projection_refuses_an_empty_constant_shape()
     {
         var (orders, reference) = JoinedTables("constant");
@@ -588,6 +610,7 @@ public sealed class RecordTableTests
     public sealed record AggregatedSummary(long Count, long Total);
     public sealed record JoinedCustomer(long Id, string Name);
     public sealed record JoinedOrder(long Id, long CustomerId, JoinedCustomer Customer);
+    public sealed record JoinedJsonOrder(long Id, long CustomerId, object Payload, JoinedCustomer Customer);
     public sealed record JoinedOrderCustomer(long OrderId, long CustomerId, string CustomerName);
 
     private static RecordTable<AggregatedCustomer> AggregationTable() => RecordTable.For<AggregatedCustomer>(

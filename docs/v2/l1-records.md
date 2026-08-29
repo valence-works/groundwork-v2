@@ -47,7 +47,9 @@ var projection = orders.Select(
 ```
 
 The joined selector is terminal and may read direct scalar members, construct typed or anonymous
-results, or materialize both complete record parameters. It compiles once and retains the
+results, or materialize both complete record parameters when every persisted member has a portable
+query-scalar representation. A complete record containing a JSON/object member is refused before
+provider I/O; select its supported scalar members instead. The selector compiles once and retains the
 zero-reflection hot path. Providers expose joined fields as stable `table.column` keys internally;
 the compiled Records accessor consumes those qualified values without exposing SQL aliases or
 MongoDB's nested lookup document. Generic post-projection query composition is intentionally not
