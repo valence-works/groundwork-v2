@@ -66,6 +66,7 @@ public static class QueryResultMaterializer
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (source is null) throw new ArgumentNullException(nameof(source));
         var executionRequest = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
+        var requireQualifiedContinuationFields = executionRequest.Join is not null;
 
         var effectiveSource = source
             .Where(row => !row.TryGetValue("__groundwork_count_only", out var marker) || Convert.ToInt64(marker ?? 0, CultureInfo.InvariantCulture) == 0)
@@ -132,7 +133,9 @@ public static class QueryResultMaterializer
                 throw new QueryRenderException("GW-QUERY-013", "The keyset continuation token is invalid: " + exception.Message);
             }
             var order = options.GetEffectiveOrder(executionRequest);
-            effectiveSource = effectiveSource.Where(row => IsAfter(row, order, cursor)).ToArray();
+            effectiveSource = effectiveSource
+                .Where(row => IsAfter(row, order, cursor, requireQualifiedContinuationFields))
+                .ToArray();
         }
         // Providers apply Distinct and its page natively and return one look-ahead row; the
         // materializer owns only the final public projection and continuation token.
@@ -156,7 +159,12 @@ public static class QueryResultMaterializer
             for (var index = 0; index < effectiveOrder.Length; index++)
             {
                 var term = effectiveOrder[index];
-                if (!TryGetOrderValue(last, effectiveOrder, index, out var value))
+                if (!TryGetOrderValue(
+                        last,
+                        effectiveOrder,
+                        index,
+                        requireQualifiedContinuationFields,
+                        out var value))
                 {
                     values.Clear();
                     break;
@@ -206,12 +214,13 @@ public static class QueryResultMaterializer
     private static bool IsAfter(
         IReadOnlyDictionary<string, object?> row,
         IReadOnlyList<OrderTerm> order,
-        IReadOnlyList<QueryConstant> cursor)
+        IReadOnlyList<QueryConstant> cursor,
+        bool requireQualifiedContinuationFields)
     {
         for (var index = 0; index < order.Count; index++)
         {
             var term = order[index];
-            TryGetOrderValue(row, order, index, out var actual);
+            TryGetOrderValue(row, order, index, requireQualifiedContinuationFields, out var actual);
             var boundary = cursor[index].Kind == QueryConstantKind.Null ? null : cursor[index].Value;
             var comparison = CompareForOrder(actual, boundary, term);
             if (comparison > 0) return true;
@@ -224,6 +233,7 @@ public static class QueryResultMaterializer
         IReadOnlyDictionary<string, object?> row,
         IReadOnlyList<OrderTerm> order,
         int index,
+        bool requireQualifiedContinuationFields,
         out object? value)
     {
         var fieldName = QueryRequestExecution.ContinuationFieldName(index);
@@ -231,7 +241,8 @@ public static class QueryResultMaterializer
             return true;
 
         var column = order[index].Column;
-        if (order.Count(term => ColumnRefIdentity.SameName(term.Column, column)) > 1)
+        if (requireQualifiedContinuationFields &&
+            order.Count(term => ColumnRefIdentity.SameName(term.Column, column)) > 1)
         {
             throw new InvalidOperationException(
                 $"A joined provider result must expose continuation field '{fieldName}' for '{column}'.");

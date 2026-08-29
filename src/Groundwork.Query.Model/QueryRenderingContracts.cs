@@ -237,7 +237,10 @@ public sealed record QueryRenderOptions
     public string ResolvePhysicalIndexName(string logicalName) =>
         PhysicalIndexNames.TryGetValue(logicalName, out var physicalName) ? physicalName : logicalName;
 
-    /// <summary>Returns options with qualified driving identity columns appended as deterministic paging tie-breaks.</summary>
+    /// <summary>
+    /// Records the provider-resolved complete driving identity and appends it as deterministic
+    /// paging tie-breaks.
+    /// </summary>
     public QueryRenderOptions WithIdentityTieBreaks(IEnumerable<ColumnRef> identityColumns)
     {
         if (identityColumns is null)
@@ -245,10 +248,13 @@ public sealed record QueryRenderOptions
         var identitySnapshot = identityColumns.ToArray();
         if (identitySnapshot.Any(column => column is null))
             throw new ArgumentException("Driving identity columns cannot contain null references.", nameof(identityColumns));
-        var merged = TieBreakColumns
+        var candidates = TieBreakColumns
             .Concat(identitySnapshot)
             .Where(column => column is not null)
-            .GroupBy(column => (column.Table, column.Name))
+            .ToArray();
+        var preserveQualification = candidates.All(column => column.Table != TableId.Empty);
+        var merged = candidates
+            .GroupBy(column => (preserveQualification ? column.Table : TableId.Empty, column.Name))
             .Select(group => group.First())
             .ToImmutableArray();
         return this with

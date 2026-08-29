@@ -183,7 +183,7 @@ if (page.NextContinuationToken is { } token)
 }
 ```
 
-Three rules for correct pages:
+Four rules for correct pages:
 
 1. **Every order term must name its null rank.** `NullOrder.ProviderDefault` is refused
    (`GW-SEM-ORDER-004`).

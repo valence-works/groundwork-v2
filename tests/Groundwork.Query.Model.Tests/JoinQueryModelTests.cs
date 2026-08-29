@@ -107,6 +107,54 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_alias_rules_do_not_change_single_table_duplicate_order_compatibility()
+    {
+        var id = new ColumnRef("id", QueryType.Int64, isNullable: false);
+        var firstRequest = new QueryRequest(
+            Orders,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(id, nullOrder: NullOrder.Last), new OrderTerm(id, nullOrder: NullOrder.Last)],
+            Projection.ColumnsOnly(id),
+            Paging.Keyset(1));
+        IReadOnlyDictionary<string, object?>[] source =
+        [
+            new Dictionary<string, object?> { [id.Name] = 1L },
+            new Dictionary<string, object?> { [id.Name] = 2L }
+        ];
+
+        var first = QueryResultMaterializer.Materialize(
+            firstRequest,
+            QueryRenderOptions.Default,
+            source,
+            sourceIncludesContinuation: false);
+        var second = QueryResultMaterializer.Materialize(
+            new QueryRequest(
+                Orders,
+                Predicate.AlwaysTrue.Instance,
+                firstRequest.Order,
+                firstRequest.Projection,
+                Paging.Continuation(first.NextContinuationToken!, 1)),
+            QueryRenderOptions.Default,
+            source,
+            sourceIncludesContinuation: false);
+
+        Assert.Equal(1L, first.Rows.Single()[id.Name]);
+        Assert.Equal(2L, second.Rows.Single()[id.Name]);
+    }
+
+    [Fact]
+    public void Provider_identity_resolution_preserves_single_table_name_deduplication()
+    {
+        var unqualifiedId = new ColumnRef("id", QueryType.Guid, isNullable: false);
+        var supplied = new QueryRenderOptions(tieBreakColumns: [unqualifiedId]);
+
+        var resolved = supplied.WithIdentityTieBreaks([OrderId]);
+
+        Assert.Same(unqualifiedId, Assert.Single(resolved.TieBreakColumns));
+        Assert.Same(OrderId, Assert.Single(resolved.DrivingIdentityColumns));
+    }
+
+    [Fact]
     public void Joined_request_qualification_covers_predicates_order_reductions_and_latest_per_key()
     {
         var join = Join();
