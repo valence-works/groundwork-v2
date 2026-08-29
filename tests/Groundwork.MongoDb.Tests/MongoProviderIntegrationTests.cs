@@ -147,7 +147,9 @@ public sealed class MongoProviderIntegrationTests
             sourceFixture.Source,
             StorageAccess.Scoped(new StorageScope("tenant-a")),
             observer);
-        var metadata = Assert.IsType<MongoDbProviderConnection>(connection).Database
+        using var metadataConnection = Assert.IsType<MongoDbProviderConnection>(
+            new MongoDbProviderFactory().Create(connectionString!));
+        var metadata = metadataConnection.Database
             .GetCollection<BsonDocument>("__groundwork_metadata");
         metadata.DeleteOne(new BsonDocument(
             "_id",

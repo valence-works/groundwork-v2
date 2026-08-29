@@ -70,10 +70,10 @@ public sealed class QueryRendererTests
         var lookup = Assert.Single(mongo.Pipeline.Where(stage => stage.Names.Single() == "$lookup"))["$lookup"].AsBsonDocument;
         Assert.Equal("customers__scope__physical", lookup["from"].AsString);
         Assert.Equal("__groundwork_target", lookup["as"].AsString);
-        Assert.Equal(new[] { "__groundwork_join_source_0", "__groundwork_join_source_1" },
+        Assert.Equal(new[] { "groundwork_join_source_0", "groundwork_join_source_1" },
             lookup["let"].AsBsonDocument.Names.ToArray());
-        Assert.Equal("$customer_id", lookup["let"]["__groundwork_join_source_0"].AsString);
-        Assert.Equal("$customer_region", lookup["let"]["__groundwork_join_source_1"].AsString);
+        Assert.Equal("$customer_id", lookup["let"]["groundwork_join_source_0"].AsString);
+        Assert.Equal("$customer_region", lookup["let"]["groundwork_join_source_1"].AsString);
 
         var targetMatch = lookup["pipeline"].AsBsonArray[0]
             .AsBsonDocument["$match"].AsBsonDocument["$expr"].AsBsonDocument;
@@ -82,9 +82,9 @@ public sealed class QueryRendererTests
             .ToArray();
         Assert.Equal(2, equalities.Length);
         Assert.Equal(new BsonString("$id"), equalities[0][0]);
-        Assert.Equal(new BsonString("$$__groundwork_join_source_0"), equalities[0][1]);
+        Assert.Equal(new BsonString("$$groundwork_join_source_0"), equalities[0][1]);
         Assert.Equal(new BsonString("$region"), equalities[1][0]);
-        Assert.Equal(new BsonString("$$__groundwork_join_source_1"), equalities[1][1]);
+        Assert.Equal(new BsonString("$$groundwork_join_source_1"), equalities[1][1]);
         Assert.Contains(mongo.Pipeline, stage => stage.Contains("$unwind"));
     }
 

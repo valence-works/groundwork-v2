@@ -363,7 +363,7 @@ public sealed class MongoQueryRenderer
         for (var index = 0; index < join.ColumnPairs.Length; index++)
         {
             var pair = join.ColumnPairs[index];
-            var variable = "__groundwork_join_source_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var variable = "groundwork_join_source_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
             let.Add(variable, "$" + pair.Source.Name);
             equalities.Add(new BsonDocument("$eq", new BsonArray
             {
