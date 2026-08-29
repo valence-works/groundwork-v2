@@ -22,9 +22,18 @@ public sealed class SchemaVerificationResult
 public static class SchemaVerifier
 {
     public static SchemaVerificationResult Verify(string schemaJson, string? coverageInventoryJson = null)
+        => Verify(schemaJson, coverageInventoryJson, validateManifest: true);
+
+    internal static SchemaVerificationResult Verify(
+        string schemaJson,
+        string? coverageInventoryJson,
+        bool validateManifest)
     {
         var schema = GroundworkSchemaCanonical.Read(schemaJson);
-        var errors = SchemaCompilation.Compile(schema)
+        var units = validateManifest
+            ? SchemaCompilation.Compile(schema)
+            : schema.Tables.Select(SchemaCompilation.Compile).ToArray();
+        var errors = units
             .Select(SearchKeyProjection.Expand)
             .SelectMany(unit => PortabilityValidator.Validate(unit).Refusals)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path))

@@ -1,5 +1,7 @@
 namespace Groundwork.Kernel;
 
+internal sealed record ManifestReferenceFinding(StorageUnitId SourceUnitId, DeclarationFinding Finding);
+
 internal static class StorageReferenceValidation
 {
     internal static IReadOnlyList<DeclarationFinding> ValidateLocal(StorageUnit unit)
@@ -139,9 +141,12 @@ internal static class StorageReferenceValidation
     }
 
     internal static IReadOnlyList<DeclarationFinding> ValidateManifest(IReadOnlyList<StorageUnit> units)
+        => ValidateManifestBySource(units).Select(result => result.Finding).ToArray();
+
+    internal static IReadOnlyList<ManifestReferenceFinding> ValidateManifestBySource(IReadOnlyList<StorageUnit> units)
     {
         ArgumentNullException.ThrowIfNull(units);
-        var findings = new List<DeclarationFinding>();
+        var findings = new List<ManifestReferenceFinding>();
         var targets = units
             .GroupBy(unit => unit.Id.Value, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
@@ -153,14 +158,15 @@ internal static class StorageReferenceValidation
                     continue;
                 if (!targets.TryGetValue(reference.TargetUnitId.Value, out var matches) || matches.Length != 1)
                 {
-                    findings.Add(new DeclarationFinding(
+                    findings.Add(new ManifestReferenceFinding(source.Id, new DeclarationFinding(
                         "GW-DECL-REF-002",
                         $"Reference '{reference.Name}' on unit '{source.Id.Value}' must resolve to exactly one target " +
                         $"unit with logical id '{reference.TargetUnitId.Value}'.",
-                        $"references.{reference.Name}.targetUnitId"));
+                        $"references.{reference.Name}.targetUnitId")));
                     continue;
                 }
-                findings.AddRange(ValidateTarget(source, reference, matches[0]));
+                findings.AddRange(ValidateTarget(source, reference, matches[0])
+                    .Select(finding => new ManifestReferenceFinding(source.Id, finding)));
             }
         }
         return findings;

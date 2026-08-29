@@ -25,6 +25,9 @@ public static class PhysicalSchemaDiffPlanner
         if (legacyHistoryPolicy != LegacyPhysicalSchemaHistoryPolicy.RejectEntriesWithoutAppliedSnapshot)
             throw new ArgumentOutOfRangeException(nameof(legacyHistoryPolicy), legacyHistoryPolicy, null);
 
+        if (target.PlanningRefusals.Length != 0)
+            return PhysicalSchemaDiffPlan.Invalid(target, plannedAt, target.PlanningRefusals, phase: phase);
+
         if (history.HasLegacyHistory && history.AppliedState is null)
         {
             return PhysicalSchemaDiffPlan.Invalid(

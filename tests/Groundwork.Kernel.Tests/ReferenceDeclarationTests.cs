@@ -154,6 +154,34 @@ public sealed class ReferenceDeclarationTests
     }
 
     [Fact]
+    public void Reference_identity_participates_in_the_schema_subject_fingerprint()
+    {
+        var customers = new SchemaSubject(SourceBuilder()
+            .Reference("customer", new StorageUnitId("customer"), "customer_id")
+            .Build());
+        var accounts = new SchemaSubject(SourceBuilder()
+            .Reference("customer", new StorageUnitId("account"), "customer_id")
+            .Build());
+
+        Assert.NotEqual(customers.Fingerprint, accounts.Fingerprint);
+    }
+
+    [Fact]
+    public void Reference_declaration_order_does_not_change_the_schema_subject_fingerprint()
+    {
+        var customerThenAccount = new SchemaSubject(SourceBuilder()
+            .Reference("customer", new StorageUnitId("customer"), "customer_id")
+            .Reference("account", new StorageUnitId("account"), "customer_id")
+            .Build());
+        var accountThenCustomer = new SchemaSubject(SourceBuilder()
+            .Reference("account", new StorageUnitId("account"), "customer_id")
+            .Reference("customer", new StorageUnitId("customer"), "customer_id")
+            .Build());
+
+        Assert.Equal(customerThenAccount.Fingerprint, accountThenCustomer.Fingerprint);
+    }
+
+    [Fact]
     public void Applied_state_preserves_references_without_rewriting_legacy_empty_state()
     {
         var withoutReferences = AppliedState(SourceBuilder().Build());

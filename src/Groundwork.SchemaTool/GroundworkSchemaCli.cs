@@ -114,7 +114,8 @@ public static class GroundworkSchemaCli
             var coveragePath = Value(arguments, "--coverage");
             var verification = SchemaVerifier.Verify(
                 schemaJson,
-                coveragePath is null ? null : await File.ReadAllTextAsync(coveragePath, cancellationToken));
+                coveragePath is null ? null : await File.ReadAllTextAsync(coveragePath, cancellationToken),
+                validateManifest: command == "validate" && arguments.Contains("--offline", StringComparer.Ordinal));
             if (!verification.Succeeded)
             {
                 await WriteAsync(output, json, new SchemaToolReport(
@@ -407,6 +408,7 @@ public static class GroundworkSchemaCli
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
         false)
     {
+        References = DescribeReferences(target),
         Supersessions = Describe(readiness),
         Warnings = (inspection.ToleratedDrift.IsDefault ? [] : inspection.ToleratedDrift)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray()
@@ -433,7 +435,10 @@ public static class GroundworkSchemaCli
         result.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
         result.Plan.Refusals.Concat(result.AuthorizationRefusals)
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
-        result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete);
+        result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete)
+    {
+        References = DescribeReferences(target)
+    };
 
     /// <summary>
     /// One adoption's report. An adopted target reports the operations the plan would have executed
@@ -464,10 +469,20 @@ public static class GroundworkSchemaCli
         result.Refusals.Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path)).ToArray(),
         result.Outcome == PhysicalSchemaAdoptionOutcome.Adopted)
     {
+        References = DescribeReferences(target),
         Warnings = result.ToleratedDrift
             .Select(refusal => new SchemaVerificationError(refusal.Code, refusal.Message, refusal.Path))
             .ToArray()
     };
+
+    private static IReadOnlyList<SchemaToolReferenceReport> DescribeReferences(PhysicalSchemaTarget target) =>
+        target.Subject.References
+            .OrderBy(reference => reference.Name, StringComparer.Ordinal)
+            .Select(reference => new SchemaToolReferenceReport(
+                reference.Name,
+                reference.TargetUnitId.Value,
+                reference.Columns.ToArray()))
+            .ToArray();
 
     /// <summary>
     /// Reports pending versus applied data migrations for one target from provider-owned state. The
@@ -821,6 +836,12 @@ public sealed record SchemaToolSupersessionReport(
     string? BackfillCompletedAt,
     string? ContractableAt);
 
+/// <summary>A logical reference declaration attached to a schema target.</summary>
+public sealed record SchemaToolReferenceReport(
+    string Name,
+    string Target,
+    IReadOnlyList<string> Columns);
+
 public sealed record SchemaToolTargetReport(
     string Subject,
     string Fingerprint,
@@ -832,6 +853,9 @@ public sealed record SchemaToolTargetReport(
     IReadOnlyList<SchemaVerificationError> Diagnostics,
     bool Mutated)
 {
+    /// <summary>Logical-only references declared by this target, ordered by name.</summary>
+    public IReadOnlyList<SchemaToolReferenceReport> References { get; init; } = [];
+
     /// <summary>Recorded data-migration state for this target, pending first.</summary>
     public IReadOnlyList<SchemaToolDataMigrationReport> DataMigrations { get; init; } = [];
 

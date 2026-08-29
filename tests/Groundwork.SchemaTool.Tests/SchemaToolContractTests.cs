@@ -55,6 +55,77 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task An_undeclared_reference_target_is_a_plan_refusal()
+    {
+        var schema = Temp("missing-reference-target.json", """
+            {"tables":[{"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false},{"name":"customer_id","type":"Guid","nullable":false}],"key":["id"],"indexes":[{"name":"by_customer","columns":[{"name":"customer_id","descending":false}],"includeNulls":true,"unique":false}],"references":[{"name":"customer","target":"missing","columns":["customer_id"]}]}]}
+            """);
+
+        Assert.Equal(
+            SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"],
+                _ => new FakeSession()));
+
+        using var report = JsonDocument.Parse(output.ToString());
+        Assert.Equal("blocked", report.RootElement.GetProperty("outcome").GetString());
+        var target = Assert.Single(report.RootElement.GetProperty("targets").EnumerateArray());
+        Assert.Contains(
+            target.GetProperty("diagnostics").EnumerateArray(),
+            diagnostic => diagnostic.GetProperty("code").GetString() == "GW-DECL-REF-002");
+    }
+
+    [Fact]
+    public async Task A_reference_type_mismatch_blocks_apply_before_mutation()
+    {
+        var schema = Temp("mismatched-reference-target.json", """
+            {"tables":[{"name":"customers","columns":[{"name":"id","type":"Int64","nullable":false}],"key":["id"],"indexes":[]},{"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false},{"name":"customer_id","type":"Guid","nullable":false}],"key":["id"],"indexes":[{"name":"by_customer","columns":[{"name":"customer_id","descending":false}],"includeNulls":true,"unique":false}],"references":[{"name":"customer","target":"customers","columns":["customer_id"]}]}]}
+            """);
+        var session = new FakeSession();
+
+        Assert.Equal(
+            SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["apply", "--schema", schema, "--provider", "fake", "--safe", "--output", "json"],
+                _ => session));
+
+        using var report = JsonDocument.Parse(output.ToString());
+        Assert.Equal("blocked", report.RootElement.GetProperty("outcome").GetString());
+        var customers = Assert.Single(report.RootElement.GetProperty("targets").EnumerateArray(),
+            target => target.GetProperty("subject").GetString() == "customers");
+        var orders = Assert.Single(report.RootElement.GetProperty("targets").EnumerateArray(),
+            target => target.GetProperty("subject").GetString() == "orders");
+        Assert.Empty(customers.GetProperty("diagnostics").EnumerateArray());
+        Assert.Contains(
+            orders.GetProperty("diagnostics").EnumerateArray(),
+            diagnostic => diagnostic.GetProperty("code").GetString() == "GW-DECL-REF-004");
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+    }
+
+    [Fact]
+    public async Task Logical_references_appear_as_metadata_in_cli_plans()
+    {
+        var schema = Temp("reference-plan.json", """
+            {"tables":[{"name":"customers","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]},{"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false},{"name":"customer_id","type":"Guid","nullable":false}],"key":["id"],"indexes":[{"name":"by_customer","columns":[{"name":"customer_id","descending":false}],"includeNulls":true,"unique":false}],"references":[{"name":"customer","target":"customers","columns":["customer_id"]}]}]}
+            """);
+
+        Assert.Equal(
+            SchemaToolExitCodes.PendingChanges,
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"],
+                _ => new FakeSession()));
+
+        using var report = JsonDocument.Parse(output.ToString());
+        var orders = Assert.Single(report.RootElement.GetProperty("targets").EnumerateArray(),
+            target => target.GetProperty("subject").GetString() == "orders");
+        var reference = Assert.Single(orders.GetProperty("references").EnumerateArray());
+        Assert.Equal("customer", reference.GetProperty("name").GetString());
+        Assert.Equal("customers", reference.GetProperty("target").GetString());
+        Assert.Equal(new string?[] { "customer_id" }, reference.GetProperty("columns").EnumerateArray()
+            .Select(column => column.GetString()).ToArray());
+        Assert.DoesNotContain(
+            orders.GetProperty("pendingOperations").EnumerateArray(),
+            operation => operation.GetProperty("kind").GetString()!.Contains("Reference", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void An_offset_less_timestamp_default_reads_as_utc_on_any_machine()
     {
         var schema = ValidSchema.Replace(
