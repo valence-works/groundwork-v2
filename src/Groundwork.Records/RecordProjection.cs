@@ -74,7 +74,8 @@ internal static class RecordProjectionAccessor
         {
             if (node.Expression == source)
             {
-                var member = members.SingleOrDefault(candidate => candidate.Member == node.Member)
+                var member = members.SingleOrDefault(candidate =>
+                    string.Equals(candidate.Name, node.Member.Name, StringComparison.Ordinal))
                     ?? throw new ArgumentException($"Member '{node.Member.Name}' is not declared by this record table.", nameof(node));
                 return Expression.Call(
                     typeof(ProjectionVisitor),
@@ -181,7 +182,8 @@ internal static class RecordProjectionAccessor
             IReadOnlyList<RecordMember> members,
             IReadOnlyDictionary<string, ColumnRef> queryColumns)
         {
-            var member = members.SingleOrDefault(candidate => candidate.Member == selected)
+            var member = members.SingleOrDefault(candidate =>
+                string.Equals(candidate.Name, selected.Name, StringComparison.Ordinal))
                 ?? throw new ArgumentException($"Member '{selected.Name}' is not declared by this record table.", nameof(selected));
             if (!queryColumns.TryGetValue(member.Name, out var column))
                 throw new ArgumentException($"Member '{selected.Name}' is not a queryable scalar column.", nameof(selected));

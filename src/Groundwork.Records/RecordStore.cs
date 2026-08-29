@@ -40,11 +40,14 @@ public sealed partial class RecordTable<T>
     /// <summary>Closed query root using this table's declared names and query types.</summary>
     public IGwQueryable<T> Query => new GwQueryDatabase().Table(queryModel).Query;
 
-    /// <summary>Number of compiled accessors for this CLR row type (one per process).</summary>
+    /// <summary>Number of compatibility accessors compiled for this CLR row type (zero when generated).</summary>
     public static int AccessorCompilationCount => RecordAccessor<T>.CompilationCount;
 
-    /// <summary>Number of reflection-based member inspections for this CLR row type (one per process).</summary>
+    /// <summary>Number of compatibility reflection inspections for this CLR row type (zero when generated).</summary>
     public static int AccessorReflectionInspectionCount => RecordAccessor<T>.ReflectionInspectionCount;
+
+    /// <summary>Number of runtime accessor delegates compiled for this CLR row type.</summary>
+    public static int AccessorDynamicCodeGenerationCount => RecordAccessor<T>.DynamicCodeGenerationCount;
 
     public RowValues ToRowValues(T value)
     {

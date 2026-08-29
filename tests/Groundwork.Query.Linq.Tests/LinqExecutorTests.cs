@@ -3,6 +3,7 @@ using Groundwork.Kernel;
 using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
+using Groundwork.Schema;
 using Groundwork.Store;
 using Groundwork.Testing;
 using Xunit;
@@ -17,11 +18,16 @@ namespace Groundwork.Query.Linq.Tests;
 /// </summary>
 public sealed class LinqExecutorTests
 {
-    private sealed class Ticket
+    [GwTable("linq_executor")]
+    public sealed class Ticket
     {
+        [GwKey, GwColumn(Name = "id", Length = 32, Required = true)]
         public string Id { get; set; } = string.Empty;
+        [GwColumn(Name = "status", Length = 32)]
         public string? Status { get; set; }
+        [GwColumn(Name = "weight", Required = true)]
         public int Weight { get; set; }
+        [GwColumn(Name = "optional")]
         public long? Optional { get; set; }
         public string Unmapped = "untouched";
     }
@@ -135,6 +141,8 @@ public sealed class LinqExecutorTests
     public async Task Executor_materializes_mapped_columns_and_leaves_unmapped_members_alone()
     {
         using var fixture = Fixture.Open();
+        var dynamicCodeBefore = LinqRowMaterializer.DynamicCodeGenerationCount;
+        Assert.True(GwGeneratedRows.TryGet<Ticket>(out _));
 
         var rows = await fixture.Table.Query
             .Where(ticket => ticket.Status == "open")
@@ -146,6 +154,7 @@ public sealed class LinqExecutorTests
         Assert.Equal(7, row.Weight);
         Assert.Null(row.Optional);
         Assert.Equal("untouched", row.Unmapped);
+        Assert.Equal(dynamicCodeBefore, LinqRowMaterializer.DynamicCodeGenerationCount);
     }
 
     [Fact]

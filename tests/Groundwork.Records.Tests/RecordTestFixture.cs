@@ -1,9 +1,17 @@
 using Groundwork.Records;
+using Groundwork.Schema;
 
 namespace Groundwork.Records.Tests;
 
-public sealed record Customer(Guid Id, string Name, string Email)
+[GwTable("generated_customers")]
+public sealed record Customer
 {
+    public Customer(Guid id, string name, string email) => (Id, Name, Email) = (id, name, email);
+
+    [GwKey, GwColumn(Name = "id", Required = true)] public Guid Id { get; init; }
+    [GwColumn(Name = "name", Length = 200, Required = true)] public string Name { get; init; }
+    [GwColumn(Name = "email", Length = 320, Required = true)] public string Email { get; init; }
+
     public static Customer Create(string name, string email) =>
         new(Guid.NewGuid(), name, email);
 }

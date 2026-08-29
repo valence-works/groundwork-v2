@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Groundwork.Schema;
 using Groundwork.Schema.Generator;
+using Groundwork.Query.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Text;
@@ -42,6 +43,11 @@ public sealed class GeneratorContractTests
         Assert.Contains(result.Generated, generated => generated.Contains("OrdinalIgnoreCase", StringComparison.Ordinal));
         Assert.Contains(result.Generated, generated => generated.Contains(".Descending(\"created_at\")", StringComparison.Ordinal));
         Assert.Contains(result.Generated, generated => generated.Contains("ExcludeMissingValues()", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("GwGeneratedRows.Register", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("static value => value.Status", StringComparison.Ordinal));
+        Assert.Contains(result.Generated, generated => generated.Contains("\"CreatedAt\", \"createdAt\"", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("GetMember(", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains(".Compile()", StringComparison.Ordinal));
         Assert.DoesNotContain(result.Generated, generated => generated.Contains("MissingValues =", StringComparison.Ordinal));
 
         var assemblyAttribute = result.OutputCompilation.Assembly.GetAttributes()
@@ -85,6 +91,30 @@ public sealed class GeneratorContractTests
                         column.Direction == Groundwork.Kernel.SortDirection.Descending)),
                     index.MissingValues == Groundwork.Kernel.MissingValueBehavior.Included,
                     index.IsUnique)))])));
+    }
+
+    [Fact]
+    public void Schema_only_consumers_do_not_receive_runtime_row_registrations()
+    {
+        const string source = "using Groundwork.Schema; [GwTable(\"tickets\")] public sealed class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; }";
+
+        var result = RunCore(source, Array.Empty<AdditionalText>(), includeGeneratedRows: false);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("GwGeneratedRows", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Inaccessible_schema_types_keep_the_compatibility_path_without_breaking_generation()
+    {
+        const string source = "using Groundwork.Schema; public sealed class Owner { [GwTable(\"tickets\")] private sealed class Ticket { [GwKey, GwColumn] public string Id { get; set; } = \"\"; } }";
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.Generated, generated => generated.Contains("GwGeneratedRows.Register", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -578,11 +608,22 @@ public sealed class GeneratorContractTests
     }
 
     private static GeneratorRunResult Run(string source, params AdditionalText[] additionalFiles)
+        => RunCore(source, additionalFiles, includeGeneratedRows: true);
+
+    private static GeneratorRunResult RunCore(
+        string source,
+        IReadOnlyList<AdditionalText> additionalFiles,
+        bool includeGeneratedRows)
     {
+        var references = References(includeGeneratedRows
+            ? new[] { typeof(GroundworkSchemaAttribute), typeof(Groundwork.Kernel.StorageUnit), typeof(GwGeneratedRows), typeof(object) }
+            : new[] { typeof(GroundworkSchemaAttribute), typeof(Groundwork.Kernel.StorageUnit), typeof(object) });
+        if (!includeGeneratedRows)
+            references = references.Where(reference => !string.Equals(reference.Display, typeof(GwGeneratedRows).Assembly.Location, StringComparison.OrdinalIgnoreCase));
         var compilation = CSharpCompilation.Create(
             "GeneratorInput",
             [CSharpSyntaxTree.ParseText(SourceText.From(source, encoding: System.Text.Encoding.UTF8))],
-            References(typeof(GroundworkSchemaAttribute), typeof(Groundwork.Kernel.StorageUnit), typeof(object)),
+            references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         var driver = CSharpGeneratorDriver.Create(new SchemaGenerator())
             .AddAdditionalTexts(additionalFiles.ToImmutableArray());

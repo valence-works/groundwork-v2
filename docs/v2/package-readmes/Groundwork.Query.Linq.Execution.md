@@ -10,6 +10,11 @@ terminals. A second copy of that per provider would be a second place for the co
 drift, and the whole value of a *closed* query surface is that the guarantee holds identically
 everywhere.
 
+Rows declared with `[GwTable]` use the accessors emitted by `Groundwork.Schema.Generator`. The
+executor resolves the generated registration once per CLR type and materializes each provider row
+without `GetMember`, `Activator`, `Convert.ChangeType`, or expression-tree compilation. Ungenerated
+types retain the preview compatibility materializer outside the native-AOT path.
+
 What is genuinely provider-specific already lives with the provider: the SQL or query dialect,
 behind `IStorageSession.Query`, and the native budgets it advertises through
 `QueryAdmissionProfile`.

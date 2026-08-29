@@ -59,6 +59,10 @@ internal static class PublicApiApprovalFixture
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
         _ = typeof(GwReference<,>);
+        _ = typeof(GwGeneratedRowMember<>);
+        _ = typeof(GwGeneratedRowAccessor<>);
+        _ = typeof(GwGeneratedRows);
+        _ = typeof(GwGeneratedRowValue);
         _ = typeof(QueryCoverageException);
         _ = typeof(QueryCoverageCandidates);
         _ = typeof(RecordTable);
@@ -231,6 +235,7 @@ internal static class PublicApiApprovalFixture
         var recordCustomers = RecordTable.For<ApprovalCustomer>("approval_record_customers")
             .Key(customer => customer.Id)
             .Build();
+        _ = RecordTable<ApprovalCustomer>.AccessorDynamicCodeGenerationCount;
         var recordOrders = RecordTable.For<ApprovalOrder>("approval_record_orders")
             .Key(order => order.Id)
             .Index("by_customer", order => order.CustomerId)
