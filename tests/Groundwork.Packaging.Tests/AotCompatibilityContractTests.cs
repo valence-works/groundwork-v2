@@ -63,6 +63,40 @@ public sealed class AotCompatibilityContractTests
         Assert.Contains("\n\"$binary\"\n", verification.ReplaceLineEndings("\n"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Native_aot_sample_uses_generated_records_a_shipped_provider_and_package_only_evidence()
+    {
+        var root = RepositoryRoot.Find();
+        var sample = Path.Combine(root, "samples", "Groundwork.Samples.NativeAotApi");
+        var project = File.ReadAllText(Path.Combine(sample, "Groundwork.Samples.NativeAotApi.csproj"));
+        var program = File.ReadAllText(Path.Combine(sample, "Program.cs"));
+        var verification = File.ReadAllText(Path.Combine(sample, "verify-native-aot.sh"));
+        var aotWorkflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "aot.yml"));
+        var performanceWorkflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "performance.yml"));
+
+        Assert.Contains("<IsAotCompatible>true</IsAotCompatible>", project, StringComparison.Ordinal);
+        Assert.Contains("Groundwork.Schema.Generator", project, StringComparison.Ordinal);
+        Assert.Contains("Groundwork.Sqlite", project, StringComparison.Ordinal);
+        Assert.DoesNotContain("Groundwork.Testing", project, StringComparison.Ordinal);
+        Assert.Contains("'$(UsePackedGroundwork)' == 'true'", project, StringComparison.Ordinal);
+        Assert.Contains("RecordTable.FromGenerated", File.ReadAllText(Path.Combine(sample, "TodoItem.cs")), StringComparison.Ordinal);
+        Assert.Contains("WebApplication.CreateSlimBuilder", program, StringComparison.Ordinal);
+        Assert.Contains("BeginUnitOfWork", program, StringComparison.Ordinal);
+        Assert.Contains("QueryAsync", program, StringComparison.Ordinal);
+        Assert.Contains("dynamic_codegen=", program, StringComparison.Ordinal);
+        Assert.Contains("JsonSerializerContext", program, StringComparison.Ordinal);
+
+        Assert.Contains("-p:UsePackedGroundwork=true", verification, StringComparison.Ordinal);
+        Assert.Contains("-p:PublishAot=true", verification, StringComparison.Ordinal);
+        Assert.Contains("file \"$binary\"", verification, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_AOT_STARTUP_RUNS", verification, StringComparison.Ordinal);
+        Assert.Contains("wc -c", verification, StringComparison.Ordinal);
+        Assert.DoesNotContain("du -", verification, StringComparison.Ordinal);
+        Assert.Contains("samples/Groundwork.Samples.NativeAotApi/verify-native-aot.sh", aotWorkflow, StringComparison.Ordinal);
+        Assert.Contains("GROUNDWORK_AOT_STARTUP_RUNS", performanceWorkflow, StringComparison.Ordinal);
+        Assert.Contains("native-aot-sample", performanceWorkflow, StringComparison.Ordinal);
+    }
+
     private static IEnumerable<string> RuntimeLibraryProjects(string root) =>
         File.ReadAllLines(Path.Combine(root, "eng", "public-packages.txt"))
             .Where(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#'))

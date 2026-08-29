@@ -70,6 +70,11 @@ dotnet run --project samples/Groundwork.Samples.Api
 
 See its [README](samples/Groundwork.Samples.Api/README.md).
 
+`samples/Groundwork.Samples.NativeAotApi` is the SQLite-backed package-only Native AOT proof. It
+publishes to a real native executable, uses generated Records metadata with zero dynamic code, and
+records reproducible startup and deploy-size observations separately from correctness gates. See
+its [README](samples/Groundwork.Samples.NativeAotApi/README.md).
+
 ## Build
 
 ```shell

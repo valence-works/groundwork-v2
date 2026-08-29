@@ -210,6 +210,8 @@ internal static class PublicApiApprovalFixture
         };
         _ = new Func<Groundwork.Kernel.StorageUnit, string, QueryRenderOptions>(
             (unit, selectedIndex) => unit.CreateQueryRenderOptions(selectedIndex));
+        _ = new Func<Groundwork.Kernel.StorageUnit, RecordTable<ApprovalRecord>>(
+            RecordTable.FromGenerated<ApprovalRecord>);
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableSession<ApprovalRecord>>((table, connection) => table.Open(connection));
         _ = new Func<RecordTable<ApprovalRecord>, IStorageProviderConnection, RecordTableStoreUnitOfWork<ApprovalRecord>>((table, connection) => table.BeginUnitOfWork(connection, BatchWriteOptions.Exact));
         _ = new Func<DocumentUnit<ApprovalDocument>, ApprovalDocument, RowWrite>((unit, value) => unit.Insert(value, WriteOptions.CreateOnly));

@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2055;IL2060;IL2072;IL2087;IL2090;IL3050</WarningsAsErrors>
+    <RootNamespace>Groundwork.Samples.NativeAotApi</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Project references keep the checked-in sample buildable with the solution. The Native AOT
+       proof copies this project outside the repository and selects the package-only graph below,
+       so it tests exactly what a customer restores without propagating PublishAot into portable
+       netstandard source projects. -->
+  <ItemGroup Condition="'$(UsePackedGroundwork)' != 'true'">
+    <ProjectReference Include="../../src/Groundwork.Extensions.DependencyInjection/Groundwork.Extensions.DependencyInjection.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Records/Groundwork.Records.csproj" />
+    <ProjectReference Include="../../src/Groundwork.Schema/Groundwork.Schema.csproj"
+                      OutputItemType="Analyzer" />
+    <ProjectReference Include="../../src/Groundwork.Schema.Generator/Groundwork.Schema.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Groundwork.Sqlite/Groundwork.Sqlite.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UsePackedGroundwork)' == 'true'">
+    <PackageReference Include="Groundwork.Extensions.DependencyInjection" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Records" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Schema" Version="$(GroundworkVersion)" />
+    <PackageReference Include="Groundwork.Schema.Generator" Version="$(GroundworkVersion)" PrivateAssets="all" />
+    <PackageReference Include="Groundwork.Sqlite" Version="$(GroundworkVersion)" />
+  </ItemGroup>
+
+</Project>

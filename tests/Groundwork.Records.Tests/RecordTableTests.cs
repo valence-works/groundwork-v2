@@ -10,6 +10,25 @@ namespace Groundwork.Records.Tests;
 public sealed class RecordTableTests
 {
     [Fact]
+    public void Generated_declaration_creates_a_trim_safe_record_table()
+    {
+        var table = RecordTable.FromGenerated<Customer>(CustomerStorageUnit.Definition);
+
+        Assert.Same(CustomerStorageUnit.Definition, table.Definition);
+        Assert.Equal(0, RecordTable<Customer>.AccessorDynamicCodeGenerationCount);
+        Assert.True(Groundwork.Query.Linq.GwGeneratedRows.TryGet<Customer>(out _));
+    }
+
+    [Fact]
+    public void Generated_declaration_refuses_a_row_without_generated_metadata()
+    {
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            RecordTable.FromGenerated<UngeneratedRow>(CustomerStorageUnit.Definition));
+
+        Assert.Contains("Groundwork.Schema.Generator", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Mapping_compiles_accessors_once_and_round_trips_a_constructor_record()
     {
         var before = RecordTable<Customer>.AccessorCompilationCount;
@@ -656,3 +675,5 @@ public sealed class RecordTableTests
         }
     }
 }
+
+internal sealed record UngeneratedRow(Guid Id, string Name, string Email);

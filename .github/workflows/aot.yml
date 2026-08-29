@@ -41,3 +41,12 @@ jobs:
         run: eng/pack-public-packages.sh artifacts/aot-packages "0.2.0-aot.${GITHUB_RUN_ID}"
       - name: Publish and run the package-only Native AOT conformance executable
         run: tests/Groundwork.Aot.Conformance/verify-native-aot.sh artifacts/aot-packages linux-x64
+      - name: Publish and smoke-test the package-only Native AOT minimal API
+        run: samples/Groundwork.Samples.NativeAotApi/verify-native-aot.sh artifacts/aot-packages linux-x64
+      - name: Publish Native AOT sample evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-aot-sample-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/native-aot-sample/evidence.md
+          if-no-files-found: error
+          retention-days: 30

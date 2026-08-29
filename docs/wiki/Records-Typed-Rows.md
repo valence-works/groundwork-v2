@@ -171,6 +171,15 @@ materialization and registers them when the assembly loads. `ToRowValues` and `F
 those ordinary delegates with **zero runtime dynamic-code generation**. Fluent-only ungenerated
 types retain the preview compatibility fallback; source-generated accessors are the AOT path.
 
+Bind the generated accessor to the generator's declaration without reflection:
+
+```csharp
+var table = RecordTable.FromGenerated<Customer>(CustomerStorageUnit.Definition);
+```
+
+`FromGenerated` fails closed when the row has no registered generated metadata. Use this entry
+point, rather than `RecordTable.For<T>`, for a trimmed or Native AOT application.
+
 `FromRowValues` chooses a public constructor that can account for every read-only member, then
 applies compiled assignments to remaining writable members. Shapes that cannot initialize every
 declared member are refused.

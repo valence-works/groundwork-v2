@@ -64,7 +64,7 @@ jobs:
         run: |
           docker run --detach --name groundwork-performance-mongo --publish 27017:27017 \
             mongo:7.0.24 --replSet performancers --bind_ip_all
-          for attempt in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if docker exec groundwork-performance-mongo mongosh --quiet --eval \
               'rs.initiate({_id:"performancers",members:[{_id:0,host:"localhost:27017"}]})' 2>/dev/null; then
               break
@@ -73,6 +73,14 @@ jobs:
           done
           docker exec groundwork-performance-mongo mongosh --quiet --eval 'rs.status().ok' | grep -qx 1
       - run: dotnet restore Groundwork.slnx
+      - name: Pack the exact-head public packages for Native AOT evidence
+        run: eng/pack-public-packages.sh artifacts/aot-packages "0.2.0-aot-performance.${GITHUB_RUN_ID}"
+      - name: Measure the Native AOT minimal API
+        env:
+          GROUNDWORK_AOT_STARTUP_RUNS: 7
+        run: >-
+          samples/Groundwork.Samples.NativeAotApi/verify-native-aot.sh
+          artifacts/aot-packages linux-x64 artifacts/performance/native-aot-sample.md
       - name: Prepare evidence manifest
         env:
           EVIDENCE_REASON: ${{ inputs.reason }}

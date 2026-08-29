@@ -71,6 +71,9 @@
   <Folder Name="/samples/Groundwork.Samples.Api/">
     <Project Path="samples/Groundwork.Samples.Api/Groundwork.Samples.Api.csproj" />
   </Folder>
+  <Folder Name="/samples/Groundwork.Samples.NativeAotApi/">
+    <Project Path="samples/Groundwork.Samples.NativeAotApi/Groundwork.Samples.NativeAotApi.csproj" />
+  </Folder>
   <Folder Name="/samples/Groundwork.Samples.EventLog/">
     <Project Path="samples/Groundwork.Samples.EventLog/Groundwork.Samples.EventLog.csproj" />
   </Folder>
