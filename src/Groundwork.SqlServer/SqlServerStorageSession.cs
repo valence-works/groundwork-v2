@@ -19,6 +19,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private readonly SqlConnection connection;
     private readonly SqlTransaction? transaction;
     private readonly RelationalSessionExecution execution;
+    private readonly RelationalSessionPointReads pointReads;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
@@ -48,6 +49,15 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             ownsConnection,
             new SqlServerSessionExecutionAdapter(owner, connection),
             nameof(SqlServerStorageSession));
+        pointReads = new RelationalSessionPointReads(
+            unit,
+            access,
+            UserColumns,
+            VersionColumnDefinition,
+            Command,
+            new SqlServerPointReadAdapter(),
+            observer,
+            "sqlserver");
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -196,11 +206,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         ReadEntry(key, RelationalExecution.Asynchronous(cancellationToken));
 
     private ValueTask<StoredEntry?> ReadEntry(StorageKey key, RelationalExecution mode)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(async () => RelationalSessionPolicy.PublicEntry(await ReadCore(
-            key, mode, observerOperation: "sqlserver.read", isProbe: false).ConfigureAwait(false)), mode);
-    }
+        => Execute(() => pointReads.ReadPublic(key, mode), mode);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
         InsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -1663,21 +1669,13 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         RelationalExecution mode,
         string? observerOperation = null,
         bool exactStringKeys = false,
-        bool isProbe = true)
-    {
-        var (where, parameters) = KeyPredicate(key.Values, exactStringKeys);
-        var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
-        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
-        AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlserver.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
-        var reader = readerScope.Reader;
-        if (!(await mode.Read(reader).ConfigureAwait(false))) return null;
-        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        for (var i = 0; i < UserColumns.Count; i++) values[UserColumns[i].Name] = FromSqlServer(reader.GetValue(i), UserColumns[i]);
-        var version = VersionColumnDefinition is null ? (long?)null : Convert.ToInt64(reader.GetValue(UserColumns.Count), CultureInfo.InvariantCulture);
-        return new StoredEntry(new StorageValues(values), version);
-    }
+        bool isProbe = true) => await pointReads.Read(
+            key,
+            mode,
+            forUpdate: false,
+            observerOperation,
+            exactStringKeys,
+            isProbe).ConfigureAwait(false);
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
     {
@@ -1793,6 +1791,26 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
         public ValueTask Rollback(DbTransaction transaction, RelationalExecution execution) =>
             execution.Rollback(transaction);
+    }
+
+    private sealed class SqlServerPointReadAdapter : IRelationalPointReadAdapter
+    {
+        public string QuoteIdentifier(string identifier) => Quote(identifier);
+
+        public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys)
+        {
+            var equality = $"{Quote(column.Name)}={parameter}";
+            return exactStringKeys && column.Type == PortableType.String
+                ? $"DATALENGTH({Quote(column.Name)})=DATALENGTH({parameter}) AND {equality}"
+                : equality;
+        }
+
+        public void Bind(DbCommand command, string parameter, object? value, ColumnDefinition column) =>
+            SqlServerProviderConnection.AddParameter((SqlCommand)command, parameter, value, column);
+
+        public object? Decode(object value, ColumnDefinition column) => FromSqlServer(value, column);
+
+        public string LockingClause(bool forUpdate) => string.Empty;
     }
 }
 

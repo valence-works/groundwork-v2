@@ -17,6 +17,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly SqliteConnection connection;
     private readonly SqliteTransaction? transaction;
     private readonly RelationalSessionExecution execution;
+    private readonly RelationalSessionPointReads pointReads;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
@@ -49,6 +50,15 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             ownsConnection,
             new SqliteSessionExecutionAdapter(owner, connection, RollbackOrRetire),
             nameof(SqliteStorageSession));
+        pointReads = new RelationalSessionPointReads(
+            unit,
+            access,
+            UserColumns,
+            VersionColumnDefinition,
+            Command,
+            new SqlitePointReadAdapter(),
+            observer,
+            "sqlite");
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -254,10 +264,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     }
 
     public StoredEntry? Read(StorageKey key)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(() => RelationalSessionPolicy.PublicEntry(ReadCore(key, observerOperation: "sqlite.read", isProbe: false)));
-    }
+        => Execute(() => pointReads.ReadPublic(key, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
@@ -1466,19 +1474,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private StoredEntry? ReadCore(
         StorageKey key,
         string? observerOperation = null,
-        bool isProbe = true)
-    {
-        var (where, parameters) = KeyPredicate(key.Values);
-        var columns = UserColumns.Concat(VersionColumnDefinition is null ? [] : [VersionColumnDefinition]);
-        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where};");
-        AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "sqlite.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
-        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        for (var i = 0; i < UserColumns.Count; i++) values[UserColumns[i].Name] = FromSqlite(reader.GetValue(i), UserColumns[i]);
-        return new StoredEntry(new StorageValues(values), VersionColumnDefinition is null ? null : Convert.ToInt64(reader.GetValue(UserColumns.Count), CultureInfo.InvariantCulture));
-    }
+        bool isProbe = true) => pointReads.Read(
+            key,
+            RelationalExecution.Synchronous,
+            observerOperation: observerOperation,
+            isProbe: isProbe).GetAwaiter().GetResult();
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
     {
@@ -1618,6 +1618,23 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             rollback((SqliteTransaction)transaction);
             return default;
         }
+    }
+
+    private sealed class SqlitePointReadAdapter : IRelationalPointReadAdapter
+    {
+        public string QuoteIdentifier(string identifier) => Quote(identifier);
+
+        public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys) =>
+            $"{Quote(column.Name)}={parameter}";
+
+        public void Bind(DbCommand command, string parameter, object? value, ColumnDefinition column) =>
+            ((SqliteCommand)command).Parameters.AddWithValue(
+                parameter,
+                ToSqlite(value, column) ?? DBNull.Value);
+
+        public object? Decode(object value, ColumnDefinition column) => FromSqlite(value, column);
+
+        public string LockingClause(bool forUpdate) => string.Empty;
     }
 }
 

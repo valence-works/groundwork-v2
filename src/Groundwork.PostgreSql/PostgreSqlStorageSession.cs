@@ -18,6 +18,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly NpgsqlConnection connection;
     private readonly NpgsqlTransaction? transaction;
     private readonly RelationalSessionExecution execution;
+    private readonly RelationalSessionPointReads pointReads;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
@@ -52,6 +53,15 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             ownsConnection,
             new PostgreSqlSessionExecutionAdapter(owner, connection),
             nameof(PostgreSqlStorageSession));
+        pointReads = new RelationalSessionPointReads(
+            unit,
+            access,
+            UserColumns,
+            VersionColumn,
+            Command,
+            new PostgreSqlPointReadAdapter(this),
+            observer,
+            "postgresql");
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -169,11 +179,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         ReadEntry(key, RelationalExecution.Asynchronous(cancellationToken));
 
     private ValueTask<StoredEntry?> ReadEntry(StorageKey key, RelationalExecution mode)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(async () => RelationalSessionPolicy.PublicEntry(await ReadCore(
-            key, mode, observerOperation: "postgresql.read", isProbe: false).ConfigureAwait(false)), mode);
-    }
+        => Execute(() => pointReads.ReadPublic(key, mode), mode);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
         InsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -1405,24 +1411,13 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         RelationalExecution mode,
         bool forUpdate = false,
         string? observerOperation = null,
-        bool isProbe = true)
-    {
-        var (where, parameters) = KeyPredicate(key.Values);
-        var columns = UserColumns.Concat(VersionColumn is null ? [] : [VersionColumn]).ToArray();
-        var locking = forUpdate ? " FOR UPDATE" : string.Empty;
-        using var command = Command($"SELECT {string.Join(", ", columns.Select(column => Quote(column.Name)))} FROM {Quote(Unit.Name)} WHERE {where}{locking};");
-        AddParameters(command, parameters);
-        commandObserver?.Observe(new ProviderCommandEvent(observerOperation ?? "postgresql.write-probe", command.CommandText, ProviderCommandKind.Read, IsProbe: isProbe));
-        await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
-        var reader = readerScope.Reader;
-        if (!(await mode.Read(reader).ConfigureAwait(false)))
-            return null;
-        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        for (var index = 0; index < UserColumns.Count; index++)
-            values[UserColumns[index].Name] = FromDatabase(reader.GetValue(index), UserColumns[index]);
-        var version = VersionColumn is null ? (long?)null : reader.GetInt64(UserColumns.Count);
-        return new StoredEntry(new StorageValues(values), version);
-    }
+        bool isProbe = true) => await pointReads.Read(
+            key,
+            mode,
+            forUpdate,
+            observerOperation,
+            exactStringKeys: false,
+            isProbe).ConfigureAwait(false);
 
     private StorageKey KeyFromValues(IReadOnlyDictionary<string, object?> values) =>
         new(Unit.Key.Columns.Where(column => column != PostgreSqlSchemaCoordinator.ScopeColumn)
@@ -1601,6 +1596,22 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
         public ValueTask Rollback(DbTransaction transaction, RelationalExecution execution) =>
             execution.Rollback(transaction);
+    }
+
+    private sealed class PostgreSqlPointReadAdapter(
+        PostgreSqlStorageSession session) : IRelationalPointReadAdapter
+    {
+        public string QuoteIdentifier(string identifier) => Quote(identifier);
+
+        public string Equality(ColumnDefinition column, string parameter, bool exactStringKeys) =>
+            $"{Quote(column.Name)}={parameter}";
+
+        public void Bind(DbCommand command, string parameter, object? value, ColumnDefinition column) =>
+            session.Add((NpgsqlCommand)command, parameter.TrimStart('@'), ConvertValue(value, column), column.Name);
+
+        public object? Decode(object value, ColumnDefinition column) => FromDatabase(value, column);
+
+        public string LockingClause(bool forUpdate) => forUpdate ? " FOR UPDATE" : string.Empty;
     }
 
 }
