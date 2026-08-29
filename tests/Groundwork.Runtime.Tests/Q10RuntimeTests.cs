@@ -11,6 +11,9 @@ public sealed class Q10RuntimeTests
     private static readonly TableId Table = new("tickets");
     private static readonly ColumnRef Status = new(Table, "status", QueryType.String);
     private static readonly ColumnRef Assignee = new(Table, "assignee", QueryType.String);
+    private static readonly ColumnRef CustomerId = new(Table, "customer_id", QueryType.String, isNullable: false);
+    private static readonly TableId Customers = new("customers");
+    private static readonly ColumnRef TargetCustomerId = new(Customers, "id", QueryType.String, isNullable: false);
 
     [Fact]
     public void Legacy_two_argument_inspection_remains_safe_to_enumerate()
@@ -47,6 +50,34 @@ public sealed class Q10RuntimeTests
         var gate = new RuntimeCoverageGate([], [Index("ix_status", "status")]);
 
         Assert.False(gate.Check(request).Coverage.IsCovered);
+    }
+
+    [Fact]
+    public void Joined_runtime_coverage_intersects_declared_and_deployed_indexes_on_both_sides()
+    {
+        var request = new QueryRequest(
+            Table,
+            new ReferenceJoin("customer", Customers, [new JoinColumnPair(CustomerId, TargetCustomerId)]),
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [],
+            Projection.All,
+            Paging.OffsetLimit(0, 25));
+        var driving = Index("ix_status", "status");
+        var target = Index("ix_customers_id", "id");
+
+        var covered = new RuntimeCoverageGate(
+            Candidates([driving], [target]),
+            Candidates([driving], [target]));
+        var undeclaredTarget = new RuntimeCoverageGate(
+            Candidates([driving], []),
+            Candidates([driving], [target]));
+        var missingDeployedTarget = new RuntimeCoverageGate(
+            Candidates([driving], [target]),
+            Candidates([driving], []));
+
+        Assert.True(covered.Check(request).Coverage.IsCovered);
+        Assert.Equal("GW-COVER-006", undeclaredTarget.Check(request).Coverage.Refusal!.Code);
+        Assert.Equal("GW-COVER-006", missingDeployedTarget.Check(request).Coverage.Refusal!.Code);
     }
 
     [Fact]
@@ -173,6 +204,11 @@ public sealed class Q10RuntimeTests
 
     private static CoverageIndex Index(string name, params string[] columns) =>
         new(name, columns);
+
+    private static QueryCoverageCandidates Candidates(
+        IEnumerable<CoverageIndex> driving,
+        IEnumerable<CoverageIndex> target) =>
+        new(driving, target);
 
     private static PhysicalSchemaTarget Target(IReadOnlyList<IndexDefinition> indexes) =>
         new(

@@ -41,13 +41,13 @@ public sealed record RuntimeCoverageDecision(
     QueryCoverageResult Coverage);
 
 /// <summary>
-/// Runtime coverage gate. Declared indexes are intersected with the deployed declaration before
-/// calling the single Q3 checker; indexes that exist only in the database are never candidates.
+/// Runtime coverage gate. Declared indexes are intersected with the deployed declaration on each
+/// query side before calling the single Q3 checker; database-only indexes are never candidates.
 /// </summary>
 public sealed class RuntimeCoverageGate
 {
-    private readonly ImmutableArray<CoverageIndex> declaredIndexes;
-    private readonly ImmutableArray<CoverageIndex> deployedIndexes;
+    private readonly QueryCoverageCandidates declaredCandidates;
+    private readonly QueryCoverageCandidates deployedCandidates;
     private readonly ImmutableDictionary<string, RuntimeVerifiedShape> recognizedShapes;
     private readonly RuntimeCoverageGateOptions options;
     private readonly Action<RuntimeCoverageMetric>? metric;
@@ -61,9 +61,24 @@ public sealed class RuntimeCoverageGate
         IEnumerable<RuntimeVerifiedShape>? recognizedShapes = null,
         RuntimeCoverageGateOptions? options = null,
         Action<RuntimeCoverageMetric>? metric = null)
+        : this(
+            new QueryCoverageCandidates(declaredIndexes, []),
+            new QueryCoverageCandidates(deployedIndexes, []),
+            recognizedShapes,
+            options,
+            metric)
     {
-        this.declaredIndexes = Snapshot(declaredIndexes, nameof(declaredIndexes));
-        this.deployedIndexes = Snapshot(deployedIndexes, nameof(deployedIndexes));
+    }
+
+    public RuntimeCoverageGate(
+        QueryCoverageCandidates declaredCandidates,
+        QueryCoverageCandidates deployedCandidates,
+        IEnumerable<RuntimeVerifiedShape>? recognizedShapes = null,
+        RuntimeCoverageGateOptions? options = null,
+        Action<RuntimeCoverageMetric>? metric = null)
+    {
+        this.declaredCandidates = declaredCandidates ?? throw new ArgumentNullException(nameof(declaredCandidates));
+        this.deployedCandidates = deployedCandidates ?? throw new ArgumentNullException(nameof(deployedCandidates));
         this.recognizedShapes = (recognizedShapes ?? [])
             .ToImmutableDictionary(shape => shape.ShapeFingerprint, StringComparer.Ordinal);
         this.options = options ?? new RuntimeCoverageGateOptions();
@@ -81,9 +96,13 @@ public sealed class RuntimeCoverageGate
         }
     }
 
-    public ImmutableArray<CoverageIndex> DeclaredIndexes => declaredIndexes;
+    public ImmutableArray<CoverageIndex> DeclaredIndexes => declaredCandidates.Driving;
 
-    public ImmutableArray<CoverageIndex> DeployedIndexes => deployedIndexes;
+    public ImmutableArray<CoverageIndex> DeployedIndexes => deployedCandidates.Driving;
+
+    public QueryCoverageCandidates DeclaredCandidates => declaredCandidates;
+
+    public QueryCoverageCandidates DeployedCandidates => deployedCandidates;
 
     public RuntimeCoverageDecision Check(QueryRequest request)
     {
@@ -93,9 +112,9 @@ public sealed class RuntimeCoverageGate
         var shapeFingerprint = request.ShapeFingerprint;
         var candidates = EffectiveIndexes();
 
-        if (recognizedShapes.TryGetValue(shapeFingerprint, out var recognized))
+        if (request.Join is null && recognizedShapes.TryGetValue(shapeFingerprint, out var recognized))
         {
-            var deployedIndex = candidates.FirstOrDefault(index => SameIndex(index, recognized.VerifiedIndex));
+            var deployedIndex = candidates.Driving.FirstOrDefault(index => SameIndex(index, recognized.VerifiedIndex));
             if (deployedIndex is not null)
             {
                 // The generated evidence is authoritative only while its physical index remains.
@@ -159,10 +178,15 @@ public sealed class RuntimeCoverageGate
                 decision.Coverage);
     }
 
-    private ImmutableArray<CoverageIndex> EffectiveIndexes() =>
-        declaredIndexes
-            .Where(declared => deployedIndexes.Any(deployed => SameIndex(declared, deployed)))
-            .ToImmutableArray();
+    private QueryCoverageCandidates EffectiveIndexes() =>
+        new(
+            Intersect(declaredCandidates.Driving, deployedCandidates.Driving),
+            Intersect(declaredCandidates.Target, deployedCandidates.Target));
+
+    private static ImmutableArray<CoverageIndex> Intersect(
+        ImmutableArray<CoverageIndex> declared,
+        ImmutableArray<CoverageIndex> deployed) =>
+        declared.Where(item => deployed.Any(candidate => SameIndex(item, candidate))).ToImmutableArray();
 
     private static bool SameIndex(CoverageIndex left, CoverageIndex right) =>
         string.Equals(left.Name, right.Name, StringComparison.Ordinal) &&
@@ -172,15 +196,4 @@ public sealed class RuntimeCoverageGate
             string.Equals(pair.column.Column, right.Columns[pair.index].Column, StringComparison.Ordinal) &&
             pair.column.Direction == right.Columns[pair.index].Direction);
 
-    private static ImmutableArray<CoverageIndex> Snapshot(
-        IEnumerable<CoverageIndex> indexes,
-        string parameterName)
-    {
-        if (indexes is null)
-            throw new ArgumentNullException(parameterName);
-        var snapshot = indexes.ToImmutableArray();
-        if (snapshot.Any(index => index is null))
-            throw new ArgumentException("Coverage indexes cannot contain null references.", parameterName);
-        return snapshot;
-    }
 }

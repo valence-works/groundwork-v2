@@ -19,6 +19,13 @@ public sealed class CoverageCheckerTests
     private static readonly ColumnRef Enabled = new(Table, "enabled", QueryType.Boolean, isNullable: false);
     private static readonly ColumnRef Weight = new(Table, "weight", QueryType.Double);
     private static readonly ColumnRef Payload = new(Table, "payload", QueryType.Binary);
+    private static readonly TableId Customers = new("customers");
+    private static readonly ColumnRef CustomerId = new(Table, "customer_id", QueryType.String, isNullable: false);
+    private static readonly ColumnRef CustomerRegion = new(Table, "customer_region", QueryType.String, isNullable: false);
+    private static readonly ColumnRef TargetId = new(Customers, "id", QueryType.String, isNullable: false);
+    private static readonly ColumnRef TargetRegion = new(Customers, "region", QueryType.String, isNullable: false);
+    private static readonly ColumnRef TargetStatus = new(Customers, "status", QueryType.String);
+    private static readonly ColumnRef TargetName = new(Customers, "name", QueryType.String);
 
     [Fact]
     public void Equality_prefix_and_ordered_suffix_are_covered()
@@ -32,6 +39,250 @@ public sealed class CoverageCheckerTests
         Assert.True(result.IsCovered, result.Refusal?.Message);
         Assert.Equal("ix_status_created", result.Index!.Name);
         Assert.Empty(result.Refusals);
+    }
+
+    [Fact]
+    public void Joined_query_requires_covered_driving_and_target_sides()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")));
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index("ix_customers_id", "id")]));
+
+        Assert.True(result.IsCovered, result.Refusal?.Message);
+        Assert.Equal("ix_tickets_status", result.Index!.Name);
+    }
+
+    [Theory]
+    [MemberData(nameof(UncoveredTargetJoinPrefixes))]
+    public void Joined_query_refuses_incomplete_reordered_or_nonleading_target_join_prefix(
+        CoverageIndex targetIndex)
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            composite: true);
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [targetIndex]));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+        Assert.Contains("target", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("prefix", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Joined_target_predicate_and_order_are_covered_by_the_join_index_suffix()
+    {
+        var request = JoinedRequest(
+            new Predicate.And([
+                new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+                new Predicate.Equal(TargetStatus, QueryConstant.Of(TargetStatus, "active"))]),
+            [
+                new OrderTerm(Status, OrderDirection.Ascending, NullOrder.First),
+                new OrderTerm(TargetName, OrderDirection.Descending, NullOrder.Last)
+            ]);
+
+        var covered = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index(
+                    "ix_customers_id_status_name",
+                    "id",
+                    "status",
+                    new CoverageIndexColumn("name", OrderDirection.Descending))]));
+        var missingPredicate = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index("ix_customers_id_name", "id", new CoverageIndexColumn("name", OrderDirection.Descending))]));
+
+        Assert.True(covered.IsCovered, covered.Refusal?.Message);
+        Assert.False(missingPredicate.IsCovered);
+        Assert.Equal("GW-COVER-006", missingPredicate.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Joined_target_only_order_is_refused_before_independent_side_checks()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [new OrderTerm(TargetName, OrderDirection.Ascending, NullOrder.First)]);
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index("ix_customers_id_name", "id", "name")]));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+        Assert.Contains("driving", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("order", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Joined_order_cannot_return_to_the_driving_side_after_a_target_term()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+            [
+                new OrderTerm(Status, OrderDirection.Ascending, NullOrder.First),
+                new OrderTerm(TargetName, OrderDirection.Ascending, NullOrder.First),
+                new OrderTerm(Created, OrderDirection.Ascending, NullOrder.First)
+            ]);
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status_created", "status", "created_at")],
+                [Index("ix_customers_id_name", "id", "name")]));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+        Assert.Contains("contiguous", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Joined_target_range_must_follow_the_complete_join_prefix()
+    {
+        var request = JoinedRequest(
+            new Predicate.And([
+                new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+                new Predicate.Range(TargetName, Bound.Inclusive(QueryConstant.Of(TargetName, "m")), null)]),
+            [
+                new OrderTerm(Status, OrderDirection.Ascending, NullOrder.First),
+                new OrderTerm(TargetName, OrderDirection.Ascending, NullOrder.First)
+            ]);
+
+        var covered = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index("ix_customers_id_name", "id", "name")]));
+        var skipped = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index("ix_customers_id_status_name", "id", "status", "name")]));
+
+        Assert.True(covered.IsCovered, covered.Refusal?.Message);
+        Assert.False(skipped.IsCovered);
+        Assert.Equal("GW-COVER-006", skipped.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Target_only_bound_does_not_hide_an_unbounded_driving_scan()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(TargetStatus, QueryConstant.Of(TargetStatus, "active")));
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index("ix_customers_id_status", "id", "status")]));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-005", result.Refusal!.Code);
+    }
+
+    [Fact]
+    public void Source_indexes_cannot_rescue_a_missing_target_index()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")));
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_source_that_looks_like_target", "status", "id")],
+                []));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+        Assert.Contains("target", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Joined_predicate_disjunction_cannot_cross_table_sides()
+    {
+        var request = JoinedRequest(
+            new Predicate.Or([
+                new Predicate.Equal(Status, QueryConstant.Of(Status, "open")),
+                new Predicate.Equal(TargetStatus, QueryConstant.Of(TargetStatus, "active"))]));
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [Index("ix_customers_id_status", "id", "status")]));
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-016", result.Refusal!.Code);
+        Assert.Contains("both sides", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Correlated_target_key_proves_a_sparse_join_prefix_is_present()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")));
+        var sparseTarget = new CoverageIndex(
+            "ix_customers_id",
+            [new CoverageIndexColumn("id")],
+            IndexMissingValueBehavior.Excluded);
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            Candidates(
+                [Index("ix_tickets_status", "status")],
+                [sparseTarget]));
+
+        Assert.True(result.IsCovered, result.Refusal?.Message);
+    }
+
+    [Fact]
+    public void Runtime_enforcer_uses_the_same_side_aware_join_verdict()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")));
+        var covered = Candidates(
+            [Index("ix_tickets_status", "status")],
+            [Index("ix_customers_id", "id")]);
+
+        QueryCoverageEnforcer.EnsureCovered(request, covered, DateTimeOffset.UtcNow);
+        var exception = Assert.Throws<QueryCoverageException>(() =>
+            QueryCoverageEnforcer.EnsureCovered(
+                request,
+                Candidates(covered.Driving, []),
+                DateTimeOffset.UtcNow));
+
+        Assert.Equal("GW-COVER-006", exception.Code);
+        Assert.Contains("target", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void The_single_table_overload_fails_closed_for_a_join()
+    {
+        var request = JoinedRequest(
+            new Predicate.Equal(Status, QueryConstant.Of(Status, "open")));
+
+        var result = QueryCoverageChecker.Check(
+            request,
+            [Index("ix_tickets_status_id", "status", "id")]);
+
+        Assert.False(result.IsCovered);
+        Assert.Equal("GW-COVER-006", result.Refusal!.Code);
+        Assert.Contains("target", result.Refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -702,6 +953,24 @@ public sealed class CoverageCheckerTests
     }
 
     [Fact]
+    public void Joined_candidate_collections_are_validated_immutable_snapshots()
+    {
+        var driving = new List<CoverageIndex> { Index("ix_status", "status") };
+        var target = new List<CoverageIndex> { Index("ix_customer_id", "id") };
+
+        var candidates = new QueryCoverageCandidates(driving, target);
+        driving.Clear();
+        target.Clear();
+
+        Assert.Single(candidates.Driving);
+        Assert.Single(candidates.Target);
+        Assert.Throws<ArgumentNullException>(() => new QueryCoverageCandidates(null!, []));
+        Assert.Throws<ArgumentNullException>(() => new QueryCoverageCandidates([], null!));
+        Assert.Throws<ArgumentException>(() => new QueryCoverageCandidates([null!], []));
+        Assert.Throws<ArgumentException>(() => new QueryCoverageCandidates([], [null!]));
+    }
+
+    [Fact]
     public void Planning_assembly_is_netstandard_and_has_one_checker_without_provider_or_ado_references()
     {
         var assembly = typeof(QueryCoverageChecker).Assembly;
@@ -719,6 +988,34 @@ public sealed class CoverageCheckerTests
         Assert.Equal(typeof(QueryCoverageChecker), implementations[0]);
     }
 
+    public static TheoryData<CoverageIndex> UncoveredTargetJoinPrefixes => new()
+    {
+        Index("ix_customers_partial", "id"),
+        Index("ix_customers_reordered", "region", "id"),
+        Index("ix_customers_nonleading", "status", "id", "region")
+    };
+
+    private static QueryRequest JoinedRequest(
+        Predicate predicate,
+        ImmutableArray<OrderTerm> order = default,
+        bool composite = false)
+    {
+        var pairs = composite
+            ? new[]
+            {
+                new JoinColumnPair(CustomerId, TargetId),
+                new JoinColumnPair(CustomerRegion, TargetRegion)
+            }
+            : [new JoinColumnPair(CustomerId, TargetId)];
+        return new QueryRequest(
+            Table,
+            new ReferenceJoin("customer", Customers, pairs),
+            predicate,
+            order.IsDefault ? [] : order,
+            Projection.All,
+            Paging.OffsetLimit(0, 25));
+    }
+
     private static QueryCoverageResult Check(
         Predicate predicate,
         ImmutableArray<OrderTerm> order,
@@ -730,6 +1027,11 @@ public sealed class CoverageCheckerTests
         QueryCoverageChecker.Check(
             new QueryRequest(Table, predicate, order, projection ?? Projection.All, paging, result ?? ResultShape.Rows.Instance, distinct: distinct),
             [index]);
+
+    private static QueryCoverageCandidates Candidates(
+        IEnumerable<CoverageIndex> driving,
+        IEnumerable<CoverageIndex> target) =>
+        new(driving, target);
 
     private static CoverageIndex Index(string name, params object[] columns) =>
         new(

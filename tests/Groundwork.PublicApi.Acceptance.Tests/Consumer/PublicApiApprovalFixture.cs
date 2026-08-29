@@ -50,6 +50,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(ProviderOwnedColumns);
         _ = typeof(QueryRequest);
         _ = typeof(QueryCoverageException);
+        _ = typeof(QueryCoverageCandidates);
         _ = typeof(RecordTable);
         _ = typeof(RecordTableStoreUnitOfWork<>);
         _ = typeof(RecordWriteOptions);
@@ -192,6 +193,9 @@ internal static class PublicApiApprovalFixture
             (query, executor) => query.MaxAsync(executor, row => row.Id));
         _ = new Func<string, IStorageProviderConnection>(connectionString => new InMemoryProviderFactory().Create(connectionString));
         _ = new Func<QueryRequest, RuntimeCoverageGate>(request => new RuntimeCoverageGate([], []).Check(request) is not null ? new RuntimeCoverageGate([], []) : throw new InvalidOperationException());
+        _ = new Func<QueryRequest, QueryCoverageCandidates, QueryCoverageResult>(QueryCoverageChecker.Check);
+        _ = new Func<QueryCoverageCandidates, QueryCoverageCandidates, RuntimeCoverageGate>(
+            (declared, deployed) => new RuntimeCoverageGate(declared, deployed));
     }
 
     private sealed record ApprovalRecord(Guid Id, string Value);

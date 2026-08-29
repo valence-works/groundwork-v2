@@ -102,6 +102,41 @@ public sealed record CoverageIndex
     private static string DirectionName(OrderDirection direction) => direction == OrderDirection.Ascending ? "ASC" : "DESC";
 }
 
+/// <summary>
+/// The table-scoped index candidates used to prove a query with one declared reference join.
+/// </summary>
+/// <remarks>
+/// A coverage index is intentionally provider- and table-neutral. This context keeps driving and
+/// target declarations separate so an index from one side can never be used as evidence for the
+/// other. Both collections are immutable snapshots.
+/// </remarks>
+public sealed class QueryCoverageCandidates
+{
+    public QueryCoverageCandidates(
+        IEnumerable<CoverageIndex> driving,
+        IEnumerable<CoverageIndex> target)
+    {
+        Driving = Snapshot(driving, nameof(driving));
+        Target = Snapshot(target, nameof(target));
+    }
+
+    public ImmutableArray<CoverageIndex> Driving { get; }
+
+    public ImmutableArray<CoverageIndex> Target { get; }
+
+    private static ImmutableArray<CoverageIndex> Snapshot(
+        IEnumerable<CoverageIndex> indexes,
+        string parameterName)
+    {
+        if (indexes is null)
+            throw new ArgumentNullException(parameterName);
+        var snapshot = indexes.ToImmutableArray();
+        if (snapshot.Any(index => index is null))
+            throw new ArgumentException("Coverage indexes cannot contain null references.", parameterName);
+        return snapshot;
+    }
+}
+
 /// <summary>A single provider-neutral planning diagnostic.</summary>
 public sealed record CoverageRefusal
 {

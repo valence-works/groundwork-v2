@@ -20,7 +20,43 @@ public static class QueryCoverageChecker
         if (candidates.Any(index => index is null))
             throw new ArgumentException("Index candidates cannot contain null references.", nameof(indexes));
 
-        var constraints = ConstraintSet.Create(request.Where);
+        if (request.Join is not null)
+        {
+            return JoinedRefusal(
+                "target side",
+                new Refusal(
+                    "GW-COVER-006",
+                    "Target-side index candidates were not supplied; the target join columns must be a declared index prefix."),
+                null,
+                null);
+        }
+
+        return CheckSingle(request, candidates);
+    }
+
+    /// <summary>
+    /// Checks a query against candidates kept separate for the driving and target tables.
+    /// </summary>
+    public static QueryCoverageResult Check(QueryRequest request, QueryCoverageCandidates candidates)
+    {
+        if (request is null)
+            throw new ArgumentNullException(nameof(request));
+        if (candidates is null)
+            throw new ArgumentNullException(nameof(candidates));
+
+        return request.Join is null
+            ? CheckSingle(request, candidates.Driving)
+            : CheckJoined(request, candidates);
+    }
+
+    private static QueryCoverageResult CheckSingle(
+        QueryRequest request,
+        ImmutableArray<CoverageIndex> candidates,
+        ConstraintSet? suppliedConstraints = null,
+        ImmutableArray<string> requiredPrefix = default)
+    {
+
+        var constraints = suppliedConstraints ?? ConstraintSet.Create(request.Where);
         var hasNonportableOrder = request.Order.Any(order =>
             order.NullOrder == NullOrder.ProviderDefault ||
             order.Column.Type is QueryType.Boolean or QueryType.Double or QueryType.Binary);
@@ -94,10 +130,12 @@ public static class QueryCoverageChecker
             .Select(index => new
             {
                 Index = index,
+                HasRequiredPrefix = requiredPrefix.IsDefaultOrEmpty || NamesEqual(index.Columns, 0, requiredPrefix),
                 Score = Score(index, request, constraints),
-                Failure = refusals.Any() ? null : CheckIndex(request, constraints, index)
+                Failure = refusals.Any() ? null : CheckIndex(request, constraints, index, requiredPrefix)
             })
-            .OrderByDescending(candidate => candidate.Score)
+            .OrderByDescending(candidate => candidate.HasRequiredPrefix)
+            .ThenByDescending(candidate => candidate.Score)
             .ThenBy(candidate => candidate.Failure?.Priority ?? int.MaxValue)
             .ThenBy(candidate => candidate.Index.Name, StringComparer.Ordinal)
             .ToArray();
@@ -117,13 +155,149 @@ public static class QueryCoverageChecker
         var nearestFailure = evaluated.FirstOrDefault(candidate => candidate.Failure is not null);
         var nearest = nearestFailure?.Index ?? evaluated.FirstOrDefault()?.Index;
         var failure = refusals.FirstOrDefault() ?? nearestFailure?.Failure ??
-            new Refusal("GW-COVER-006", "No candidate index covers the query shape.");
+            (requiredPrefix.IsDefaultOrEmpty
+                ? new Refusal("GW-COVER-006", "No candidate index covers the query shape.")
+                : new Refusal("GW-COVER-006", "No target candidate index has the required join-column prefix."));
         var refusal = new CoverageRefusal(
             failure.Code,
             BuildMessage(request, failure.Message, nearest, suggested, isPointRead),
             nearest,
             suggested);
         return new QueryCoverageResult(CoverageDecision.Refuse, null, [refusal], failure.Message);
+    }
+
+    private static QueryCoverageResult CheckJoined(
+        QueryRequest request,
+        QueryCoverageCandidates candidates)
+    {
+        var join = request.Join!;
+        if (request.Where is Predicate.AlwaysFalse)
+        {
+            var emptyResult = CheckSingle(CreateSideRequest(
+                request,
+                request.Table,
+                request.Where,
+                request.Order,
+                request.Projection,
+                request.Result,
+                request.Distinct), candidates.Driving);
+            return emptyResult.IsCovered && request.AcceptedScan?.Allowed == true
+                ? StaleAcceptance(request, null, null)
+                : emptyResult;
+        }
+
+        var partition = PredicatePartition.Create(request.Where, request.Table, join.TargetTable);
+        if (partition.Failure is not null)
+            return JoinedRefusal("both sides", partition.Failure, null, null);
+
+        var order = JoinedOrderPartition.Create(request.Order, request.Table, join.TargetTable);
+        if (order.Failure is not null)
+            return JoinedRefusal("both sides", order.Failure, null, null);
+
+        var drivingRequest = CreateSideRequest(
+            request,
+            request.Table,
+            partition.Driving,
+            order.Driving,
+            SideProjection(request.Projection, request.Table),
+            SideResult(request.Result, request.Table, keepCardinalityShape: true),
+            SideDistinct(request, request.Table));
+        var drivingResult = CheckSingle(drivingRequest, candidates.Driving);
+        if (!drivingResult.IsCovered)
+            return JoinedRefusal("driving side", drivingResult);
+
+        var targetRequest = CreateSideRequest(
+            request,
+            join.TargetTable,
+            partition.Target,
+            order.Target,
+            SideProjection(request.Projection, join.TargetTable),
+            SideResult(request.Result, join.TargetTable, keepCardinalityShape: false),
+            SideDistinct(request, join.TargetTable));
+        var targetConstraints = ConstraintSet.Create(partition.Target)
+            .WithCorrelatedEqualities(join.ColumnPairs.Select(pair => pair.Target.Name));
+        var targetResult = CheckSingle(
+            targetRequest,
+            candidates.Target,
+            targetConstraints,
+            join.ColumnPairs.Select(pair => pair.Target.Name).ToImmutableArray());
+        if (!targetResult.IsCovered)
+            return JoinedRefusal("target side", targetResult);
+
+        if (request.AcceptedScan?.Allowed == true)
+            return StaleAcceptance(request, drivingResult.Index, null);
+
+        return new QueryCoverageResult(
+            CoverageDecision.Covered,
+            drivingResult.Index,
+            Array.Empty<CoverageRefusal>(),
+            "The driving query and target lookup are covered by their respective declared index prefixes.");
+    }
+
+    private static QueryRequest CreateSideRequest(
+        QueryRequest request,
+        TableId table,
+        Predicate predicate,
+        ImmutableArray<OrderTerm> order,
+        Projection projection,
+        ResultShape result,
+        bool distinct) =>
+        new(
+            table,
+            predicate,
+            order,
+            projection,
+            request.Paging,
+            result,
+            latestPerKey: null,
+            acceptedScan: null,
+            distinct: distinct);
+
+    private static Projection SideProjection(Projection projection, TableId table) =>
+        projection.AllColumns
+            ? Projection.All
+            : Projection.ColumnsOnly(projection.Columns.Where(column => column.Table == table));
+
+    private static bool SideDistinct(QueryRequest request, TableId table) =>
+        request.Distinct &&
+        (request.Projection.AllColumns || request.Projection.Columns.Any(column => column.Table == table));
+
+    private static ResultShape SideResult(
+        ResultShape result,
+        TableId table,
+        bool keepCardinalityShape) =>
+        result is ResultShape.Reduction reduction
+            ? reduction.Column.Table == table ? result : ResultShape.Rows.Instance
+            : keepCardinalityShape ? result : ResultShape.Rows.Instance;
+
+    private static QueryCoverageResult JoinedRefusal(
+        string side,
+        QueryCoverageResult result)
+    {
+        var refusal = result.Refusal ?? new CoverageRefusal(
+            "GW-COVER-006",
+            result.Reason,
+            result.Index,
+            null);
+        return JoinedRefusal(
+            side,
+            new Refusal(refusal.Code, refusal.Message),
+            refusal.NearestIndex,
+            refusal.SuggestedIndex);
+    }
+
+    private static QueryCoverageResult JoinedRefusal(
+        string side,
+        Refusal failure,
+        CoverageIndex? nearest,
+        CoverageIndex? suggested)
+    {
+        var message = "Joined query " + side + " is not index-covered. " + failure.Message;
+        return new QueryCoverageResult(
+            CoverageDecision.Refuse,
+            null,
+            [new CoverageRefusal(failure.Code, message, nearest, suggested)],
+            message);
     }
 
     private static QueryCoverageResult StaleAcceptance(
@@ -160,8 +334,20 @@ public static class QueryCoverageChecker
                " Or mark the read: .AcceptScan(\"GW-SCAN-nnnn\", reason: \"reason\", owner: \"team\", expiresOn: \"yyyy-MM-dd\").";
     }
 
-    private static Refusal? CheckIndex(QueryRequest request, ConstraintSet constraints, CoverageIndex index)
+    private static Refusal? CheckIndex(
+        QueryRequest request,
+        ConstraintSet constraints,
+        CoverageIndex index,
+        ImmutableArray<string> requiredPrefix)
     {
+        if (!requiredPrefix.IsDefaultOrEmpty && !NamesEqual(index.Columns, 0, requiredPrefix))
+        {
+            return new Refusal(
+                "GW-COVER-006",
+                "The target join columns must be the complete leading prefix of the target index in declared key order.",
+                Priority: 0);
+        }
+
         if (index.MissingValues == IndexMissingValueBehavior.Excluded &&
             index.Columns.Any(column => column.IsNullable && !constraints.ProvesNonNull(column.Column)))
         {
@@ -228,7 +414,7 @@ public static class QueryCoverageChecker
                     Priority: 1);
             }
             if (sort.SkippedEqualityCount > 0 &&
-                !constraints.AreSingleValueEqualities(sort.SkippedEqualityCount, index))
+                !constraints.AreBoundEqualities(sort.SkippedEqualityCount, index))
             {
                 return new Refusal(
                     "GW-COVER-006",
@@ -401,6 +587,139 @@ public static class QueryCoverageChecker
 
     private sealed record Refusal(string Code, string Message, int Priority = 10);
 
+    private sealed record JoinedOrderPartition(
+        ImmutableArray<OrderTerm> Driving,
+        ImmutableArray<OrderTerm> Target,
+        Refusal? Failure)
+    {
+        public static JoinedOrderPartition Create(
+            ImmutableArray<OrderTerm> order,
+            TableId drivingTable,
+            TableId targetTable)
+        {
+            var driving = ImmutableArray.CreateBuilder<OrderTerm>();
+            var target = ImmutableArray.CreateBuilder<OrderTerm>();
+            var targetSegmentStarted = false;
+            foreach (var term in order)
+            {
+                if (term.Column.Table == drivingTable)
+                {
+                    if (targetSegmentStarted)
+                    {
+                        return Failed(
+                            "Joined ordering must keep all driving terms in one contiguous segment before target terms.");
+                    }
+                    driving.Add(term);
+                    continue;
+                }
+
+                if (term.Column.Table == targetTable)
+                {
+                    if (driving.Count == 0)
+                    {
+                        return Failed(
+                            "A target order requires a leading driving-side order segment for nested-loop coverage.");
+                    }
+                    targetSegmentStarted = true;
+                    target.Add(term);
+                    continue;
+                }
+
+                return new JoinedOrderPartition(
+                    [],
+                    [],
+                    new Refusal(
+                        "GW-COVER-016",
+                        "Every joined ordering term must belong to the driving or target table."));
+            }
+
+            return new JoinedOrderPartition(driving.ToImmutable(), target.ToImmutable(), null);
+        }
+
+        private static JoinedOrderPartition Failed(string message) =>
+            new([], [], new Refusal("GW-COVER-006", message));
+    }
+
+    private sealed record PredicatePartition(Predicate Driving, Predicate Target, Refusal? Failure)
+    {
+        public static PredicatePartition Create(Predicate predicate, TableId drivingTable, TableId targetTable)
+        {
+            var driving = new List<Predicate>();
+            var target = new List<Predicate>();
+            foreach (var term in TopLevelTerms(predicate))
+            {
+                var tables = ReferencedTables(term).Distinct().ToArray();
+                if (tables.Length == 0 || tables.All(table => table == drivingTable))
+                {
+                    driving.Add(term);
+                    continue;
+                }
+                if (tables.All(table => table == targetTable))
+                {
+                    target.Add(term);
+                    continue;
+                }
+
+                return new PredicatePartition(
+                    Predicate.AlwaysTrue.Instance,
+                    Predicate.AlwaysTrue.Instance,
+                    new Refusal(
+                        "GW-COVER-016",
+                        "A joined predicate term cannot mix driving and target columns; keep each indexed predicate on one side of the join."));
+            }
+
+            return new PredicatePartition(Combine(driving), Combine(target), null);
+        }
+
+        private static Predicate Combine(IReadOnlyCollection<Predicate> terms) => terms.Count switch
+        {
+            0 => Predicate.AlwaysTrue.Instance,
+            1 => terms.First(),
+            _ => new Predicate.And(terms)
+        };
+
+        private static IEnumerable<Predicate> TopLevelTerms(Predicate predicate) =>
+            predicate is Predicate.And and ? and.Terms : [predicate];
+
+        private static IEnumerable<TableId> ReferencedTables(Predicate predicate)
+        {
+            switch (predicate)
+            {
+                case Predicate.Equal equal:
+                    yield return equal.Column.Table;
+                    yield break;
+                case Predicate.In membership:
+                    yield return membership.Column.Table;
+                    yield break;
+                case Predicate.Range range:
+                    yield return range.Column.Table;
+                    yield break;
+                case Predicate.StartsWith startsWith:
+                    yield return startsWith.Column.Table;
+                    yield break;
+                case Predicate.Substring substring:
+                    yield return substring.Column.Table;
+                    yield break;
+                case Predicate.ColumnCompare compare:
+                    yield return compare.Left.Table;
+                    yield return compare.Right.Table;
+                    yield break;
+                case Predicate.Not not:
+                    foreach (var table in ReferencedTables(not.Inner))
+                        yield return table;
+                    yield break;
+                case Predicate.And and:
+                    foreach (var table in and.Terms.SelectMany(ReferencedTables))
+                        yield return table;
+                    yield break;
+                case Predicate.Or or:
+                    foreach (var table in or.Terms.SelectMany(ReferencedTables))
+                        yield return table;
+                    yield break;
+            }
+        }
+    }
+
     private sealed class ConstraintSet
     {
         private ConstraintSet(
@@ -450,6 +769,33 @@ public static class QueryCoverageChecker
                     return false;
             }
             return true;
+        }
+
+        public bool AreBoundEqualities(int count, CoverageIndex index)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                var constraint = Constraints.FirstOrDefault(item => item.Column == index.Columns[i].Column);
+                if (constraint is null || constraint.Kind != ConstraintKind.Equality || !constraint.BindsOneValue)
+                    return false;
+            }
+            return true;
+        }
+
+        public ConstraintSet WithCorrelatedEqualities(IEnumerable<string> columns)
+        {
+            var joinColumns = columns.Distinct(StringComparer.Ordinal).ToImmutableArray();
+            var correlated = joinColumns.Select(Constraint.CorrelatedEquality).ToImmutableArray();
+            var remaining = Constraints.Where(constraint => !joinColumns.Contains(
+                constraint.Column,
+                StringComparer.Ordinal));
+            return new ConstraintSet(
+                correlated.Concat(remaining).ToImmutableArray(),
+                correlated.Select(item => item.Column).Concat(ReferencedColumns).Distinct(StringComparer.Ordinal).ToImmutableArray(),
+                HasCrossColumnDisjunction,
+                HasNonCoveringPredicate,
+                HasUnsupportedRange,
+                UnsupportedRangeColumn);
         }
 
         public static ConstraintSet Create(Predicate predicate)
@@ -597,10 +943,21 @@ public static class QueryCoverageChecker
         };
     }
 
-    private sealed record Constraint(string Column, ConstraintKind Kind, bool SingleValue, bool ProvesNonNull)
+    private sealed record Constraint(
+        string Column,
+        ConstraintKind Kind,
+        bool SingleValue,
+        bool BindsOneValue,
+        bool ProvesNonNull)
     {
-        public static Constraint Equality(string column, bool singleValue, bool provesNonNull) => new(column, ConstraintKind.Equality, singleValue, provesNonNull);
-        public static Constraint Range(string column, bool provesNonNull) => new(column, ConstraintKind.Range, false, provesNonNull);
+        public static Constraint Equality(string column, bool singleValue, bool provesNonNull) =>
+            new(column, ConstraintKind.Equality, singleValue, singleValue, provesNonNull);
+
+        public static Constraint CorrelatedEquality(string column) =>
+            new(column, ConstraintKind.Equality, SingleValue: false, BindsOneValue: true, ProvesNonNull: true);
+
+        public static Constraint Range(string column, bool provesNonNull) =>
+            new(column, ConstraintKind.Range, SingleValue: false, BindsOneValue: false, provesNonNull);
     }
 
     private enum ConstraintKind
