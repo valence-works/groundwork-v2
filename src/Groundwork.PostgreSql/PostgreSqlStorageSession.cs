@@ -19,6 +19,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly NpgsqlTransaction? transaction;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
+    private readonly RelationalSessionSetMutations setMutations;
     private NpgsqlTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
     private readonly AsyncLocal<bool> writeExecutionScope = new();
@@ -66,6 +67,16 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             FromDatabase,
             observer,
             "postgresql.aggregate");
+        setMutations = new RelationalSessionSetMutations(
+            unit,
+            access,
+            new PostgreSqlQueryRenderer(),
+            unit.Columns.FirstOrDefault(column => column.Name == PostgreSqlSchemaCoordinator.VersionColumn)?.Name,
+            Command,
+            (command, name, value, column) =>
+                Add((NpgsqlCommand)command, name, ConvertValue(value, column), column.Name),
+            observer,
+            "postgresql");
     }
 
     /// <summary>
@@ -377,23 +388,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         IReadOnlyDictionary<string, object?> assignments,
         RelationalExecution mode)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
-        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
-        return ExecuteWrite(async () =>
-        {
-            var rendered = new PostgreSqlQueryRenderer().RenderUpdateWhere(
-                Unit.Name, ScopedSetPredicate(where), columns, VersionColumn?.Name);
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            for (var index = 0; index < columns.Length; index++)
-            {
-                Add(command, rendered.AssignmentParameters[index],
-                    ConvertValue(physical[columns[index]], Column(columns[index])), columns[index]);
-            }
-            Observe("postgresql.update-where", rendered.CommandText, ProviderCommandKind.Write);
-            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
-        }, mode);
+        var operation = setMutations.PrepareUpdateWhere(where, assignments);
+        return ExecuteWrite(() => operation(mode), mode);
     }
 
     public SetMutationResult DeleteWhere(Predicate where) =>
@@ -406,24 +402,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<SetMutationResult> DeleteWhere(Predicate where, RelationalExecution mode)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        return ExecuteWrite(async () =>
-        {
-            var rendered = new PostgreSqlQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            Observe("postgresql.delete-where", rendered.CommandText, ProviderCommandKind.Write);
-            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
-        }, mode);
+        var operation = setMutations.PrepareDeleteWhere(where);
+        return ExecuteWrite(() => operation(mode), mode);
     }
-
-    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
-        where,
-        Unit.Name,
-        Unit.Columns.Any(column => column.Name == PostgreSqlSchemaCoordinator.ScopeColumn)
-            ? PostgreSqlSchemaCoordinator.ScopeColumn
-            : null,
-        Access.Scope?.Value);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ApplyRetention(options, RelationalExecution.Synchronous).GetAwaiter().GetResult();

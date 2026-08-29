@@ -19,6 +19,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private readonly SqlTransaction? transaction;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
+    private readonly RelationalSessionSetMutations setMutations;
     private readonly SqlServerDialect dialect = new();
     private SqlTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
@@ -61,6 +62,19 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             FromSqlServer,
             observer,
             "sqlserver.aggregate");
+        setMutations = new RelationalSessionSetMutations(
+            unit,
+            access,
+            new SqlServerQueryRenderer(),
+            unit.Columns.FirstOrDefault(column => column.Name == SqlServerSchemaCoordinator.VersionColumn)?.Name,
+            Command,
+            (command, name, value, column) => SqlServerProviderConnection.AddParameter(
+                (SqlCommand)command,
+                "@" + name,
+                value,
+                column),
+            observer,
+            "sqlserver");
     }
 
     /// <summary>
@@ -431,27 +445,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         IReadOnlyDictionary<string, object?> assignments,
         RelationalExecution mode)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
-        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
-        return ExecuteWrite(async () =>
-        {
-            var rendered = new SqlServerQueryRenderer().RenderUpdateWhere(
-                Unit.Name, ScopedSetPredicate(where), columns, VersionColumnDefinition?.Name);
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            for (var index = 0; index < columns.Length; index++)
-            {
-                SqlServerProviderConnection.AddParameter(
-                    command,
-                    "@" + rendered.AssignmentParameters[index],
-                    physical[columns[index]],
-                    Column(columns[index]));
-            }
-            commandObserver?.Observe(new ProviderCommandEvent(
-                "sqlserver.update-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
-        }, mode);
+        var operation = setMutations.PrepareUpdateWhere(where, assignments);
+        return ExecuteWrite(() => operation(mode), mode);
     }
 
     public SetMutationResult DeleteWhere(Predicate where) =>
@@ -464,25 +459,9 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private ValueTask<SetMutationResult> DeleteWhere(Predicate where, RelationalExecution mode)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        return ExecuteWrite(async () =>
-        {
-            var rendered = new SqlServerQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            commandObserver?.Observe(new ProviderCommandEvent(
-                "sqlserver.delete-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            return new SetMutationResult(await mode.ExecuteNonQuery(command).ConfigureAwait(false));
-        }, mode);
+        var operation = setMutations.PrepareDeleteWhere(where);
+        return ExecuteWrite(() => operation(mode), mode);
     }
-
-    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
-        where,
-        Unit.Name,
-        Unit.Columns.Any(column => column.Name == SqlServerSchemaCoordinator.ScopeColumn)
-            ? SqlServerSchemaCoordinator.ScopeColumn
-            : null,
-        Access.Scope?.Value);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ApplyRetention(options, RelationalExecution.Synchronous).GetAwaiter().GetResult();

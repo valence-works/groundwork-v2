@@ -17,6 +17,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly SqliteTransaction? transaction;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
+    private readonly RelationalSessionSetMutations setMutations;
     private SqliteTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
     private readonly AsyncLocal<bool> writeExecutionScope = new();
@@ -66,6 +67,17 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             FromSqlite,
             observer,
             "sqlite.aggregate");
+        setMutations = new RelationalSessionSetMutations(
+            unit,
+            access,
+            new SqliteQueryRenderer(),
+            unit.Columns.FirstOrDefault(column => column.Name == SqliteSchemaCoordinator.VersionColumn)?.Name,
+            Command,
+            (command, name, value, column) => ((SqliteCommand)command).Parameters.AddWithValue(
+                "@" + name,
+                ToSqlite(value, column) ?? DBNull.Value),
+            observer,
+            "sqlite");
     }
 
     /// <summary>
@@ -397,25 +409,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
-        var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
-        return ExecuteWrite(() =>
-        {
-            var rendered = new SqliteQueryRenderer().RenderUpdateWhere(
-                Unit.Name, ScopedSetPredicate(where), columns, VersionColumnDefinition?.Name);
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            for (var index = 0; index < columns.Length; index++)
-            {
-                command.Parameters.AddWithValue(
-                    "@" + rendered.AssignmentParameters[index],
-                    ToSqlite(physical[columns[index]], Column(columns[index])) ?? DBNull.Value);
-            }
-            commandObserver?.Observe(new ProviderCommandEvent(
-                "sqlite.update-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            return new SetMutationResult(command.ExecuteNonQuery());
-        });
+        var operation = setMutations.PrepareUpdateWhere(where, assignments);
+        return ExecuteWrite(() => operation(RelationalExecution.Synchronous).GetAwaiter().GetResult());
     }
 
     public ValueTask<SetMutationResult> UpdateWhereAsync(
@@ -426,25 +421,14 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     public SetMutationResult DeleteWhere(Predicate where)
     {
-        ArgumentNullException.ThrowIfNull(where);
-        return ExecuteWrite(() =>
-        {
-            var rendered = new SqliteQueryRenderer().RenderDeleteWhere(Unit.Name, ScopedSetPredicate(where));
-            using var command = Command(rendered.CommandText);
-            RelationalQueryResultReader.AddParameters(command, rendered);
-            commandObserver?.Observe(new ProviderCommandEvent(
-                "sqlite.delete-where", rendered.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            return new SetMutationResult(command.ExecuteNonQuery());
-        });
+        var operation = setMutations.PrepareDeleteWhere(where);
+        return ExecuteWrite(() => operation(RelationalExecution.Synchronous).GetAwaiter().GetResult());
     }
 
     public ValueTask<SetMutationResult> DeleteWhereAsync(
         Predicate where,
         CancellationToken cancellationToken = default) =>
         Completed(cancellationToken, () => DeleteWhere(where));
-
-    private Predicate ScopedSetPredicate(Predicate where) => RelationalSetMutation.WithScope(
-        where, Unit.Name, ScopeColumnDefinition?.Name, Access.Scope?.Value);
 
     public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
         ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
