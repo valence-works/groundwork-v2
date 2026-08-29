@@ -193,8 +193,9 @@ parameters. SQL Server's 2,100 statement limit reserves two slots for the `Micro
 
 ### Pages repeat or skip rows
 
-Supply your declared identity columns as `QueryRenderOptions.TieBreakColumns`, and name an explicit
-null rank on every order term. Prefer `Paging.Keyset` over `Paging.OffsetLimit`.
+Supply your declared identity as `QueryRenderOptions.TieBreakColumns`; for joined pages, also set
+the complete identity through `QueryRenderOptions.DrivingIdentityColumns`. Name an explicit null
+rank on every order term. Prefer `Paging.Keyset` over `Paging.OffsetLimit`.
 
 ### `GW-LINQ-107` — opaque helper
 

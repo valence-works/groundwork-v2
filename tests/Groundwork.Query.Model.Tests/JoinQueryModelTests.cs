@@ -374,7 +374,7 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
-    public void Joined_composite_continuation_rejects_a_partial_source_identity()
+    public void Joined_composite_continuation_rejects_tie_breaks_without_a_complete_declaration()
     {
         var request = Request(Join());
         var options = new QueryRenderOptions(tieBreakColumns: [OrderCustomerId]);
@@ -389,7 +389,32 @@ public sealed class JoinQueryModelTests
                 : term.Column == CustomerId ? Guid.Empty
                 : "eu"))));
 
-        Assert.Contains("every declared source identity component", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("complete declared driving identity", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_composite_continuation_includes_every_declared_source_identity_component()
+    {
+        var request = Request(Join());
+        var options = new QueryRenderOptions(
+            tieBreakColumns: [OrderCustomerId],
+            drivingIdentityColumns: [OrderCustomerId, OrderRegion]);
+        var order = options.GetEffectiveOrder(request);
+
+        Assert.Equal(
+            [CustomerName, OrderCustomerId, OrderRegion, CustomerId, CustomerRegion],
+            order.Select(term => term.Column));
+
+        var token = QueryContinuationToken.Encode(
+            request,
+            options,
+            order.Select(term => QueryConstant.Of(term.Column, term.Column == OrderCustomerId
+                ? Guid.Empty
+                : term.Column == CustomerName ? "Alice"
+                : term.Column == CustomerId ? Guid.Empty
+                : "eu")));
+
+        Assert.Equal(order.Length, QueryContinuationToken.Decode(token, request, options).Count);
     }
 
     [Fact]
@@ -453,7 +478,7 @@ public sealed class JoinQueryModelTests
         [new JoinColumnPair(OrderCustomerId, CustomerId), new JoinColumnPair(OrderRegion, CustomerRegion)]);
 
     private static QueryRenderOptions CompositeOptions() =>
-        new(tieBreakColumns: [OrderSequence]);
+        new(tieBreakColumns: [OrderSequence], drivingIdentityColumns: [OrderSequence]);
 
     private static QueryConstant[] CompositeValues(QueryConstant? targetId = null) =>
     [

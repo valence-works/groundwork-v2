@@ -181,7 +181,8 @@ public sealed record QueryRenderOptions
     public QueryRenderOptions(
         IEnumerable<QueryIndexDeclaration>? indexes = null,
         string? selectedIndex = null,
-        IEnumerable<ColumnRef>? tieBreakColumns = null)
+        IEnumerable<ColumnRef>? tieBreakColumns = null,
+        IEnumerable<ColumnRef>? drivingIdentityColumns = null)
     {
         Indexes = (indexes ?? Array.Empty<QueryIndexDeclaration>()).ToImmutableArray();
         if (Indexes.Any(index => index is null))
@@ -192,6 +193,9 @@ public sealed record QueryRenderOptions
         TieBreakColumns = (tieBreakColumns ?? Array.Empty<ColumnRef>()).ToImmutableArray();
         if (TieBreakColumns.Any(column => column is null))
             throw new ArgumentException("Tie-break columns cannot contain null references.", nameof(tieBreakColumns));
+        DrivingIdentityColumns = (drivingIdentityColumns ?? Array.Empty<ColumnRef>()).ToImmutableArray();
+        if (DrivingIdentityColumns.Any(column => column is null))
+            throw new ArgumentException("Driving identity columns cannot contain null references.", nameof(drivingIdentityColumns));
         PhysicalIndexNames = ImmutableDictionary<string, string>.Empty.WithComparers(StringComparer.Ordinal);
         SearchKeyColumns = ImmutableDictionary<string, QuerySearchKeyColumn>.Empty.WithComparers(StringComparer.Ordinal);
         LatestPartitionColumns = ImmutableArray<ColumnRef>.Empty;
@@ -203,10 +207,17 @@ public sealed record QueryRenderOptions
     public ImmutableArray<QueryIndexDeclaration> Indexes { get; init; }
     public string? SelectedIndex { get; }
     /// <summary>
-    /// Declared driving identity columns appended to the requested order for deterministic paging.
-    /// A joined request appends its declared target key after these columns.
+    /// Identity and additional tie-break columns appended to the requested order for deterministic
+    /// paging. A joined request appends its declared target key after the driving identity.
     /// </summary>
     public ImmutableArray<ColumnRef> TieBreakColumns { get; init; }
+
+    /// <summary>
+    /// Complete declared identity of the driving table. Joined continuation ordering always
+    /// includes these columns in this order, even when a caller supplies only a partial set of
+    /// additional tie-break columns.
+    /// </summary>
+    public ImmutableArray<ColumnRef> DrivingIdentityColumns { get; init; }
 
     /// <summary>Provider-owned partition columns added to LatestPerKey grouping.</summary>
     public ImmutableArray<ColumnRef> LatestPartitionColumns { get; init; }
@@ -228,13 +239,20 @@ public sealed record QueryRenderOptions
     {
         if (identityColumns is null)
             throw new ArgumentNullException(nameof(identityColumns));
+        var identitySnapshot = identityColumns.ToArray();
+        if (identitySnapshot.Any(column => column is null))
+            throw new ArgumentException("Driving identity columns cannot contain null references.", nameof(identityColumns));
         var merged = TieBreakColumns
-            .Concat(identityColumns)
+            .Concat(identitySnapshot)
             .Where(column => column is not null)
             .GroupBy(column => (column.Table, column.Name))
             .Select(group => group.First())
             .ToImmutableArray();
-        return this with { TieBreakColumns = merged };
+        return this with
+        {
+            TieBreakColumns = merged,
+            DrivingIdentityColumns = identitySnapshot.ToImmutableArray()
+        };
     }
 
     /// <summary>
@@ -266,7 +284,8 @@ public sealed record QueryRenderOptions
                         nameof(request));
                 }
             }
-            identity = TieBreakColumns
+            identity = DrivingIdentityColumns
+                .Concat(TieBreakColumns)
                 .Where(column => column.Table == request.Table)
                 .Concat(join.ColumnPairs.Select(pair => pair.Target));
         }
@@ -424,32 +443,26 @@ public static class QueryContinuationToken
 
     private static void RequireJoinedSourceIdentity(QueryRequest request, QueryRenderOptions options)
     {
-        if (request.Join is not { } join)
+        if (request.Join is null)
             return;
 
-        var sourceTieBreaks = options.TieBreakColumns
-            .Where(column => column.Table == request.Table)
-            .ToArray();
-        if (sourceTieBreaks.Length == 0)
+        var declaredIdentity = options.DrivingIdentityColumns;
+        if (declaredIdentity.Length == 0)
         {
             throw new ArgumentException(
-                "A joined continuation requires the driving identity tie-break columns.",
+                "A joined continuation requires the complete declared driving identity.",
                 nameof(options));
         }
 
-        // A reference can map a composite source identity to a composite target key. If callers
-        // use one of those source components as a tie-break, accepting only a prefix would make
-        // rows that differ in an omitted component compare equal to the cursor and be skipped.
-        var declaredSourceIdentity = join.ColumnPairs.Select(pair => pair.Source).ToArray();
-        if (sourceTieBreaks.Any(column => declaredSourceIdentity.Any(declared =>
-                ColumnRefIdentity.SameQualifiedColumn(column, declared))) &&
-            declaredSourceIdentity.Any(declared => sourceTieBreaks.Count(column =>
-                ColumnRefIdentity.SameQualifiedColumn(column, declared)) != 1))
-        {
+        if (declaredIdentity.Any(column => column is null || column.Table != request.Table))
             throw new ArgumentException(
-                "A joined continuation requires every declared source identity component exactly once.",
+                "Every declared driving identity column must belong to the joined query source table.",
                 nameof(options));
-        }
+
+        if (declaredIdentity.GroupBy(column => (column.Table, column.Name)).Any(group => group.Count() != 1))
+            throw new ArgumentException(
+                "A joined continuation requires every declared driving identity component exactly once.",
+                nameof(options));
     }
 
     private static QueryConstant DecodeValue(string encoded, ColumnRef column)
