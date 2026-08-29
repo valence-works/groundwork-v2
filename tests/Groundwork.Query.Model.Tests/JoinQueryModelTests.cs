@@ -374,6 +374,25 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_composite_continuation_rejects_a_partial_source_identity()
+    {
+        var request = Request(Join());
+        var options = new QueryRenderOptions(tieBreakColumns: [OrderCustomerId]);
+        var order = options.GetEffectiveOrder(request);
+
+        var failure = Assert.Throws<ArgumentException>(() => QueryContinuationToken.Encode(
+            request,
+            options,
+            order.Select(term => QueryConstant.Of(term.Column, term.Column == OrderCustomerId
+                ? Guid.Empty
+                : term.Column == CustomerName ? "Alice"
+                : term.Column == CustomerId ? Guid.Empty
+                : "eu"))));
+
+        Assert.Contains("every declared source identity component", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Joined_composite_continuation_keeps_the_privileged_invocation_binding()
     {
         var options = CompositeOptions();

@@ -424,11 +424,30 @@ public static class QueryContinuationToken
 
     private static void RequireJoinedSourceIdentity(QueryRequest request, QueryRenderOptions options)
     {
-        if (request.Join is not null &&
-            !options.TieBreakColumns.Any(column => column.Table == request.Table))
+        if (request.Join is not { } join)
+            return;
+
+        var sourceTieBreaks = options.TieBreakColumns
+            .Where(column => column.Table == request.Table)
+            .ToArray();
+        if (sourceTieBreaks.Length == 0)
         {
             throw new ArgumentException(
                 "A joined continuation requires the driving identity tie-break columns.",
+                nameof(options));
+        }
+
+        // A reference can map a composite source identity to a composite target key. If callers
+        // use one of those source components as a tie-break, accepting only a prefix would make
+        // rows that differ in an omitted component compare equal to the cursor and be skipped.
+        var declaredSourceIdentity = join.ColumnPairs.Select(pair => pair.Source).ToArray();
+        if (sourceTieBreaks.Any(column => declaredSourceIdentity.Any(declared =>
+                ColumnRefIdentity.SameQualifiedColumn(column, declared))) &&
+            declaredSourceIdentity.Any(declared => sourceTieBreaks.Count(column =>
+                ColumnRefIdentity.SameQualifiedColumn(column, declared)) != 1))
+        {
+            throw new ArgumentException(
+                "A joined continuation requires every declared source identity component exactly once.",
                 nameof(options));
         }
     }
