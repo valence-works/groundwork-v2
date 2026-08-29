@@ -12,6 +12,22 @@ namespace Groundwork.Differential.Tests;
 public sealed class ConstraintCapabilityAdvertisementTests
 {
     [Fact]
+    public void Constraint_advertisement_is_deduplicated_and_immutable()
+    {
+        var input = new List<CapabilityDescriptor>();
+        var advertised = SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(input);
+
+        input.Add(new CapabilityDescriptor(new CapabilityId("sample.late.capability"), "Late", "Late mutation."));
+        var deduplicated = SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(advertised);
+
+        Assert.Single(advertised);
+        Assert.Single(deduplicated,
+            capability => capability.Id == WellKnownCapabilities.EnforcedConstraints);
+        var view = Assert.IsAssignableFrom<IList<CapabilityDescriptor>>(advertised);
+        Assert.Throws<NotSupportedException>(() => view.Add(advertised[0]));
+    }
+
+    [Fact]
     public void Relational_connections_advertise_enforced_constraints()
     {
         using var sqlite = new SqliteProviderFactory().Create("Data Source=:memory:");

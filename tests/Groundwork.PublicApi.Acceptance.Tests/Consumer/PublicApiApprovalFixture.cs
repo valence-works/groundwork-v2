@@ -107,6 +107,10 @@ internal static class PublicApiApprovalFixture
     public static void CompileCallableSurface()
     {
         _ = new Func<string, IStorageProviderConnection>(connectionString => new SqliteProviderFactory().Create(connectionString));
+        _ = new Func<IEnumerable<CapabilityDescriptor>, IReadOnlyList<CapabilityDescriptor>>(
+            SchemaCapabilityAdmission.AdvertiseEnforcedConstraints);
+        _ = new Action<Groundwork.Kernel.StorageUnit, IEnumerable<CapabilityDescriptor>>(
+            SchemaCapabilityAdmission.EnsureSupported);
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
