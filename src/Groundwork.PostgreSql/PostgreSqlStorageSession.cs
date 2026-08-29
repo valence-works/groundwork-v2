@@ -18,6 +18,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly NpgsqlConnection connection;
     private readonly NpgsqlTransaction? transaction;
     private readonly RelationalSessionQueries queries;
+    private readonly RelationalSessionAggregations aggregations;
     private NpgsqlTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
     private readonly AsyncLocal<bool> writeExecutionScope = new();
@@ -57,6 +58,14 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             AssertExplainPlan,
             observer,
             "postgresql");
+        aggregations = new RelationalSessionAggregations(
+            unit,
+            access,
+            connection,
+            new PostgreSqlDialect(),
+            FromDatabase,
+            observer,
+            "postgresql.aggregate");
     }
 
     /// <summary>
@@ -123,42 +132,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         CancellationToken cancellationToken = default) =>
         AggregateCore(query, RelationalExecution.Asynchronous(cancellationToken));
 
-    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) => Execute(async () =>
-    {
-        ArgumentNullException.ThrowIfNull(query);
-        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
-        var decode = (string name, object? value) =>
-        {
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        };
-        return await (Unit.Scope == ScopePolicy.Scoped
-            ? RelationalAggregationExecutor.ExecuteScoped(
-                connection,
-                activeTransaction ?? transaction,
-                new PostgreSqlDialect(),
-                Unit,
-                profile,
-                query,
-                decode,
-                PostgreSqlSchemaCoordinator.ScopeColumn,
-                Access.Scope!,
-                mode,
-                commandObserver,
-                "postgresql.aggregate")
-            : RelationalAggregationExecutor.Execute(
-            connection,
-            activeTransaction ?? transaction,
-            new PostgreSqlDialect(),
-            Unit,
-            profile,
-            query,
-            decode,
-            mode,
-            commandObserver,
-            "postgresql.aggregate")).ConfigureAwait(false);
-    }, mode);
+    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) =>
+        Execute(() => aggregations.Aggregate(query, activeTransaction ?? transaction, mode), mode);
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {

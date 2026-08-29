@@ -18,6 +18,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private readonly SqlConnection connection;
     private readonly SqlTransaction? transaction;
     private readonly RelationalSessionQueries queries;
+    private readonly RelationalSessionAggregations aggregations;
     private readonly SqlServerDialect dialect = new();
     private SqlTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
@@ -52,6 +53,14 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             AssertExplainPlan,
             observer,
             "sqlserver");
+        aggregations = new RelationalSessionAggregations(
+            unit,
+            access,
+            connection,
+            dialect,
+            FromSqlServer,
+            observer,
+            "sqlserver.aggregate");
     }
 
     /// <summary>
@@ -114,42 +123,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         CancellationToken cancellationToken = default) =>
         AggregateCore(query, RelationalExecution.Asynchronous(cancellationToken));
 
-    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) => Execute(async () =>
-    {
-        ArgumentNullException.ThrowIfNull(query);
-        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
-        var decode = (string name, object? value) =>
-        {
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromSqlServer(value ?? DBNull.Value, column);
-        };
-        return await (Unit.Scope == ScopePolicy.Scoped
-            ? RelationalAggregationExecutor.ExecuteScoped(
-                connection,
-                activeTransaction ?? transaction,
-                dialect,
-                Unit,
-                profile,
-                query,
-                decode,
-                SqlServerSchemaCoordinator.ScopeColumn,
-                Access.Scope!,
-                mode,
-                commandObserver,
-                "sqlserver.aggregate")
-            : RelationalAggregationExecutor.Execute(
-            connection,
-            activeTransaction ?? transaction,
-            dialect,
-            Unit,
-            profile,
-            query,
-            decode,
-            mode,
-            commandObserver,
-            "sqlserver.aggregate")).ConfigureAwait(false);
-    }, mode);
+    private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) =>
+        Execute(() => aggregations.Aggregate(query, activeTransaction ?? transaction, mode), mode);
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {

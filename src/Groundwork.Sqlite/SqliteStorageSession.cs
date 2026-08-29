@@ -16,6 +16,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly SqliteConnection connection;
     private readonly SqliteTransaction? transaction;
     private readonly RelationalSessionQueries queries;
+    private readonly RelationalSessionAggregations aggregations;
     private SqliteTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
     private readonly AsyncLocal<bool> writeExecutionScope = new();
@@ -57,6 +58,14 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             },
             observer,
             "sqlite");
+        aggregations = new RelationalSessionAggregations(
+            unit,
+            access,
+            connection,
+            new SqliteDialect(),
+            FromSqlite,
+            observer,
+            "sqlite.aggregate");
     }
 
     /// <summary>
@@ -205,42 +214,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
                 .GetAwaiter().GetResult());
 
     public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
-    {
-        ArgumentNullException.ThrowIfNull(query);
-        StorageAccessValidation.EnsurePointOperation(Access, "aggregate");
-        var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
-        var mode = RelationalExecution.Synchronous;
-        var decode = (string name, object? value) =>
-        {
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-        };
-        return (Unit.Scope == ScopePolicy.Scoped
-            ? RelationalAggregationExecutor.ExecuteScoped(
-                connection,
-                activeTransaction ?? transaction,
-                new SqliteDialect(),
-                Unit,
-                profile,
+        aggregations.Aggregate(
                 query,
-                decode,
-                SqliteSchemaCoordinator.ScopeColumn,
-                Access.Scope!,
-                mode,
-                commandObserver,
-                "sqlite.aggregate")
-            : RelationalAggregationExecutor.Execute(
-            connection,
-            activeTransaction ?? transaction,
-            new SqliteDialect(),
-            Unit,
-            profile,
-            query,
-            decode,
-            mode,
-            commandObserver,
-            "sqlite.aggregate")).GetAwaiter().GetResult();
-    });
+                activeTransaction ?? transaction,
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
 
     private void AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options)
     {
