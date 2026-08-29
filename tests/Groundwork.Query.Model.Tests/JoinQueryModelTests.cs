@@ -512,6 +512,29 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_composite_continuation_rejects_requested_identity_terms_out_of_declared_order()
+    {
+        var request = new QueryRequest(
+            Orders,
+            Join(),
+            Predicate.AlwaysTrue.Instance,
+            [
+                new OrderTerm(OrderRegion, nullOrder: NullOrder.Last),
+                new OrderTerm(OrderCustomerId, nullOrder: NullOrder.Last)
+            ],
+            Projection.ColumnsOnly(OrderRegion, OrderCustomerId),
+            Paging.Keyset(25));
+        var options = new QueryRenderOptions().WithIdentityTieBreaks([OrderCustomerId, OrderRegion]);
+
+        var failure = Assert.Throws<ArgumentException>(() => QueryContinuationToken.Encode(
+            request,
+            options,
+            options.GetEffectiveOrder(request).Select(term => ContinuationValue(term.Column))));
+
+        Assert.Contains("declaration order", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Joined_composite_continuation_keeps_the_privileged_invocation_binding()
     {
         var options = CompositeOptions();

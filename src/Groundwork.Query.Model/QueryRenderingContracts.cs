@@ -485,6 +485,19 @@ public static class QueryContinuationToken
             throw new ArgumentException(
                 "The declared driving identity must match the source schema identity in order and completeness.",
                 nameof(options));
+
+        var effectiveOrder = options.GetEffectiveOrder(request);
+        var identityIndex = 0;
+        foreach (var term in effectiveOrder)
+        {
+            if (identityIndex < resolvedIdentity.Length &&
+                ColumnRefIdentity.SameQualifiedColumn(term.Column, resolvedIdentity[identityIndex]))
+                identityIndex++;
+        }
+        if (identityIndex != resolvedIdentity.Length)
+            throw new ArgumentException(
+                "The effective joined order must contain the complete driving identity in declaration order.",
+                nameof(options));
     }
 
     private static QueryConstant DecodeValue(string encoded, ColumnRef column)
