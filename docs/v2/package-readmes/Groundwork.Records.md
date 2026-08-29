@@ -14,7 +14,7 @@ That generated accessor/materializer path is the Native AOT record-mapping contr
 and aggregation selectors still compile expressions; those boundaries are explicitly annotated as
 requiring unreferenced and/or dynamic code. Native AOT applications must add
 `Groundwork.Schema.Generator`, construct tables with
-`RecordTable.FromGenerated<T>(TStorageUnit.Definition)`, and keep row and projection shapes on
+`RecordTable.FromGenerated<Customer>(CustomerStorageUnit.Definition)`, and keep row and projection shapes on
 generated surfaces. That constructor fails closed for an ungenerated row. Managed applications may
 continue using fluent declaration inference when they preserve the reflected members.
 
