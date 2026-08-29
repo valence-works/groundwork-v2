@@ -29,7 +29,7 @@ internal static class AnalyzerDiagnostics
             ["GW-LINQ-101"] = Create("GW_LINQ_101", "Column expression is not portable", "{0}"),
             ["GW-LINQ-102"] = Create("GW_LINQ_102", "Column arithmetic is not portable", "{0}"),
             ["GW-LINQ-103"] = Create("GW_LINQ_103", "Column comparison requires scan acceptance", "{0}"),
-            ["GW-LINQ-104"] = Create("GW_LINQ_104", "Joins are not portable", "{0}"),
+            ["GW-LINQ-104"] = Create("GW_LINQ_104", "Undeclared cross-table access is not portable", "{0}"),
             ["GW-LINQ-105"] = Create("GW_LINQ_105", "GroupBy is not portable", "{0}"),
             ["GW-LINQ-106"] = Create("GW_LINQ_106", "Nested collection predicate is not portable", "{0}"),
             ["GW-LINQ-107"] = Create("GW_LINQ_107", "Opaque helper is not portable", "{0}"),

@@ -153,7 +153,9 @@ public sealed class TypedNavigationTests
         var exception = Assert.Throws<LinqTranslationException>(() => new GwQueryDatabase().Table(Orders)
             .Where(order => order.Customer.Name == "Ada"));
 
-        Assert.Equal("GW-LINQ-104", Assert.Single(exception.Diagnostics).Code);
+        var diagnostic = Assert.Single(exception.Diagnostics);
+        Assert.Equal("GW-LINQ-104", diagnostic.Code);
+        Assert.Contains(".Join(reference)", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
