@@ -1,7 +1,6 @@
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using System.Collections.Immutable;
 using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Query.Model;
@@ -85,20 +84,10 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         QueryRenderOptions? options,
         RelationalExecution mode) => Execute(async () =>
     {
-        ArgumentNullException.ThrowIfNull(request);
-        StorageAccessValidation.EnsureOrdinaryQuery(Access);
-        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
-            throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var executionSource = WithScopePredicate(request);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(Unit.Key.Columns.Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn).Select(QueryColumn).Where(column => column is not null)!.Select(column => column!)) with
-        {
-            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
-                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(column => column.Name, column => QueryTypeOf(column.Type), StringComparer.Ordinal))).ToImmutableArray(),
-            PhysicalIndexNames = PhysicalIndexNames(),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit)
-        };
-        var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
+        var prepared = RelationalSessionPolicy.PrepareQuery(Unit, Access, request, options, PhysicalIndexNames());
+        var executionSource = prepared.ExecutionSource;
+        var renderOptions = prepared.RenderOptions;
+        var executionRequest = prepared.ExecutionRequest;
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
         commandObserver?.Observe(new ProviderCommandEvent("postgresql.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
@@ -133,46 +122,15 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         QueryRenderOptions? options,
         RelationalExecution mode) => Execute(async () =>
     {
-        ArgumentNullException.ThrowIfNull(request);
-        if (!Access.IsPrivilegedAcrossScopes)
-            throw new InvalidOperationException(
-                "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
-        if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
-            throw new ArgumentException(
-                $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
-                nameof(request));
-        StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
-
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var scopeToken = new ColumnRef(
-            new TableId(Unit.Name),
-            CrossScopeQueryMaterializer.ScopeTokenColumn,
-            QueryType.String,
-            isNullable: false);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
-            new[] { scopeToken }
-                .Concat(Unit.Key.Columns
-                    .Where(name => name != PostgreSqlSchemaCoordinator.ScopeColumn)
-                    .Select(QueryColumn)
-                    .Where(column => column is not null)
-                    .Select(column => column!))) with
-        {
-            Indexes = SearchKeyQueryMappings.RetargetIndexes(Unit, suppliedOptions.Indexes)
-                .Select(index => index.WithColumnTypes(Unit.Columns.ToDictionary(
-                    column => column.Name,
-                    column => QueryTypeOf(column.Type),
-                    StringComparer.Ordinal)))
-                .ToImmutableArray(),
-            PhysicalIndexNames = PhysicalIndexNames(),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
-            LatestPartitionColumns = [scopeToken]
-        };
-        var executionSource = QueryRequestExecution.WithProviderPredicate(
+        var prepared = RelationalSessionPolicy.PrepareCrossScopeQuery(
+            Unit,
+            Access,
             request,
-            request.Where,
-            CrossScopeQueryMaterializer.BindingDiscriminator(Access));
-        var executionRequest = EnsureScopeProjection(
-            QueryRequestExecution.ForPage(executionSource, renderOptions));
+            options,
+            PhysicalIndexNames());
+        var executionSource = prepared.ExecutionSource;
+        var renderOptions = prepared.RenderOptions;
+        var executionRequest = prepared.ExecutionRequest;
         var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
         commandObserver?.Observe(new ProviderCommandEvent("postgresql.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
         var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
@@ -254,10 +212,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             PostgreSqlExplainPlanInspector.ChoseIndex(rawPlan, physicalIndex));
     }
 
-    private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
-        ? request
-        : RelationalQueryExecution.BindScope(request, PostgreSqlSchemaCoordinator.ScopeColumn, Access.Scope!.Value);
-
     public StoredEntry? Read(StorageKey key) =>
         ReadEntry(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
 
@@ -267,28 +221,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private ValueTask<StoredEntry?> ReadEntry(StorageKey key, RelationalExecution mode)
     {
         StorageAccessValidation.EnsurePointOperation(Access, "read");
-        return Execute(async () => PublicEntry(await ReadCore(
+        return Execute(async () => RelationalSessionPolicy.PublicEntry(await ReadCore(
             key, mode, observerOperation: "postgresql.read", isProbe: false).ConfigureAwait(false)), mode);
     }
-
-    private QueryRequest EnsureScopeProjection(QueryRequest request)
-    {
-        if (request.Projection.AllColumns || request.Projection.Columns.Any(column =>
-                string.Equals(column.Name, PostgreSqlSchemaCoordinator.ScopeColumn, StringComparison.Ordinal)))
-            return request;
-        var scope = new ColumnRef(
-            new TableId(Unit.Name),
-            PostgreSqlSchemaCoordinator.ScopeColumn,
-            QueryType.String,
-            isNullable: false);
-        return QueryRequestExecution.WithProjection(
-            request,
-            Projection.ColumnsOnly([.. request.Projection.Columns, scope]));
-    }
-
-    private static StoredEntry? PublicEntry(StoredEntry? entry) => entry is null
-        ? null
-        : new StoredEntry(new StorageValues(SearchKeyProjection.PublicValues(entry.Values.Values)), entry.Version);
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
         InsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -460,7 +395,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             if (options?.Precondition.Kind == WritePreconditionKind.IfVersion &&
                 options.Precondition.Version != existing.Version)
                 return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
-            if (!MatchesExpected(existing, expected))
+            if (!RelationalSessionPolicy.MatchesExpected(Unit, existing, expected))
                 return new WriteOutcome(WriteOutcomeStatus.ComparisonMismatch, existing.Version);
 
             var (where, parameters) = KeyPredicate(canonicalKey.Values);
@@ -491,14 +426,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
                 : new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
         }, mode);
     }
-
-    private bool MatchesExpected(StoredEntry existing, IReadOnlyDictionary<string, object?> expected) =>
-        expected.All(pair =>
-        {
-            var definition = Column(pair.Key);
-            return existing.Values.Values.TryGetValue(pair.Key, out var actual) &&
-                CompareAndDeleteValidation.ValuesEqual(actual, pair.Value, definition.Type);
-        });
 
     public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
         UpdateWhere(where, assignments, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -905,7 +832,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private async ValueTask<RowWriteOutcome> InsertAppendSequence(RowWrite write, RelationalExecution mode)
     {
         var values = new StorageValues(SearchKeyProjection.Populate(Unit, write.Values!.Values));
-        ValidateValues(values.Values, requireAllNonNullable: true);
+        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, requireAllNonNullable: true);
         return new RowWriteOutcome(write, await InsertCore(values, mode).ConfigureAwait(false));
     }
 
@@ -1067,7 +994,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             return ApplyBatchFallback(writes, mode);
         if (writes.Any(write => write.Options.Precondition.Kind != WritePreconditionKind.Unconditional))
             return ApplyBatchFallback(writes, mode);
-        if (HasSecondaryUniqueIndex(writes[0].Unit))
+        if (RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit))
             return ApplyBatchFallback(writes, mode);
         var physicalWrites = writes.Select(write => write.PopulateSearchKeyValues()).ToArray();
         return physicalWrites[0].Mode switch
@@ -1083,7 +1010,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         writes.Count != 0 &&
         SequenceColumn is null &&
         writes.All(write => write.Options.Precondition.Kind == WritePreconditionKind.Unconditional) &&
-        !HasSecondaryUniqueIndex(writes[0].Unit) &&
+        !RelationalSessionPolicy.HasSecondaryUniqueIndex(writes[0].Unit) &&
         writes.Select(write => write.ColumnSet).Distinct(StringComparer.Ordinal).Count() == 1 &&
         writes[0].Mode is RowWriteMode.Insert or RowWriteMode.Upsert;
 
@@ -1092,7 +1019,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
         foreach (var write in writes)
         {
-            ValidateValues(write.Values!.Values, requireAllNonNullable: true);
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", write.Values!.Values, requireAllNonNullable: true);
             if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
                 return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         }
@@ -1130,7 +1057,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         var columns = PhysicalValues(writes[0].Values!.Values, includeVersion: VersionColumn is not null).Keys.ToArray();
         foreach (var write in writes)
         {
-            ValidateValues(write.Values!.Values, requireAllNonNullable: false);
+            RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", write.Values!.Values, requireAllNonNullable: false);
             if (!PhysicalValues(write.Values.Values, includeVersion: VersionColumn is not null).Keys.SequenceEqual(columns, StringComparer.Ordinal))
                 return await ApplyBatchFallback(writes, mode).ConfigureAwait(false);
         }
@@ -1255,42 +1182,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         }
     }
 
-    private static bool HasSecondaryUniqueIndex(StorageUnit logicalUnit) =>
-        logicalUnit.Indexes.Any(index => index.IsUnique &&
-            !index.Columns.Select(column => column.Column)
-                .SequenceEqual(logicalUnit.Key.Columns, StringComparer.Ordinal));
-    private ColumnRef? QueryColumn(string name)
-    {
-        var column = Unit.Columns.Single(item => item.Name == name);
-        return column.Type switch
-        {
-            PortableType.Boolean => new ColumnRef(new TableId(Unit.Name), name, QueryType.Boolean, column.IsNullable),
-            PortableType.Int32 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int32, column.IsNullable),
-            PortableType.Int64 => new ColumnRef(new TableId(Unit.Name), name, QueryType.Int64, column.IsNullable),
-            PortableType.Decimal => new ColumnRef(new TableId(Unit.Name), name, QueryType.Decimal, column.IsNullable, null,
-                column.Precision is int precision ? checked((byte)precision) : null,
-                column.Scale is int scale ? checked((byte)scale) : null),
-            PortableType.String => new ColumnRef(new TableId(Unit.Name), name, QueryType.String, column.IsNullable, column.MaxLength),
-            PortableType.DateTimeOffset => new ColumnRef(new TableId(Unit.Name), name, QueryType.DateTimeOffset, column.IsNullable),
-            PortableType.Guid => new ColumnRef(new TableId(Unit.Name), name, QueryType.Guid, column.IsNullable),
-            PortableType.Binary => new ColumnRef(new TableId(Unit.Name), name, QueryType.Binary, column.IsNullable, column.MaxLength),
-            _ => null
-        };
-    }
-
-    private static QueryType? QueryTypeOf(PortableType type) => type switch
-    {
-        PortableType.Boolean => QueryType.Boolean,
-        PortableType.Int32 => QueryType.Int32,
-        PortableType.Int64 => QueryType.Int64,
-        PortableType.Decimal => QueryType.Decimal,
-        PortableType.String => QueryType.String,
-        PortableType.DateTimeOffset => QueryType.DateTimeOffset,
-        PortableType.Guid => QueryType.Guid,
-        PortableType.Binary => QueryType.Binary,
-        _ => null
-    };
-
     private async ValueTask<WriteOutcome> Mutate(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode)
     {
         var outcome = await MutateCore(values, options, mutation, mode).ConfigureAwait(false);
@@ -1313,7 +1204,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        ValidateValues(values.Values, mutation == Mutation.Insert,
+        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, mutation == Mutation.Insert,
             allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
 
         // A provider sequence has no caller-visible key until the insert commits. Treat an
@@ -1356,7 +1247,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     {
         ArgumentNullException.ThrowIfNull(values);
         values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        ValidateValues(values.Values, requireAllNonNullable: false);
+        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, requireAllNonNullable: false);
         if (options?.Precondition.Kind == WritePreconditionKind.IfVersion && VersionColumn is null)
             throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare version machinery.");
 
@@ -1672,29 +1563,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             index.MissingValues == MissingValueBehavior.Excluded &&
             index.Columns.Select(column => column.Column).SequenceEqual(Unit.Key.Columns, StringComparer.Ordinal));
         return index is null ? null : new PostgreSqlDialect().IndexFilter(index);
-    }
-
-    private void ValidateValues(
-        IReadOnlyDictionary<string, object?> values,
-        bool requireAllNonNullable,
-        bool allowGeneratedLocator = false)
-    {
-        var known = UserColumns.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
-        var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
-        if (unknown is not null)
-            throw new ArgumentException($"Column '{unknown}' is not declared by '{Unit.Name}'.", nameof(values));
-        foreach (var generated in UserColumns.Where(column => column.Generation == ColumnGeneration.ProviderSequence))
-            if (values.ContainsKey(generated.Name) && !allowGeneratedLocator)
-                throw new ArgumentException($"ProviderSequence column '{generated.Name}' is assigned by PostgreSQL; it may only be supplied as the locator for Update or Upsert.", nameof(values));
-        if (!requireAllNonNullable)
-            return;
-        foreach (var column in UserColumns.Where(column => !column.IsNullable && column.Default is null))
-        {
-            if (column.Generation == ColumnGeneration.ProviderSequence)
-                continue;
-            if (!values.TryGetValue(column.Name, out var value) || value is null)
-                throw new ArgumentException($"Non-nullable column '{column.Name}' is required.", nameof(values));
-        }
     }
 
     private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
