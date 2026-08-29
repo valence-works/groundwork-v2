@@ -351,6 +351,23 @@ public sealed record KeyDefinition
     public required IReadOnlyList<string> Columns { get; init; }
 }
 
+/// <summary>
+/// Declares a logical relationship from columns on one storage unit to another unit's key.
+/// Providers do not turn this metadata into a physical foreign key; portable join planning owns
+/// its use.
+/// </summary>
+public sealed record ReferenceDefinition
+{
+    /// <summary>The stable name later query declarations use to select this relationship.</summary>
+    public required string Name { get; init; }
+
+    /// <summary>Columns on the referencing unit, in target-key order.</summary>
+    public required IReadOnlyList<string> Columns { get; init; }
+
+    /// <summary>The logical identity of the unit whose declared key is referenced.</summary>
+    public required StorageUnitId TargetUnitId { get; init; }
+}
+
 public sealed record IndexColumn(string Column, SortDirection Direction = SortDirection.Ascending);
 
 public sealed record IndexDefinition
@@ -404,6 +421,8 @@ public sealed record StorageUnit
     public required KeyDefinition Key { get; init; }
     public IReadOnlyList<DerivedColumnDefinition> DerivedColumns { get; init; } = [];
     public IReadOnlyList<IndexDefinition> Indexes { get; init; } = [];
+    /// <summary>Logical-only relationships from this unit's columns to another unit's key.</summary>
+    public IReadOnlyList<ReferenceDefinition> References { get; init; } = [];
     /// <summary>Named, closed aggregation shapes available to callers of this unit.</summary>
     public IReadOnlyList<AggregationProfile> AggregationProfiles { get; init; } = [];
     public ScopePolicy Scope { get; init; } = ScopePolicy.Global;

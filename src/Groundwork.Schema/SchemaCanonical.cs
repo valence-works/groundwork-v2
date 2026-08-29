@@ -90,6 +90,21 @@ public static class GroundworkSchemaCanonical
             }
 
             builder.Append(']');
+            if (table.References.Count != 0)
+            {
+                builder.Append(",\"references\":[");
+                for (var referenceIndex = 0; referenceIndex < table.References.Count; referenceIndex++)
+                {
+                    if (referenceIndex != 0) builder.Append(',');
+                    var reference = table.References[referenceIndex];
+                    builder.Append("{\"name\":").Append(String(reference.Name))
+                        .Append(",\"target\":").Append(String(reference.Target))
+                        .Append(",\"columns\":[")
+                        .Append(string.Join(",", reference.Columns.Select(String)))
+                        .Append("]}");
+                }
+                builder.Append(']');
+            }
             if (table.Id is { } tableId && !string.Equals(tableId, table.Name, StringComparison.Ordinal))
                 builder.Append(",\"id\":").Append(String(tableId));
             // Emitted only once it diverges from the default, so every schema document written
@@ -166,7 +181,8 @@ public static class GroundworkSchemaCanonical
                 ReadIdempotency(tableElement, "retentionIdempotency"),
                 ReadAggregations(tableElement),
                 OptionalString(tableElement, "id"),
-                EnumValueOrDefault(tableElement, "foreignColumns", SchemaForeignColumns.Refuse)));
+                EnumValueOrDefault(tableElement, "foreignColumns", SchemaForeignColumns.Refuse),
+                ReadReferences(tableElement)));
         }
 
         return new SchemaDocument(tables);
@@ -384,6 +400,17 @@ public static class GroundworkSchemaCanonical
             RequiredArray(element, "groupByColumns").Select(column =>
                 column.GetString() ?? throw new FormatException("Aggregation group columns must be strings.")),
             RequiredArray(element, "groupBy").Select(ReadAggregationGroup).ToArray())).ToArray();
+    }
+
+    private static IReadOnlyList<SchemaReference> ReadReferences(JsonElement table)
+    {
+        if (!TryRead(table, "references", JsonValueKind.Array, out var value))
+            return Array.Empty<SchemaReference>();
+        return value.EnumerateArray().Select(reference => new SchemaReference(
+            RequiredString(reference, "name"),
+            RequiredString(reference, "target"),
+            RequiredArray(reference, "columns").Select(column =>
+                column.GetString() ?? throw new FormatException("Reference column names must be strings.")))).ToArray();
     }
 
     private static SchemaAggregationGroup ReadAggregationGroup(JsonElement element)

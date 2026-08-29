@@ -64,6 +64,8 @@ internal static class StorageDeclarationReferenceValidation
             }
         }
 
+        diagnostics.AddRange(StorageReferenceValidation.ValidateLocal(unit));
+
         return diagnostics;
     }
 

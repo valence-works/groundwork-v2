@@ -156,6 +156,28 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Index(string name, Action<IndexBuilder> configure) =>
         AddIndex(name, configure, unique: false);
 
+    /// <summary>
+    /// Declares a logical-only relationship to <paramref name="target"/>'s key. The target is
+    /// snapshotted so key shape, scope, and portable column types are validated when this builder
+    /// is built, together with the required covering key or index.
+    /// </summary>
+    public StorageDeclarationBuilder Reference(string name, StorageUnit target, params string[] columns)
+    {
+        state.AddReference(name, target, columns);
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a logical-only relationship by target identity. This form is used when a canonical
+    /// schema is assembled before all units exist; target-dependent validation occurs when the
+    /// complete manifest is validated.
+    /// </summary>
+    public StorageDeclarationBuilder Reference(string name, StorageUnitId targetUnitId, params string[] columns)
+    {
+        state.AddReference(name, targetUnitId, columns);
+        return this;
+    }
+
     public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = ProviderReservedLedgerNames.DefaultAppendLedger)
     {
         state.SetAppendIdempotency(new AppendIdempotencyDeclaration { Window = window, LedgerName = ledgerName });
@@ -400,6 +422,7 @@ internal sealed class StorageDeclarationState
 {
     private readonly List<ColumnDefinition> columns = [];
     private readonly List<IndexDefinition> indexes = [];
+    private readonly List<ReferenceDeclarationState> references = [];
     private readonly List<AggregationProfile> aggregationProfiles = [];
     private readonly string id;
     private readonly string name;
@@ -484,6 +507,35 @@ internal sealed class StorageDeclarationState
         aggregationProfiles.Add(profile);
     }
 
+    public void AddReference(string name, StorageUnit target, IEnumerable<string> columnNames)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        AddReference(name, target.Id, columnNames, new SchemaSubject(target).Definition);
+    }
+
+    public void AddReference(string name, StorageUnitId targetUnitId, IEnumerable<string> columnNames) =>
+        AddReference(name, targetUnitId, columnNames, target: null);
+
+    private void AddReference(
+        string name,
+        StorageUnitId targetUnitId,
+        IEnumerable<string> columnNames,
+        StorageUnit? target)
+    {
+        var referenceName = RequireText(name, nameof(name));
+        if (references.Any(reference => string.Equals(reference.Definition.Name, referenceName, StringComparison.Ordinal)))
+            throw new ArgumentException($"Reference '{referenceName}' is already declared.", nameof(name));
+        var snapshot = (columnNames ?? throw new ArgumentNullException(nameof(columnNames))).ToArray();
+        references.Add(new ReferenceDeclarationState(
+            new ReferenceDefinition
+            {
+                Name = referenceName,
+                Columns = Array.AsReadOnly(snapshot),
+                TargetUnitId = targetUnitId
+            },
+            target));
+    }
+
     public void SetScope(ScopePolicy value) => scope = value;
 
     public void SetForeignColumns(ForeignColumnPolicy value) => foreignColumns = value;
@@ -505,6 +557,7 @@ internal sealed class StorageDeclarationState
             Columns = Array.AsReadOnly(columns.ToArray()),
             Key = new KeyDefinition { Columns = Array.AsReadOnly((key?.Columns ?? []).ToArray()) },
             Indexes = Array.AsReadOnly(indexes.ToArray()),
+            References = Array.AsReadOnly(references.Select(reference => reference.SnapshotDefinition()).ToArray()),
             AggregationProfiles = Array.AsReadOnly(aggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()),
             Scope = scope,
             ForeignColumns = foreignColumns,
@@ -515,6 +568,10 @@ internal sealed class StorageDeclarationState
         };
 
         var declarationFindings = StorageDeclarationReferenceValidation.Validate(unit, key is null).ToList();
+        declarationFindings.AddRange(StorageReferenceValidation.ValidateTargets(
+            unit,
+            references.Where(reference => reference.Target is not null)
+                .ToDictionary(reference => reference.Definition.Name, reference => reference.Target!, StringComparer.Ordinal)));
         try
         {
             ProviderOwnedColumns.ValidateReservedLogicalNames(unit);
@@ -579,6 +636,14 @@ internal sealed class StorageDeclarationState
         string.IsNullOrWhiteSpace(value)
             ? throw new ArgumentException("A non-empty value is required.", parameterName)
             : value;
+}
+
+internal sealed record ReferenceDeclarationState(ReferenceDefinition Definition, StorageUnit? Target)
+{
+    public ReferenceDefinition SnapshotDefinition() => Definition with
+    {
+        Columns = Array.AsReadOnly((Definition.Columns ?? []).ToArray())
+    };
 }
 
 public sealed class DeclarationFinding

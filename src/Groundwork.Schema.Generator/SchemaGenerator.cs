@@ -648,6 +648,14 @@ public sealed class SchemaGenerator : ISourceGenerator
                 builder.AppendLine("                .ExcludeMissingValues()");
             builder.AppendLine("            )");
         }
+        foreach (var reference in table.References)
+        {
+            builder.Append("            .Reference(").Append(Literal(reference.Name))
+                .Append(", new global::Groundwork.Kernel.StorageUnitId(").Append(Literal(reference.Target))
+                .Append("), new string[] { ")
+                .Append(string.Join(", ", reference.Columns.Select(Literal)))
+                .AppendLine(" })");
+        }
         if (table.Scope == SchemaScope.Scoped)
             builder.AppendLine("            .Scoped()");
         if (table.ForeignColumns == SchemaForeignColumns.TolerateDatabaseSupplied)

@@ -493,6 +493,27 @@ public sealed class GeneratorContractTests
     }
 
     [Fact]
+    public void Additional_file_references_reach_the_generated_runtime_unit()
+    {
+        const string json = """
+            {"tables":[
+              {"name":"customers","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]},
+              {"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false},{"name":"customer_id","type":"Guid","nullable":false}],"key":["id"],"indexes":[{"name":"by_customer","columns":[{"name":"customer_id","descending":false}],"includeNulls":true,"unique":false}],"references":[{"name":"customer","target":"customers","columns":["customer_id"]}]}
+            ]}
+            """;
+
+        var result = Run("public static class Empty { }", new InMemoryAdditionalText("schema/groundwork.json", json));
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var reference = Assert.Single(Definition(result, "ordersStorageUnit").References);
+        Assert.Equal("customer", reference.Name);
+        Assert.Equal("customers", reference.TargetUnitId.Value);
+        Assert.Equal(["customer_id"], reference.Columns);
+        Assert.Contains(result.Generated, generated => generated.Contains(".Reference(\"customer\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Additional_file_does_not_mask_an_invalid_attribute_schema()
     {
         const string json = "{\"tables\":[{\"name\":\"tickets\",\"columns\":[{\"name\":\"id\",\"type\":\"String\",\"nullable\":false}],\"key\":[\"id\"],\"indexes\":[]}] }";

@@ -4,6 +4,8 @@ Groundwork.Kernel.PortableType
 Groundwork.Kernel.ProviderOwnedColumns
 Groundwork.Kernel.MissingValueBehavior
 Groundwork.Kernel.IndexBuilder
+Groundwork.Kernel.ReferenceDefinition
+Groundwork.Schema.SchemaReference
 Groundwork.Kernel.StorageDeclarationBuilder
 Groundwork.Kernel.PortabilityValidator
 Groundwork.Kernel.AggregationOrderTerm

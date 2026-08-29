@@ -159,6 +159,8 @@ public sealed class SchemaSubject
 
     public ImmutableArray<IndexDefinition> Indexes => definition.Indexes.ToImmutableArray();
 
+    public ImmutableArray<ReferenceDefinition> References => definition.References.ToImmutableArray();
+
     public ImmutableArray<AggregationProfile> AggregationProfiles => definition.AggregationProfiles.ToImmutableArray();
 
     public ScopePolicy Scope => definition.Scope;
@@ -203,6 +205,15 @@ public sealed class SchemaSubject
 
         foreach (var unit in units)
             Validate(unit);
+
+        var referenceFindings = StorageReferenceValidation.ValidateManifest(units);
+        if (referenceFindings.Count != 0)
+        {
+            throw new ArgumentException(
+                "The schema manifest has invalid logical references: " + string.Join(
+                    "; ", referenceFindings.Select(finding => $"{finding.Code} at {finding.Path}: {finding.Message}")),
+                nameof(declarations));
+        }
 
         var names = new Dictionary<string, StorageUnit>(StringComparer.OrdinalIgnoreCase);
         foreach (var unit in units)
@@ -370,6 +381,12 @@ public sealed class SchemaSubject
             IsUnique = index.IsUnique,
             MissingValues = index.MissingValues,
             SchemaVersion = index.SchemaVersion
+        }).ToImmutableArray(),
+        References = (source.References ?? []).Select(reference => new ReferenceDefinition
+        {
+            Name = reference.Name,
+            Columns = (reference.Columns ?? []).ToImmutableArray(),
+            TargetUnitId = reference.TargetUnitId
         }).ToImmutableArray(),
         AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
