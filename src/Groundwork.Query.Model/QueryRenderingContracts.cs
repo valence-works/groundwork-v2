@@ -494,7 +494,7 @@ public static class QueryContinuationToken
 
         if (declaredIdentity.Length != resolvedIdentity.Length ||
             declaredIdentity.Where((column, index) =>
-                !ColumnRefIdentity.SameQualifiedColumn(column, resolvedIdentity[index])).Any())
+                !column.Equals(resolvedIdentity[index])).Any())
             throw new ArgumentException(
                 "The declared driving identity must match the source schema identity in order and completeness.",
                 nameof(options));
@@ -504,7 +504,7 @@ public static class QueryContinuationToken
         foreach (var term in effectiveOrder)
         {
             if (identityIndex < resolvedIdentity.Length &&
-                ColumnRefIdentity.SameQualifiedColumn(term.Column, resolvedIdentity[identityIndex]))
+                term.Column.Equals(resolvedIdentity[identityIndex]))
                 identityIndex++;
         }
         if (identityIndex != resolvedIdentity.Length)

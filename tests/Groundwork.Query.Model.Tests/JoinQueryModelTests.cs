@@ -512,6 +512,28 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_composite_continuation_rejects_wrong_identity_type_metadata()
+    {
+        var request = Request(Join());
+        var wrongCustomerId = new ColumnRef(
+            Orders,
+            OrderCustomerId.Name,
+            QueryType.String,
+            isNullable: false);
+        var options = new QueryRenderOptions(
+                drivingIdentityColumns: [wrongCustomerId, OrderRegion])
+            .WithIdentityTieBreaks([OrderCustomerId, OrderRegion]);
+        var order = options.GetEffectiveOrder(request);
+
+        var failure = Assert.Throws<ArgumentException>(() => QueryContinuationToken.Encode(
+            request,
+            options,
+            order.Select(term => ContinuationValue(term.Column))));
+
+        Assert.Contains("match the source schema identity", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Joined_composite_continuation_preserves_requested_order_and_appends_the_declared_identity()
     {
         var request = new QueryRequest(

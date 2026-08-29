@@ -15,7 +15,8 @@ The aggregate command and its budget probe bind the same fragment parameters bef
 with `QueryContinuationToken.Encode`; the tuple contains every requested order term followed by
 the explicitly supplied `QueryRenderOptions.TieBreakColumns`. For joined continuations, applications
 must supply their complete driving identity through `QueryRenderOptions.DrivingIdentityColumns`; the
-joined order includes that identity in declaration order even when the additional tie-break list is
+declaration must exactly match the provider-resolved source key, including portable type metadata and
+facets. The joined order includes that identity in declaration order even when the additional tie-break list is
 partial or a requested order term already names one of its columns. This preserves caller-selected
 sort priority while retaining a complete declaration-order identity suffix. Joined renderers alias
 each effective-order value with

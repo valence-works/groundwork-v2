@@ -188,7 +188,8 @@ Four rules for correct pages:
 1. **Every order term must name its null rank.** `NullOrder.ProviderDefault` is refused
    (`GW-SEM-ORDER-004`).
 2. **For joined continuations, you must supply your complete declared identity through
-   `QueryRenderOptions.DrivingIdentityColumns`.** Joined continuations include that identity in
+   `QueryRenderOptions.DrivingIdentityColumns`.** It must exactly match the provider-resolved key,
+   including portable type metadata and facets. Joined continuations include that identity in
    declaration order even when `TieBreakColumns` contains only additional tie-breaks or requested
    order terms already name identity columns. Without a complete identity suffix, pages are not
    deterministic.
