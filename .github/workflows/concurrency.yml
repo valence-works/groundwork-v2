@@ -18,7 +18,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The repository-level cost brake also suppresses automatic main-branch
+  # concurrency evidence. Manual dispatch is available again after unpausing.
   concurrency-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -123,6 +126,7 @@ jobs:
           retention-days: 14
 
   sqlserver-w2-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     name: SQL Server W2 (${{ matrix.target-framework }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -194,6 +198,7 @@ jobs:
           retention-days: 14
 
   retention-concurrency:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

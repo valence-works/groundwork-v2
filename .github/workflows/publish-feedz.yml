@@ -31,6 +31,7 @@ env:
 
 jobs:
   package:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}

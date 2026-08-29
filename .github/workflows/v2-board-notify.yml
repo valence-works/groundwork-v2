@@ -28,6 +28,8 @@ permissions:
 
 jobs:
   reconcile:
+    # During a quota pause the control room maintains board state manually.
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       # pull_request_target is used for link events, but this checkout is
