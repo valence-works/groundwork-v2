@@ -431,7 +431,7 @@ public sealed class RecordTableSession<T>
         ArgumentNullException.ThrowIfNull(query);
         var request = query.Any().Request;
         table.ValidateRequest(request);
-        return store.Query(request, table.CreateRenderOptions(null)).Rows.Count != 0;
+        return store.Query(QueryRequestExecution.ForExistenceProbe(request), table.CreateRenderOptions(null)).Rows.Count != 0;
     }
 
     /// <summary>Executes a typed declared aggregation through the provider's covered aggregation path.</summary>

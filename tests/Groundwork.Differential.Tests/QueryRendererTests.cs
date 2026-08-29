@@ -336,6 +336,30 @@ public sealed class QueryRendererTests
             (_, value) => value));
         Assert.Equal("GW-QUERY-032", refusal.Code);
         Assert.Contains("explicit projection", refusal.Message, StringComparison.Ordinal);
+
+        var ordinaryCountedRows = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None,
+            ResultShape.TotalCount.Instance,
+            distinct: true);
+        Assert.Throws<QueryRenderException>(() => RelationalQueryResultReader.Read(
+            unopenedConnection,
+            new SqliteQueryRenderer().Render(ordinaryCountedRows),
+            (_, value) => value));
+
+        var scalarCount = QueryRequestExecution.ForProviderCount(ordinaryCountedRows);
+        Assert.False(scalarCount.Distinct);
+        Assert.Equal(customerId, Assert.Single(scalarCount.Projection.Columns));
+        var counted = Assert.Single(RelationalQueryResultReader.Read(
+            connection,
+            new SqliteQueryRenderer().Render(scalarCount),
+            (_, value) => value));
+        Assert.Equal(1L, counted["__groundwork_total_count"]);
+        Assert.Equal(0L, counted["__groundwork_count_only"]);
     }
 
     [Fact]

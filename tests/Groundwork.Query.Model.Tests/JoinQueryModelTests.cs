@@ -312,6 +312,56 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_scalar_probes_avoid_row_materialization_without_changing_distinct_semantics()
+    {
+        var request = new QueryRequest(
+            Orders,
+            Join(),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+
+        var count = QueryRequestExecution.ForProviderCount(request);
+        var any = QueryRequestExecution.ForExistenceProbe(request);
+        var distinctRequest = new QueryRequest(
+            request.Table,
+            request.Join!,
+            request.Where,
+            request.Order,
+            request.Projection,
+            request.Paging,
+            request.Result,
+            distinct: true);
+        var distinctCount = QueryRequestExecution.ForProviderCount(distinctRequest);
+        var distinctAny = QueryRequestExecution.ForExistenceProbe(distinctRequest);
+        var explicitDistinctRequest = new QueryRequest(
+            request.Table,
+            request.Join!,
+            request.Where,
+            request.Order,
+            Projection.ColumnsOnly(CustomerName),
+            request.Paging,
+            request.Result,
+            distinct: true);
+        var explicitDistinctCount = QueryRequestExecution.ForProviderCount(explicitDistinctRequest);
+        var explicitDistinctAny = QueryRequestExecution.ForExistenceProbe(explicitDistinctRequest);
+
+        Assert.IsType<ResultShape.TotalCount>(count.Result);
+        Assert.IsType<ResultShape.Rows>(any.Result);
+        Assert.Equal(OrderCustomerId, Assert.Single(count.Projection.Columns));
+        Assert.Equal(OrderCustomerId, Assert.Single(any.Projection.Columns));
+        Assert.False(distinctCount.Distinct);
+        Assert.False(distinctAny.Distinct);
+        Assert.Equal(OrderCustomerId, Assert.Single(distinctCount.Projection.Columns));
+        Assert.Equal(OrderCustomerId, Assert.Single(distinctAny.Projection.Columns));
+        Assert.True(explicitDistinctCount.Distinct);
+        Assert.True(explicitDistinctAny.Distinct);
+        Assert.Equal(CustomerName, Assert.Single(explicitDistinctCount.Projection.Columns));
+        Assert.Equal(CustomerName, Assert.Single(explicitDistinctAny.Projection.Columns));
+    }
+
+    [Fact]
     public void Driving_table_search_key_rewrites_do_not_capture_same_named_target_columns()
     {
         var sourceName = new ColumnRef(Orders, "name", QueryType.String, isNullable: false);

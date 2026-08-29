@@ -56,9 +56,10 @@ references. Applied declarations that predate this metadata must be reapplied be
 a newly built declaration; a direct legacy declaration that still omits it fails closed before join I/O.
 Target fields remain nested under `__groundwork_target` inside the native pipeline. Provider sessions
 normalize relational aliases and Mongo's nested document to one public `table.column` result key,
-so same-named source and target columns cannot collide. Joined scalar reductions and explicitly
-projected joined rows execute natively. `Projection.All` joined rows remain refused with
-`GW-QUERY-032` because their duplicate native labels do not define an unambiguous public shape.
+so same-named source and target columns cannot collide. Joined scalar reductions, `Count()` and
+`Any()` execute natively without requiring composite row materialization, and explicitly projected
+joined rows execute through the composite result shape. `Projection.All` joined row results remain
+refused with `GW-QUERY-032` because their duplicate native labels do not define an unambiguous public shape.
 Privileged cross-scope queries
 refuse joins with `GW-ACCESS-003` before audit observation or provider commands.
 

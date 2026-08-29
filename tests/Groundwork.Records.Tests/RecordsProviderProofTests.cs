@@ -67,36 +67,35 @@ public sealed class RecordsProviderProofTests
         try
         {
             using var connection = new SqliteProviderFactory().Create("Data Source=" + path);
-            var suffix = Guid.NewGuid().ToString("N");
-            var customers = RecordTable.For<JoinedProviderCustomer>("records_join_customers_" + suffix)
-                .Key(customer => customer.Id)
-                .Build();
-            var orders = RecordTable.For<JoinedProviderOrder>("records_join_orders_" + suffix)
-                .Key(order => order.Id)
-                .Index("by_customer", order => order.CustomerId)
-                .Reference("customer", order => order.Customer, customers, order => order.CustomerId)
-                .Build();
-            Assert.True(connection.Schema.Apply(customers.Definition).Applied);
-            Assert.True(connection.Schema.Apply(orders.Definition).Applied);
-            var customer = new JoinedProviderCustomer(Guid.NewGuid(), "Ada");
-            var order = new JoinedProviderOrder(Guid.NewGuid(), customer.Id, customer);
-            Assert.Equal(RecordWriteStatus.Inserted, customers.Open(connection).Insert(customer).Status);
-            var records = orders.Open(connection);
-            Assert.Equal(RecordWriteStatus.Inserted, records.Insert(order).Status);
-            var reference = orders.Reference<JoinedProviderCustomer>("customer");
-            var projection = orders.Select(
-                reference.Join(orders.Query),
-                reference,
-                (source, target) => new JoinedProviderResult(source.Id, target.Id, target.Name));
-
-            var result = Assert.Single(records.Query(projection));
-
-            Assert.Equal(new JoinedProviderResult(order.Id, customer.Id, "Ada"), result);
+            AssertJoinedScalarTerminals(connection, "sqlite");
         }
         finally
         {
             if (File.Exists(path)) File.Delete(path);
         }
+    }
+
+    [SkippableFact]
+    public void PostgreSQL_executes_joined_count_and_any()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL records proof.");
+        using var connection = new PostgreSqlProviderFactory().Create(connectionString!);
+        AssertJoinedScalarTerminals(connection, "pg");
+    }
+
+    [SkippableFact]
+    public void SQLServer_executes_joined_count_and_any()
+    {
+        using var connection = new SqlServerProviderFactory().Create(LiveSqlServer.Required());
+        AssertJoinedScalarTerminals(connection, "sql");
+    }
+
+    [SkippableFact]
+    public void MongoDB_executes_joined_count_and_any()
+    {
+        using var connection = new MongoProviderFactory().Create(LiveMongo.Required());
+        AssertJoinedScalarTerminals(connection, "mongo");
     }
 
     [Fact]
@@ -259,6 +258,45 @@ public sealed class RecordsProviderProofTests
         var deleted = records.Delete(customer, RecordWriteOptions.IfVersion(3));
         Assert.Equal(RecordWriteStatus.Deleted, deleted.Status);
         Assert.Empty(records.Query(table.Query.Where(row => row.Email == email)));
+    }
+
+    private static void AssertJoinedScalarTerminals(IStorageProviderConnection connection, string provider)
+    {
+        var suffix = provider + "_" + Guid.NewGuid().ToString("N");
+        var customers = RecordTable.For<JoinedProviderCustomer>("records_join_customers_" + suffix)
+            .Key(customer => customer.Id)
+            .Build();
+        var orders = RecordTable.For<JoinedProviderOrder>("records_join_orders_" + suffix)
+            .Key(order => order.Id)
+            .Index("by_customer", order => order.CustomerId)
+            .Reference("customer", order => order.Customer, customers, order => order.CustomerId)
+            .Build();
+        Assert.True(connection.Schema.Apply(customers.Definition).Applied);
+        Assert.True(connection.Schema.Apply(orders.Definition).Applied);
+        var customer = new JoinedProviderCustomer(Guid.NewGuid(), "Ada");
+        var order = new JoinedProviderOrder(Guid.NewGuid(), customer.Id, customer);
+        Assert.Equal(RecordWriteStatus.Inserted, customers.Open(connection).Insert(customer).Status);
+        var records = orders.Open(connection);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(order).Status);
+        var reference = orders.Reference<JoinedProviderCustomer>("customer");
+        var joined = reference.Join(orders.Query);
+        var projection = orders.Select(
+            joined,
+            reference,
+            (source, target) => new JoinedProviderResult(source.Id, target.Id, target.Name));
+
+        Assert.Equal(
+            new JoinedProviderResult(order.Id, customer.Id, "Ada"),
+            Assert.Single(records.Query(projection)));
+        Assert.Equal(1, records.Count(joined));
+        Assert.True(records.Any(joined));
+        var missing = joined.Where(source => source.Customer.Name == "Grace");
+        Assert.Equal(0, records.Count(missing));
+        Assert.False(records.Any(missing));
+        var secondOrder = new JoinedProviderOrder(Guid.NewGuid(), customer.Id, customer);
+        Assert.Equal(RecordWriteStatus.Inserted, records.Insert(secondOrder).Status);
+        Assert.Equal(2, records.Count(joined.Distinct()));
+        Assert.True(records.Any(joined.Distinct()));
     }
 
     private sealed record JoinedProviderCustomer(Guid Id, string Name);

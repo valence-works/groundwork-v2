@@ -407,15 +407,17 @@ public static class QueryRequestExecution
 
     /// <summary>
     /// Builds a provider execution request that answers a count with the provider's total-count
-    /// shape. Distinct counts retain their Distinct flag so each provider can de-duplicate in its
-    /// native command before counting; ordinary counts use a single-row probe.
+    /// shape. Distinct counts retain their Distinct flag unless a joined all-column projection is
+    /// already unique by its source row; ordinary counts use a single-row probe.
     /// </summary>
     public static QueryRequest ForProviderCount(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
-        return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            request.Distinct ? Paging.None : ProbePaging(request.Paging, keepOffset: false),
-            ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
+        var distinct = ScalarProbeDistinct(request);
+        return new QueryRequest(request.Table, request.Where, request.Order,
+            ScalarProbeProjection(request),
+            distinct ? Paging.None : ProbePaging(request.Paging, keepOffset: false),
+            ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -427,8 +429,10 @@ public static class QueryRequestExecution
     public static QueryRequest ForExistenceProbe(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
-        return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
+        var distinct = ScalarProbeDistinct(request);
+        return new QueryRequest(request.Table, request.Where, request.Order,
+            ScalarProbeProjection(request),
+            ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan, distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -449,6 +453,25 @@ public static class QueryRequestExecution
         paging.ContinuationToken is { } token
             ? Paging.Continuation(token, 1)
             : Paging.OffsetLimit(keepOffset ? paging.Offset ?? 0 : 0, 1);
+
+    private static Projection ScalarProbeProjection(QueryRequest request)
+    {
+        if (request.Join is null ||
+            !request.Projection.AllColumns)
+        {
+            return request.Projection;
+        }
+
+        return Projection.ColumnsOnly(request.Join.ColumnPairs[0].Source);
+    }
+
+    private static bool ScalarProbeDistinct(QueryRequest request)
+    {
+        // A declared reference resolves at most one target row per source row, and Projection.All
+        // includes the source key. Every joined row is therefore already unique. Removing Distinct
+        // lets the scalar probe project one qualified source column without changing its answer.
+        return request.Distinct && (request.Join is null || !request.Projection.AllColumns);
+    }
 
     /// <summary>Builds a provider execution request with additional internal projection columns.</summary>
     public static QueryRequest WithProjection(QueryRequest request, Projection projection)
