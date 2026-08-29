@@ -19,6 +19,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly RelationalSessionExecution execution;
     private readonly RelationalSessionPointReads pointReads;
     private readonly RelationalSessionCrud crud;
+    private readonly RelationalSessionRetention retention;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
@@ -69,6 +70,10 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             "SQLite",
             (key, readExecution) => pointReads.Read(key, readExecution),
             new SqliteCrudAdapter(this));
+        retention = new RelationalSessionRetention(
+            unit,
+            access,
+            new SqliteRetentionAdapter(this));
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -425,8 +430,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         CancellationToken cancellationToken = default) =>
         Completed(cancellationToken, () => DeleteWhere(where));
 
-    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null) =>
-        ExecuteWrite(() => ApplyRetentionCore(options ?? new RetentionExecutionOptions()));
+    public RetentionResult ApplyRetention(RetentionExecutionOptions? options = null)
+    {
+        var operation = retention.Prepare(options);
+        return ExecuteWrite(() => retention.Apply(operation, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
+    }
 
     public StorageInspection Inspect() => Execute(() =>
     {
@@ -444,146 +453,16 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     public RetentionOperationResult ApplyRetention(OperationId operationId, RetentionExecutionOptions? options = null)
     {
-        var declaration = Unit.RetentionIdempotency ?? throw new InvalidOperationException(
-            $"Storage unit '{Unit.Name}' does not declare retention idempotency; declare RetentionIdempotency before using operation-identified retention.");
-        declaration.Validate(Unit);
-        options ??= new RetentionExecutionOptions();
-        RetentionSessionExtensions.ValidateExecutionOptions(options);
-        RetentionOperationCodec.ValidateOperation(operationId);
-        return ExecuteWrite(() => ApplyExactRetentionCore(operationId, declaration, options));
-    }
-
-    private RetentionOperationResult ApplyExactRetentionCore(
-        OperationId operationId,
-        RetentionIdempotencyDeclaration declaration,
-        RetentionExecutionOptions options)
-    {
-        EnsureLedgerTable(declaration.LedgerName);
-        var providerNow = ProviderNow();
-        var scope = Access.Scope?.Value ?? string.Empty;
-        var fingerprint = RetentionOperationCodec.Fingerprint(Unit, options);
-        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE rowid IN (SELECT rowid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);") )
-        {
-            reclaim.Parameters.AddWithValue("@reclaim_unit", Unit.Id.Value);
-            reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
-            reclaim.ExecuteNonQuery();
-        }
-
-        var existing = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
-        if (existing is not null)
-        {
-            var (committedAt, storedFingerprint, storedResult) = existing.Value;
-            if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-            {
-                if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
-                    throw new InvalidOperationException(
-                        "GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
-                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                return RetentionOperationCodec.DeserializeResult(storedResult) with { Status = RetentionOperationStatus.Replayed };
-            }
-
-            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            deleteExpired.ExecuteNonQuery();
-        }
-
-        using (var insertLedger = Command($"INSERT OR IGNORE INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result);"))
-        {
-            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
-            insertLedger.Parameters.AddWithValue("@committed_at", FormatLedgerTime(providerNow));
-            insertLedger.Parameters.AddWithValue("@fingerprint", fingerprint);
-            insertLedger.Parameters.AddWithValue("@result", string.Empty);
-            if (insertLedger.ExecuteNonQuery() == 0)
-            {
-                var raced = ReadRetentionLedger(declaration.LedgerName, operationId, scope);
-                if (raced is null || string.IsNullOrEmpty(raced.Value.storedFingerprint) || string.IsNullOrEmpty(raced.Value.storedResult))
-                    throw new InvalidOperationException(
-                        "GW-RETENTION-002: an existing exact retention ledger entry has no exact result; use a new operation nonce.");
-                if (!string.Equals(raced.Value.storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new RetentionIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, raced.Value.storedFingerprint, fingerprint);
-                return RetentionOperationCodec.DeserializeResult(raced.Value.storedResult) with { Status = RetentionOperationStatus.Replayed };
-            }
-        }
-
-        // Exact retention executes inside this same transaction. Cancellation or any
-        // provider failure rolls back both deletes and the placeholder ledger row.
-        var retention = ApplyRetentionCore(options);
-        var result = new RetentionOperationResult(
-            RetentionOperationStatus.Executed,
-            retention.DeletedRows,
-            retention.Batches,
-            retention.Completed);
-        using var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-        AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
-        complete.Parameters.AddWithValue("@result", RetentionOperationCodec.SerializeResult(result));
-        complete.ExecuteNonQuery();
-        return result;
-    }
-
-    private (DateTimeOffset committedAt, string? storedFingerprint, string? storedResult)? ReadRetentionLedger(
-        string table,
-        OperationId operationId,
-        string scope)
-    {
-        using var command = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(table)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-        AddLedgerParameters(command, Unit.Id.Value, scope, operationId.Nonce);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
-            return null;
-        return (
-            DateTimeOffset.Parse(reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            reader.IsDBNull(1) ? null : reader.GetString(1),
-            reader.IsDBNull(2) ? null : reader.GetString(2));
+        var operation = retention.PrepareExact(operationId, options);
+        return ExecuteWrite(() => retention.ApplyExact(operation, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
     }
 
     private RetentionResult ApplyRetentionCore(RetentionExecutionOptions options)
-    {
-        if (options.MaxRowsPerBatch <= 0)
-            throw new ArgumentOutOfRangeException(nameof(options.MaxRowsPerBatch));
-        var declaration = Unit.Retention ??
-            throw new InvalidOperationException($"Storage unit '{Unit.Name}' does not declare retention.");
-        var keepNewest = RetentionSessionExtensions.EffectiveKeepNewest(Unit, options);
-        var keyColumns = Unit.Key.Columns;
-        var partition = declaration.PartitionColumns.Count == 0
-            ? string.Empty
-            : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
-        var scope = Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn)
-            ? $" WHERE {Quote(SqliteSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
-            : string.Empty;
-        var keys = string.Join(", ", keyColumns.Select(Quote));
-        var ordering = string.Join(", ", [
-            $"{Quote(declaration.OrderColumn)} DESC",
-            .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
-        var equality = string.Join(" AND ", keyColumns.Select(column =>
-            $"target.{Quote(column)}=victim.{Quote(column)}"));
-        var deleted = 0;
-        var batches = 0;
-        while (true)
-        {
-            options.CancellationToken.ThrowIfCancellationRequested();
-            using var command = Command($"WITH ranked AS (" +
-                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
-                $"FROM {Quote(Unit.Name)}{scope}), victims AS (" +
-                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
-                $"DELETE FROM {Quote(Unit.Name)} AS target WHERE EXISTS (SELECT 1 FROM victims AS victim WHERE {equality});");
-            command.Parameters.AddWithValue("@keep", keepNewest);
-            command.Parameters.AddWithValue("@limit", options.MaxRowsPerBatch);
-            if (Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
-                command.Parameters.AddWithValue("@__groundwork_scope", Access.Scope!.Value);
-            var affected = command.ExecuteNonQuery();
-            commandObserver?.Observe(new ProviderCommandEvent("sqlite.retention-delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            if (affected == 0)
-                break;
-            deleted += affected;
-            batches++;
-            if (affected < options.MaxRowsPerBatch)
-                break;
-        }
-        return new RetentionResult(deleted, batches);
-    }
+        => retention.Apply(
+                retention.Prepare(options),
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
 
     public WriteOutcome Append(OperationId operationId, IReadOnlyList<StorageValues> values)
     {
@@ -1449,6 +1328,153 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             WriteOptions? options,
             RelationalExecution execution) =>
             ValueTask.FromResult(session.DeleteCore(key, existing, options));
+    }
+
+    private sealed class SqliteRetentionAdapter(SqliteStorageSession session) : IRelationalRetentionAdapter
+    {
+        public ValueTask<int> DeleteBatch(
+            RelationalRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            var declaration = operation.Declaration;
+            var keyColumns = operation.Unit.Key.Columns;
+            var partition = declaration.PartitionColumns.Count == 0
+                ? string.Empty
+                : $"PARTITION BY {string.Join(", ", declaration.PartitionColumns.Select(Quote))} ";
+            var scope = operation.Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn)
+                ? $" WHERE {Quote(SqliteSchemaCoordinator.ScopeColumn)}=@__groundwork_scope"
+                : string.Empty;
+            var keys = string.Join(", ", keyColumns.Select(Quote));
+            var ordering = string.Join(", ", [
+                $"{Quote(declaration.OrderColumn)} DESC",
+                .. keyColumns.Select(column => $"{Quote(column)} ASC")]);
+            var equality = string.Join(" AND ", keyColumns.Select(column =>
+                $"target.{Quote(column)}=victim.{Quote(column)}"));
+            using var command = session.Command(
+                $"WITH ranked AS (" +
+                $"SELECT {keys}, ROW_NUMBER() OVER ({partition}ORDER BY {ordering}) AS __groundwork_retention_rank " +
+                $"FROM {Quote(operation.Unit.Name)}{scope}), victims AS (" +
+                $"SELECT {keys} FROM ranked WHERE __groundwork_retention_rank > @keep LIMIT @limit) " +
+                $"DELETE FROM {Quote(operation.Unit.Name)} AS target WHERE EXISTS (SELECT 1 FROM victims AS victim WHERE {equality});");
+            command.Parameters.AddWithValue("@keep", operation.KeepNewest);
+            command.Parameters.AddWithValue("@limit", operation.Options.MaxRowsPerBatch);
+            if (operation.Unit.Columns.Any(column => column.Name == SqliteSchemaCoordinator.ScopeColumn))
+                command.Parameters.AddWithValue("@__groundwork_scope", operation.Scope);
+            var affected = command.ExecuteNonQuery();
+            session.commandObserver?.Observe(new ProviderCommandEvent(
+                "sqlite.retention-delete",
+                command.CommandText,
+                ProviderCommandKind.Write,
+                IsProbe: false));
+            return ValueTask.FromResult(affected);
+        }
+
+        public ValueTask<DateTimeOffset> PrepareLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            session.EnsureLedgerTable(operation.Declaration.LedgerName);
+            return ValueTask.FromResult(session.ProviderNow());
+        }
+
+        public ValueTask ReclaimExpired(
+            RelationalExactRetentionOperation operation,
+            DateTimeOffset cutoff,
+            RelationalExecution execution)
+        {
+            using var reclaim = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE rowid IN " +
+                $"(SELECT rowid FROM {Quote(operation.Declaration.LedgerName)} " +
+                $"WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);");
+            reclaim.Parameters.AddWithValue("@reclaim_unit", operation.Unit.Id.Value);
+            reclaim.Parameters.AddWithValue("@cutoff", FormatLedgerTime(cutoff));
+            reclaim.ExecuteNonQuery();
+            return default;
+        }
+
+        public ValueTask<RelationalRetentionLedgerEntry?> ReadLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            using var existing = session.Command(
+                $"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(existing, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            using var reader = existing.ExecuteReader();
+            if (!reader.Read())
+                return ValueTask.FromResult<RelationalRetentionLedgerEntry?>(null);
+            return ValueTask.FromResult<RelationalRetentionLedgerEntry?>(new(
+                DateTimeOffset.Parse(
+                    reader.GetString(0),
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2)));
+        }
+
+        public ValueTask DeleteLedger(
+            RelationalExactRetentionOperation operation,
+            RelationalRetentionLedgerEntry existing,
+            RelationalExecution execution)
+        {
+            using var delete = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce " +
+                $"AND {Quote(LedgerCommittedAt)}=@observed_committed_at;");
+            AddLedgerParameters(delete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            delete.Parameters.AddWithValue("@observed_committed_at", FormatLedgerTime(existing.CommittedAt));
+            delete.ExecuteNonQuery();
+            return default;
+        }
+
+        public ValueTask<bool> TryClaimLedger(
+            RelationalExactRetentionOperation operation,
+            DateTimeOffset providerNow,
+            RelationalExecution execution)
+        {
+            using var insert = session.Command(
+                $"INSERT OR IGNORE INTO {Quote(operation.Declaration.LedgerName)} " +
+                $"({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, " +
+                $"{Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) " +
+                "VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result);");
+            AddLedgerParameters(insert, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            insert.Parameters.AddWithValue("@committed_at", FormatLedgerTime(providerNow));
+            insert.Parameters.AddWithValue("@fingerprint", operation.Fingerprint);
+            insert.Parameters.AddWithValue("@result", string.Empty);
+            return ValueTask.FromResult(insert.ExecuteNonQuery() == 1);
+        }
+
+        public ValueTask<RelationalRetentionReplayEntry?> ReadClaimWinner(
+            RelationalExactRetentionOperation operation,
+            RelationalExecution execution)
+        {
+            using var replay = session.Command(
+                $"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(replay, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            using var reader = replay.ExecuteReader();
+            if (!reader.Read())
+                return ValueTask.FromResult<RelationalRetentionReplayEntry?>(null);
+            return ValueTask.FromResult<RelationalRetentionReplayEntry?>(new(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        public ValueTask<bool> CompleteLedger(
+            RelationalExactRetentionOperation operation,
+            string serializedResult,
+            RelationalExecution execution)
+        {
+            using var complete = session.Command(
+                $"UPDATE {Quote(operation.Declaration.LedgerName)} SET {Quote(LedgerResult)}=@result " +
+                $"WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope " +
+                $"AND {Quote(LedgerNonce)}=@nonce;");
+            AddLedgerParameters(complete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            complete.Parameters.AddWithValue("@result", serializedResult);
+            return ValueTask.FromResult(complete.ExecuteNonQuery() == 1);
+        }
     }
 
     private sealed class SqliteAppendAdapter(SqliteStorageSession session) : IRelationalAppendAdapter
