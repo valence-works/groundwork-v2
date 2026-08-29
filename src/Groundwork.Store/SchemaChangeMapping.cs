@@ -78,6 +78,8 @@ public static class SchemaChangeMapping
                     ? SchemaChangeKind.AddDerivedColumn
                     : SchemaChangeKind.AddColumn,
             PhysicalSchemaOperationKind.CreatePhysicalIndex => SchemaChangeKind.CreateIndex,
+            PhysicalSchemaOperationKind.CreatePhysicalForeignKey => SchemaChangeKind.CreateForeignKey,
+            PhysicalSchemaOperationKind.CreatePhysicalCheckConstraint => SchemaChangeKind.CreateCheckConstraint,
             PhysicalSchemaOperationKind.RebuildPhysicalIndex => SchemaChangeKind.RebuildIndex,
             PhysicalSchemaOperationKind.RenamePrimaryStorage => SchemaChangeKind.RenameStorageUnit,
             PhysicalSchemaOperationKind.RenameColumn => SchemaChangeKind.RenameColumn,

@@ -16,6 +16,15 @@ public static class RelationalSql
         var declaredColumns = unit.Columns ?? throw new ArgumentException("A relational table requires columns.", nameof(unit));
         var columns = declaredColumns
             .Select(column => ColumnDefinitionSql(dialect, column))
+            .Concat((unit.References ?? [])
+                .Where(reference => reference.Enforcement == ReferenceEnforcement.Physical)
+                .Select(dialect.ForeignKeyDefinitionSql))
+            .Concat((unit.CheckConstraints ?? []).Select(constraint =>
+            {
+                var column = declaredColumns.Single(candidate =>
+                    string.Equals(candidate.Name, constraint.Column, StringComparison.Ordinal));
+                return dialect.CheckConstraintDefinitionSql(constraint, column);
+            }))
             .ToArray();
         var providerSequence = declaredColumns.SingleOrDefault(column =>
             column.Generation == ColumnGeneration.ProviderSequence)?.Name;
@@ -61,6 +70,28 @@ public static class RelationalSql
     {
         ArgumentNullException.ThrowIfNull(dialect);
         return dialect.DropIndexSql(table, index);
+    }
+
+    public static string CreateForeignKey(
+        RelationalDialect dialect,
+        string table,
+        ReferenceDefinition reference)
+    {
+        ArgumentNullException.ThrowIfNull(dialect);
+        ArgumentNullException.ThrowIfNull(reference);
+        return dialect.CreateForeignKeySql(table, reference);
+    }
+
+    public static string CreateCheckConstraint(
+        RelationalDialect dialect,
+        string table,
+        CheckConstraintDefinition constraint,
+        ColumnDefinition column)
+    {
+        ArgumentNullException.ThrowIfNull(dialect);
+        ArgumentNullException.ThrowIfNull(constraint);
+        ArgumentNullException.ThrowIfNull(column);
+        return dialect.CreateCheckConstraintSql(table, constraint, column);
     }
 
     public static string ConditionalUpsert(

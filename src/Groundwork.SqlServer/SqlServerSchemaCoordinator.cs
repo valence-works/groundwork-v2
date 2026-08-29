@@ -163,10 +163,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         PortabilityValidator.EnsurePortableDefaults(source);
         PortabilityValidator.EnsurePhysicalIdentifiers(source);
         EnsurePhysicalIndexNames(source);
-        return ProviderOwnedColumns.Physicalize(source, ColumnPolicy) with
-        {
-            Name = SqlServerPhysicalName.Normalize(source.Name)
-        };
+        return ProviderOwnedColumns.Physicalize(source, ColumnPolicy, SqlServerPhysicalName.Normalize);
     }
 
     internal static StorageUnit Prepare(StorageUnit desired)

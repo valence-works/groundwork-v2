@@ -17,6 +17,38 @@ public sealed class PostgreSqlDialectTests
     private readonly PostgreSqlDialect dialect = new();
 
     [SkippableFact]
+    public void Physical_foreign_keys_and_checks_apply_as_native_postgresql_constraints()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var customer = StorageUnit.Declare("pg-customer-" + suffix, "pg_customer_" + suffix)
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build();
+        var order = StorageUnit.Declare("pg-order-" + suffix, "pg_order_" + suffix)
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Int32("quantity", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .PhysicalReference("fk_order_customer", customer, "customer_id")
+            .Check("ck_order_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0)
+            .Build();
+
+        Assert.True(connection.Schema.Apply(customer).Applied);
+        Assert.True(connection.Schema.Apply(order).Applied);
+        Assert.True(connection.Schema.Diff(order).IsEmpty);
+
+        using var raw = new NpgsqlConnection(database.ConnectionString);
+        raw.Open();
+        using var command = raw.CreateCommand();
+        command.CommandText = "SELECT count(*) FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_class t ON t.oid=c.conrelid WHERE t.relname=@table AND c.conname IN ('fk_order_customer','ck_order_quantity');";
+        command.Parameters.AddWithValue("table", order.Name);
+        Assert.Equal(2L, command.ExecuteScalar());
+    }
+
+    [SkippableFact]
     public void Owned_session_marker_matches_the_opening_path()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();

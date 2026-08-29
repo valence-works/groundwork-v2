@@ -60,9 +60,14 @@ public sealed record PhysicalSchemaInspectionResult(
     /// </summary>
     public ImmutableArray<SchemaRefusal> ToleratedDrift { get; init; } = [];
 
+    /// <summary>Missing or mismatched declared foreign-key and check constraints.</summary>
+    public ImmutableArray<SchemaRefusal> ConstraintDrift { get; init; } = [];
+
     public bool HasColumnDrift => !ColumnDrift.IsDefaultOrEmpty;
 
     public bool HasIndexDrift => !IndexDrift.IsDefaultOrEmpty;
+
+    public bool HasConstraintDrift => !ConstraintDrift.IsDefaultOrEmpty;
 
     public bool HasToleratedDrift => !ToleratedDrift.IsDefaultOrEmpty;
 }
@@ -412,6 +417,7 @@ public sealed record GroundworkRuntimeSchemaAdmissionResult(
     public ImmutableArray<SchemaRefusal> Refusals =>
         (Inspection.ColumnDrift.IsDefault ? [] : Inspection.ColumnDrift)
             .Concat(Inspection.IndexDrift.IsDefault ? [] : Inspection.IndexDrift)
+            .Concat(Inspection.ConstraintDrift.IsDefault ? [] : Inspection.ConstraintDrift)
             .Concat(Plan.Refusals)
             .Concat(Application?.AuthorizationRefusals ?? [])
             .ToImmutableArray();

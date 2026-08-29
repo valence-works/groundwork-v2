@@ -59,7 +59,26 @@ public static class SchemaCompilation
             {
                 Name = reference.Name,
                 Columns = reference.Columns.ToArray(),
-                TargetUnitId = new StorageUnitId(reference.Target)
+                TargetUnitId = new StorageUnitId(reference.Target),
+                Enforcement = reference.Physical
+                    ? ReferenceEnforcement.Physical
+                    : ReferenceEnforcement.LogicalOnly
+            }).ToArray(),
+            CheckConstraints = table.Checks.Select(check => new CheckConstraintDefinition
+            {
+                Name = check.Name,
+                Column = check.Column,
+                Operator = check.Operator switch
+                {
+                    SchemaCheckOperator.Equal => CheckConstraintOperator.Equal,
+                    SchemaCheckOperator.NotEqual => CheckConstraintOperator.NotEqual,
+                    SchemaCheckOperator.GreaterThan => CheckConstraintOperator.GreaterThan,
+                    SchemaCheckOperator.GreaterThanOrEqual => CheckConstraintOperator.GreaterThanOrEqual,
+                    SchemaCheckOperator.LessThan => CheckConstraintOperator.LessThan,
+                    SchemaCheckOperator.LessThanOrEqual => CheckConstraintOperator.LessThanOrEqual,
+                    _ => throw new ArgumentOutOfRangeException(nameof(check.Operator), check.Operator, null)
+                },
+                Value = new PortableDefault(check.Value.Value)
             }).ToArray(),
             AggregationProfiles = table.Aggregations.Select(Compile).ToArray(),
             Scope = table.Scope == SchemaScope.Scoped ? ScopePolicy.Scoped : ScopePolicy.Global,
@@ -155,13 +174,45 @@ public static class SchemaCompilation
                     result.Finding.Code,
                     result.Finding.Message,
                     result.Finding.Path)).ToArray());
-        return units.Select(unit =>
+        return OrderForPhysicalConstraintDeployment(units).Select(unit =>
         {
             var target = targets.Compile(unit);
             return refusals.TryGetValue(unit.Id, out var unitRefusals)
                 ? target.WithPlanningRefusals(unitRefusals)
                 : target;
         }).ToArray();
+    }
+
+    private static IReadOnlyList<StorageUnit> OrderForPhysicalConstraintDeployment(
+        IReadOnlyList<StorageUnit> units)
+    {
+        var knownIds = units.Select(unit => unit.Id).ToHashSet();
+        var emittedIds = new HashSet<StorageUnitId>();
+        var pending = units.ToList();
+        var ordered = new List<StorageUnit>(units.Count);
+        while (pending.Count != 0)
+        {
+            var next = pending.FindIndex(unit => (unit.References ?? [])
+                .Where(reference => reference.Enforcement == ReferenceEnforcement.Physical)
+                .Select(reference => reference.TargetUnitId)
+                .Where(targetId => targetId != unit.Id && knownIds.Contains(targetId))
+                .All(emittedIds.Contains));
+            if (next < 0)
+            {
+                // Cyclic references can still be added to tables that already exist. Preserve the
+                // manifest order so planning and reporting stay deterministic; a fresh relational
+                // deployment will surface the provider's native cycle limitation.
+                ordered.AddRange(pending);
+                break;
+            }
+
+            var unit = pending[next];
+            pending.RemoveAt(next);
+            ordered.Add(unit);
+            emittedIds.Add(unit.Id);
+        }
+
+        return ordered;
     }
 
     private static IReadOnlyList<StorageUnit> EnrichReferenceTargetScopes(IReadOnlyList<StorageUnit> units)
@@ -176,11 +227,23 @@ public static class SchemaCompilation
         return units.Select(unit => unit with
         {
             References = (unit.References ?? []).Select(reference =>
-                reference.TargetScope is null &&
-                targets.TryGetValue(reference.TargetUnitId.Value, out var target) &&
-                target is not null
-                    ? reference with { TargetScope = target.Scope }
-                    : reference).ToArray()
+            {
+                if (!targets.TryGetValue(reference.TargetUnitId.Value, out var target) || target is null)
+                    return reference;
+                return reference with
+                {
+                    TargetScope = reference.TargetScope ?? target.Scope,
+                    TargetName = reference.Enforcement == ReferenceEnforcement.Physical
+                        ? target.Name
+                        : reference.TargetName,
+                    TargetKeyColumns = reference.Enforcement == ReferenceEnforcement.Physical
+                        ? target.Key.Columns.ToArray()
+                        : reference.TargetKeyColumns,
+                    TargetKeyHasProviderSequence = reference.Enforcement == ReferenceEnforcement.Physical
+                        ? target.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence)
+                        : reference.TargetKeyHasProviderSequence
+                };
+            }).ToArray()
         }).ToArray();
     }
 

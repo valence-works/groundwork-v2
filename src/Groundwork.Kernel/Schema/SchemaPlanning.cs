@@ -228,6 +228,13 @@ public static class PhysicalSchemaDiffPlanner
         operations.AddRange(target.Subject.Indexes
             .OrderBy(index => index.Name, StringComparer.Ordinal)
             .Select(index => (PhysicalSchemaOperation)new CreatePhysicalIndexOperation(target.Subject, index)));
+        operations.AddRange(target.Subject.References
+            .Where(reference => reference.Enforcement == ReferenceEnforcement.Physical)
+            .OrderBy(reference => reference.Name, StringComparer.Ordinal)
+            .Select(reference => (PhysicalSchemaOperation)new CreatePhysicalForeignKeyOperation(target.Subject, reference)));
+        operations.AddRange(target.Subject.CheckConstraints
+            .OrderBy(check => check.Name, StringComparer.Ordinal)
+            .Select(check => (PhysicalSchemaOperation)new CreatePhysicalCheckConstraintOperation(target.Subject, check)));
         operations.AddRange(target.ProviderDefinitions.Select(definition =>
             (PhysicalSchemaOperation)new ApplyProviderPhysicalSchemaDefinitionOperation(definition)));
         operations.AddRange(supersessions.Operations(target.Subject, phase));
@@ -405,8 +412,10 @@ public static class PhysicalSchemaDiffPlanner
         PhysicalSchemaOperationKind.ColumnSupersession => 8,
         PhysicalSchemaOperationKind.CreatePhysicalIndex => 9,
         PhysicalSchemaOperationKind.RebuildPhysicalIndex => 10,
-        PhysicalSchemaOperationKind.ApplyProviderDefinition => 11,
-        PhysicalSchemaOperationKind.DropPrimaryStorage => 12,
+        PhysicalSchemaOperationKind.CreatePhysicalForeignKey => 11,
+        PhysicalSchemaOperationKind.CreatePhysicalCheckConstraint => 12,
+        PhysicalSchemaOperationKind.ApplyProviderDefinition => 13,
+        PhysicalSchemaOperationKind.DropPrimaryStorage => 14,
         PhysicalSchemaOperationKind.ValidatePhysicalSchema => 100,
         PhysicalSchemaOperationKind.PublishAppliedState => 101,
         _ => 100

@@ -389,14 +389,15 @@ internal sealed class SchemaEvolutionAnalysis
         // storage. Those applied slots vanish by construction and the rename removes them, so they
         // are superseded rather than stranded.
         var renamesStorage = evolution.Any(operation => operation is RenamePrimaryStorageOperation);
-        var desiredSlots = desired
-            .Select(operation => LogicalSlot(
+        var desiredBySlot = desired
+            .GroupBy(operation => LogicalSlot(
                 operation.Kind,
                 operation.SubjectId,
                 operation.SubjectIdentity,
                 operation.SlotIdentity,
-                desiredColumnIds))
-            .ToHashSet(StringComparer.Ordinal);
+                desiredColumnIds), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Single(), StringComparer.Ordinal);
+        var desiredSlots = desiredBySlot.Keys.ToHashSet(StringComparer.Ordinal);
         foreach (var (slot, operation) in appliedByLogicalSlot.OrderBy(entry => entry.Key, StringComparer.Ordinal))
         {
             if (operation.Kind == PhysicalSchemaOperationKind.ColumnSupersession && !desiredSlots.Contains(slot))
@@ -414,6 +415,19 @@ internal sealed class SchemaEvolutionAnalysis
                     $"Column '{operation.SubjectIdentity}' is recorded as retained by an expand plan, and this " +
                     "declaration no longer supersedes it. Contract it before withdrawing the supersession.",
                     $"schema.supersessions.{operation.SubjectIdentity}"));
+                continue;
+            }
+
+            if (operation.Kind is PhysicalSchemaOperationKind.CreatePhysicalForeignKey or
+                    PhysicalSchemaOperationKind.CreatePhysicalCheckConstraint &&
+                desiredBySlot.TryGetValue(slot, out var changedConstraint) &&
+                !string.Equals(operation.Identity, changedConstraint.Identity, StringComparison.Ordinal))
+            {
+                refusals.Add(new SchemaRefusal(
+                    "GW-SCHEMA-004",
+                    $"Applied constraint operation '{operation.Identity}' differs from the desired definition and " +
+                    "has no portable replacement operation. Rebuild the target from the current declaration.",
+                    $"schema.operations.{operation.SubjectIdentity}"));
                 continue;
             }
 

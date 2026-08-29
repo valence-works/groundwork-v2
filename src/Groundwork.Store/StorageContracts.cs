@@ -699,7 +699,9 @@ public enum SchemaChangeKind
     AlterColumn,
     DropColumn,
     DropIndex,
-    DropStorageUnit
+    DropStorageUnit,
+    CreateForeignKey,
+    CreateCheckConstraint
 }
 
 public sealed record SchemaChange(SchemaChangeKind Kind, string Identity);

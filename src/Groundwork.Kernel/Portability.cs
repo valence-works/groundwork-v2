@@ -367,6 +367,23 @@ public static class PortabilityValidator
             ValidateIdentifier(derived.SourceColumn, $"derivedColumns.{derived.Name}.sourceColumn", diagnostics, allowKnownProviderOwnedColumn: true);
         }
 
+        foreach (var reference in (unit.References ?? []).Where(reference =>
+                     reference is not null && reference.Enforcement == ReferenceEnforcement.Physical))
+        {
+            var path = $"references.{reference.Name}";
+            ValidateIdentifier(reference.Name, $"{path}.name", diagnostics);
+            ValidateIdentifier(reference.TargetName, $"{path}.targetName", diagnostics);
+            foreach (var column in reference.TargetKeyColumns ?? [])
+                ValidateIdentifier(column, $"{path}.targetKeyColumns", diagnostics, allowKnownProviderOwnedColumn: true);
+        }
+
+        foreach (var check in (unit.CheckConstraints ?? []).Where(check => check is not null))
+        {
+            var path = $"checkConstraints.{check.Name}";
+            ValidateIdentifier(check.Name, $"{path}.name", diagnostics);
+            ValidateIdentifier(check.Column, $"{path}.column", diagnostics, allowKnownProviderOwnedColumn: true);
+        }
+
         if (unit.Concurrency?.TokenColumn is { } tokenColumn)
             ValidateIdentifier(tokenColumn, "concurrency.tokenColumn", diagnostics);
 

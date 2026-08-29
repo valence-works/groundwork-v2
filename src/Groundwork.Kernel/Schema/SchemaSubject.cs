@@ -131,6 +131,8 @@ public sealed class SchemaSubject
                 // in a different order describes the same subject.
                 .. Indexes.Select(CanonicalIndex).OrderBy(canonical => canonical, StringComparer.Ordinal),
                 .. References.Select(CanonicalReference).OrderBy(canonical => canonical, StringComparer.Ordinal),
+                .. (definition.CheckConstraints ?? []).Select(check => CanonicalCheckConstraint(definition, check))
+                    .OrderBy(canonical => canonical, StringComparer.Ordinal),
                 .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile)
                     .OrderBy(canonical => canonical, StringComparer.Ordinal),
                 Evolution.IsDestructive ? "destructive" : "safe",
@@ -161,6 +163,8 @@ public sealed class SchemaSubject
     public ImmutableArray<IndexDefinition> Indexes => definition.Indexes.ToImmutableArray();
 
     public ImmutableArray<ReferenceDefinition> References => definition.References.ToImmutableArray();
+
+    public ImmutableArray<CheckConstraintDefinition> CheckConstraints => definition.CheckConstraints.ToImmutableArray();
 
     public ImmutableArray<AggregationProfile> AggregationProfiles => definition.AggregationProfiles.ToImmutableArray();
 
@@ -304,6 +308,7 @@ public sealed class SchemaSubject
     private static void Validate(StorageUnit unit)
     {
         StorageDeclarationReferenceValidation.ThrowIfInvalid(unit);
+        PhysicalConstraintValidation.ThrowIfInvalid(unit);
         ConcurrencyDeclaration.ValidateDeclaration(unit);
         unit.AppendIdempotency?.Validate(unit);
         unit.RetentionIdempotency?.Validate(unit);
@@ -405,7 +410,23 @@ public sealed class SchemaSubject
             Name = reference.Name,
             Columns = (reference.Columns ?? []).ToImmutableArray(),
             TargetUnitId = reference.TargetUnitId,
-            TargetScope = reference.TargetScope
+            TargetScope = reference.TargetScope,
+            Enforcement = reference.Enforcement,
+            TargetName = reference.TargetName,
+            TargetKeyColumns = reference.TargetKeyColumns?.ToImmutableArray(),
+            TargetKeyHasProviderSequence = reference.TargetKeyHasProviderSequence
+        }).ToImmutableArray(),
+        CheckConstraints = (source.CheckConstraints ?? []).Select(check =>
+        {
+            var column = source.Columns.Single(candidate =>
+                string.Equals(candidate.Name, check.Column, StringComparison.Ordinal));
+            return new CheckConstraintDefinition
+            {
+                Name = check.Name,
+                Column = check.Column,
+                Operator = check.Operator,
+                Value = new PortableDefault(SchemaValue.Snapshot(check.Value.Value, column.Type))
+            };
         }).ToImmutableArray(),
         AggregationProfiles = (source.AggregationProfiles ?? []).Select(Snapshot).ToImmutableArray(),
         Scope = source.Scope,
@@ -488,11 +509,36 @@ public sealed class SchemaSubject
                 reference.Name,
                 reference.TargetUnitId.Value,
                 .. reference.Columns,
-                .. CanonicalTargetScope(reference)
+                .. CanonicalTargetScope(reference),
+                .. CanonicalPhysicalReference(reference)
             ]);
 
     private static string[] CanonicalTargetScope(ReferenceDefinition reference) =>
         reference.TargetScope is { } scope ? [$"target-scope:{scope}"] : [];
+
+    private static string?[] CanonicalPhysicalReference(ReferenceDefinition reference) =>
+        reference.Enforcement != ReferenceEnforcement.Physical
+            ? []
+            :
+            [
+                "enforcement:physical",
+                reference.TargetName,
+                reference.TargetKeyHasProviderSequence?.ToString(CultureInfo.InvariantCulture),
+                .. (reference.TargetKeyColumns ?? []).Select(column => $"target-key:{column}")
+            ];
+
+    internal static string CanonicalCheckConstraint(StorageUnit unit, CheckConstraintDefinition check)
+    {
+        var column = unit.Columns.Single(candidate =>
+            string.Equals(candidate.Name, check.Column, StringComparison.Ordinal));
+        return SchemaFingerprint.Canonicalize(
+        [
+            check.Name,
+            check.Column,
+            check.Operator.ToString(),
+            SchemaValue.Canonicalize(check.Value.Value, column.Type)
+        ]);
+    }
 
     private static AggregationProfile Snapshot(AggregationProfile profile) =>
         AggregationProfileSnapshot.Capture(profile);

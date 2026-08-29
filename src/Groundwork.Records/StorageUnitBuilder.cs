@@ -118,6 +118,22 @@ public sealed class StorageDeclarationBuilder
         params string[] columns) =>
         Wrap(inner.Reference(name, targetUnitId, targetScope, columns));
 
+    public StorageDeclarationBuilder PhysicalReference(
+        string name,
+        KernelStorageUnit target,
+        params string[] columns) =>
+        Wrap(inner.PhysicalReference(name, target, columns));
+
+    public StorageDeclarationBuilder Check(
+        string name,
+        string column,
+        CheckConstraintOperator @operator,
+        object? value) =>
+        Wrap(inner.Check(name, column, @operator, value));
+
+    public StorageDeclarationBuilder Check(CheckConstraintDefinition definition) =>
+        Wrap(inner.Check(definition));
+
     public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = "__groundwork_operations") =>
         Wrap(inner.AppendIdempotency(window, ledgerName));
 

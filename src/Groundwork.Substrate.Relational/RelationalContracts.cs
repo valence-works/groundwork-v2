@@ -198,7 +198,7 @@ public abstract class RelationalDialect
     }
 
     /// <summary>Runs one statement on the dialect's schema connection and transaction.</summary>
-    protected static void Execute(DbConnection connection, DbTransaction transaction, string sql)
+    protected static void Execute(DbConnection connection, DbTransaction? transaction, string sql)
     {
         ArgumentNullException.ThrowIfNull(connection);
         using var command = connection.CreateCommand();
@@ -212,6 +212,51 @@ public abstract class RelationalDialect
         $"ALTER TABLE {QuoteIdentifier(table)} RENAME COLUMN {QuoteIdentifier(column)} TO {QuoteIdentifier(renamed)};";
 
     public abstract string CreateIndexSql(string table, IndexDefinition index, string? filter);
+
+    /// <summary>Renders one named foreign-key table constraint.</summary>
+    public virtual string ForeignKeyDefinitionSql(ReferenceDefinition reference)
+    {
+        ArgumentNullException.ThrowIfNull(reference);
+        if (reference.Enforcement != ReferenceEnforcement.Physical ||
+            string.IsNullOrWhiteSpace(reference.TargetName) ||
+            reference.TargetKeyColumns is null)
+        {
+            throw new ArgumentException("A physical foreign key requires resolved target metadata.", nameof(reference));
+        }
+        return $"CONSTRAINT {QuoteIdentifier(reference.Name)} FOREIGN KEY " +
+            $"({string.Join(", ", reference.Columns.Select(QuoteIdentifier))}) REFERENCES " +
+            $"{QuoteIdentifier(reference.TargetName)} ({string.Join(", ", reference.TargetKeyColumns.Select(QuoteIdentifier))})";
+    }
+
+    /// <summary>Renders one named portable check table constraint.</summary>
+    public virtual string CheckConstraintDefinitionSql(
+        CheckConstraintDefinition constraint,
+        ColumnDefinition column) =>
+        $"CONSTRAINT {QuoteIdentifier(constraint.Name)} CHECK ({CheckExpressionSql(constraint, column)})";
+
+    public virtual string CreateForeignKeySql(string table, ReferenceDefinition reference) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} ADD {ForeignKeyDefinitionSql(reference)};";
+
+    public virtual string CreateCheckConstraintSql(
+        string table,
+        CheckConstraintDefinition constraint,
+        ColumnDefinition column) =>
+        $"ALTER TABLE {QuoteIdentifier(table)} ADD {CheckConstraintDefinitionSql(constraint, column)};";
+
+    public virtual void CreateForeignKey(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ReferenceDefinition reference) =>
+        Execute(connection, transaction, CreateForeignKeySql(table, reference));
+
+    public virtual void CreateCheckConstraint(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        CheckConstraintDefinition constraint,
+        ColumnDefinition column) =>
+        Execute(connection, transaction, CreateCheckConstraintSql(table, constraint, column));
 
     public abstract string DropIndexSql(string table, string index);
 
@@ -276,6 +321,15 @@ public abstract class RelationalDialect
         return mode.BeginTransaction(connection, TransactionIsolation);
     }
 
+    /// <summary>Prepares connection-scoped settings before a schema-operation transaction begins.</summary>
+    public virtual void PrepareSchemaBatch(DbConnection connection) { }
+
+    /// <summary>Validates provider invariants before a schema-operation transaction commits.</summary>
+    public virtual void ValidateSchemaBatch(DbConnection connection, DbTransaction transaction) { }
+
+    /// <summary>Restores connection-scoped settings after a schema-operation transaction ends.</summary>
+    public virtual void CompleteSchemaBatch(DbConnection connection) { }
+
     public abstract void EnsureInfrastructure(DbConnection connection);
 
     public abstract PhysicalSchemaHistoryState ReadHistory(
@@ -323,6 +377,65 @@ public abstract class RelationalDialect
         DbTransaction? transaction,
         string table,
         string index);
+
+    /// <summary>Reads one named physical constraint, or null when the catalog does not contain it.</summary>
+    public virtual RelationalConstraintMetadata? ReadConstraint(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string table,
+        string constraint) => null;
+
+    /// <summary>Compares a catalog constraint with its declaration using this dialect's SQL form.</summary>
+    public virtual bool ConstraintMatches(
+        RelationalConstraintMetadata actual,
+        ReferenceDefinition expected) =>
+        actual.Kind == RelationalConstraintKind.ForeignKey &&
+        string.Equals(actual.TargetTable, expected.TargetName, StringComparison.Ordinal) &&
+        actual.SourceColumns.SequenceEqual(expected.Columns, StringComparer.Ordinal) &&
+        actual.TargetColumns.SequenceEqual(expected.TargetKeyColumns ?? [], StringComparer.Ordinal);
+
+    public virtual bool ConstraintMatches(
+        RelationalConstraintMetadata actual,
+        CheckConstraintDefinition expected,
+        ColumnDefinition column) =>
+        actual.Kind == RelationalConstraintKind.Check &&
+        string.Equals(
+            NormalizeConstraintSql(actual.CheckExpression),
+            NormalizeConstraintSql(CheckExpressionSql(expected, column)),
+            StringComparison.OrdinalIgnoreCase);
+
+    protected virtual string CheckExpressionSql(
+        CheckConstraintDefinition constraint,
+        ColumnDefinition column)
+    {
+        ArgumentNullException.ThrowIfNull(constraint);
+        ArgumentNullException.ThrowIfNull(column);
+        var identifier = QuoteIdentifier(constraint.Column);
+        if (constraint.Value.Value is null)
+        {
+            return constraint.Operator switch
+            {
+                CheckConstraintOperator.Equal => $"{identifier} IS NULL",
+                CheckConstraintOperator.NotEqual => $"{identifier} IS NOT NULL",
+                _ => throw new ArgumentException("Only equality check operators accept null.", nameof(constraint))
+            };
+        }
+        var comparison = constraint.Operator switch
+        {
+            CheckConstraintOperator.Equal => "=",
+            CheckConstraintOperator.NotEqual => "<>",
+            CheckConstraintOperator.GreaterThan => ">",
+            CheckConstraintOperator.GreaterThanOrEqual => ">=",
+            CheckConstraintOperator.LessThan => "<",
+            CheckConstraintOperator.LessThanOrEqual => "<=",
+            _ => throw new ArgumentOutOfRangeException(nameof(constraint), constraint.Operator, null)
+        };
+        return $"{identifier} {comparison} {RenderAggregationLiteral(constraint.Value.Value, column.Type)}";
+    }
+
+    protected static string NormalizeConstraintSql(string? sql) => string.IsNullOrWhiteSpace(sql)
+        ? string.Empty
+        : new string(sql.Where(character => !char.IsWhiteSpace(character) && character is not '(' and not ')').ToArray());
 
     public virtual string? IndexFilter(IndexDefinition index) =>
         index.MissingValues == MissingValueBehavior.Excluded
@@ -509,4 +622,37 @@ public sealed record RelationalIndexMetadata
     public IReadOnlyList<RelationalIndexColumnMetadata> Columns { get; }
 
     public string? Filter { get; }
+}
+
+public enum RelationalConstraintKind
+{
+    ForeignKey,
+    Check
+}
+
+public sealed record RelationalConstraintMetadata
+{
+    public RelationalConstraintMetadata(
+        RelationalConstraintKind kind,
+        IEnumerable<string>? sourceColumns = null,
+        string? targetTable = null,
+        IEnumerable<string>? targetColumns = null,
+        string? checkExpression = null)
+    {
+        Kind = kind;
+        SourceColumns = new ReadOnlyCollection<string>((sourceColumns ?? []).ToArray());
+        TargetTable = targetTable;
+        TargetColumns = new ReadOnlyCollection<string>((targetColumns ?? []).ToArray());
+        CheckExpression = checkExpression;
+    }
+
+    public RelationalConstraintKind Kind { get; }
+
+    public IReadOnlyList<string> SourceColumns { get; }
+
+    public string? TargetTable { get; }
+
+    public IReadOnlyList<string> TargetColumns { get; }
+
+    public string? CheckExpression { get; }
 }
