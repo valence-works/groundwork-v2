@@ -240,6 +240,27 @@ public enum SchemaForeignColumns
     TolerateDatabaseSupplied
 }
 
+/// <summary>One logical-only mapping from source columns to another table's declared key.</summary>
+public sealed record SchemaReference
+{
+    public SchemaReference(string name, string target, IEnumerable<string> columns)
+    {
+        Name = string.IsNullOrWhiteSpace(name)
+            ? throw new ArgumentException("A non-empty value is required.", nameof(name))
+            : name;
+        Target = string.IsNullOrWhiteSpace(target)
+            ? throw new ArgumentException("A non-empty value is required.", nameof(target))
+            : target;
+        Columns = new ReadOnlyCollection<string>((columns ?? throw new ArgumentNullException(nameof(columns)))
+            .Select(column => column ?? throw new ArgumentException("Reference column names cannot be null.", nameof(columns)))
+            .ToArray());
+    }
+
+    public string Name { get; }
+    public string Target { get; }
+    public IReadOnlyList<string> Columns { get; }
+}
+
 public sealed record SchemaTable
 {
     public SchemaTable(
@@ -255,7 +276,8 @@ public sealed record SchemaTable
         SchemaIdempotency? retentionIdempotency = null,
         IEnumerable<SchemaAggregation>? aggregations = null,
         string? id = null,
-        SchemaForeignColumns foreignColumns = SchemaForeignColumns.Refuse)
+        SchemaForeignColumns foreignColumns = SchemaForeignColumns.Refuse,
+        IEnumerable<SchemaReference>? references = null)
     {
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
         Id = string.IsNullOrWhiteSpace(id) ? null : id;
@@ -270,6 +292,7 @@ public sealed record SchemaTable
         RetentionIdempotency = retentionIdempotency;
         Aggregations = Ordered(aggregations ?? Array.Empty<SchemaAggregation>(), nameof(aggregations), aggregation => aggregation.Name);
         ForeignColumns = foreignColumns;
+        References = Ordered(references ?? Array.Empty<SchemaReference>(), nameof(references), reference => reference.Name);
     }
 
     public string Name { get; }
@@ -296,6 +319,9 @@ public sealed record SchemaTable
     public SchemaIdempotency? RetentionIdempotency { get; }
     /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>
     public IReadOnlyList<SchemaAggregation> Aggregations { get; }
+
+    /// <summary>Logical references held in canonical name order.</summary>
+    public IReadOnlyList<SchemaReference> References { get; }
 
     /// <summary>
     /// How a deployed column this table does not declare is treated. Declared here so the

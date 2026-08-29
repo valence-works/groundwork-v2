@@ -105,6 +105,12 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Index(string name, Action<IndexBuilder> configure) =>
         Wrap(inner.Index(name, configure));
 
+    public StorageDeclarationBuilder Reference(string name, KernelStorageUnit target, params string[] columns) =>
+        Wrap(inner.Reference(name, target, columns));
+
+    public StorageDeclarationBuilder Reference(string name, StorageUnitId targetUnitId, params string[] columns) =>
+        Wrap(inner.Reference(name, targetUnitId, columns));
+
     public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = "__groundwork_operations") =>
         Wrap(inner.AppendIdempotency(window, ledgerName));
 

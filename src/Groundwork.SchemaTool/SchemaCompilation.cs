@@ -55,6 +55,12 @@ public static class SchemaCompilation
                     ? MissingValueBehavior.Included
                     : MissingValueBehavior.Excluded
             }).ToArray(),
+            References = table.References.Select(reference => new ReferenceDefinition
+            {
+                Name = reference.Name,
+                Columns = reference.Columns.ToArray(),
+                TargetUnitId = new StorageUnitId(reference.Target)
+            }).ToArray(),
             AggregationProfiles = table.Aggregations.Select(Compile).ToArray(),
             Scope = table.Scope == SchemaScope.Scoped ? ScopePolicy.Scoped : ScopePolicy.Global,
             ForeignColumns = table.ForeignColumns == SchemaForeignColumns.TolerateDatabaseSupplied

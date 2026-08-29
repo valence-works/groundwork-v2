@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace Groundwork.Kernel.Schema;
 
@@ -43,8 +44,24 @@ public static class PhysicalSchemaAppliedStateSerializer
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false,
+        TypeInfoResolver = CreateTypeInfoResolver(),
         Converters = { new PortableDefaultJsonConverter(), new ReadOnlySetJsonConverterFactory(), new JsonStringEnumConverter() }
     };
+
+    private static IJsonTypeInfoResolver CreateTypeInfoResolver()
+    {
+        var resolver = new DefaultJsonTypeInfoResolver();
+        resolver.Modifiers.Add(typeInfo =>
+        {
+            if (typeInfo.Type != typeof(StorageUnit))
+                return;
+            var references = typeInfo.Properties.Single(property =>
+                string.Equals(property.Name, nameof(StorageUnit.References), StringComparison.OrdinalIgnoreCase));
+            references.ShouldSerialize = static (_, value) =>
+                value is IReadOnlyList<ReferenceDefinition> { Count: > 0 };
+        });
+        return resolver;
+    }
 
     public static string Serialize(PhysicalSchemaAppliedState state)
     {

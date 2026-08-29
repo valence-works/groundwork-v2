@@ -25,7 +25,7 @@ test -n "$version" || {
 
 for required in \
   Groundwork.Kernel Groundwork.Query.Model Groundwork.Query.Linq Groundwork.Query.Linq.Execution \
-  Groundwork.Query.Planning \
+  Groundwork.Query.Planning Groundwork.Schema \
   Groundwork.Records Groundwork.Store Groundwork.Records.Store Groundwork.Diagnostics \
   Groundwork.Substrate.Relational Groundwork.Sqlite Groundwork.Documents Groundwork.Testing; do
   test -f "$feed/$required.$version.nupkg" || {

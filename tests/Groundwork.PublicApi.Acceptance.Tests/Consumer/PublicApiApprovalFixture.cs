@@ -25,6 +25,8 @@ internal static class PublicApiApprovalFixture
         _ = typeof(PortableLocaleOrdering);
         _ = typeof(MissingValueBehavior);
         _ = typeof(IndexBuilder);
+        _ = typeof(ReferenceDefinition);
+        _ = typeof(Groundwork.Schema.SchemaReference);
         _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
         _ = typeof(PortabilityValidator);
         _ = typeof(AggregationOrderTerm);
@@ -92,6 +94,8 @@ internal static class PublicApiApprovalFixture
         _ = new Func<Groundwork.Kernel.StorageUnit, StorageValues, RowWrite>((unit, values) => RowWrite.Upsert(unit, values));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
+        _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
+            builder.Reference("customer", new StorageUnitId("customer"), "customer_id"));
         _ = new Func<ColumnBuilder, ColumnBuilder>(column => column.LocaleOrder("sv-SE", 12));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.ValidatePortableDefaults(unit));
@@ -118,6 +122,8 @@ internal static class PublicApiApprovalFixture
         _ = new Action<Groundwork.Kernel.StorageUnit>(PortabilityValidator.EnsurePortableDefaults);
         _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
             builder.UniqueIndex("by_sparse", index => index.Column("nullable").ExcludeMissingValues()));
+        _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
+            builder.Reference("customer", new StorageUnitId("customer"), "customer_id"));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
             (session, operation, values) => session.AppendWithOutcomes(operation, values));
         _ = new Func<IStorageSession, StorageKey, IReadOnlyDictionary<string, object?>, WriteOutcome>(
