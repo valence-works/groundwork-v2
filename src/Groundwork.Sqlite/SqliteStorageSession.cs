@@ -15,6 +15,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
     private readonly SqliteTransaction? transaction;
+    private readonly RelationalSessionQueries queries;
     private SqliteTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
     private readonly AsyncLocal<bool> writeExecutionScope = new();
@@ -42,6 +43,20 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        queries = new RelationalSessionQueries(
+            unit,
+            access,
+            connection,
+            new SqliteQueryRenderer(),
+            PhysicalIndexNames,
+            FromSqlite,
+            (command, renderOptions, _) =>
+            {
+                AssertExplainPlan(command, renderOptions);
+                return default;
+            },
+            observer,
+            "sqlite");
     }
 
     /// <summary>
@@ -67,16 +82,8 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         StringComparer.Ordinal);
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
-    {
-        var (executionSource, renderOptions, command) = PrepareQuery(request, options);
-        var rows = RelationalQueryResultReader.Read(connection, command,
-            (name, value) => DecodeQueryValue(name, value, executionSource, renderOptions), activeTransaction ?? transaction);
-        AssertExplainPlan(command, renderOptions);
-        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true,
-            sourceIncludesDistinct: true);
-    });
+        queries.Query(request, options, activeTransaction ?? transaction, RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult());
 
     /// <summary>
     /// Reads the page on the async ADO.NET surface so the token still interrupts the native
@@ -89,16 +96,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         Completed(cancellationToken, () => Execute(() =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var (executionSource, renderOptions, command) = PrepareQuery(request, options);
-            var rows = RelationalQueryResultReader.Read(
-                    connection, command, (name, value) => DecodeQueryValue(name, value, executionSource, renderOptions), activeTransaction ?? transaction,
+            return queries.Query(
+                    request,
+                    options,
+                    activeTransaction ?? transaction,
                     RelationalExecution.Asynchronous(cancellationToken))
                 .GetAwaiter().GetResult();
-            AssertExplainPlan(command, renderOptions);
-            return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-                sourceIncludesRequestedOffset: true,
-                sourceIncludesContinuation: true,
-                sourceIncludesDistinct: true);
         }));
 
     public ValueTask<StoredEntry?> ReadAsync(StorageKey key, CancellationToken cancellationToken = default) =>
@@ -195,75 +198,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         return ValueTask.FromResult(operation());
     }
 
-    private (QueryRequest ExecutionSource, QueryRenderOptions RenderOptions, RelationalQueryCommand Command) PrepareQuery(
-        QueryRequest request,
-        QueryRenderOptions? options)
-    {
-        var prepared = RelationalSessionPolicy.PrepareQuery(Unit, Access, request, options, PhysicalIndexNames());
-        var executionSource = prepared.ExecutionSource;
-        var renderOptions = prepared.RenderOptions;
-        var executionRequest = prepared.ExecutionRequest;
-        var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        return (executionSource, renderOptions, command);
-    }
-
-    private object? DecodeQueryValue(string name, object? value)
-    {
-        if (name == "__groundwork_total_count") return value;
-        var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-        return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-    }
-
-    private object? DecodeQueryValue(
-        string name,
-        object? value,
-        QueryRequest request,
-        QueryRenderOptions options)
-    {
-        if (request.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
-            string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
-            return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
-        if (name == "__groundwork_total_count") return value;
-        var column = RelationalQueryResultReader.ResolveColumnDefinition(Unit, request, options, name);
-        return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-    }
-
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
         QueryRenderOptions? options = null) => Execute(() =>
-    {
-        var prepared = RelationalSessionPolicy.PrepareCrossScopeQuery(
-            Unit,
-            Access,
-            request,
-            options,
-            PhysicalIndexNames());
-        var executionSource = prepared.ExecutionSource;
-        var renderOptions = prepared.RenderOptions;
-        var executionRequest = prepared.ExecutionRequest;
-        var command = new SqliteQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("sqlite.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
-        });
-        AssertExplainPlan(command, renderOptions);
-        var materialized = QueryResultMaterializer.Materialize(
-            executionSource,
-            renderOptions,
-            rows,
-            command.SelectedIndex,
-            command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-        return CrossScopeQueryMaterializer.FromNativePage(
-            materialized,
-            rows,
-            SqliteSchemaCoordinator.ScopeColumn);
-    });
+            queries.QueryAcrossScopes(request, options, RelationalExecution.Synchronous)
+                .GetAwaiter().GetResult());
 
     public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
     {

@@ -17,6 +17,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
     private readonly NpgsqlTransaction? transaction;
+    private readonly RelationalSessionQueries queries;
     private NpgsqlTransaction? activeTransaction;
     private readonly AsyncLocal<bool> batchFallbackScope = new();
     private readonly AsyncLocal<bool> writeExecutionScope = new();
@@ -46,6 +47,16 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         this.connection = connection;
         this.transaction = transaction;
         commandObserver = observer;
+        queries = new RelationalSessionQueries(
+            unit,
+            access,
+            connection,
+            new PostgreSqlQueryRenderer(),
+            PhysicalIndexNames,
+            FromDatabase,
+            AssertExplainPlan,
+            observer,
+            "postgresql");
     }
 
     /// <summary>
@@ -82,29 +93,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private ValueTask<QueryMaterializedResult> QueryCore(
         QueryRequest request,
         QueryRenderOptions? options,
-        RelationalExecution mode) => Execute(async () =>
-    {
-        var prepared = RelationalSessionPolicy.PrepareQuery(Unit, Access, request, options, PhysicalIndexNames());
-        var executionSource = prepared.ExecutionSource;
-        var renderOptions = prepared.RenderOptions;
-        var executionRequest = prepared.ExecutionRequest;
-        var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("postgresql.query", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            if (executionSource.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
-                string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
-                return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
-            var column = RelationalQueryResultReader.ResolveColumnDefinition(Unit, executionSource, renderOptions, name);
-            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        }, activeTransaction ?? transaction, mode).ConfigureAwait(false);
-        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
-        return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true,
-            sourceIncludesDistinct: true);
-    }, mode);
+        RelationalExecution mode) => Execute(
+            () => queries.Query(request, options, activeTransaction ?? transaction, mode),
+            mode);
 
     public CrossScopeQueryResult QueryAcrossScopes(
         QueryRequest request,
@@ -120,39 +111,9 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private ValueTask<CrossScopeQueryResult> QueryAcrossScopesCore(
         QueryRequest request,
         QueryRenderOptions? options,
-        RelationalExecution mode) => Execute(async () =>
-    {
-        var prepared = RelationalSessionPolicy.PrepareCrossScopeQuery(
-            Unit,
-            Access,
-            request,
-            options,
-            PhysicalIndexNames());
-        var executionSource = prepared.ExecutionSource;
-        var renderOptions = prepared.RenderOptions;
-        var executionRequest = prepared.ExecutionRequest;
-        var command = new PostgreSqlQueryRenderer().Render(executionRequest, renderOptions);
-        commandObserver?.Observe(new ProviderCommandEvent("postgresql.query-across-scopes", command.CommandText, ProviderCommandKind.Read, IsProbe: false));
-        var rows = await RelationalQueryResultReader.Read(connection, command, (name, value) =>
-        {
-            if (name == "__groundwork_total_count") return value;
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
-            return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
-        }, transaction: null, mode).ConfigureAwait(false);
-        await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);
-        var materialized = QueryResultMaterializer.Materialize(
-            executionSource,
-            renderOptions,
-            rows,
-            command.SelectedIndex,
-            command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-        return CrossScopeQueryMaterializer.FromNativePage(
-            materialized,
-            rows,
-            PostgreSqlSchemaCoordinator.ScopeColumn);
-    }, mode);
+        RelationalExecution mode) => Execute(
+            () => queries.QueryAcrossScopes(request, options, mode),
+            mode);
 
     public AggregationResult Aggregate(AggregationQuery query) =>
         AggregateCore(query, RelationalExecution.Synchronous).GetAwaiter().GetResult();
