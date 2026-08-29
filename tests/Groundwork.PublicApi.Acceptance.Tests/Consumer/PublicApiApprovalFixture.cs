@@ -110,6 +110,11 @@ internal static class PublicApiApprovalFixture
 
     public static void CompileCallableSurface()
     {
+        _ = new Action<Type, int, Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, object?>>(
+            GwGeneratedRows.RegisterProjection);
+        _ = GwGeneratedRows.TryGetProjection<ApprovalRecord>(1, out _);
+        _ = new Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, int, string>(
+            GwGeneratedRowValue.ReadProjection<string>);
         _ = new Func<string, IStorageProviderConnection>(connectionString => new SqliteProviderFactory().Create(connectionString));
         _ = new Func<IEnumerable<CapabilityDescriptor>, IReadOnlyList<CapabilityDescriptor>>(
             SchemaCapabilityAdmission.AdvertiseEnforcedConstraints);

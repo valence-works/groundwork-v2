@@ -32,20 +32,22 @@ public sealed class LinqExecutorTests
         public string Unmapped = "untouched";
     }
 
-    private sealed class StatusDto
+    public sealed class StatusDto
     {
         public string? Status { get; init; }
     }
 
-    private sealed class ConstructorStatusDto
+    public sealed class ConstructorStatusDto
     {
         public ConstructorStatusDto(string? status) => Status = status;
         public string? Status { get; }
     }
 
-    private sealed record StatusRecord(string? Status);
+    public sealed record StatusRecord(string? Status);
 
-    private sealed class SettableConstructorStatusDto
+    public sealed record AmbiguousProjectionRegistration(string? Status);
+
+    public sealed class SettableConstructorStatusDto
     {
         public SettableConstructorStatusDto(string? status) => Status = status;
         public string? Status { get; set; }
@@ -56,6 +58,7 @@ public sealed class LinqExecutorTests
     public async Task Async_cardinality_materializes_anonymous_and_constructor_projections()
     {
         using var fixture = Fixture.Open();
+        var dynamicCodeBefore = LinqRowMaterializer.DynamicCodeGenerationCount;
 
         var anonymous = await fixture.Table.Query
             .OrderBy(ticket => ticket.Status)
@@ -73,12 +76,14 @@ public sealed class LinqExecutorTests
         Assert.Equal("open", anonymous.Status);
         Assert.Equal("open", initialized.Status);
         Assert.Equal("open", constructed.Status);
+        Assert.Equal(dynamicCodeBefore, LinqRowMaterializer.DynamicCodeGenerationCount);
     }
 
     [Fact]
     public async Task Async_cardinality_materializes_scalar_records_and_settable_constructor_projections()
     {
         using var fixture = Fixture.Open();
+        var dynamicCodeBefore = LinqRowMaterializer.DynamicCodeGenerationCount;
 
         var scalar = await fixture.Table.Query
             .Where(ticket => ticket.Status == "open")
@@ -101,6 +106,25 @@ public sealed class LinqExecutorTests
         Assert.Equal("open", record.Status);
         Assert.Equal("open", settable.Status);
         Assert.Equal("a", settable.Identifier);
+        Assert.Equal(dynamicCodeBefore, LinqRowMaterializer.DynamicCodeGenerationCount);
+    }
+
+    [Fact]
+    public void Duplicate_projection_registrations_fail_closed()
+    {
+        GwGeneratedRows.RegisterProjection(
+            typeof(AmbiguousProjectionRegistration),
+            1,
+            static (values, columns) => new AmbiguousProjectionRegistration(
+                GwGeneratedRowValue.ReadProjection<string?>(values, columns, 0)));
+        Assert.True(GwGeneratedRows.TryGetProjection<AmbiguousProjectionRegistration>(1, out _));
+
+        GwGeneratedRows.RegisterProjection(
+            typeof(AmbiguousProjectionRegistration),
+            1,
+            static (_, _) => new AmbiguousProjectionRegistration("different"));
+
+        Assert.False(GwGeneratedRows.TryGetProjection<AmbiguousProjectionRegistration>(1, out _));
     }
 
     [Fact]
@@ -155,6 +179,52 @@ public sealed class LinqExecutorTests
         Assert.Null(row.Optional);
         Assert.Equal("untouched", row.Unmapped);
         Assert.Equal(dynamicCodeBefore, LinqRowMaterializer.DynamicCodeGenerationCount);
+    }
+
+    [Fact]
+    public async Task Generated_materializer_defaults_model_columns_omitted_by_a_partial_request()
+    {
+        using var fixture = Fixture.Open();
+        var request = fixture.Table.Query
+            .Where(ticket => ticket.Id == "a")
+            .ToQueryRequest();
+        var partial = new QueryRequest(
+            request.Table,
+            request.Where,
+            request.Order,
+            Projection.ColumnsOnly(Fixture.Model.Columns[nameof(Ticket.Id)]),
+            request.Paging,
+            request.Result,
+            request.LatestPerKey,
+            request.AcceptedScan,
+            request.Distinct);
+
+        var rows = await fixture.Executor.ToListAsync(partial, Fixture.Model);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("a", row.Id);
+        Assert.Null(row.Status);
+        Assert.Equal(0, row.Weight);
+        Assert.Null(row.Optional);
+        Assert.Equal("untouched", row.Unmapped);
+    }
+
+    [Fact]
+    public async Task Generated_materializer_uses_declared_column_names_for_projection_all_without_a_model()
+    {
+        using var fixture = Fixture.Open();
+        var request = fixture.Table.Query
+            .Where(ticket => ticket.Id == "a")
+            .ToQueryRequest();
+
+        var rows = await fixture.Executor.ToListAsync<Ticket>(request);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("a", row.Id);
+        Assert.Equal("open", row.Status);
+        Assert.Equal(7, row.Weight);
+        Assert.Null(row.Optional);
+        Assert.Equal("untouched", row.Unmapped);
     }
 
     [Fact]

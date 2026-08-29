@@ -70,6 +70,7 @@ public sealed class SchemaGenerator : ISourceGenerator
     {
         var tables = new List<GeneratedTable>();
         var emitGeneratedRows = context.Compilation.GetTypeByMetadataName("Groundwork.Query.Linq.GwGeneratedRows") is not null;
+        var projections = emitGeneratedRows ? FindGeneratedProjections(context) : Array.Empty<GeneratedProjection>();
         if (emitGeneratedRows && context.Compilation.GetTypeByMetadataName("System.Runtime.CompilerServices.ModuleInitializerAttribute") is null)
         {
             context.AddSource("GroundworkModuleInitializer.g.cs", """
@@ -97,7 +98,7 @@ public sealed class SchemaGenerator : ISourceGenerator
                 if (!seenTypes.Add(symbol))
                     continue;
 
-                var table = BuildTable(context, GetClassParts(context, symbol), symbol, tableAttribute);
+                var table = BuildTable(context, symbol, tableAttribute);
                 if (table is null)
                     continue;
 
@@ -126,6 +127,7 @@ public sealed class SchemaGenerator : ISourceGenerator
             {
                 tables.AddRange(schemaFile.Tables.Select(table => new GeneratedTable(table, Identifier(table.Name), null, null, null)));
                 EmitStorageUnits(context, tables, emitGeneratedRows);
+                EmitProjectionRegistrations(context, projections);
                 EmitSchemaAttribute(context, schemaFile);
             }
             return;
@@ -133,6 +135,7 @@ public sealed class SchemaGenerator : ISourceGenerator
 
         var schema = new SchemaDocument(tables.Select(item => item.Table));
         EmitStorageUnits(context, tables, emitGeneratedRows);
+        EmitProjectionRegistrations(context, projections);
         EmitSchemaAttribute(context, schema);
     }
 
@@ -155,7 +158,6 @@ public sealed class SchemaGenerator : ISourceGenerator
 
     private static SchemaTable? BuildTable(
         GeneratorExecutionContext context,
-        IReadOnlyList<ClassPart> declarations,
         INamedTypeSymbol symbol,
         AttributeData tableAttribute)
     {
@@ -166,101 +168,75 @@ public sealed class SchemaGenerator : ISourceGenerator
         var keys = new List<string>();
         var columnSymbols = new Dictionary<string, ISymbol>(StringComparer.Ordinal);
 
-        foreach (var part in declarations)
+        foreach (var declared in DeclaredColumns(symbol))
         {
-            var declaration = part.Declaration;
-            var semanticModel = part.SemanticModel;
-            foreach (var member in declaration.Members)
+            var memberSymbol = declared.Symbol;
+            var memberType = declared.Type;
+            var columnAttribute = declared.Attribute;
+            if (!TryMapType(memberType, out var type))
             {
-                if (member is not PropertyDeclarationSyntax and not FieldDeclarationSyntax)
-                    continue;
+                context.ReportDiagnostic(Diagnostic.Create(
+                    UnsupportedType,
+                    AttributeLocation(columnAttribute, context),
+                    memberSymbol.Name,
+                    memberType.ToDisplayString()));
+                continue;
+            }
 
-                var declaredMembers = member switch
+            var name = StringNamedArgument(columnAttribute, "Name") ?? ToSnakeCase(memberSymbol.Name);
+            if (IsEmpty(context, columnAttribute, tableName, $"the name of column '{memberSymbol.Name}'", name))
+                continue;
+            var nullable = IsNullable(memberType) && !BooleanNamedArgument(columnAttribute, "Required");
+            SchemaDefault? columnDefault = null;
+            if (StringNamedArgument(columnAttribute, "Default") is { } defaultText)
+            {
+                try
                 {
-                    PropertyDeclarationSyntax property => new[] { semanticModel.GetDeclaredSymbol(property, context.CancellationToken) },
-                    FieldDeclarationSyntax field => field.Declaration.Variables
-                        .Select(variable => semanticModel.GetDeclaredSymbol(variable, context.CancellationToken)),
-                    _ => Array.Empty<ISymbol?>()
-                };
-
-                foreach (var declared in declaredMembers)
+                    columnDefault = GroundworkSchemaCanonical.ReadDefault(defaultText, type);
+                }
+                catch (Exception exception) when (exception is FormatException or OverflowException or System.Text.Json.JsonException)
                 {
-                    if (declared is not ISymbol memberSymbol || FindAttribute(memberSymbol, "GwColumnAttribute") is not { } columnAttribute)
-                        continue;
-
-                    var memberType = memberSymbol switch
-                    {
-                        IPropertySymbol property => property.Type,
-                        IFieldSymbol field => field.Type,
-                        _ => null
-                    };
-                    if (memberType is null || !TryMapType(memberType, out var type))
-                    {
-                        context.ReportDiagnostic(Diagnostic.Create(
-                            UnsupportedType,
-                            columnAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
-                            memberSymbol.Name,
-                            memberType?.ToDisplayString() ?? "<unknown>"));
-                        continue;
-                    }
-
-                    var name = StringNamedArgument(columnAttribute, "Name") ?? ToSnakeCase(memberSymbol.Name);
-                    if (IsEmpty(context, columnAttribute, tableName, $"the name of column '{memberSymbol.Name}'", name))
-                        continue;
-                    var nullable = IsNullable(memberType) && !BooleanNamedArgument(columnAttribute, "Required");
-                    SchemaDefault? columnDefault = null;
-                    if (StringNamedArgument(columnAttribute, "Default") is { } defaultText)
-                    {
-                        try
-                        {
-                            columnDefault = GroundworkSchemaCanonical.ReadDefault(defaultText, type);
-                        }
-                        catch (Exception exception) when (exception is FormatException or OverflowException or System.Text.Json.JsonException)
-                        {
-                            context.ReportDiagnostic(Diagnostic.Create(
-                                InvalidDefault,
-                                columnAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
-                                name,
-                                type.ToString(),
-                                exception.Message));
-                            continue;
-                        }
-                    }
-                    var column = new SchemaColumn(
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        InvalidDefault,
+                        AttributeLocation(columnAttribute, context),
                         name,
-                        type,
-                        nullable,
-                        IntNamedArgument(columnAttribute, "Length"),
-                        IntNamedArgument(columnAttribute, "Precision"),
-                        IntNamedArgument(columnAttribute, "Scale"),
-                        EnumNamedArgument(columnAttribute, "Folding", TextFolding.None),
-                        EnumNamedArgument(columnAttribute, "Generation", SchemaGeneration.Supplied),
-                        columnDefault,
-                        StringNamedArgument(columnAttribute, "Id"));
-                    if (columnSymbols.ContainsKey(name))
-                    {
-                        context.ReportDiagnostic(Diagnostic.Create(
-                            DuplicateColumn,
-                            columnAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? declaration.GetLocation(),
-                            tableName,
-                            name));
-                        continue;
-                    }
-
-                    columns.Add(column);
-                    columnSymbols[name] = memberSymbol;
-                    if (FindAttribute(memberSymbol, "GwKeyAttribute") is not null)
-                        keys.Add(name);
+                        type.ToString(),
+                        exception.Message));
+                    continue;
                 }
             }
+            var column = new SchemaColumn(
+                name,
+                type,
+                nullable,
+                IntNamedArgument(columnAttribute, "Length"),
+                IntNamedArgument(columnAttribute, "Precision"),
+                IntNamedArgument(columnAttribute, "Scale"),
+                EnumNamedArgument(columnAttribute, "Folding", TextFolding.None),
+                EnumNamedArgument(columnAttribute, "Generation", SchemaGeneration.Supplied),
+                columnDefault,
+                StringNamedArgument(columnAttribute, "Id"));
+            if (columnSymbols.ContainsKey(name))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    DuplicateColumn,
+                    AttributeLocation(columnAttribute, context),
+                    tableName,
+                    name));
+                continue;
+            }
+
+            columns.Add(column);
+            columnSymbols[name] = memberSymbol;
+            if (FindAttribute(memberSymbol, "GwKeyAttribute") is not null)
+                keys.Add(name);
         }
 
         if (keys.Count == 0)
         {
             context.ReportDiagnostic(Diagnostic.Create(
                 MissingKey,
-                tableAttribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ??
-                declarations.FirstOrDefault()?.Declaration.GetLocation() ?? Location.None,
+                AttributeLocation(tableAttribute, context),
                 tableName));
             return null;
         }
@@ -462,28 +438,6 @@ public sealed class SchemaGenerator : ISourceGenerator
         return true;
     }
 
-    private static IReadOnlyList<ClassPart> GetClassParts(
-        GeneratorExecutionContext context,
-        INamedTypeSymbol target)
-    {
-        var parts = new List<ClassPart>();
-        foreach (var tree in context.Compilation.SyntaxTrees)
-        {
-            var root = tree.GetRoot(context.CancellationToken);
-            var semanticModel = context.Compilation.GetSemanticModel(tree);
-            foreach (var declaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
-            {
-                if (semanticModel.GetDeclaredSymbol(declaration, context.CancellationToken) is INamedTypeSymbol symbol &&
-                    SymbolEqualityComparer.Default.Equals(symbol, target))
-                {
-                    parts.Add(new ClassPart(declaration, semanticModel));
-                }
-            }
-        }
-
-        return parts;
-    }
-
     private static bool TryParseIndex(
         GeneratorExecutionContext context,
         AttributeData attribute,
@@ -601,40 +555,482 @@ public sealed class SchemaGenerator : ISourceGenerator
         context.AddSource("GroundworkSchema.g.cs", $"// <auto-generated />\n[assembly: global::Groundwork.Schema.GroundworkSchemaAttribute({Literal(canonical)}, {Literal(fingerprint)})]\n");
     }
 
+    private static IReadOnlyList<GeneratedProjection> FindGeneratedProjections(GeneratorExecutionContext context)
+    {
+        var candidates = new List<GeneratedProjection>();
+        foreach (var tree in context.Compilation.SyntaxTrees)
+        {
+            var root = tree.GetRoot(context.CancellationToken);
+            var semanticModel = context.Compilation.GetSemanticModel(tree);
+            foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                if (semanticModel.GetSymbolInfo(invocation, context.CancellationToken).Symbol is not IMethodSymbol method ||
+                    !IsGroundworkSelect(context.Compilation, method) ||
+                    invocation.ArgumentList.Arguments.Count != 1 ||
+                    invocation.ArgumentList.Arguments[0].Expression is not LambdaExpressionSyntax lambda ||
+                    lambda.Body is not ExpressionSyntax body ||
+                    method.ContainingType.TypeArguments.Length != 1 ||
+                    method.TypeArguments.Length != 1 ||
+                    method.ContainingType.TypeArguments[0] is not INamedTypeSymbol sourceType ||
+                    method.TypeArguments[0] is not ITypeSymbol resultType ||
+                    FindAttribute(sourceType, "GwTableAttribute") is null ||
+                    !CanReferenceProjectionType(sourceType) ||
+                    !CanReferenceProjectionType(resultType))
+                    continue;
+
+                var sourceParameter = lambda switch
+                {
+                    SimpleLambdaExpressionSyntax simple => semanticModel.GetDeclaredSymbol(simple.Parameter, context.CancellationToken),
+                    ParenthesizedLambdaExpressionSyntax parenthesized when parenthesized.ParameterList.Parameters.Count == 1 =>
+                        semanticModel.GetDeclaredSymbol(parenthesized.ParameterList.Parameters[0], context.CancellationToken),
+                    _ => null
+                };
+                if (sourceParameter is not IParameterSymbol parameter)
+                    continue;
+
+                if (!TryBuildProjectionExpression(
+                        body,
+                        parameter,
+                        semanticModel,
+                        resultType,
+                        context.CancellationToken,
+                        out var projection))
+                    continue;
+
+                var factory = RenderProjectionFactory(projection, out var renderedColumnCount);
+                if (renderedColumnCount == 0)
+                    continue;
+
+                candidates.Add(new GeneratedProjection(
+                    TypeIdentity(resultType),
+                    renderedColumnCount,
+                    factory,
+                    RenderProjectionResultType(resultType, projection)));
+            }
+        }
+
+        var selected = new List<GeneratedProjection>();
+        foreach (var group in candidates.GroupBy(candidate => (candidate.ResultTypeIdentity, candidate.ColumnCount)))
+        {
+            var shapes = group.GroupBy(candidate => candidate.Factory, StringComparer.Ordinal).ToArray();
+            if (shapes.Length == 1)
+                selected.Add(shapes[0].First());
+        }
+        return selected;
+    }
+
+    private static bool IsGroundworkSelect(Compilation compilation, IMethodSymbol method)
+    {
+        var containing = method.ContainingType.OriginalDefinition;
+        return method.Name == "Select" &&
+            method.TypeParameters.Length == 1 &&
+            method.Parameters.Length == 1 &&
+            (SymbolEqualityComparer.Default.Equals(
+                containing,
+                compilation.GetTypeByMetadataName("Groundwork.Query.Linq.IGwQueryable`1")) ||
+             SymbolEqualityComparer.Default.Equals(
+                containing,
+                compilation.GetTypeByMetadataName("Groundwork.Query.Linq.GwQueryTable`1")));
+    }
+
+    private static bool TryBuildProjectionExpression(
+        ExpressionSyntax syntax,
+        IParameterSymbol sourceParameter,
+        SemanticModel semanticModel,
+        ITypeSymbol? expectedType,
+        CancellationToken cancellationToken,
+        out GeneratedProjectionExpression projection)
+    {
+        syntax = UnwrapProjectionSyntax(syntax);
+
+        if (syntax is MemberAccessExpressionSyntax member &&
+            IsProjectionMemberAccess(member, sourceParameter, semanticModel, cancellationToken) &&
+            semanticModel.GetSymbolInfo(member, cancellationToken).Symbol is ISymbol memberSymbol &&
+            TryProjectionColumn(memberSymbol))
+        {
+            var type = expectedType ?? semanticModel.GetTypeInfo(member, cancellationToken).Type;
+            if (type is null || !CanUseProjectionReadType(type))
+            {
+                projection = null!;
+                return false;
+            }
+
+            projection = new GeneratedProjectionRead(TypeName(type));
+            return true;
+        }
+
+        if (syntax is AnonymousObjectCreationExpressionSyntax anonymous)
+            return TryBuildAnonymousProjection(
+                anonymous,
+                sourceParameter,
+                semanticModel,
+                cancellationToken,
+                out projection);
+
+        if (syntax is ObjectCreationExpressionSyntax creation)
+            return TryBuildNamedProjection(
+                creation,
+                creation.ArgumentList,
+                creation.Initializer,
+                semanticModel,
+                sourceParameter,
+                cancellationToken,
+                out projection);
+
+        if (syntax is ImplicitObjectCreationExpressionSyntax implicitCreation)
+            return TryBuildNamedProjection(
+                implicitCreation,
+                implicitCreation.ArgumentList,
+                implicitCreation.Initializer,
+                semanticModel,
+                sourceParameter,
+                cancellationToken,
+                out projection);
+
+        projection = null!;
+        return false;
+    }
+
+    private static bool TryBuildNamedProjection(
+        SyntaxNode creation,
+        ArgumentListSyntax? argumentList,
+        InitializerExpressionSyntax? initializer,
+        SemanticModel semanticModel,
+        IParameterSymbol sourceParameter,
+        CancellationToken cancellationToken,
+        out GeneratedProjectionExpression projection)
+    {
+        var resultType = semanticModel.GetTypeInfo(creation, cancellationToken).Type as INamedTypeSymbol;
+        var constructor = semanticModel.GetSymbolInfo(creation, cancellationToken).Symbol as IMethodSymbol;
+        if (resultType is null || resultType.IsAnonymousType ||
+            !CanReferenceProjectionType(resultType) ||
+            constructor is null || constructor.MethodKind != MethodKind.Constructor ||
+            !IsAccessibleFromGeneratedSource(constructor))
+        {
+            projection = null!;
+            return false;
+        }
+
+        if ((argumentList?.Arguments.Count ?? 0) != constructor.Parameters.Length)
+        {
+            projection = null!;
+            return false;
+        }
+        if (argumentList?.Arguments.Any(argument => argument.NameColon is not null) == true)
+        {
+            projection = null!;
+            return false;
+        }
+
+        var constructorArguments = new List<GeneratedProjectionExpression>();
+        for (var index = 0; index < (argumentList?.Arguments.Count ?? 0); index++)
+        {
+            if (!TryBuildProjectionExpression(
+                    argumentList!.Arguments[index].Expression,
+                    sourceParameter,
+                    semanticModel,
+                    constructor.Parameters[index].Type,
+                    cancellationToken,
+                    out var argument))
+            {
+                projection = null!;
+                return false;
+            }
+            constructorArguments.Add(argument);
+        }
+
+        var assignments = new List<GeneratedProjectionAssignment>();
+        if (initializer is not null)
+        {
+            foreach (var expression in initializer.Expressions)
+            {
+                if (expression is not AssignmentExpressionSyntax assignment ||
+                    assignment.Kind() != SyntaxKind.SimpleAssignmentExpression ||
+                    assignment.Left is not IdentifierNameSyntax identifier ||
+                    semanticModel.GetSymbolInfo(assignment.Left, cancellationToken).Symbol is not ISymbol member ||
+                    !TryProjectionAssignment(member, out var memberType))
+                {
+                    projection = null!;
+                    return false;
+                }
+
+                if (!TryBuildProjectionExpression(
+                        assignment.Right,
+                        sourceParameter,
+                        semanticModel,
+                        memberType,
+                        cancellationToken,
+                        out var value))
+                {
+                    projection = null!;
+                    return false;
+                }
+                assignments.Add(new GeneratedProjectionAssignment(identifier.Identifier.ValueText, TypeName(memberType), value));
+            }
+        }
+
+        projection = new GeneratedProjectionObject(
+            TypeName(resultType),
+            constructorArguments,
+            assignments,
+            IsAnonymous: false);
+        return true;
+    }
+
+    private static bool TryBuildAnonymousProjection(
+        AnonymousObjectCreationExpressionSyntax anonymous,
+        IParameterSymbol sourceParameter,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken,
+        out GeneratedProjectionExpression projection)
+    {
+        if (semanticModel.GetTypeInfo(anonymous, cancellationToken).Type is not INamedTypeSymbol resultType ||
+            !resultType.IsAnonymousType)
+        {
+            projection = null!;
+            return false;
+        }
+
+        var assignments = new List<GeneratedProjectionAssignment>();
+        foreach (var initializer in anonymous.Initializers)
+        {
+            var value = initializer.Expression;
+            var memberName = initializer.NameEquals?.Name.Identifier.ValueText;
+            if (memberName is null && semanticModel.GetSymbolInfo(value, cancellationToken).Symbol is ISymbol selected)
+                memberName = selected.Name;
+            if (memberName is null || resultType.GetMembers(memberName).SingleOrDefault() is not IPropertySymbol property)
+            {
+                projection = null!;
+                return false;
+            }
+
+            if (!TryBuildProjectionExpression(
+                    value,
+                    sourceParameter,
+                    semanticModel,
+                    property.Type,
+                    cancellationToken,
+                    out var expression))
+            {
+                projection = null!;
+                return false;
+            }
+            assignments.Add(new GeneratedProjectionAssignment(memberName, TypeName(property.Type), expression));
+        }
+
+        projection = new GeneratedProjectionObject(null, Array.Empty<GeneratedProjectionExpression>(), assignments, IsAnonymous: true);
+        return true;
+    }
+
+    private static bool TryProjectionColumn(ISymbol member)
+    {
+        if (member is not IPropertySymbol and not IFieldSymbol ||
+            member.IsStatic ||
+            !IsAccessibleFromGeneratedSource(member) ||
+            member.ContainingType is not INamedTypeSymbol declaringType ||
+            !CanReferenceProjectionType(declaringType) ||
+            member is IPropertySymbol { GetMethod: { } getter } && !IsAccessibleFromGeneratedSource(getter))
+            return false;
+
+        var memberType = member is IPropertySymbol property ? property.Type : ((IFieldSymbol)member).Type;
+        if (FindAttribute(member, "GwColumnAttribute") is not { } attribute || !TryMapType(memberType, out _))
+            return false;
+
+        var columnName = StringNamedArgument(attribute, "Name") ?? ToSnakeCase(member.Name);
+        return !string.IsNullOrWhiteSpace(columnName);
+    }
+
+    private static bool IsProjectionMemberAccess(
+        MemberAccessExpressionSyntax member,
+        IParameterSymbol sourceParameter,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        var receiver = UnwrapProjectionSyntax(member.Expression);
+        if (semanticModel.GetSymbolInfo(receiver, cancellationToken).Symbol is IParameterSymbol directParameter)
+            return SymbolEqualityComparer.Default.Equals(directParameter, sourceParameter);
+
+        if (receiver is not MemberAccessExpressionSyntax navigation ||
+            semanticModel.GetSymbolInfo(UnwrapProjectionSyntax(navigation.Expression), cancellationToken).Symbol is not IParameterSymbol navigationParameter)
+            return false;
+        return SymbolEqualityComparer.Default.Equals(navigationParameter, sourceParameter);
+    }
+
+    private static ExpressionSyntax UnwrapProjectionSyntax(ExpressionSyntax syntax)
+    {
+        while (true)
+        {
+            switch (syntax)
+            {
+                case ParenthesizedExpressionSyntax parenthesized:
+                    syntax = parenthesized.Expression;
+                    continue;
+                case CastExpressionSyntax cast:
+                    syntax = cast.Expression;
+                    continue;
+                case CheckedExpressionSyntax checkedExpression:
+                    syntax = checkedExpression.Expression;
+                    continue;
+                case PostfixUnaryExpressionSyntax suppression when
+                    suppression.Kind() == SyntaxKind.SuppressNullableWarningExpression:
+                    syntax = suppression.Operand;
+                    continue;
+                default:
+                    return syntax;
+            }
+        }
+    }
+
+    private static bool TryProjectionAssignment(ISymbol member, out ITypeSymbol memberType)
+    {
+        switch (member)
+        {
+            case IPropertySymbol property when !property.IsStatic &&
+                property.SetMethod is { } setter && IsAccessibleFromGeneratedSource(setter):
+                memberType = property.Type;
+                return CanUseProjectionReadType(memberType);
+            case IFieldSymbol field when !field.IsStatic && !field.IsReadOnly && IsAccessibleFromGeneratedSource(field):
+                memberType = field.Type;
+                return CanUseProjectionReadType(memberType);
+            default:
+                memberType = null!;
+                return false;
+        }
+    }
+
+    private static bool IsAccessibleFromGeneratedSource(ISymbol symbol) =>
+        symbol.DeclaredAccessibility is Accessibility.Public or Accessibility.Internal;
+
+    private static bool CanReferenceProjectionType(ITypeSymbol type)
+    {
+        if (TryMapType(type, out _))
+            return true;
+        if (type is not INamedTypeSymbol named || named.Arity != 0 || named.IsRefLikeType)
+            return false;
+        if (named.IsAnonymousType)
+            return true;
+        for (var current = named; current is not null; current = current.ContainingType)
+        {
+            if (current.Arity != 0 || !IsAccessibleFromGeneratedSource(current))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool CanUseProjectionReadType(ITypeSymbol type) => TryMapType(type, out _);
+
+    private static string TypeIdentity(ITypeSymbol type) =>
+        type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+    private static string TypeName(ITypeSymbol type) =>
+        type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+    private static string RenderProjectionFactory(GeneratedProjectionExpression projection, out int columnCount)
+    {
+        var ordinal = 0;
+        var factory = RenderProjectionExpression(projection, ref ordinal);
+        columnCount = ordinal;
+        return factory;
+    }
+
+    private static string RenderProjectionExpression(GeneratedProjectionExpression projection, ref int ordinal)
+    {
+        switch (projection)
+        {
+            case GeneratedProjectionRead read:
+                return "global::Groundwork.Query.Linq.GwGeneratedRowValue.ReadProjection<" + read.TypeName + ">(values, columns, " +
+                    (ordinal++).ToString(CultureInfo.InvariantCulture) + ")";
+            case GeneratedProjectionObject created when created.IsAnonymous:
+                var anonymousAssignments = new List<string>();
+                foreach (var assignment in created.Assignments)
+                    anonymousAssignments.Add(EscapeIdentifier(assignment.Name) + " = " + RenderProjectionExpression(assignment.Value, ref ordinal));
+                return "new { " + string.Join(", ", anonymousAssignments) + " }";
+            case GeneratedProjectionObject created:
+                var constructorArguments = new List<string>();
+                foreach (var argument in created.ConstructorArguments)
+                    constructorArguments.Add(RenderProjectionExpression(argument, ref ordinal));
+                var result = "new " + created.TypeName + "(" + string.Join(", ", constructorArguments) + ")";
+                if (created.Assignments.Count != 0)
+                {
+                    var assignments = new List<string>();
+                    foreach (var assignment in created.Assignments)
+                        assignments.Add(EscapeIdentifier(assignment.Name) + " = " + RenderProjectionExpression(assignment.Value, ref ordinal));
+                    result += " { " + string.Join(", ", assignments) + " }";
+                }
+                return result;
+            default:
+                throw new InvalidOperationException("Unknown generated projection expression.");
+        }
+    }
+
+    private static string RenderProjectionResultType(ITypeSymbol resultType, GeneratedProjectionExpression projection)
+    {
+        if (resultType is INamedTypeSymbol named && named.IsAnonymousType && projection is GeneratedProjectionObject anonymous)
+        {
+            return "new { " + string.Join(", ", anonymous.Assignments.Select(assignment =>
+                EscapeIdentifier(assignment.Name) + " = default(" + assignment.TypeName + ")")) + " }.GetType()";
+        }
+        return "typeof(" + TypeName(resultType) + ")";
+    }
+
+    private static void EmitProjectionRegistrations(
+        GeneratorExecutionContext context,
+        IReadOnlyList<GeneratedProjection> projections)
+    {
+        if (projections.Count == 0)
+            return;
+
+        var builder = new StringBuilder();
+        builder.AppendLine("// <auto-generated />");
+        builder.AppendLine("#nullable enable");
+        builder.AppendLine("internal static class GroundworkGeneratedProjectionRegistrations");
+        builder.AppendLine("{");
+        builder.AppendLine("    [global::System.Runtime.CompilerServices.ModuleInitializer]");
+        builder.AppendLine("    internal static void Register()");
+        builder.AppendLine("    {");
+        foreach (var projection in projections)
+        {
+            builder.Append("        global::Groundwork.Query.Linq.GwGeneratedRows.RegisterProjection(")
+                .Append(projection.ResultTypeExpression).Append(", ")
+                .Append(projection.ColumnCount.ToString(CultureInfo.InvariantCulture)).AppendLine(",");
+            builder.Append("            static (values, columns) => ").Append(projection.Factory).AppendLine(");");
+        }
+        builder.AppendLine("    }");
+        builder.AppendLine("}");
+        context.AddSource("GroundworkGeneratedProjections.g.cs", builder.ToString());
+    }
+
     private static GeneratedRow? BuildGeneratedRow(INamedTypeSymbol symbol)
     {
         if (!CanReferenceGeneratedRow(symbol))
             return null;
-        var declaredMembers = symbol.GetMembers()
-            .Where(member => member is IPropertySymbol { IsStatic: false } or IFieldSymbol { IsStatic: false })
-            .Where(member => member.DeclaredAccessibility == Accessibility.Public)
-            .Where(member => member is not IPropertySymbol property || property.GetMethod?.DeclaredAccessibility == Accessibility.Public)
+        var declaredMembers = DeclaredColumns(symbol)
+            .Where(member => member.Symbol.DeclaredAccessibility == Accessibility.Public)
+            .Where(member => member.Symbol is not IPropertySymbol property ||
+                property.GetMethod?.DeclaredAccessibility == Accessibility.Public)
             .ToArray();
         var members = declaredMembers
             .Select(member =>
             {
-                var memberType = member switch
+                var initializable = member.Symbol is IPropertySymbol
                 {
-                    IPropertySymbol property => property.Type,
-                    IFieldSymbol field => field.Type,
-                    _ => null
-                };
-                if (memberType is null)
-                    return null;
-                var writable = member switch
+                    SetMethod: { DeclaredAccessibility: Accessibility.Public } setter
+                } property && (setter.IsInitOnly || property.IsRequired);
+                var writable = member.Symbol switch
                 {
-                    IPropertySymbol property => property.SetMethod is { DeclaredAccessibility: Accessibility.Public, IsInitOnly: false },
+                    IPropertySymbol writableProperty => writableProperty.SetMethod is
+                        { DeclaredAccessibility: Accessibility.Public, IsInitOnly: false } && !writableProperty.IsRequired,
                     IFieldSymbol field => !field.IsReadOnly && field.DeclaredAccessibility == Accessibility.Public,
                     _ => false
                 };
                 return new GeneratedMember(
-                    member.Name,
-                    LowerFirst(member.Name),
-                    memberType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                    writable);
+                    member.Symbol.Name,
+                    StringNamedArgument(member.Attribute, "Name") ?? ToSnakeCase(member.Symbol.Name),
+                    member.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                    writable,
+                    initializable,
+                    member.Symbol is IPropertySymbol { IsRequired: true });
             })
-            .Where(member => member is not null)
-            .Cast<GeneratedMember>()
             .ToArray();
         if (members.Length == 0)
             return null;
@@ -651,7 +1047,8 @@ public sealed class SchemaGenerator : ISourceGenerator
                         .FirstOrDefault(type => type is not null)))).ToArray()
             })
             .Where(candidate => candidate.Bound.All(member => member is not null))
-            .Where(candidate => members.All(member => candidate.Bound.Contains(member) || member.Writable))
+            .Where(candidate => members.All(member =>
+                candidate.Bound.Contains(member) || member.Writable || member.Initializable))
             .OrderByDescending(candidate => candidate.Candidate.Parameters.Length)
             .FirstOrDefault();
         if (constructor is null && !symbol.IsValueType)
@@ -659,7 +1056,23 @@ public sealed class SchemaGenerator : ISourceGenerator
 
         return new GeneratedRow(
             members,
-            constructor?.Bound.Where(member => member is not null).Cast<GeneratedMember>().ToArray() ?? Array.Empty<GeneratedMember>());
+            constructor?.Bound.Where(member => member is not null).Cast<GeneratedMember>().ToArray() ?? Array.Empty<GeneratedMember>(),
+            constructor is not null && FindAttribute(constructor.Candidate, "SetsRequiredMembersAttribute") is not null);
+    }
+
+    private static IEnumerable<DeclaredColumn> DeclaredColumns(INamedTypeSymbol symbol)
+    {
+        foreach (var member in symbol.GetMembers())
+        {
+            var type = member switch
+            {
+                IPropertySymbol { IsStatic: false } property => property.Type,
+                IFieldSymbol { IsStatic: false } field => field.Type,
+                _ => null
+            };
+            if (type is not null && FindAttribute(member, "GwColumnAttribute") is { } attribute)
+                yield return new DeclaredColumn(member, type, attribute);
+        }
     }
 
     private static bool CanReferenceGeneratedRow(INamedTypeSymbol symbol)
@@ -671,9 +1084,6 @@ public sealed class SchemaGenerator : ISourceGenerator
         }
         return true;
     }
-
-    private static string LowerFirst(string name) =>
-        name.Length == 0 ? name : char.ToLowerInvariant(name[0]) + name.Substring(1);
 
     private static string RenderStorageUnit(GeneratedTable generated, bool emitGeneratedRows)
     {
@@ -832,7 +1242,25 @@ public sealed class SchemaGenerator : ISourceGenerator
         builder.AppendLine("                {");
         builder.Append("                    var value = new ").Append(clrTypeName).Append("(");
         builder.Append(string.Join(", ", row.ConstructorMembers.Select(member => GeneratedRead(member))));
-        builder.AppendLine(");");
+        builder.Append(")");
+        var initializers = row.Members.Where(member =>
+            member.Initializable &&
+            (!row.ConstructorMembers.Contains(member) || member.Required && !row.ConstructorSetsRequiredMembers)).ToArray();
+        if (initializers.Length == 0)
+        {
+            builder.AppendLine(";");
+        }
+        else
+        {
+            builder.AppendLine();
+            builder.AppendLine("                    {");
+            foreach (var member in initializers)
+            {
+                builder.Append("                        ").Append(EscapeIdentifier(member.Name)).Append(" = ")
+                    .Append(GeneratedRead(member)).AppendLine(",");
+            }
+            builder.AppendLine("                    };");
+        }
         foreach (var member in row.Members.Where(member => member.Writable && !row.ConstructorMembers.Contains(member)))
         {
             builder.Append("                    if (columns.ContainsKey(").Append(Literal(member.Name)).AppendLine("))");
@@ -1041,13 +1469,41 @@ public sealed class SchemaGenerator : ISourceGenerator
             normalizedLeft.EndsWith('/' + normalizedRight, StringComparison.OrdinalIgnoreCase);
     }
 
-    private sealed record ClassPart(TypeDeclarationSyntax Declaration, SemanticModel SemanticModel);
-
-    private sealed record GeneratedMember(string Name, string ColumnName, string TypeName, bool Writable);
+    private sealed record GeneratedMember(
+        string Name,
+        string ColumnName,
+        string TypeName,
+        bool Writable,
+        bool Initializable,
+        bool Required);
 
     private sealed record GeneratedRow(
         IReadOnlyList<GeneratedMember> Members,
-        IReadOnlyList<GeneratedMember> ConstructorMembers);
+        IReadOnlyList<GeneratedMember> ConstructorMembers,
+        bool ConstructorSetsRequiredMembers);
+
+    private sealed record DeclaredColumn(ISymbol Symbol, ITypeSymbol Type, AttributeData Attribute);
+
+    private abstract record GeneratedProjectionExpression;
+
+    private sealed record GeneratedProjectionRead(string TypeName) : GeneratedProjectionExpression;
+
+    private sealed record GeneratedProjectionAssignment(
+        string Name,
+        string TypeName,
+        GeneratedProjectionExpression Value);
+
+    private sealed record GeneratedProjectionObject(
+        string? TypeName,
+        IReadOnlyList<GeneratedProjectionExpression> ConstructorArguments,
+        IReadOnlyList<GeneratedProjectionAssignment> Assignments,
+        bool IsAnonymous) : GeneratedProjectionExpression;
+
+    private sealed record GeneratedProjection(
+        string ResultTypeIdentity,
+        int ColumnCount,
+        string Factory,
+        string ResultTypeExpression);
 
     private sealed record GeneratedTable(
         SchemaTable Table,

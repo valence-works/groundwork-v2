@@ -4,7 +4,8 @@ A Roslyn source generator. It reads the `Groundwork.Schema` attributes in your a
 the canonical schema document plus its fingerprint as an assembly attribute, so the schema your code
 declares and the schema your deployment applies cannot drift apart. When the application also
 references `Groundwork.Query.Linq`, the same pass emits direct row getters and materializers for
-each `[GwTable]` CLR type and registers them without runtime reflection or expression compilation.
+each `[GwTable]` CLR type plus factories for supported LINQ `Select` construction sites, and
+registers them without runtime reflection or expression compilation.
 
 Downstream, `Groundwork.Analyzers` reads that attribute to check query coverage, and the
 `groundwork` CLI reads it to plan and apply.

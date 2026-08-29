@@ -57,6 +57,8 @@ public sealed class GwGeneratedRowAccessor<T>
 public static class GwGeneratedRows
 {
     private static readonly ConcurrentDictionary<Type, object> Accessors = new();
+    private static readonly ConcurrentDictionary<ProjectionKey, object> Projections = new();
+    private static readonly object AmbiguousProjection = new();
 
     internal static IReadOnlyCollection<string> EmptyColumns { get; } = new HashSet<string>(StringComparer.Ordinal);
 
@@ -77,11 +79,72 @@ public static class GwGeneratedRows
         accessor = null;
         return false;
     }
+
+    /// <summary>
+    /// Registers a compile-time generated materializer for one projected result shape. Applications
+    /// normally receive this registration from <c>Groundwork.Schema.Generator</c>. Registering a
+    /// second factory for the same result type and column count marks that shape ambiguous so callers
+    /// can use their compatibility materializer instead of selecting a factory nondeterministically.
+    /// </summary>
+    public static void RegisterProjection(
+        Type resultType,
+        int columnCount,
+        Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, object?> materializer)
+    {
+        if (resultType is null) throw new ArgumentNullException(nameof(resultType));
+        if (columnCount <= 0) throw new ArgumentOutOfRangeException(nameof(columnCount));
+        if (materializer is null) throw new ArgumentNullException(nameof(materializer));
+        Projections.AddOrUpdate(
+            new ProjectionKey(resultType, columnCount),
+            materializer,
+            static (_, _) => AmbiguousProjection);
+    }
+
+    /// <summary>Finds the generated materializer for a projected result type and column count.</summary>
+    public static bool TryGetProjection<T>(
+        int columnCount,
+        out Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, T>? materializer)
+    {
+        if (Projections.TryGetValue(new ProjectionKey(typeof(T), columnCount), out var value) &&
+            value is Func<IReadOnlyDictionary<string, object?>, IReadOnlyList<string>, object?> registered)
+        {
+            materializer = (values, columns) => (T)registered(values, columns)!;
+            return true;
+        }
+
+        materializer = null;
+        return false;
+    }
+
+    private readonly struct ProjectionKey : IEquatable<ProjectionKey>
+    {
+        internal ProjectionKey(Type type, int columnCount) => (Type, ColumnCount) = (type, columnCount);
+        private Type Type { get; }
+        private int ColumnCount { get; }
+        public bool Equals(ProjectionKey other) => Type == other.Type && ColumnCount == other.ColumnCount;
+        public override bool Equals(object? obj) => obj is ProjectionKey other && Equals(other);
+        public override int GetHashCode() => (Type.GetHashCode() * 397) ^ ColumnCount;
+    }
 }
 
 /// <summary>Conversion helpers used by generated materializers.</summary>
 public static class GwGeneratedRowValue
 {
+    /// <summary>Reads and converts one projected value by its compile-time ordinal.</summary>
+    public static T ReadProjection<T>(
+        IReadOnlyDictionary<string, object?> values,
+        IReadOnlyList<string> columns,
+        int index)
+    {
+        if (values is null) throw new ArgumentNullException(nameof(values));
+        if (columns is null) throw new ArgumentNullException(nameof(columns));
+        if ((uint)index >= (uint)columns.Count) throw new ArgumentOutOfRangeException(nameof(index));
+        var column = columns[index];
+        if (!values.TryGetValue(column, out var value))
+            throw new KeyNotFoundException($"The query result did not contain projected column '{column}'.");
+        return ConvertValue<T>(value);
+    }
+
     public static T Read<T>(
         IReadOnlyDictionary<string, object?> values,
         IReadOnlyDictionary<string, string> columns,
