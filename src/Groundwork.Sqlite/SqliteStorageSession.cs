@@ -984,8 +984,9 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
         commandObserver?.Observe(new ProviderCommandEvent("sqlite.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
         AddParameters(command, parameters);
-        command.ExecuteNonQuery();
-        return new WriteOutcome(WriteOutcomeStatus.Deleted, existing!.Version);
+        return command.ExecuteNonQuery() == 0
+            ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing!.Version)
+            : new WriteOutcome(WriteOutcomeStatus.Deleted, existing!.Version);
     }
 
     private WriteOutcome ConditionalUpsertCore(StorageValues values, WriteOptions? options)

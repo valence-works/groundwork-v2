@@ -375,6 +375,51 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Optimistic_delete_reports_a_conflict_when_the_delete_affects_no_row()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("zero-row-delete"),
+            Name = "zero_row_delete",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "value", Type = PortableType.String, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenSession(unit, StorageAccess.Global);
+        var values = new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one",
+            ["value"] = "value"
+        });
+        Assert.Equal(WriteOutcomeStatus.Inserted, session.Insert(values).Status);
+        using (var raw = new SqliteConnection(store.ConnectionString))
+        {
+            raw.Open();
+            using var trigger = raw.CreateCommand();
+            trigger.CommandText =
+                "CREATE TRIGGER ignore_zero_row_delete BEFORE DELETE ON zero_row_delete " +
+                "BEGIN SELECT RAISE(IGNORE); END;";
+            trigger.ExecuteNonQuery();
+        }
+
+        var outcome = session.Delete(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "one" }),
+            WriteOptions.IfVersion(1));
+
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, outcome.Status);
+        Assert.Equal(1, outcome.Version);
+        Assert.NotNull(session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "one" })));
+    }
+
+    [Fact]
     public void Provider_composed_index_names_are_injective_for_underscore_components()
     {
         var left = SqliteDialect.PhysicalIndexName("a_", "b");
