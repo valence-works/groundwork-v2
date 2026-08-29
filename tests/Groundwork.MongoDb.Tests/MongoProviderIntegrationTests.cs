@@ -147,6 +147,13 @@ public sealed class MongoProviderIntegrationTests
             sourceFixture.Source,
             StorageAccess.Scoped(new StorageScope("tenant-a")),
             observer);
+        var metadata = Assert.IsType<MongoDbProviderConnection>(connection).Database
+            .GetCollection<BsonDocument>("__groundwork_metadata");
+        metadata.DeleteOne(new BsonDocument(
+            "_id",
+            "history:" + new PhysicalSchemaTargetIdentity(
+                targetFixture.Target.Id,
+                MongoSchemaTargets.Provider.Name)));
         var request = new QueryRequest(
             sourceFixture.SourceTable,
             sourceFixture.Join,
