@@ -18,6 +18,8 @@ provider-neutral `ReferenceJoin`. After `.Join(reference)`, exactly that navigat
 members lower to target-qualified columns; arbitrary, deeper, and multiple navigations remain
 outside the closed surface. Provider rendering and composite source/target materialization are
 separate capabilities and fail closed until their provider packages implement them.
+Navigation-bearing row types use explicit table models; scalar-only `GwTableModel<T>.Infer` keeps
+rejecting complex members rather than guessing which object property represents a relationship.
 
 Deliberately *not* `IQueryable`. An open provider surface is what lets an expression compile
 happily and then fall back to client-side evaluation, or fail at runtime on one database and not

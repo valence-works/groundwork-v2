@@ -19,6 +19,8 @@ public sealed class TypedNavigationTests
     [
         new(nameof(CustomerRow.Id), "id", QueryType.Int32, false),
         new(nameof(CustomerRow.Name), "name", QueryType.String, false),
+        new(nameof(CustomerRow.OrderCount), "order_count", QueryType.Int32, false),
+        new(nameof(CustomerRow.OptionalScore), "optional_score", QueryType.Int32, true),
         new(nameof(CustomerRow.CreatedAt), "created_at", QueryType.DateTimeOffset, false)
     ]);
 
@@ -66,18 +68,21 @@ public sealed class TypedNavigationTests
         var requests = new[]
         {
             query.ToQueryRequest(),
+            query.ToList().Request,
             query.Count().Request,
             query.Any().Request,
             query.First().Request,
             query.FirstOrDefault().Request,
             query.Single().Request,
             query.SingleOrDefault().Request,
+            query.Sum(order => order.Customer.OrderCount).Request,
             query.Min(order => order.Customer.Name).Request,
             query.Max(order => order.Customer.CreatedAt).Request
         };
 
         Assert.All(requests, request => Assert.Same(CustomerJoin, request.Join));
         Assert.All(requests, request => Assert.True(request.Distinct));
+        Assert.Equal(Customers.Table, ((ResultShape.Sum)requests[^3].Result).Column.Table);
         Assert.Equal(Customers.Table, ((ResultShape.Min)requests[^2].Result).Column.Table);
         Assert.Equal(Customers.Table, ((ResultShape.Max)requests[^1].Result).Column.Table);
     }
@@ -98,6 +103,29 @@ public sealed class TypedNavigationTests
         Assert.Equal(Customers.Table, request.LatestPerKey.Timestamp.Table);
         Assert.Equal(2, request.Paging.Offset);
         Assert.Equal(5, request.Paging.Limit);
+    }
+
+    [Fact]
+    public void Declared_target_nullable_and_date_wrappers_lower_to_target_columns()
+    {
+        QueryRequest Request(System.Linq.Expressions.Expression<Func<OrderRow, bool>> predicate) =>
+            new GwQueryDatabase().Table(Orders)
+                .Join(CustomerReference)
+                .Where(predicate)
+                .ToQueryRequest();
+
+        var requests = new[]
+        {
+            Request(order => order.Customer.OptionalScore!.Value >= 3),
+            Request(order => order.Customer.CreatedAt.Year == 2026),
+            Request(order => order.Customer.CreatedAt.Date == new DateTime(2026, 1, 1))
+        };
+
+        Assert.Equal("optional_score", Assert.Single(Columns(requests[0].Where)).Name);
+        Assert.All(requests, request =>
+            Assert.All(Columns(request.Where), column => Assert.Equal(Customers.Table, column.Table)));
+        Assert.All(requests[1..], request =>
+            Assert.Equal("created_at", Assert.Single(Columns(request.Where)).Name));
     }
 
     [Fact]
@@ -228,6 +256,8 @@ public sealed class TypedNavigationTests
     {
         public int Id { get; init; }
         public string Name { get; init; } = string.Empty;
+        public int OrderCount { get; init; }
+        public int? OptionalScore { get; init; }
         public DateTimeOffset CreatedAt { get; init; }
         public CustomerProfile Profile { get; init; } = new();
     }

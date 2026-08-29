@@ -53,6 +53,10 @@ var request = database.Table(orderModel)
     .ToQueryRequest();
 ```
 
+Navigation-bearing row types use explicit `GwTableModel<T>` instances. `GwTableModel<T>.Infer`
+remains scalar-only and continues to reject complex members rather than silently deciding that an
+arbitrary object property is a relationship.
+
 Source and target columns stay table-qualified even when they have the same logical name. A
 navigation used without its matching `Join`, a different navigation, a deeper member chain, a
 second join, or an arbitrary LINQ `Join` remains refused. Provider rendering and composite

@@ -614,20 +614,27 @@ public static class ExpressionLowerer
         private ColumnRef? TryColumn(Expression source)
         {
             source = Unwrap(source);
-            if (source is MemberExpression member && member.Expression == parameter && model.Columns.TryGetValue(member.Member.Name, out var column)) return column;
-            if (source is MemberExpression value && value.Member.Name == "Value" && value.Expression is MemberExpression nullable && nullable.Expression == parameter && model.Columns.TryGetValue(nullable.Member.Name, out var nullableColumn)) return nullableColumn;
-            if (source is MemberExpression targetMember && targetMember.Expression is MemberExpression navigationMember &&
-                navigationMember.Expression == parameter && navigation is not null &&
-                string.Equals(navigationMember.Member.Name, navigation.NavigationMember, StringComparison.Ordinal) &&
-                navigation.TargetColumns.TryGetValue(targetMember.Member.Name, out var targetColumn)) return targetColumn;
+            if (source is MemberExpression member && TryMappedColumn(member, out var column)) return column;
+            if (source is MemberExpression value && value.Member.Name == "Value" &&
+                value.Expression is MemberExpression nullable && TryMappedColumn(nullable, out var nullableColumn)) return nullableColumn;
             return null;
         }
 
         private bool TryDatePart(Expression source, out ColumnRef column, out string part)
         {
             column = null!; part = string.Empty; source = Unwrap(source);
-            if (source is MemberExpression member && member.Expression is MemberExpression inner && inner.Expression == parameter &&
-                model.Columns.TryGetValue(inner.Member.Name, out column!) && member.Member.Name is "Year" or "Date") { part = member.Member.Name; return true; }
+            if (source is MemberExpression member && member.Expression is MemberExpression inner &&
+                TryMappedColumn(inner, out column!) && member.Member.Name is "Year" or "Date") { part = member.Member.Name; return true; }
+            return false;
+        }
+
+        private bool TryMappedColumn(MemberExpression member, out ColumnRef column)
+        {
+            if (member.Expression == parameter && model.Columns.TryGetValue(member.Member.Name, out column!)) return true;
+            if (member.Expression is MemberExpression navigationMember && navigationMember.Expression == parameter && navigation is not null &&
+                string.Equals(navigationMember.Member.Name, navigation.NavigationMember, StringComparison.Ordinal) &&
+                navigation.TargetColumns.TryGetValue(member.Member.Name, out column!)) return true;
+            column = null!;
             return false;
         }
         private bool HasColumn(Expression source) => ContainsParameter(source, parameter);
