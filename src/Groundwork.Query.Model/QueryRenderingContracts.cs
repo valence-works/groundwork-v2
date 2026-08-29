@@ -275,7 +275,6 @@ public sealed record QueryRenderOptions
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         var terms = request.Order.ToList();
-        IEnumerable<ColumnRef> identity = TieBreakColumns;
         if (request.Join is { } join)
         {
             foreach (var tieBreak in TieBreakColumns)
@@ -296,16 +295,30 @@ public sealed record QueryRenderOptions
                         nameof(request));
                 }
             }
-            identity = DrivingIdentityColumns
-                .Concat(TieBreakColumns)
-                .Where(column => column.Table == request.Table)
-                .Concat(join.ColumnPairs.Select(pair => pair.Target));
+
+            var drivingIdentity = DrivingIdentityColumns.Length == 0
+                ? TieBreakColumns.Where(column => column.Table == request.Table).ToArray()
+                : DrivingIdentityColumns.ToArray();
+            foreach (var column in drivingIdentity)
+                terms.Add(new OrderTerm(column, OrderDirection.Ascending, NullOrder.First));
+
+            foreach (var tieBreak in TieBreakColumns.Where(column =>
+                         column.Table == request.Table &&
+                         !drivingIdentity.Any(identityColumn =>
+                             ColumnRefIdentity.SameQualifiedColumn(identityColumn, column))))
+            {
+                if (!terms.Any(term => ColumnRefIdentity.SameQualifiedColumn(term.Column, tieBreak)))
+                    terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
+            }
+
+            foreach (var pair in join.ColumnPairs)
+                terms.Add(new OrderTerm(pair.Target, OrderDirection.Ascending, NullOrder.First));
+            return terms.ToImmutableArray();
         }
-        foreach (var tieBreak in identity)
+
+        foreach (var tieBreak in TieBreakColumns)
         {
-            if (terms.Any(term => request.Join is null
-                    ? ColumnRefIdentity.SameName(term.Column, tieBreak)
-                    : ColumnRefIdentity.SameQualifiedColumn(term.Column, tieBreak)))
+            if (terms.Any(term => ColumnRefIdentity.SameName(term.Column, tieBreak)))
                 continue;
             terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
         }

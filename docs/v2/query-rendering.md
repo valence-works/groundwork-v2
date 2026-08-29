@@ -16,7 +16,9 @@ with `QueryContinuationToken.Encode`; the tuple contains every requested order t
 the explicitly supplied `QueryRenderOptions.TieBreakColumns`. For joined continuations, applications
 must supply their complete driving identity through `QueryRenderOptions.DrivingIdentityColumns`; the
 joined order includes that identity in declaration order even when the additional tie-break list is
-partial. Joined renderers alias each effective-order value with
+partial or a requested order term already names one of its columns. This preserves caller-selected
+sort priority while retaining a complete declaration-order identity suffix. Joined renderers alias
+each effective-order value with
 `QueryRequestExecution.ContinuationFieldName(index)` so qualified columns that share a logical name
 remain distinct inside the provider result. These fields are internal and never enter the public row.
 Every order term must name its null rank. Offset paging remains available through `Paging.OffsetLimit`

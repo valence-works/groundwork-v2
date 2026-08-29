@@ -189,8 +189,9 @@ Four rules for correct pages:
    (`GW-SEM-ORDER-004`).
 2. **For joined continuations, you must supply your complete declared identity through
    `QueryRenderOptions.DrivingIdentityColumns`.** Joined continuations include that identity in
-   declaration order even when `TieBreakColumns` contains only additional tie-breaks. Without a
-   complete identity, pages are not deterministic.
+   declaration order even when `TieBreakColumns` contains only additional tie-breaks or requested
+   order terms already name identity columns. Without a complete identity suffix, pages are not
+   deterministic.
 3. **Joined provider adapters must alias effective-order values with
    `QueryRequestExecution.ContinuationFieldName(index)`.** These internal fields keep same-named
    source and target cursor values distinct without leaking into the public row.
