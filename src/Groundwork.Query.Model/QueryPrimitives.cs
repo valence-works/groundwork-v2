@@ -117,6 +117,13 @@ public sealed record ColumnRef
     public override string ToString() => Table.Value.Length == 0 ? Name : Table + "." + Name;
 }
 
+internal static class ColumnRefIdentity
+{
+    internal static bool Same(ColumnRef left, ColumnRef right, bool tableQualified) =>
+        string.Equals(left.Name, right.Name, StringComparison.Ordinal) &&
+        (!tableQualified || left.Table == right.Table);
+}
+
 public sealed class QueryConstant : IEquatable<QueryConstant>
 {
     private readonly object? _value;

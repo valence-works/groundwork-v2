@@ -202,7 +202,10 @@ public sealed record QueryRenderOptions
 
     public ImmutableArray<QueryIndexDeclaration> Indexes { get; init; }
     public string? SelectedIndex { get; }
-    /// <summary>Declared identity columns appended to the requested order for deterministic paging.</summary>
+    /// <summary>
+    /// Declared driving identity columns appended to the requested order for deterministic paging.
+    /// A joined request appends its declared target key after these columns.
+    /// </summary>
     public ImmutableArray<ColumnRef> TieBreakColumns { get; init; }
 
     /// <summary>Provider-owned partition columns added to LatestPerKey grouping.</summary>
@@ -220,7 +223,7 @@ public sealed record QueryRenderOptions
     public string ResolvePhysicalIndexName(string logicalName) =>
         PhysicalIndexNames.TryGetValue(logicalName, out var physicalName) ? physicalName : logicalName;
 
-    /// <summary>Returns options with identity columns appended as deterministic paging tie-breaks.</summary>
+    /// <summary>Returns options with qualified driving identity columns appended as deterministic paging tie-breaks.</summary>
     public QueryRenderOptions WithIdentityTieBreaks(IEnumerable<ColumnRef> identityColumns)
     {
         if (identityColumns is null)
@@ -228,20 +231,48 @@ public sealed record QueryRenderOptions
         var merged = TieBreakColumns
             .Concat(identityColumns)
             .Where(column => column is not null)
-            .GroupBy(column => column.Name, StringComparer.Ordinal)
+            .GroupBy(column => (column.Table, column.Name))
             .Select(group => group.First())
             .ToImmutableArray();
         return this with { TieBreakColumns = merged };
     }
 
-    /// <summary>Returns the requested order followed by the declared identity tie-break columns.</summary>
+    /// <summary>
+    /// Returns the requested order followed by the driving identity and, for a joined request,
+    /// the declared target key in reference order.
+    /// </summary>
     public ImmutableArray<OrderTerm> GetEffectiveOrder(QueryRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         var terms = request.Order.ToList();
-        foreach (var tieBreak in TieBreakColumns)
+        IEnumerable<ColumnRef> identity = TieBreakColumns;
+        if (request.Join is { } join)
         {
-            if (terms.Any(term => string.Equals(term.Column.Name, tieBreak.Name, StringComparison.Ordinal)))
+            foreach (var tieBreak in TieBreakColumns)
+            {
+                if (tieBreak.Table == TableId.Empty ||
+                    tieBreak.Table != request.Table && tieBreak.Table != join.TargetTable)
+                {
+                    throw new ArgumentException(
+                        "Every joined-query identity tie-break must be qualified as the source or target table.",
+                        nameof(request));
+                }
+                if (tieBreak.Table == join.TargetTable &&
+                    !join.ColumnPairs.Any(pair =>
+                        ColumnRefIdentity.Same(pair.Target, tieBreak, tableQualified: true)))
+                {
+                    throw new ArgumentException(
+                        "Target identity tie-breaks must belong to the declared reference target key.",
+                        nameof(request));
+                }
+            }
+            identity = TieBreakColumns
+                .Where(column => column.Table == request.Table)
+                .Concat(join.ColumnPairs.Select(pair => pair.Target));
+        }
+        foreach (var tieBreak in identity)
+        {
+            if (terms.Any(term => ColumnRefIdentity.Same(term.Column, tieBreak, request.Join is not null)))
                 continue;
             terms.Add(new OrderTerm(tieBreak, OrderDirection.Ascending, NullOrder.First));
         }
@@ -287,7 +318,7 @@ public sealed record QueryRenderParameter
     public object? Value { get; }
 }
 
-/// <summary>A deterministic continuation token for the ordered terms of a query.</summary>
+/// <summary>A deterministic typed continuation token for the effective identity order of a query.</summary>
 public static class QueryContinuationToken
 {
     private const string Prefix = "q1.";
@@ -306,11 +337,29 @@ public static class QueryContinuationToken
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (options is null) throw new ArgumentNullException(nameof(options));
         var snapshot = (values ?? throw new ArgumentNullException(nameof(values))).ToArray();
+        RequireJoinedSourceIdentity(request, options);
         var order = options.GetEffectiveOrder(request);
         if (snapshot.Length != order.Length)
             throw new ArgumentException("A continuation must contain one value per effective order term.", nameof(values));
+        var boundValues = new QueryConstant[snapshot.Length];
+        for (var index = 0; index < snapshot.Length; index++)
+        {
+            var value = snapshot[index] ??
+                throw new ArgumentException("Continuation values cannot contain null references.", nameof(values));
+            try
+            {
+                boundValues[index] = value.Bind(order[index].Column);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new ArgumentException(
+                    $"Continuation value {index} is not valid for effective order term '{order[index].Column}'.",
+                    nameof(values),
+                    exception);
+            }
+        }
         var binding = Binding(request, order);
-        return BoundPrefix + EncodeText(binding) + "." + string.Join(".", snapshot.Select(value => EncodeValue(value ?? throw new ArgumentException("Continuation values cannot contain null references.", nameof(values)))));
+        return BoundPrefix + EncodeText(binding) + "." + string.Join(".", boundValues.Select(EncodeValue));
     }
 
     public static IReadOnlyList<QueryConstant> Decode(string token, IReadOnlyList<ColumnRef> columns)
@@ -338,6 +387,7 @@ public static class QueryContinuationToken
         if (!token.StartsWith(BoundPrefix, StringComparison.Ordinal))
             throw new FormatException("The continuation token is unbound; issue a new token from the current query result.");
 
+        RequireJoinedSourceIdentity(request, options);
         var parts = token.Substring(BoundPrefix.Length).Split('.');
         var order = options.GetEffectiveOrder(request);
         if (parts.Length != order.Length + 1)
@@ -369,6 +419,17 @@ public static class QueryContinuationToken
     private static string Binding(QueryRequest request, IEnumerable<OrderTerm> order) =>
         request.CanonicalPredicate + "|" + request.ContinuationFingerprint + "|" +
         request.ContinuationBindingDiscriminator + "|" + string.Join(";", order.Select(OrderBinding));
+
+    private static void RequireJoinedSourceIdentity(QueryRequest request, QueryRenderOptions options)
+    {
+        if (request.Join is not null &&
+            !options.TieBreakColumns.Any(column => column.Table == request.Table))
+        {
+            throw new ArgumentException(
+                "A joined continuation requires the driving identity tie-break columns.",
+                nameof(options));
+        }
+    }
 
     private static QueryConstant DecodeValue(string encoded, ColumnRef column)
     {

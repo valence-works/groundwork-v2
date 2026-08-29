@@ -390,7 +390,8 @@ public static class QueryRequestExecution
                              !string.Equals(mapping.SourceColumn, mapping.PhysicalColumn, StringComparison.Ordinal) &&
                              string.Equals(mapping.PhysicalColumn, term.Column.Name, StringComparison.Ordinal))))
             {
-                if (!columns.Any(column => string.Equals(column.Name, term.Column.Name, StringComparison.Ordinal)))
+                if (!columns.Any(column =>
+                        ColumnRefIdentity.Same(column, term.Column, request.Join is not null)))
                     columns.Add(term.Column);
             }
             projection = Projection.ColumnsOnly(columns);

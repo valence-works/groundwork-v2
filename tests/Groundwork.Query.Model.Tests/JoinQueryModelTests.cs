@@ -8,6 +8,8 @@ public sealed class JoinQueryModelTests
 {
     private static readonly TableId Orders = new("orders");
     private static readonly TableId Customers = new("customers");
+    private static readonly ColumnRef OrderId = new(Orders, "id", QueryType.Guid, isNullable: false);
+    private static readonly ColumnRef OrderSequence = new(Orders, "order_id", QueryType.Int64, isNullable: false);
     private static readonly ColumnRef OrderCustomerId = new(Orders, "customer_id", QueryType.Guid, isNullable: false);
     private static readonly ColumnRef OrderRegion = new(Orders, "customer_region", QueryType.String, isNullable: false);
     private static readonly ColumnRef CustomerId = new(Customers, "id", QueryType.Guid, isNullable: false);
@@ -265,10 +267,202 @@ public sealed class JoinQueryModelTests
         Assert.Equal(new[] { Orders, Customers }, rewritten.Order.Select(term => term.Column.Table));
     }
 
+    [Fact]
+    public void Joined_effective_order_appends_both_qualified_identities_in_declared_order()
+    {
+        var request = Request(Join());
+        var options = new QueryRenderOptions(tieBreakColumns: [OrderId]);
+
+        var order = options.GetEffectiveOrder(request);
+
+        Assert.Equal(
+            [CustomerName, OrderId, CustomerId, CustomerRegion],
+            order.Select(term => term.Column));
+    }
+
+    [Fact]
+    public void Joined_effective_order_canonicalizes_supplied_target_keys_after_the_source_identity()
+    {
+        var request = Request(Join());
+        var options = new QueryRenderOptions(
+            tieBreakColumns: [CustomerRegion, OrderSequence, CustomerId]);
+
+        var order = options.GetEffectiveOrder(request);
+
+        Assert.Equal(
+            [CustomerName, OrderSequence, CustomerId, CustomerRegion],
+            order.Select(term => term.Column));
+    }
+
+    [Fact]
+    public void Joined_effective_order_refuses_ambiguous_or_foreign_identity_tie_breaks()
+    {
+        var request = Request(Join());
+        var unqualified = new ColumnRef("id", QueryType.Guid, isNullable: false);
+        var foreign = new ColumnRef(new TableId("accounts"), "id", QueryType.Guid, isNullable: false);
+
+        Assert.Throws<ArgumentException>(() =>
+            new QueryRenderOptions(tieBreakColumns: [unqualified]).GetEffectiveOrder(request));
+        Assert.Throws<ArgumentException>(() =>
+            new QueryRenderOptions(tieBreakColumns: [foreign]).GetEffectiveOrder(request));
+    }
+
+    [Fact]
+    public void Joined_composite_continuation_pages_deterministically_across_both_identities()
+    {
+        var options = CompositeOptions();
+        var customerA = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var customerB = Guid.Parse("00000000-0000-0000-0000-000000000002");
+        var source = new[]
+        {
+            Row(1, customerA, "eu", "Alice"),
+            Row(2, customerA, "eu", "Alice"),
+            Row(3, customerB, "us", "Alice"),
+            Row(4, customerB, "us", "Bob")
+        };
+        var firstRequest = ContinuationPage(Paging.Keyset(2));
+
+        var first = QueryResultMaterializer.Materialize(
+            firstRequest,
+            options,
+            source,
+            sourceIncludesContinuation: false);
+        var cursor = QueryContinuationToken.Decode(first.NextContinuationToken!, firstRequest, options);
+        var secondRequest = ContinuationPage(Paging.Continuation(first.NextContinuationToken!, 2));
+        var second = QueryResultMaterializer.Materialize(
+            secondRequest,
+            options,
+            source,
+            sourceIncludesContinuation: false);
+
+        Assert.Equal([1L, 2L], first.Rows.Select(row => row[OrderSequence.Name]));
+        Assert.Equal([3L, 4L], second.Rows.Select(row => row[OrderSequence.Name]));
+        Assert.Null(second.NextContinuationToken);
+        Assert.Equal(
+            ["string:416C696365", "int64:2", "guid:00000000-0000-0000-0000-000000000001", "string:6575"],
+            cursor.Select(value => value.ToCanonicalString()));
+
+    }
+
+    [Fact]
+    public void Joined_composite_continuation_refuses_a_value_outside_its_typed_tuple_position()
+    {
+        var request = Request(Join());
+        var options = CompositeOptions();
+
+        var failure = Assert.Throws<ArgumentException>(() => QueryContinuationToken.Encode(
+            request,
+            options,
+            CompositeValues(QueryConstant.Of("not-a-guid"))));
+
+        Assert.Contains("effective order term", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_composite_continuation_requires_the_driving_declared_identity()
+    {
+        var failure = Assert.Throws<ArgumentException>(() => QueryContinuationToken.Encode(
+            Request(Join()),
+            QueryRenderOptions.Default,
+            [
+                QueryConstant.Of(CustomerName, "Alice"),
+                QueryConstant.Of(CustomerId, Guid.Empty),
+                QueryConstant.Of(CustomerRegion, "eu")
+            ]));
+
+        Assert.Contains("driving identity", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_composite_continuation_keeps_the_privileged_invocation_binding()
+    {
+        var options = CompositeOptions();
+        var request = QueryRequestExecution.WithProviderPredicate(
+            Request(Join()),
+            Predicate.AlwaysTrue.Instance,
+            "privileged-audit-binding-a");
+        var token = QueryContinuationToken.Encode(
+            request,
+            options,
+            CompositeValues());
+        var otherInvocation = QueryRequestExecution.WithProviderPredicate(
+            Request(Join()),
+            Predicate.AlwaysTrue.Instance,
+            "privileged-audit-binding-b");
+
+        Assert.Equal(4, QueryContinuationToken.Decode(token, request, options).Count);
+        Assert.Throws<FormatException>(() =>
+            QueryContinuationToken.Decode(token, otherInvocation, options));
+    }
+
+    [Fact]
+    public void Joined_composite_continuation_rejects_a_changed_reference_mapping()
+    {
+        var options = CompositeOptions();
+        var request = Request(Join());
+        var token = QueryContinuationToken.Encode(
+            request,
+            options,
+            CompositeValues());
+        var changed = Request(new ReferenceJoin(
+            "customer",
+            Customers,
+            [
+                new JoinColumnPair(OrderRegion, CustomerRegion),
+                new JoinColumnPair(OrderCustomerId, CustomerId)
+            ]));
+
+        Assert.Throws<FormatException>(() => QueryContinuationToken.Decode(token, changed, options));
+    }
+
+    [Fact]
+    public void Joined_provider_page_projects_same_named_tie_breaks_from_both_tables()
+    {
+        var request = Request(Join(), projection: Projection.ColumnsOnly(OrderId, CustomerName));
+        var options = new QueryRenderOptions(tieBreakColumns: [OrderId]);
+
+        var execution = QueryRequestExecution.ForProviderPage(request, options);
+
+        Assert.Equal(
+            new[] { OrderId, CustomerName, CustomerId, CustomerRegion },
+            execution.Projection.Columns.ToArray());
+    }
+
     private static ReferenceJoin Join() => new(
         "customer",
         Customers,
         [new JoinColumnPair(OrderCustomerId, CustomerId), new JoinColumnPair(OrderRegion, CustomerRegion)]);
+
+    private static QueryRenderOptions CompositeOptions() =>
+        new(tieBreakColumns: [OrderSequence]);
+
+    private static QueryConstant[] CompositeValues(QueryConstant? targetId = null) =>
+    [
+        QueryConstant.Of(CustomerName, "Alice"),
+        QueryConstant.Of(OrderSequence, 2L),
+        targetId ?? QueryConstant.Of(CustomerId, Guid.Empty),
+        QueryConstant.Of(CustomerRegion, "eu")
+    ];
+
+    private static QueryRequest ContinuationPage(Paging paging) => new(
+        Orders,
+        Join(),
+        Predicate.AlwaysTrue.Instance,
+        [new OrderTerm(CustomerName, nullOrder: NullOrder.Last)],
+        Projection.ColumnsOnly(OrderSequence, CustomerName),
+        paging);
+
+    private static IReadOnlyDictionary<string, object?> Row(
+        long order,
+        Guid customer,
+        string region,
+        string name) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        [OrderSequence.Name] = order,
+        [CustomerId.Name] = customer,
+        [CustomerRegion.Name] = region,
+        [CustomerName.Name] = name
+    };
 
     private static QueryRequest Request(
         ReferenceJoin join,
