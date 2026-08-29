@@ -1,0 +1,43 @@
+name: Native AOT conformance
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact 40-character commit SHA to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-aot-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Verify the requested exact head
+        env:
+          EXPECTED_REF: ${{ inputs.ref || github.sha }}
+        run: bash eng/verify-exact-head.sh "$EXPECTED_REF"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Restore the source graph for packing
+        run: dotnet restore Groundwork.slnx --nologo -m:1
+      - name: Pack the exact-head public packages
+        run: eng/pack-public-packages.sh artifacts/aot-packages "0.2.0-aot.${GITHUB_RUN_ID}"
+      - name: Publish and run the package-only Native AOT conformance executable
+        run: tests/Groundwork.Aot.Conformance/verify-native-aot.sh artifacts/aot-packages linux-x64

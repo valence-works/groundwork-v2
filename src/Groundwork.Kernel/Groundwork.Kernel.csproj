@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
     <PackageId>Groundwork.Kernel</PackageId>
     <Description>Provider-neutral storage declarations, write semantics, and durable operation contracts for Groundwork.</Description>
   </PropertyGroup>

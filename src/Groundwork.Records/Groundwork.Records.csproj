@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
     <PackageId>Groundwork.Records</PackageId>
     <Description>Typed record declarations, optimistic concurrency, and query/write helpers for Groundwork.</Description>
   </PropertyGroup>

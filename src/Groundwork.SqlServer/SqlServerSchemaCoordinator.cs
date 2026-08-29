@@ -134,15 +134,15 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     }
 
     private static string BatchTypeCanonicalDefinition(StorageUnit physical) =>
-        JsonSerializer.Serialize(physical.Columns.Select(column => new
+        PortableJsonSerializer.Serialize(physical.Columns.Select(column => (object?)new Dictionary<string, object?>
         {
-            column.Name,
-            Type = (int)column.Type,
-            column.MaxLength,
-            column.Precision,
-            column.Scale,
-            Collation = column.Collation?.ToString()
-        }));
+            ["Name"] = column.Name,
+            ["Type"] = (int)column.Type,
+            ["MaxLength"] = column.MaxLength,
+            ["Precision"] = column.Precision,
+            ["Scale"] = column.Scale,
+            ["Collation"] = column.Collation?.ToString()
+        }).ToArray());
 
     internal static void ValidateAccess(StorageUnit unit, StorageAccess access)
     {

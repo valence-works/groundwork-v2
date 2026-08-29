@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
@@ -92,6 +93,8 @@ public sealed class DocumentUnitBuilder<T>
     }
 
     /// <summary>Declares the native typed key. The value is also written to the JSON document.</summary>
+    [RequiresDynamicCode("Compiles the document key selector at runtime.")]
+    [RequiresUnreferencedCode("Inspects the selected document key member, which may be trimmed.")]
     public DocumentUnitBuilder<T> Id<TKey>(Expression<Func<T, TKey>> selector, Action<ColumnBuilder>? configure = null)
     {
         idMember = SingleMember(selector);
@@ -180,6 +183,8 @@ public sealed class DocumentUnitBuilder<T>
         return this;
     }
 
+    [RequiresDynamicCode("Inspects configured JSON converters and freezes a reflection-based document contract.")]
+    [RequiresUnreferencedCode("Resolves serialized CLR members and converters that may be trimmed.")]
     public DocumentUnit<T> Build()
     {
         var diagnostics = new List<DocumentDiagnostic>();
@@ -373,6 +378,8 @@ public sealed class DocumentUnitBuilder<T>
         return expression;
     }
 
+    [RequiresDynamicCode("Inspects configured JSON converters for enum projections.")]
+    [RequiresUnreferencedCode("Inspects configured JSON converters and CLR members that may be trimmed.")]
     private PortableType ToPortableType(Type type, IReadOnlyList<MemberInfo>? members = null)
     {
         type = Nullable.GetUnderlyingType(type) ?? type;
@@ -397,6 +404,8 @@ public sealed class DocumentUnitBuilder<T>
         return PortableType.Json;
     }
 
+    [RequiresDynamicCode("Creates and inspects a configured JSON converter for an enum projection.")]
+    [RequiresUnreferencedCode("Creates and inspects a configured JSON converter whose members may be trimmed.")]
     private PortableType EnumPortableType(Type enumType, IReadOnlyList<MemberInfo>? members)
     {
         JsonConverter? propertyConverter = null;
@@ -563,8 +572,12 @@ public sealed class DocumentUnit<T>
     public IReadOnlyList<ColumnBinding> Bindings { get; }
     public VersionedJsonDocumentCodec Codec => codec;
 
+    [RequiresDynamicCode("Serializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed.")]
     public VersionedJsonContent Serialize(T value) => codec.Serialize(DocumentKind, value);
 
+    [RequiresDynamicCode("Serializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed.")]
     public RowValues ToRowValues(T value)
     {
         ArgumentNullException.ThrowIfNull(value);
@@ -585,8 +598,12 @@ public sealed class DocumentUnit<T>
         return new RowValues(values);
     }
 
+    [RequiresDynamicCode("Serializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed.")]
     public RowValues Map(T value) => ToRowValues(value);
 
+    [RequiresDynamicCode("Materializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Materializes an application document whose members may be trimmed.")]
     public T Materialize(RowValues values)
     {
         ArgumentNullException.ThrowIfNull(values);
@@ -629,8 +646,12 @@ public sealed class DocumentUnit<T>
         return materialized;
     }
 
+    [RequiresDynamicCode("Materializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Materializes an application document whose members may be trimmed.")]
     public T Read(RowValues values) => Materialize(values);
 
+    [RequiresDynamicCode("Materializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Materializes an application document whose members may be trimmed.")]
     public DocumentReadResult<T> Read(RowValues values, long? version)
     {
         var materialized = Materialize(values);
@@ -638,6 +659,8 @@ public sealed class DocumentUnit<T>
     }
 
     /// <summary>Builds the ordinary Store row mutation for a typed document value.</summary>
+    [RequiresDynamicCode("Serializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed.")]
     public RowWrite ToRowWrite(T value, RowWriteMode mode, WriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(value);
@@ -655,12 +678,20 @@ public sealed class DocumentUnit<T>
         };
     }
 
+    [RequiresDynamicCode("Serializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed.")]
     public RowWrite Insert(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Insert, options);
 
+    [RequiresDynamicCode("Serializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed.")]
     public RowWrite Update(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Update, options);
 
+    [RequiresDynamicCode("Serializes the application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed.")]
     public RowWrite Upsert(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Upsert, options);
 
+    [RequiresDynamicCode("Uses the document row-write compatibility path.")]
+    [RequiresUnreferencedCode("Uses the document row-write compatibility path whose CLR members may be trimmed.")]
     public RowWrite Delete(T value, WriteOptions? options = null) => ToRowWrite(value, RowWriteMode.Delete, options);
 
     /// <summary>Executes a previously mapped row write through the provider-neutral Store seam.</summary>

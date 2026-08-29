@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
     <PackageId>Groundwork.Extensions.DependencyInjection</PackageId>
     <Description>Dependency injection and hosting integration for Groundwork typed storage: named connections, the process-singleton connection lifetime, startup schema admission, and health checks.</Description>
   </PropertyGroup>

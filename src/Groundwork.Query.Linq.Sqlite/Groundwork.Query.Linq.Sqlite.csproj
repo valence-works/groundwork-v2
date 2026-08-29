@@ -3,6 +3,7 @@
     <TargetFrameworks>$(GroundworkRuntimeTargetFrameworks)</TargetFrameworks>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
     <PackageId>Groundwork.Query.Linq.Sqlite</PackageId>
     <Description>SQLite execution adapter for Groundwork's closed LINQ front-end.</Description>
   </PropertyGroup>

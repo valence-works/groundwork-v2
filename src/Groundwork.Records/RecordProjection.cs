@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Diagnostics.CodeAnalysis;
 using Groundwork.Query.Model;
 
 namespace Groundwork.Records;
@@ -32,6 +33,8 @@ internal static class RecordProjectionAccessor
         IReadOnlyList<ColumnRef> Columns,
         Func<RowValues, TResult> Materializer);
 
+    [RequiresDynamicCode("Compiles a runtime record projection. Use a generated query projection for Native AOT.")]
+    [RequiresUnreferencedCode("Builds a projection expression from CLR members that may be trimmed.")]
     public static Func<RowValues, TResult> Compile<T, TResult>(
         Expression<Func<T, TResult>> selector,
         IReadOnlyList<RecordMember> members)
@@ -41,6 +44,8 @@ internal static class RecordProjectionAccessor
         return Expression.Lambda<Func<RowValues, TResult>>(body, values).Compile();
     }
 
+    [RequiresDynamicCode("Compiles a runtime joined record projection. Use a generated query projection for Native AOT.")]
+    [RequiresUnreferencedCode("Builds a joined projection expression from CLR members that may be trimmed.")]
     public static JoinedCompilation<TResult> CompileJoined<TSource, TTarget, TResult>(
         Expression<Func<TSource, TTarget, TResult>> selector,
         RecordTable<TSource> sourceTable,
@@ -70,6 +75,10 @@ internal static class RecordProjectionAccessor
         ParameterExpression values,
         IReadOnlyList<RecordMember> members) : ExpressionVisitor
     {
+        [UnconditionalSuppressMessage(
+            "AOT",
+            "IL3050",
+            Justification = "The public projection entry point is annotated and owns this compatibility-only visitor.")]
         protected override Expression VisitMember(MemberExpression node)
         {
             if (node.Expression == source)
@@ -136,6 +145,14 @@ internal static class RecordProjectionAccessor
                 nameof(node));
         }
 
+        [UnconditionalSuppressMessage(
+            "AOT",
+            "IL3050",
+            Justification = "The public projection entry point is annotated and owns this compatibility-only visitor.")]
+        [UnconditionalSuppressMessage(
+            "Trimming",
+            "IL2026",
+            Justification = "The public projection entry point is annotated and owns this compatibility-only visitor.")]
         protected override Expression VisitParameter(ParameterExpression node)
         {
             if (node == source)
@@ -177,6 +194,10 @@ internal static class RecordProjectionAccessor
         protected override Expression VisitInvocation(InvocationExpression node) =>
             throw new ArgumentException("Invoked expressions are not portable joined record projections.", nameof(node));
 
+        [UnconditionalSuppressMessage(
+            "AOT",
+            "IL3050",
+            Justification = "The public projection entry point is annotated and owns this compatibility-only visitor.")]
         private Expression ReadMember(
             System.Reflection.MemberInfo selected,
             IReadOnlyList<RecordMember> members,

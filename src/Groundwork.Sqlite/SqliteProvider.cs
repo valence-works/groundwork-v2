@@ -260,7 +260,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
             PortableType.Guid when value is Guid guid => guid.ToString("D"),
             PortableType.DateTimeOffset when value is DateTimeOffset timestamp => timestamp.ToUniversalTime().ToString("O"),
             PortableType.Decimal when value is decimal decimalValue => decimalValue.ToString("G29", System.Globalization.CultureInfo.InvariantCulture),
-            PortableType.Json => value is string text ? text : System.Text.Json.JsonSerializer.Serialize(value),
+            PortableType.Json => value is string text ? text : PortableJsonSerializer.Serialize(value),
             PortableType.Binary when value is byte[] bytes => bytes.ToArray(),
             _ => value
         };

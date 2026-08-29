@@ -1,5 +1,7 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Groundwork.Query.Linq;
 
 namespace Groundwork.Records;
@@ -64,6 +66,33 @@ internal sealed class RecordAccessor<T>
                 (values, optional) => generatedAccessor.Materialize(values, columns, optional));
         }
 
+        return CreateCompatibilityWhenAvailable();
+    }
+
+    [UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2026",
+        Justification = "Native AOT refuses before this call; the managed preview fallback intentionally retains reflection compatibility.")]
+    [UnconditionalSuppressMessage(
+        "Aot",
+        "IL3050",
+        Justification = "RuntimeFeature.IsDynamicCodeSupported guards the managed-only compatibility accessor.")]
+    private static RecordAccessor<T> CreateCompatibilityWhenAvailable()
+    {
+        if (!RuntimeFeature.IsDynamicCodeSupported)
+        {
+            throw new NotSupportedException(
+                $"Type '{typeof(T).FullName}' has no generated Groundwork record accessor. " +
+                "Add Groundwork.Schema.Generator for Native AOT record mapping.");
+        }
+
+        return CreateCompatibility();
+    }
+
+    [RequiresDynamicCode("Builds and compiles a compatibility accessor for an ungenerated CLR row type.")]
+    [RequiresUnreferencedCode("Reflects over an ungenerated CLR row type. Add Groundwork.Schema.Generator to use the trim-safe path.")]
+    private static RecordAccessor<T> CreateCompatibility()
+    {
         CompilationCount++;
         ReflectionInspectionCount++;
         var members = typeof(T)
@@ -99,6 +128,8 @@ internal sealed class RecordAccessor<T>
         return new RecordAccessor<T>(members, getters, materializer);
     }
 
+    [RequiresDynamicCode("Builds and compiles a compatibility accessor for an ungenerated CLR row type.")]
+    [RequiresUnreferencedCode("Reflects over an ungenerated CLR row type.")]
     private static Func<IReadOnlyDictionary<string, object?>, IReadOnlySet<string>, T> BuildMaterializer(
         IReadOnlyList<RecordMember> members)
     {
@@ -160,6 +191,8 @@ internal sealed class RecordAccessor<T>
             Expression.Block(new[] { value }, expressions), source, optional).Compile();
     }
 
+    [RequiresDynamicCode("Builds a compatibility conversion expression.")]
+    [RequiresUnreferencedCode("Builds a compatibility conversion expression by member name.")]
     private static Expression ReadAndConvert(
         ParameterExpression source,
         ParameterExpression optional,

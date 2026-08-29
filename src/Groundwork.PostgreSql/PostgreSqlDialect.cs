@@ -202,7 +202,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
         byte[] bytes => bytes.ToArray(),
         JsonDocument document => document.RootElement.GetRawText(),
         JsonElement element => element.GetRawText(),
-        _ when definition.Type == PortableType.Json && value is not string => JsonSerializer.Serialize(value),
+        _ when definition.Type == PortableType.Json && value is not string => PortableJsonSerializer.Serialize(value),
         _ => value
     };
 
@@ -693,7 +693,7 @@ public sealed class PostgreSqlDialect : RelationalDialect
         PortableType.DateTimeOffset => value is DateTimeOffset timestamp ? timestamp.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) : Convert.ToString(value, CultureInfo.InvariantCulture)!,
         PortableType.Guid => $"'{value}'::uuid",
         PortableType.Binary => $"decode('{Convert.ToHexString((byte[])value)}', 'hex')",
-        PortableType.Json => $"'{Escape(value is string text ? text : JsonSerializer.Serialize(value))}'::jsonb",
+        PortableType.Json => $"'{Escape(value is string text ? text : PortableJsonSerializer.Serialize(value))}'::jsonb",
         PortableType.Double => PortableDouble.ToLiteral(Convert.ToDouble(value, CultureInfo.InvariantCulture)),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };

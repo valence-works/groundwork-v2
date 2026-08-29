@@ -430,14 +430,14 @@ internal static class ExactAppendCodec
             return CanonicalJson(parsedNode.RootElement);
         }
 
-        using var parsed = JsonDocument.Parse(JsonSerializer.Serialize(value));
+        using var parsed = JsonDocument.Parse(PortableJsonSerializer.Serialize(value));
         return CanonicalJson(parsed.RootElement);
     }
 
     private static string SerializeJsonString(string value)
     {
         StrictUtf8.GetBytes(value);
-        return JsonSerializer.Serialize(value);
+        return PortableJsonSerializer.SerializeString(value);
     }
 
     private static decimal CanonicalDecimal(decimal value)

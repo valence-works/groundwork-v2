@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 using Groundwork.Kernel;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 using DeclarationState = Groundwork.Kernel.StorageDeclarationState;
@@ -9,6 +10,8 @@ namespace Groundwork.Records;
 /// <summary>Starts a strongly typed storage declaration.</summary>
 public static class RecordTable
 {
+    [RequiresUnreferencedCode(
+        "Infers a declaration from CLR members. Use the generated schema declaration directly in trimmed applications.")]
     public static RecordTableBuilder<T> For<T>(string name) => new(name);
 }
 
@@ -19,6 +22,7 @@ public sealed class RecordTableBuilder<T>
     private readonly List<RecordReferenceBinding> references = [];
     private readonly List<MemberInfo> unsupportedMembers = [];
 
+    [RequiresUnreferencedCode("Infers a declaration from the public members of the CLR row type.")]
     internal RecordTableBuilder(string name)
     {
         state = new DeclarationState(name, name);
@@ -106,6 +110,8 @@ public sealed class RecordTableBuilder<T>
         return this;
     }
 
+    [RequiresDynamicCode("Initializes a generated accessor or the managed compatibility accessor for the CLR row type.")]
+    [RequiresUnreferencedCode("Completes a reflection-inferred record declaration whose CLR members may be trimmed.")]
     public RecordTable<T> Build(PortabilityValidationContext? context = null)
     {
         var unbound = unsupportedMembers.FirstOrDefault(member =>
@@ -122,6 +128,7 @@ public sealed class RecordTableBuilder<T>
         }
     }
 
+    [RequiresUnreferencedCode("Infers a declaration from the public members of the CLR row type.")]
     private void AddInferredColumns()
     {
         var count = 0;

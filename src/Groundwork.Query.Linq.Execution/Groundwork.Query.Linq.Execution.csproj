@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
     <PackageId>Groundwork.Query.Linq.Execution</PackageId>
     <Description>Provider-neutral execution adapter for Groundwork's closed LINQ front-end, admitted through the shared runtime coverage gate.</Description>
   </PropertyGroup>

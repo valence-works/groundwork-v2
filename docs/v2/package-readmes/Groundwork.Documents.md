@@ -11,6 +11,14 @@ document-specific contract — a mapped document write is an ordinary `RowWrite`
 Versioned upcasting is explicit: a document read at an older `schemaVersion` is upcast through the
 declared chain, and an unknown version is refused rather than guessed.
 
+The options-based codec, expression-compiled key selector, and reflection-inferred document mapping
+surfaces are annotated as requiring unreferenced and/or dynamic code. Native AOT applications should
+provide generated `System.Text.Json` metadata for their document types and preserve any members used
+by document mapping. Portable JSON values written through the storage contract remain
+reflection-free when represented as scalars, dictionaries, arrays, `JsonDocument`, `JsonElement`,
+or `JsonNode`; arbitrary CLR-object JSON is a managed compatibility fallback and is refused when
+reflection-based serialization is disabled.
+
 Full notes on the stable storage contract and upcasting:
 [src/Groundwork.Documents/README.md](https://github.com/valence-works/groundwork-v2/blob/main/src/Groundwork.Documents/README.md).
 
