@@ -198,7 +198,27 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
 
             var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
             OwnConnection(connection);
-            return new PostgreSqlUnitOfWork(this, connection, transaction, units, access, options, observer);
+            var physicalUnits = units.ToDictionary(unit => unit.Id, Resolve);
+            var lifetime = new RelationalUnitOfWorkLifetime(
+                connection,
+                transaction,
+                supportsAsync: true,
+                disposeTransaction: false);
+            return new RelationalUnitOfWork(
+                units,
+                options,
+                unit =>
+                {
+                    var session = new PostgreSqlStorageSession(
+                        this,
+                        physicalUnits[unit.Id],
+                        access,
+                        connection,
+                        transaction,
+                        observer);
+                    return new RelationalUnitOfWorkSession(session, session.Close);
+                },
+                lifetime);
         }
         catch
         {
