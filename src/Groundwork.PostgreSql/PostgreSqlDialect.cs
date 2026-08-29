@@ -541,6 +541,75 @@ public sealed class PostgreSqlDialect : RelationalDialect
             : ReadIndexByName(connection, transaction, table, index));
     }
 
+    public override RelationalConstraintMetadata? ReadConstraint(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string table,
+        string constraint)
+    {
+        using var command = Command(connection, transaction, """
+            SELECT c.contype::text,
+                   rt.relname,
+                   ARRAY(SELECT a.attname
+                         FROM unnest(c.conkey) WITH ORDINALITY keys(attnum, ordinal)
+                         JOIN pg_catalog.pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=keys.attnum
+                         ORDER BY keys.ordinal),
+                   ARRAY(SELECT a.attname
+                         FROM unnest(c.confkey) WITH ORDINALITY keys(attnum, ordinal)
+                         JOIN pg_catalog.pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=keys.attnum
+                         ORDER BY keys.ordinal),
+                   pg_get_expr(c.conbin, c.conrelid, false)
+            FROM pg_catalog.pg_constraint c
+            JOIN pg_catalog.pg_class t ON t.oid=c.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
+            LEFT JOIN pg_catalog.pg_class rt ON rt.oid=c.confrelid
+            WHERE n.nspname=current_schema() AND t.relname=@table AND c.conname=@constraint
+              AND c.contype IN ('f','c');
+            """);
+        Add(command, "table", table);
+        Add(command, "constraint", constraint);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+        var kind = reader.GetString(0) == "f"
+            ? RelationalConstraintKind.ForeignKey
+            : RelationalConstraintKind.Check;
+        return new RelationalConstraintMetadata(
+            kind,
+            reader.IsDBNull(2) ? [] : reader.GetFieldValue<string[]>(2),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(3) ? [] : reader.GetFieldValue<string[]>(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4));
+    }
+
+    public override bool ConstraintMatches(
+        RelationalConstraintMetadata actual,
+        CheckConstraintDefinition expected,
+        ColumnDefinition column) =>
+        actual.Kind == RelationalConstraintKind.Check &&
+        string.Equals(
+            NormalizePostgreSqlConstraint(actual.CheckExpression),
+            NormalizePostgreSqlConstraint(CheckConstraintDefinitionSql(expected, column)),
+            StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizePostgreSqlConstraint(string? sql)
+    {
+        var normalized = NormalizeConstraintSql(sql).Replace("\"", string.Empty, StringComparison.Ordinal);
+        foreach (var cast in new[]
+                 {
+                     "::numeric", "::integer", "::bigint", "::text", "::boolean",
+                     "::timestampwithtimezone", "::uuid", "::bytea"
+                 })
+        {
+            normalized = normalized.Replace(cast, string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+        const string prefix = "CONSTRAINT";
+        var check = normalized.IndexOf("CHECK", StringComparison.OrdinalIgnoreCase);
+        return normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && check >= 0
+            ? normalized[(check + "CHECK".Length)..]
+            : normalized;
+    }
+
     private RelationalIndexMetadata? ReadIndexByName(
         DbConnection connection,
         DbTransaction? transaction,

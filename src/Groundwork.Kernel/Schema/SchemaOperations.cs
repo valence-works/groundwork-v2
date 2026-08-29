@@ -22,7 +22,13 @@ public enum PhysicalSchemaOperationKind
     DropPrimaryStorage,
 
     /// <summary>Records that a superseded column is retained beside its replacement, or contracted.</summary>
-    ColumnSupersession
+    ColumnSupersession,
+
+    /// <summary>Adds one declared database-enforced reference.</summary>
+    CreatePhysicalForeignKey,
+
+    /// <summary>Adds one declared portable database check.</summary>
+    CreatePhysicalCheckConstraint
 }
 
 /// <summary>One immutable semantic schema operation with deterministic identity and fingerprint.</summary>
@@ -285,6 +291,79 @@ public sealed class CreatePhysicalIndexOperation : PhysicalSchemaOperation
         MissingValues = index.MissingValues,
         SchemaVersion = index.SchemaVersion
     };
+}
+
+public sealed class CreatePhysicalForeignKeyOperation : PhysicalSchemaOperation
+{
+    internal CreatePhysicalForeignKeyOperation(SchemaSubject subject, ReferenceDefinition reference)
+        : base(
+            PhysicalSchemaOperationKind.CreatePhysicalForeignKey,
+            subject.Id,
+            reference.Name,
+            null,
+            Canonical(reference))
+    {
+        Subject = subject;
+        Reference = Snapshot(reference);
+        RequiresAuthorization = subject.Evolution.IsDestructive;
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    public ReferenceDefinition Reference { get; }
+
+    internal static string Canonical(ReferenceDefinition reference) => SchemaFingerprint.Canonicalize(
+    [
+        reference.Name,
+        reference.TargetUnitId.Value,
+        reference.TargetName,
+        reference.TargetScope?.ToString(),
+        reference.TargetKeyHasProviderSequence?.ToString(CultureInfo.InvariantCulture),
+        .. reference.Columns.Select(column => $"source:{column}"),
+        .. (reference.TargetKeyColumns ?? []).Select(column => $"target:{column}")
+    ]);
+
+    internal static ReferenceDefinition Snapshot(ReferenceDefinition reference) => new()
+    {
+        Name = reference.Name,
+        Columns = reference.Columns.ToImmutableArray(),
+        TargetUnitId = reference.TargetUnitId,
+        TargetScope = reference.TargetScope,
+        Enforcement = reference.Enforcement,
+        TargetName = reference.TargetName,
+        TargetKeyColumns = reference.TargetKeyColumns?.ToImmutableArray(),
+        TargetKeyHasProviderSequence = reference.TargetKeyHasProviderSequence
+    };
+}
+
+public sealed class CreatePhysicalCheckConstraintOperation : PhysicalSchemaOperation
+{
+    internal CreatePhysicalCheckConstraintOperation(SchemaSubject subject, CheckConstraintDefinition constraint)
+        : base(
+            PhysicalSchemaOperationKind.CreatePhysicalCheckConstraint,
+            subject.Id,
+            constraint.Name,
+            null,
+            SchemaSubject.CanonicalCheckConstraint(subject.Definition, constraint))
+    {
+        Subject = subject;
+        var column = subject.Columns.Single(candidate =>
+            string.Equals(candidate.Name, constraint.Column, StringComparison.Ordinal));
+        Constraint = new CheckConstraintDefinition
+        {
+            Name = constraint.Name,
+            Column = constraint.Column,
+            Operator = constraint.Operator,
+            Value = new PortableDefault(SchemaValue.Snapshot(constraint.Value.Value, column.Type))
+        };
+        RequiresAuthorization = subject.Evolution.IsDestructive;
+        SemanticMigrationId = subject.Evolution.SemanticMigrationId;
+    }
+
+    public SchemaSubject Subject { get; }
+
+    public CheckConstraintDefinition Constraint { get; }
 }
 
 internal sealed record CanonicalIndexPayload(

@@ -240,10 +240,10 @@ public enum SchemaForeignColumns
     TolerateDatabaseSupplied
 }
 
-/// <summary>One logical-only mapping from source columns to another table's declared key.</summary>
+/// <summary>One mapping from source columns to another table's declared key.</summary>
 public sealed record SchemaReference
 {
-    public SchemaReference(string name, string target, IEnumerable<string> columns)
+    public SchemaReference(string name, string target, IEnumerable<string> columns, bool physical = false)
     {
         Name = string.IsNullOrWhiteSpace(name)
             ? throw new ArgumentException("A non-empty value is required.", nameof(name))
@@ -254,11 +254,44 @@ public sealed record SchemaReference
         Columns = new ReadOnlyCollection<string>((columns ?? throw new ArgumentNullException(nameof(columns)))
             .Select(column => column ?? throw new ArgumentException("Reference column names cannot be null.", nameof(columns)))
             .ToArray());
+        Physical = physical;
     }
 
     public string Name { get; }
     public string Target { get; }
     public IReadOnlyList<string> Columns { get; }
+    public bool Physical { get; }
+}
+
+public enum SchemaCheckOperator
+{
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual
+}
+
+/// <summary>One named portable comparison check over a table column.</summary>
+public sealed record SchemaCheck
+{
+    public SchemaCheck(string name, string column, SchemaCheckOperator @operator, SchemaDefault value)
+    {
+        Name = string.IsNullOrWhiteSpace(name)
+            ? throw new ArgumentException("A non-empty value is required.", nameof(name))
+            : name;
+        Column = string.IsNullOrWhiteSpace(column)
+            ? throw new ArgumentException("A non-empty value is required.", nameof(column))
+            : column;
+        Operator = @operator;
+        Value = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
+    public string Name { get; }
+    public string Column { get; }
+    public SchemaCheckOperator Operator { get; }
+    public SchemaDefault Value { get; }
 }
 
 public sealed record SchemaTable
@@ -277,7 +310,8 @@ public sealed record SchemaTable
         IEnumerable<SchemaAggregation>? aggregations = null,
         string? id = null,
         SchemaForeignColumns foreignColumns = SchemaForeignColumns.Refuse,
-        IEnumerable<SchemaReference>? references = null)
+        IEnumerable<SchemaReference>? references = null,
+        IEnumerable<SchemaCheck>? checks = null)
     {
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
         Id = string.IsNullOrWhiteSpace(id) ? null : id;
@@ -293,6 +327,7 @@ public sealed record SchemaTable
         Aggregations = Ordered(aggregations ?? Array.Empty<SchemaAggregation>(), nameof(aggregations), aggregation => aggregation.Name);
         ForeignColumns = foreignColumns;
         References = Ordered(references ?? Array.Empty<SchemaReference>(), nameof(references), reference => reference.Name);
+        Checks = Ordered(checks ?? Array.Empty<SchemaCheck>(), nameof(checks), check => check.Name);
     }
 
     public string Name { get; }
@@ -320,8 +355,11 @@ public sealed record SchemaTable
     /// <summary>Held in canonical name order, which the schema fingerprint depends on.</summary>
     public IReadOnlyList<SchemaAggregation> Aggregations { get; }
 
-    /// <summary>Logical references held in canonical name order.</summary>
+    /// <summary>Logical and physically enforced references held in canonical name order.</summary>
     public IReadOnlyList<SchemaReference> References { get; }
+
+    /// <summary>Portable checks held in canonical name order.</summary>
+    public IReadOnlyList<SchemaCheck> Checks { get; }
 
     /// <summary>
     /// How a deployed column this table does not declare is treated. Declared here so the

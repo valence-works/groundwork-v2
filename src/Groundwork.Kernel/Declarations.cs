@@ -95,6 +95,24 @@ public enum ConcurrencyKind
     Optimistic
 }
 
+/// <summary>Whether a declared reference is query metadata only or also database-enforced.</summary>
+public enum ReferenceEnforcement
+{
+    LogicalOnly,
+    Physical
+}
+
+/// <summary>The closed comparison surface supported by portable database check constraints.</summary>
+public enum CheckConstraintOperator
+{
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual
+}
+
 /// <summary>
 /// Declares whether a storage unit owns an optimistic version token. Concurrency is opt-in:
 /// <see cref="None"/> contributes no version column or write-path machinery.
@@ -209,7 +227,10 @@ public static class ProviderOwnedColumns
     /// coordinators and the deployment tool: derived search keys, the scope column and its key and
     /// index prefixes, and the optimistic version or append-action column.
     /// </summary>
-    public static StorageUnit Physicalize(StorageUnit source, ProviderOwnedColumnPolicy policy)
+    public static StorageUnit Physicalize(
+        StorageUnit source,
+        ProviderOwnedColumnPolicy policy,
+        Func<string, string>? normalizeStorageName = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(policy);
@@ -252,12 +273,43 @@ public static class ProviderOwnedColumns
         }
         return source with
         {
+            Name = normalizeStorageName?.Invoke(source.Name) ?? source.Name,
             Columns = columns,
             Key = new KeyDefinition { Columns = key },
             Indexes = indexes,
+            References = PhysicalizeReferences(source, policy, normalizeStorageName),
             AggregationProfiles = source.AggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()
         };
     }
+
+    private static IReadOnlyList<ReferenceDefinition> PhysicalizeReferences(
+        StorageUnit source,
+        ProviderOwnedColumnPolicy policy,
+        Func<string, string>? normalizeStorageName) =>
+        (source.References ?? []).Select(reference =>
+        {
+            if (reference.Enforcement != ReferenceEnforcement.Physical)
+                return reference with { Columns = reference.Columns.ToArray() };
+            if (reference.TargetKeyColumns is null ||
+                reference.TargetKeyHasProviderSequence is null ||
+                string.IsNullOrWhiteSpace(reference.TargetName))
+            {
+                throw new ArgumentException(
+                    $"Physical reference '{reference.Name}' requires resolved target storage and key metadata.",
+                    nameof(source));
+            }
+
+            var joinsScope = source.Scope == ScopePolicy.Scoped &&
+                (policy.ScopeJoinsGeneratedKey || !reference.TargetKeyHasProviderSequence.Value);
+            return reference with
+            {
+                Columns = joinsScope ? [Scope, .. reference.Columns] : reference.Columns.ToArray(),
+                TargetName = normalizeStorageName?.Invoke(reference.TargetName!) ?? reference.TargetName,
+                TargetKeyColumns = joinsScope
+                    ? [Scope, .. reference.TargetKeyColumns]
+                    : reference.TargetKeyColumns.ToArray()
+            };
+        }).ToArray();
 
     private static void RemoveDeclaredToken(StorageUnit source, List<ColumnDefinition> columns)
     {
@@ -352,9 +404,8 @@ public sealed record KeyDefinition
 }
 
 /// <summary>
-/// Declares a logical relationship from columns on one storage unit to another unit's key.
-/// Providers do not turn this metadata into a physical foreign key; portable join planning owns
-/// its use.
+/// Declares a relationship from columns on one storage unit to another unit's key. References are
+/// logical-only unless <see cref="Enforcement"/> explicitly opts into database enforcement.
 /// </summary>
 public sealed record ReferenceDefinition
 {
@@ -373,6 +424,34 @@ public sealed record ReferenceDefinition
     /// closed before reading target metadata when it is absent.
     /// </summary>
     public ScopePolicy? TargetScope { get; init; }
+
+    /// <summary>Whether relational schema application also creates a physical foreign key.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public ReferenceEnforcement Enforcement { get; init; }
+
+    /// <summary>The resolved target storage name required by physical enforcement.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TargetName { get; init; }
+
+    /// <summary>The resolved target key columns, in reference order.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? TargetKeyColumns { get; init; }
+
+    /// <summary>Whether the resolved target key owns a provider-generated sequence column.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? TargetKeyHasProviderSequence { get; init; }
+}
+
+/// <summary>A named, single-column portable database check constraint.</summary>
+public sealed record CheckConstraintDefinition
+{
+    public required string Name { get; init; }
+
+    public required string Column { get; init; }
+
+    public required CheckConstraintOperator Operator { get; init; }
+
+    public required PortableDefault Value { get; init; }
 }
 
 public sealed record IndexColumn(string Column, SortDirection Direction = SortDirection.Ascending);
@@ -428,8 +507,10 @@ public sealed record StorageUnit
     public required KeyDefinition Key { get; init; }
     public IReadOnlyList<DerivedColumnDefinition> DerivedColumns { get; init; } = [];
     public IReadOnlyList<IndexDefinition> Indexes { get; init; } = [];
-    /// <summary>Logical-only relationships from this unit's columns to another unit's key.</summary>
+    /// <summary>Logical relationships, some of which may opt into physical enforcement.</summary>
     public IReadOnlyList<ReferenceDefinition> References { get; init; } = [];
+    /// <summary>Named portable checks that relational providers enforce in their catalog.</summary>
+    public IReadOnlyList<CheckConstraintDefinition> CheckConstraints { get; init; } = [];
     /// <summary>Named, closed aggregation shapes available to callers of this unit.</summary>
     public IReadOnlyList<AggregationProfile> AggregationProfiles { get; init; } = [];
     public ScopePolicy Scope { get; init; } = ScopePolicy.Global;

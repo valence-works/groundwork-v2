@@ -585,6 +585,60 @@ internal sealed class SqlServerDialect : RelationalDialect
         return new RelationalIndexMetadata(unique, result, filter);
     }
 
+    public override RelationalConstraintMetadata? ReadConstraint(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string table,
+        string constraint)
+    {
+        using (var check = connection.CreateCommand())
+        {
+            check.Transaction = transaction;
+            check.CommandText = "SELECT cc.definition FROM sys.check_constraints cc JOIN sys.tables t ON t.object_id=cc.parent_object_id WHERE t.schema_id=SCHEMA_ID(N'dbo') AND t.name=@table AND cc.name=@constraint;";
+            AddParameter(check, "@table", table);
+            AddParameter(check, "@constraint", constraint);
+            if (check.ExecuteScalar() is string definition)
+            {
+                return new RelationalConstraintMetadata(
+                    RelationalConstraintKind.Check,
+                    checkExpression: definition);
+            }
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT pc.name, rt.name, rc.name
+            FROM sys.foreign_keys fk
+            JOIN sys.tables t ON t.object_id=fk.parent_object_id
+            JOIN sys.tables rt ON rt.object_id=fk.referenced_object_id
+            JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
+            JOIN sys.columns pc ON pc.object_id=fkc.parent_object_id AND pc.column_id=fkc.parent_column_id
+            JOIN sys.columns rc ON rc.object_id=fkc.referenced_object_id AND rc.column_id=fkc.referenced_column_id
+            WHERE t.schema_id=SCHEMA_ID(N'dbo') AND t.name=@table AND fk.name=@constraint
+            ORDER BY fkc.constraint_column_id;
+            """;
+        AddParameter(command, "@table", table);
+        AddParameter(command, "@constraint", constraint);
+        using var reader = command.ExecuteReader();
+        var sourceColumns = new List<string>();
+        var targetColumns = new List<string>();
+        string? targetTable = null;
+        while (reader.Read())
+        {
+            sourceColumns.Add(reader.GetString(0));
+            targetTable ??= reader.GetString(1);
+            targetColumns.Add(reader.GetString(2));
+        }
+        return targetTable is null
+            ? null
+            : new RelationalConstraintMetadata(
+                RelationalConstraintKind.ForeignKey,
+                sourceColumns,
+                targetTable,
+                targetColumns);
+    }
+
     public override string? BackfillColumnSql(string table, ColumnDefinition column) =>
         column.Default is null ? null : $"UPDATE {QuoteIdentifier(table)} SET {QuoteIdentifier(column.Name)}={MapDefault(column)} WHERE {QuoteIdentifier(column.Name)} IS NULL;";
 

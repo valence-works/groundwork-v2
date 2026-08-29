@@ -349,7 +349,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
                 isDeterministic: true);
             using (var pragma = connection.CreateCommand())
             {
-                pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
+                pragma.CommandText = "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
                 pragma.ExecuteNonQuery();
             }
 

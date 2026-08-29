@@ -17,6 +17,204 @@ namespace Groundwork.Sqlite.Tests;
 public sealed class SqliteProviderTests
 {
     [Fact]
+    public void Physical_foreign_keys_and_checks_apply_enforce_and_replan_idempotently()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var customer = StorageUnit.Declare("physical-customer", "physical_customers")
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build();
+        var order = StorageUnit.Declare("physical-order", "physical_orders")
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Int32("quantity", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .PhysicalReference("fk_orders_customer", customer, "customer_id")
+            .Check("ck_orders_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0)
+            .Build();
+
+        Assert.True(connection.Schema.Apply(customer).Applied);
+        Assert.True(connection.Schema.Apply(order).Applied);
+        Assert.True(connection.Schema.Diff(order).IsEmpty);
+
+        using var raw = new SqliteConnection(store.ConnectionString);
+        raw.Open();
+        using (var pragma = raw.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA foreign_keys=ON;";
+            pragma.ExecuteNonQuery();
+        }
+        var customerId = Guid.NewGuid().ToString("D");
+        using var insert = raw.CreateCommand();
+        insert.CommandText = "INSERT INTO \"physical_orders\" (\"id\",\"customer_id\",\"quantity\",\"__groundwork_action\") VALUES (@id,@customer,@quantity,'I');";
+        insert.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("D"));
+        insert.Parameters.AddWithValue("@customer", customerId);
+        insert.Parameters.AddWithValue("@quantity", 1);
+        Assert.Throws<SqliteException>(() => insert.ExecuteNonQuery());
+
+        using (var insertCustomer = raw.CreateCommand())
+        {
+            insertCustomer.CommandText = "INSERT INTO \"physical_customers\" (\"id\",\"__groundwork_action\") VALUES (@id,'I');";
+            insertCustomer.Parameters.AddWithValue("@id", customerId);
+            insertCustomer.ExecuteNonQuery();
+        }
+        insert.Parameters["@quantity"].Value = 0;
+        Assert.Throws<SqliteException>(() => insert.ExecuteNonQuery());
+    }
+
+    [Fact]
+    public void Physical_constraints_are_added_to_an_existing_sqlite_table_without_losing_rows()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var customer = StorageUnit.Declare("incremental-customer", "incremental_customers")
+            .Guid("id", column => column.Required())
+            .Int32("tier", column => column.Required())
+            .Key("id")
+            .Build();
+        var constrainedCustomer = StorageUnit.Declare("incremental-customer", "incremental_customers")
+            .Guid("id", column => column.Required())
+            .Int32("tier", column => column.Required())
+            .Key("id")
+            .Check("ck_customers_tier", "tier", CheckConstraintOperator.GreaterThan, 0)
+            .Build();
+        var initial = StorageUnit.Declare("incremental-order", "incremental_orders")
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Int32("quantity", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .Reference("fk_orders_customer", customer, "customer_id")
+            .Build();
+        var constrained = StorageUnit.Declare("incremental-order", "incremental_orders")
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Int32("quantity", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .PhysicalReference("fk_orders_customer", customer, "customer_id")
+            .Check("ck_orders_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0)
+            .Build();
+
+        Assert.True(connection.Schema.Apply(customer).Applied);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var customerId = Guid.NewGuid();
+        connection.OpenSession(customer, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = customerId, ["tier"] = 1 }));
+        var orderId = Guid.NewGuid();
+        connection.OpenSession(initial, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = orderId,
+                ["customer_id"] = customerId,
+                ["quantity"] = 2
+            }));
+
+        var result = connection.Schema.Apply(constrained);
+
+        Assert.True(result.Applied);
+        Assert.Contains(result.Diff.Changes, change => change.Kind == SchemaChangeKind.CreateForeignKey);
+        Assert.Contains(result.Diff.Changes, change => change.Kind == SchemaChangeKind.CreateCheckConstraint);
+        Assert.True(connection.Schema.Apply(constrainedCustomer).Applied);
+        var read = connection.OpenSession(constrained, StorageAccess.Global);
+        Assert.NotNull(read.Read(new StorageKey(new Dictionary<string, object?> { ["id"] = orderId })));
+        Assert.NotNull(connection.OpenSession(constrainedCustomer, StorageAccess.Global)
+            .Read(new StorageKey(new Dictionary<string, object?> { ["id"] = customerId })));
+        Assert.True(connection.Schema.Diff(constrained).IsEmpty);
+    }
+
+    [Fact]
+    public void Constraint_catalog_drift_blocks_runtime_admission()
+    {
+        using var store = TemporaryStore.Create();
+        var customer = StorageUnit.Declare("drift-customer", "drift_customers")
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build();
+        var order = StorageUnit.Declare("drift-order", "drift_orders")
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Int32("quantity", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .PhysicalReference("fk_orders_customer", customer, "customer_id")
+            .Check("ck_orders_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0)
+            .Build();
+        using (var applied = new SqliteProviderFactory().Create(store.ConnectionString))
+        {
+            Assert.True(applied.Schema.Apply(customer).Applied);
+            Assert.True(applied.Schema.Apply(order).Applied);
+        }
+
+        using (var raw = new SqliteConnection(store.ConnectionString))
+        {
+            raw.Open();
+            using var version = raw.CreateCommand();
+            version.CommandText = "PRAGMA schema_version;";
+            var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            using var tamper = raw.CreateCommand();
+            tamper.CommandText = """
+                PRAGMA writable_schema=ON;
+                UPDATE sqlite_master
+                SET sql=replace(sql,'ck_orders_quantity','ck_orders_quantity_tampered')
+                WHERE type='table' AND name='drift_orders';
+                PRAGMA writable_schema=OFF;
+                """;
+            tamper.ExecuteNonQuery();
+            using var refresh = raw.CreateCommand();
+            refresh.CommandText = $"PRAGMA schema_version={schemaVersion + 1};";
+            refresh.ExecuteNonQuery();
+        }
+
+        using var restarted = new SqliteProviderFactory().Create(store.ConnectionString);
+        var failure = Assert.Throws<GroundworkRuntimeSchemaAdmissionException>(() =>
+            restarted.OpenSession(order, StorageAccess.Global));
+
+        Assert.Contains(failure.Result.Refusals, refusal =>
+            refusal.Code == "GW-RUNTIME-004" && refusal.Path == "constraints.ck_orders_quantity");
+    }
+
+    [Fact]
+    public void Adding_a_foreign_key_refuses_existing_orphaned_rows_and_keeps_history_pending()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var customer = StorageUnit.Declare("orphan-customer", "orphan_customers")
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build();
+        var initial = StorageUnit.Declare("orphan-order", "orphan_orders")
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .Reference("fk_orders_customer", customer, "customer_id")
+            .Build();
+        var constrained = StorageUnit.Declare("orphan-order", "orphan_orders")
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .PhysicalReference("fk_orders_customer", customer, "customer_id")
+            .Build();
+
+        Assert.True(connection.Schema.Apply(customer).Applied);
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        connection.OpenSession(initial, StorageAccess.Global)
+            .Insert(new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = Guid.NewGuid(),
+                ["customer_id"] = Guid.NewGuid()
+            }));
+
+        Assert.Throws<InvalidOperationException>(() => connection.Schema.Apply(constrained));
+        Assert.Contains(connection.Schema.Diff(constrained).Changes, change =>
+            change.Kind == SchemaChangeKind.CreateForeignKey);
+    }
+
+    [Fact]
     public void Owned_session_marker_matches_the_opening_path()
     {
         using var store = TemporaryStore.Create();

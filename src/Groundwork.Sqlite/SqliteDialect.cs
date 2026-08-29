@@ -117,6 +117,25 @@ internal sealed class SqliteDialect : RelationalDialect
     public override ValueTask<DbTransaction> BeginTransaction(DbConnection connection, RelationalExecution mode) =>
         new(BeginTransaction(connection));
 
+    public override void PrepareSchemaBatch(DbConnection connection) =>
+        Execute(connection, transaction: null, "PRAGMA foreign_keys=OFF;");
+
+    public override void ValidateSchemaBatch(DbConnection connection, DbTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "PRAGMA foreign_key_check;";
+        using var reader = command.ExecuteReader();
+        if (reader.Read())
+        {
+            throw new InvalidOperationException(
+                $"SQLite foreign-key validation failed for table '{reader.GetString(0)}'.");
+        }
+    }
+
+    public override void CompleteSchemaBatch(DbConnection connection) =>
+        Execute(connection, transaction: null, "PRAGMA foreign_keys=ON;");
+
     public override string CreateIndexSql(string table, IndexDefinition index, string? filter)
     {
         var unique = index.IsUnique ? "UNIQUE " : string.Empty;
@@ -128,6 +147,15 @@ internal sealed class SqliteDialect : RelationalDialect
 
     public override string DropIndexSql(string table, string index) =>
         $"DROP INDEX IF EXISTS {QuoteIdentifier(PhysicalIndexName(table, index))};";
+
+    protected override string CheckExpressionSql(CheckConstraintDefinition constraint, ColumnDefinition column)
+    {
+        var expression = base.CheckExpressionSql(constraint, column);
+        if (column.Type != PortableType.Decimal || constraint.Value.Value is null)
+            return expression;
+        var identifier = QuoteIdentifier(column.Name);
+        return expression.Replace(identifier, $"CAST({identifier} AS NUMERIC)", StringComparison.Ordinal);
+    }
 
     public override string ConditionalUpsertSql(RelationalWriteShape shape) =>
         UpsertSql(shape);
@@ -388,19 +416,93 @@ internal sealed class SqliteDialect : RelationalDialect
         return new RelationalIndexMetadata(unique, result, ReadIndexFilter((SqliteConnection)connection, (SqliteTransaction?)transaction, physicalIndex));
     }
 
+    public override RelationalConstraintMetadata? ReadConstraint(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string table,
+        string constraint)
+    {
+        var createSql = ReadCreateSql((SqliteConnection)connection, transaction, table);
+        var definition = createSql is null ? null : SqliteCreateTableSql.ExtractNamedConstraint(createSql, constraint);
+        if (definition is null)
+            return null;
+        var kind = SqliteCreateTableSql.FindKeyword(definition, "FOREIGN") >= 0
+            ? RelationalConstraintKind.ForeignKey
+            : RelationalConstraintKind.Check;
+        return new RelationalConstraintMetadata(kind, checkExpression: definition);
+    }
+
+    public override bool ConstraintMatches(RelationalConstraintMetadata actual, ReferenceDefinition expected) =>
+        actual.Kind == RelationalConstraintKind.ForeignKey &&
+        string.Equals(
+            NormalizeConstraintSql(actual.CheckExpression),
+            NormalizeConstraintSql(ForeignKeyDefinitionSql(expected)),
+            StringComparison.OrdinalIgnoreCase);
+
+    public override bool ConstraintMatches(
+        RelationalConstraintMetadata actual,
+        CheckConstraintDefinition expected,
+        ColumnDefinition column) =>
+        actual.Kind == RelationalConstraintKind.Check &&
+        string.Equals(
+            NormalizeConstraintSql(actual.CheckExpression),
+            NormalizeConstraintSql(CheckConstraintDefinitionSql(expected, column)),
+            StringComparison.OrdinalIgnoreCase);
+
+    public override void CreateForeignKey(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        ReferenceDefinition reference) =>
+        RebuildWithConstraint(connection, transaction, table, ForeignKeyDefinitionSql(reference));
+
+    public override void CreateCheckConstraint(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        CheckConstraintDefinition constraint,
+        ColumnDefinition column) =>
+        RebuildWithConstraint(connection, transaction, table, CheckConstraintDefinitionSql(constraint, column));
+
     public override string? BackfillColumnSql(string table, ColumnDefinition column) =>
         column.Default is null ? null : $"UPDATE {QuoteIdentifier(table)} SET {QuoteIdentifier(column.Name)}={MapDefault(column)} WHERE {QuoteIdentifier(column.Name)} IS NULL;";
 
     public override void FinalizeColumn(DbConnection connection, DbTransaction transaction, string table, ColumnDefinition definition)
     {
+        var columnSql = ColumnDefinitionSql(definition);
+        RebuildTable(connection, transaction, table, (createSql, temporary) =>
+            SqliteCreateTableSql.ReplaceTableAndColumn(
+                createSql,
+                table,
+                QuoteIdentifier(temporary),
+                definition.Name,
+                columnSql));
+    }
+
+    private void RebuildWithConstraint(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        string constraint) =>
+        RebuildTable(connection, transaction, table, (createSql, temporary) =>
+            SqliteCreateTableSql.AddTableConstraint(
+                createSql,
+                table,
+                QuoteIdentifier(temporary),
+                constraint));
+
+    private void RebuildTable(
+        DbConnection connection,
+        DbTransaction transaction,
+        string table,
+        Func<string, string, string> rewrite)
+    {
         var sqlite = (SqliteConnection)connection;
-        var createSql = ReadCreateSql(sqlite, (SqliteTransaction)transaction, table) ?? throw new InvalidOperationException($"SQLite table '{table}' has no CREATE SQL.");
+        var createSql = ReadCreateSql(sqlite, (SqliteTransaction)transaction, table) ??
+            throw new InvalidOperationException($"SQLite table '{table}' has no CREATE SQL.");
         var indexes = ReadIndexSql(sqlite, (SqliteTransaction)transaction, table);
         var temporary = $"__groundwork_rebuild_{Guid.NewGuid():N}";
-        var columnSql = ColumnDefinitionSql(definition);
-        var rebuilt = SqliteCreateTableSql.ReplaceTableAndColumn(createSql, table, QuoteIdentifier(temporary), definition.Name, columnSql);
-        Execute(connection, transaction, rebuilt);
-
+        Execute(connection, transaction, rewrite(createSql, temporary));
         var columns = ReadColumns(connection, transaction, table).Keys.OrderBy(name => name, StringComparer.Ordinal).ToArray();
         var names = string.Join(", ", columns.Select(QuoteIdentifier));
         Execute(connection, transaction, $"INSERT INTO {QuoteIdentifier(temporary)} ({names}) SELECT {names} FROM {QuoteIdentifier(table)};");

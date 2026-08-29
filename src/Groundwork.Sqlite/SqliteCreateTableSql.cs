@@ -30,6 +30,39 @@ internal static class SqliteCreateTableSql
         return ApplyReplacements(sql, new Replacement(item.Start, item.End, replacementColumn), new Replacement(parsed.Table.Start, parsed.Table.End, replacementTable));
     }
 
+    public static string AddTableConstraint(
+        string sql,
+        string expectedTable,
+        string replacementTable,
+        string constraint)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(constraint);
+        var parsed = Parse(sql);
+        if (!string.Equals(parsed.Table.Value, expectedTable, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Physical table creation SQL declares '{parsed.Table.Value}' instead of expected table '{expectedTable}'.");
+        return ApplyReplacements(
+            sql,
+            new Replacement(parsed.BodyEnd, parsed.BodyEnd, $", {constraint}"),
+            new Replacement(parsed.Table.Start, parsed.Table.End, replacementTable));
+    }
+
+    public static string? ExtractNamedConstraint(string sql, string constraint)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(constraint);
+        var parsed = Parse(sql);
+        foreach (var item in parsed.Items)
+        {
+            if (!string.Equals(item.Identifier.Value, "CONSTRAINT", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var index = item.Identifier.End;
+            SkipTrivia(sql, ref index, item.End);
+            var name = ReadIdentifierToken(sql, ref index, item.End);
+            if (string.Equals(name.Value, constraint, StringComparison.Ordinal))
+                return sql[item.Start..item.End];
+        }
+        return null;
+    }
+
     public static int FindKeyword(string value, string keyword)
     {
         ArgumentNullException.ThrowIfNull(value);
@@ -97,10 +130,11 @@ internal static class SqliteCreateTableSql
         var table = ReadIdentifierToken(sql, ref index);
         SkipTrivia(sql, ref index);
         if (index >= sql.Length || sql[index] != '(') throw new InvalidOperationException("Physical table definition is missing its column-list opening parenthesis.");
-        return new ParsedCreateTable(table, ReadTopLevelItems(sql, index));
+        var items = ReadTopLevelItems(sql, index, out var bodyEnd);
+        return new ParsedCreateTable(table, items, bodyEnd);
     }
 
-    private static IReadOnlyList<SqlItem> ReadTopLevelItems(string sql, int bodyStart)
+    private static IReadOnlyList<SqlItem> ReadTopLevelItems(string sql, int bodyStart, out int bodyEnd)
     {
         var items = new List<SqlItem>();
         var itemStart = bodyStart + 1;
@@ -112,7 +146,10 @@ internal static class SqliteCreateTableSql
             {
                 case '(': depth++; index++; break;
                 case ')' when depth > 0: depth--; index++; break;
-                case ')' when depth == 0: AddItem(sql, itemStart, index, items); return items;
+                case ')' when depth == 0:
+                    AddItem(sql, itemStart, index, items);
+                    bodyEnd = index;
+                    return items;
                 case ',' when depth == 0: AddItem(sql, itemStart, index, items); itemStart = ++index; break;
                 default: index++; break;
             }
@@ -221,7 +258,7 @@ internal static class SqliteCreateTableSql
         return value;
     }
 
-    private sealed record ParsedCreateTable(IdentifierToken Table, IReadOnlyList<SqlItem> Items)
+    private sealed record ParsedCreateTable(IdentifierToken Table, IReadOnlyList<SqlItem> Items, int BodyEnd)
     {
         public SqlItem FindColumn(string column)
         {

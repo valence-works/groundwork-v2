@@ -101,7 +101,27 @@ public static class GroundworkSchemaCanonical
                         .Append(",\"target\":").Append(String(reference.Target))
                         .Append(",\"columns\":[")
                         .Append(string.Join(",", reference.Columns.Select(String)))
-                        .Append("]}");
+                        .Append(']');
+                    if (reference.Physical)
+                        builder.Append(",\"physical\":true");
+                    builder.Append('}');
+                }
+                builder.Append(']');
+            }
+            if (table.Checks.Count != 0)
+            {
+                builder.Append(",\"checks\":[");
+                for (var checkIndex = 0; checkIndex < table.Checks.Count; checkIndex++)
+                {
+                    if (checkIndex != 0) builder.Append(',');
+                    var check = table.Checks[checkIndex];
+                    var column = table.Columns.Single(candidate =>
+                        string.Equals(candidate.Name, check.Column, StringComparison.Ordinal));
+                    builder.Append("{\"name\":").Append(String(check.Name))
+                        .Append(",\"column\":").Append(String(check.Column))
+                        .Append(",\"operator\":").Append(String(check.Operator.ToString()))
+                        .Append(",\"value\":").Append(Literal(check.Value.Value, column.Type))
+                        .Append('}');
                 }
                 builder.Append(']');
             }
@@ -182,7 +202,8 @@ public static class GroundworkSchemaCanonical
                 ReadAggregations(tableElement),
                 OptionalString(tableElement, "id"),
                 EnumValueOrDefault(tableElement, "foreignColumns", SchemaForeignColumns.Refuse),
-                ReadReferences(tableElement)));
+                ReadReferences(tableElement),
+                ReadChecks(tableElement, columns)));
         }
 
         return new SchemaDocument(tables);
@@ -282,9 +303,14 @@ public static class GroundworkSchemaCanonical
             return null;
         if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty("value", out var literal))
             throw new FormatException("Schema JSON property 'default' must be null or an object with a 'value'.");
+        return new SchemaDefault(ReadLiteral(literal, type));
+    }
+
+    private static object? ReadLiteral(JsonElement literal, SchemaValueType type)
+    {
         if (literal.ValueKind == JsonValueKind.Null)
-            return new SchemaDefault(null);
-        return new SchemaDefault(type switch
+            return null;
+        return type switch
         {
             SchemaValueType.String => Text(literal, type),
             SchemaValueType.Int32 => Number(literal, type).GetInt32(),
@@ -301,7 +327,7 @@ public static class GroundworkSchemaCanonical
             SchemaValueType.Binary => Binary(literal, type),
             SchemaValueType.Json => ReadJson(literal),
             _ => throw Mistyped(literal, type)
-        });
+        };
     }
 
     private static string Text(JsonElement literal, SchemaValueType type) =>
@@ -410,7 +436,30 @@ public static class GroundworkSchemaCanonical
             RequiredString(reference, "name"),
             RequiredString(reference, "target"),
             RequiredArray(reference, "columns").Select(column =>
-                column.GetString() ?? throw new FormatException("Reference column names must be strings.")))).ToArray();
+                column.GetString() ?? throw new FormatException("Reference column names must be strings.")),
+            OptionalBoolean(reference, "physical"))).ToArray();
+    }
+
+    private static IReadOnlyList<SchemaCheck> ReadChecks(
+        JsonElement table,
+        IReadOnlyList<SchemaColumn> columns)
+    {
+        if (!TryRead(table, "checks", JsonValueKind.Array, out var value))
+            return Array.Empty<SchemaCheck>();
+        var byName = columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        return value.EnumerateArray().Select(check =>
+        {
+            var columnName = RequiredString(check, "column");
+            if (!byName.TryGetValue(columnName, out var column))
+                throw new FormatException($"Check constraint column '{columnName}' is not declared by its table.");
+            if (!check.TryGetProperty("value", out var literal))
+                throw new FormatException("Schema check constraints require a 'value'.");
+            return new SchemaCheck(
+                RequiredString(check, "name"),
+                columnName,
+                EnumValue<SchemaCheckOperator>(check, "operator"),
+                new SchemaDefault(ReadLiteral(literal, column.Type)));
+        }).ToArray();
     }
 
     private static SchemaAggregationGroup ReadAggregationGroup(JsonElement element)
@@ -457,6 +506,13 @@ public static class GroundworkSchemaCanonical
         parent.TryGetProperty(name, out var value) && (value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False)
             ? value.GetBoolean()
             : throw new FormatException($"Schema JSON property '{name}' must be a boolean.");
+
+    private static bool OptionalBoolean(JsonElement parent, string name) =>
+        !parent.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null
+            ? false
+            : value.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? value.GetBoolean()
+                : throw new FormatException($"Schema JSON property '{name}' must be a boolean.");
 
     private static int RequiredInt(JsonElement parent, string name) =>
         parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number)

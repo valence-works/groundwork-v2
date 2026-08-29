@@ -14,6 +14,37 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [SkippableFact]
+    public void Physical_foreign_keys_and_checks_apply_as_native_sqlserver_constraints()
+    {
+        var connectionString = fixture.Reset();
+        using var connection = new SqlServerProviderFactory().Create(connectionString);
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var customer = StorageUnit.Declare("sql-customer-" + suffix, "customer_constraint_target_" + suffix)
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build();
+        var order = StorageUnit.Declare("sql-order-" + suffix, "customer_constraint_source_" + suffix)
+            .Guid("id", column => column.Required())
+            .Guid("customer_id", column => column.Required())
+            .Int32("quantity", column => column.Required())
+            .Key("id")
+            .Index("by_customer", "customer_id")
+            .PhysicalReference("fk_order_customer", customer, "customer_id")
+            .Check("ck_order_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0)
+            .Build();
+
+        Assert.True(connection.Schema.Apply(customer).Applied);
+        Assert.True(connection.Schema.Apply(order).Applied);
+        Assert.True(connection.Schema.Diff(order).IsEmpty);
+
+        using var raw = new SqlConnection(connectionString);
+        raw.Open();
+        using var command = raw.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sys.objects o JOIN sys.tables t ON t.object_id=o.parent_object_id WHERE t.name=@table AND o.name IN (N'fk_order_customer',N'ck_order_quantity');";
+        command.Parameters.AddWithValue("@table", order.Name);
+        Assert.Equal(2, Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+    }
+    [SkippableFact]
     public void Owned_session_marker_matches_the_opening_path()
     {
         var connectionString = fixture.Reset();
@@ -827,9 +858,10 @@ public sealed class SqlServerFixture
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            DECLARE @sql nvarchar(max) = N'';
-            SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
-            FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
+            DECLARE @targets TABLE (object_id int PRIMARY KEY);
+            INSERT INTO @targets (object_id)
+            SELECT t.object_id
+            FROM sys.tables t
             WHERE t.name IN (N'__groundwork_schema_history',N'__groundwork_schema_fences',N'__groundwork_sequence_high_waters',N'__groundwork_operations',N'__groundwork_retention_operations')
                OR t.name LIKE N'conformance[_]global%'
                OR t.name LIKE N'conformance[_]scoped%'
@@ -839,6 +871,22 @@ public sealed class SqlServerFixture
                OR t.name LIKE N'w2_sqlserver[_]%'
                OR t.name LIKE N's7_sqlserver[_]%'
                OR t.name LIKE N's7_legacy_retention[_]%';
+
+            DECLARE @sql nvarchar(max) = N'';
+            SELECT @sql += N'ALTER TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name)
+                + N' DROP CONSTRAINT ' + QUOTENAME(fk.name) + N';'
+            FROM sys.foreign_keys fk
+            JOIN sys.tables t ON t.object_id=fk.parent_object_id
+            JOIN sys.schemas s ON s.schema_id=t.schema_id
+            WHERE fk.parent_object_id IN (SELECT object_id FROM @targets)
+               OR fk.referenced_object_id IN (SELECT object_id FROM @targets);
+            IF @sql <> N'' EXEC sys.sp_executesql @sql;
+
+            SET @sql = N'';
+            SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id=t.schema_id
+            JOIN @targets target ON target.object_id=t.object_id;
             IF @sql <> N'' EXEC sys.sp_executesql @sql;
             """;
         command.ExecuteNonQuery();

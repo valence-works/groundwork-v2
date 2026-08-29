@@ -58,6 +58,56 @@ public sealed class SchemaEvolutionDdlTests
         // safe for an index a previous partial apply already removed.
         Assert.Contains("IF EXISTS", Create(provider).DropIndexSql("orders", "by_customer"), StringComparison.Ordinal);
 
+    [Theory]
+    [MemberData(nameof(Dialects))]
+    public void Every_dialect_renders_foreign_key_and_check_constraints(string provider)
+    {
+        var dialect = Create(provider);
+        var reference = new ReferenceDefinition
+        {
+            Name = "fk_orders_customer",
+            Columns = ["customer_id"],
+            TargetUnitId = new StorageUnitId("customer"),
+            TargetScope = ScopePolicy.Global,
+            Enforcement = ReferenceEnforcement.Physical,
+            TargetName = "customers",
+            TargetKeyColumns = ["id"],
+            TargetKeyHasProviderSequence = false
+        };
+        var column = new ColumnDefinition { Name = "quantity", Type = PortableType.Int32, IsNullable = false };
+        var check = new CheckConstraintDefinition
+        {
+            Name = "ck_orders_quantity",
+            Column = "quantity",
+            Operator = CheckConstraintOperator.GreaterThan,
+            Value = new PortableDefault(0)
+        };
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("order"),
+            Name = "orders",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Guid, IsNullable = false },
+                new ColumnDefinition { Name = "customer_id", Type = PortableType.Guid, IsNullable = false },
+                column
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            References = [reference],
+            CheckConstraints = [check]
+        };
+
+        var foreignKey = dialect.ForeignKeyDefinitionSql(reference);
+        var checkSql = dialect.CheckConstraintDefinitionSql(check, column);
+        var create = RelationalSql.CreateTable(dialect, unit);
+
+        Assert.Contains("FOREIGN KEY", foreignKey, StringComparison.Ordinal);
+        Assert.Contains("REFERENCES", foreignKey, StringComparison.Ordinal);
+        Assert.Contains("CHECK", checkSql, StringComparison.Ordinal);
+        Assert.Contains("fk_orders_customer", create, StringComparison.Ordinal);
+        Assert.Contains("ck_orders_quantity", create, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void SqlServer_drops_the_default_constraint_bound_to_a_column_before_dropping_it() =>
         // SQL Server auto-names the constraint behind a column default and then refuses to drop the

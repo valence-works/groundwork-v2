@@ -264,6 +264,12 @@ public sealed class RelationalSchemaExecutor
                 Execute(connection, transaction, RelationalSql.DropIndex(dialect, rebuild.Subject.Name, rebuild.Index.Name));
                 Execute(connection, transaction, RelationalSql.CreateIndex(dialect, rebuild.Subject.Name, rebuild.Index));
                 break;
+            case CreatePhysicalForeignKeyOperation foreignKey:
+                CreateForeignKey(connection, transaction, foreignKey);
+                break;
+            case CreatePhysicalCheckConstraintOperation check:
+                CreateCheckConstraint(connection, transaction, check);
+                break;
             case RenamePrimaryStorageOperation rename:
                 dialect.RenameTable(connection, transaction, rename.FromName, rename.ToName);
                 foreach (var carried in rename.CarriedIndexes)
@@ -308,6 +314,44 @@ public sealed class RelationalSchemaExecutor
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(operation), operation.Kind, "Unsupported relational schema operation.");
+        }
+    }
+
+    private void CreateForeignKey(
+        DbConnection connection,
+        DbTransaction transaction,
+        CreatePhysicalForeignKeyOperation operation)
+    {
+        var actual = dialect.ReadConstraint(connection, transaction, operation.Subject.Name, operation.Reference.Name);
+        if (actual is null)
+        {
+            dialect.CreateForeignKey(connection, transaction, operation.Subject.Name, operation.Reference);
+            return;
+        }
+        if (!dialect.ConstraintMatches(actual, operation.Reference))
+        {
+            throw new InvalidOperationException(
+                $"Relational schema constraint '{operation.Subject.Name}.{operation.Reference.Name}' already exists with a different definition.");
+        }
+    }
+
+    private void CreateCheckConstraint(
+        DbConnection connection,
+        DbTransaction transaction,
+        CreatePhysicalCheckConstraintOperation operation)
+    {
+        var column = operation.Subject.Columns.Single(candidate =>
+            string.Equals(candidate.Name, operation.Constraint.Column, StringComparison.Ordinal));
+        var actual = dialect.ReadConstraint(connection, transaction, operation.Subject.Name, operation.Constraint.Name);
+        if (actual is null)
+        {
+            dialect.CreateCheckConstraint(connection, transaction, operation.Subject.Name, operation.Constraint, column);
+            return;
+        }
+        if (!dialect.ConstraintMatches(actual, operation.Constraint, column))
+        {
+            throw new InvalidOperationException(
+                $"Relational schema constraint '{operation.Subject.Name}.{operation.Constraint.Name}' already exists with a different definition.");
         }
     }
 
@@ -565,35 +609,44 @@ public sealed class RelationalSchemaExecutor
         PhysicalSchemaTargetIdentity target,
         IReadOnlyList<PhysicalSchemaOperation> operations)
     {
-        using var transaction = dialect.BeginTransaction(lease.Connection);
-        var acknowledgements = new List<PhysicalSchemaOperationAcknowledgement>(operations.Count);
+        dialect.PrepareSchemaBatch(lease.Connection);
         try
         {
-            dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
-            foreach (var operation in operations)
+            using var transaction = dialect.BeginTransaction(lease.Connection);
+            var acknowledgements = new List<PhysicalSchemaOperationAcknowledgement>(operations.Count);
+            try
             {
                 dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
-                // The neutral planner records Add/Backfill/Finalize for every declaration so
-                // providers can acknowledge one stable ledger. Dialects that create all columns
-                // in their CREATE TABLE statement must not execute those duplicate operations.
-                if (!(dialect.CreateTableIncludesColumns &&
-                      operations.Any(item => item is CreatePrimaryStorageOperation) &&
-                      operation is AddColumnOperation or BackfillColumnOperation or FinalizeColumnOperation))
-                    ExecuteOperation(lease.Connection, transaction, operation);
-                acknowledgements.Add(new PhysicalSchemaOperationAcknowledgement(
-                    operation.Identity,
-                    operation.Fingerprint,
-                    DateTimeOffset.UtcNow));
-            }
+                foreach (var operation in operations)
+                {
+                    dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
+                    // The neutral planner records Add/Backfill/Finalize for every declaration so
+                    // providers can acknowledge one stable ledger. Dialects that create all columns
+                    // in their CREATE TABLE statement must not execute those duplicate operations.
+                    if (!(dialect.CreateTableIncludesColumns &&
+                          operations.Any(item => item is CreatePrimaryStorageOperation) &&
+                          operation is AddColumnOperation or BackfillColumnOperation or FinalizeColumnOperation))
+                        ExecuteOperation(lease.Connection, transaction, operation);
+                    acknowledgements.Add(new PhysicalSchemaOperationAcknowledgement(
+                        operation.Identity,
+                        operation.Fingerprint,
+                        DateTimeOffset.UtcNow));
+                }
 
-            dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
-            transaction.Commit();
-            return acknowledgements;
+                dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
+                dialect.ValidateSchemaBatch(lease.Connection, transaction);
+                transaction.Commit();
+                return acknowledgements;
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
         }
-        catch
+        finally
         {
-            transaction.Rollback();
-            throw;
+            dialect.CompleteSchemaBatch(lease.Connection);
         }
     }
 
@@ -604,9 +657,11 @@ public sealed class RelationalSchemaExecutor
     {
         var inspection = InspectTarget(
             connection, transaction, target, PhysicalSchemaHistoryState.Empty, target.Subject.ForeignColumns);
-        if (inspection.HasColumnDrift || inspection.HasIndexDrift)
+        if (inspection.HasColumnDrift || inspection.HasIndexDrift || inspection.HasConstraintDrift)
         {
-            var refusal = inspection.HasColumnDrift ? inspection.ColumnDrift[0] : inspection.IndexDrift[0];
+            var refusal = inspection.HasColumnDrift
+                ? inspection.ColumnDrift[0]
+                : inspection.HasIndexDrift ? inspection.IndexDrift[0] : inspection.ConstraintDrift[0];
             throw new InvalidOperationException(refusal.Message);
         }
     }
@@ -763,13 +818,45 @@ public sealed class RelationalSchemaExecutor
             }
         }
 
+        var constraintDrift = new List<SchemaRefusal>();
+        foreach (var expected in target.Subject.References.Where(reference =>
+                     reference.Enforcement == ReferenceEnforcement.Physical))
+        {
+            var actual = dialect.ReadConstraint(connection, transaction, table, expected.Name);
+            if (actual is null || !dialect.ConstraintMatches(actual, expected))
+            {
+                constraintDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-004",
+                    actual is null
+                        ? $"Relational schema table '{table}' is missing foreign key '{expected.Name}'."
+                        : $"Relational schema foreign key '{table}.{expected.Name}' does not match its declaration.",
+                    $"constraints.{expected.Name}"));
+            }
+        }
+        foreach (var expected in target.Subject.CheckConstraints)
+        {
+            var column = target.Subject.Columns.Single(candidate =>
+                string.Equals(candidate.Name, expected.Column, StringComparison.Ordinal));
+            var actual = dialect.ReadConstraint(connection, transaction, table, expected.Name);
+            if (actual is null || !dialect.ConstraintMatches(actual, expected, column))
+            {
+                constraintDrift.Add(new SchemaRefusal(
+                    "GW-RUNTIME-004",
+                    actual is null
+                        ? $"Relational schema table '{table}' is missing check constraint '{expected.Name}'."
+                        : $"Relational schema check constraint '{table}.{expected.Name}' does not match its declaration.",
+                    $"constraints.{expected.Name}"));
+            }
+        }
+
         var inspection = new PhysicalSchemaInspectionResult(
             history,
-            IsAppliedSchemaValid: columnDrift.Count == 0,
+            IsAppliedSchemaValid: columnDrift.Count == 0 && constraintDrift.Count == 0,
             columnDrift.ToImmutableArray(),
             indexDrift.ToImmutableArray())
         {
-            ToleratedDrift = verdict.Tolerated
+            ToleratedDrift = verdict.Tolerated,
+            ConstraintDrift = constraintDrift.ToImmutableArray()
         };
 
         if (inspection.IsAppliedSchemaValid)

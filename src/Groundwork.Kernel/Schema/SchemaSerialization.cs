@@ -59,6 +59,10 @@ public static class PhysicalSchemaAppliedStateSerializer
                 string.Equals(property.Name, nameof(StorageUnit.References), StringComparison.OrdinalIgnoreCase));
             references.ShouldSerialize = static (_, value) =>
                 value is IReadOnlyList<ReferenceDefinition> { Count: > 0 };
+            var checks = typeInfo.Properties.Single(property =>
+                string.Equals(property.Name, nameof(StorageUnit.CheckConstraints), StringComparison.OrdinalIgnoreCase));
+            checks.ShouldSerialize = static (_, value) =>
+                value is IReadOnlyList<CheckConstraintDefinition> { Count: > 0 };
         });
         return resolver;
     }

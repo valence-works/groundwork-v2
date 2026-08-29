@@ -194,6 +194,41 @@ public sealed class StorageDeclarationBuilder
         return this;
     }
 
+    /// <summary>
+    /// Declares a database-enforced relationship to <paramref name="target"/>'s key. The logical
+    /// reference remains available to query planning; relational schema planning additionally
+    /// emits a physical foreign-key operation.
+    /// </summary>
+    public StorageDeclarationBuilder PhysicalReference(string name, StorageUnit target, params string[] columns)
+    {
+        state.AddPhysicalReference(name, target, columns);
+        return this;
+    }
+
+    /// <summary>Adds a named portable comparison check over one declared column.</summary>
+    public StorageDeclarationBuilder Check(
+        string name,
+        string column,
+        CheckConstraintOperator @operator,
+        object? value)
+    {
+        state.AddCheck(new CheckConstraintDefinition
+        {
+            Name = name,
+            Column = column,
+            Operator = @operator,
+            Value = new PortableDefault(value)
+        });
+        return this;
+    }
+
+    /// <summary>Adds an explicitly constructed portable check declaration.</summary>
+    public StorageDeclarationBuilder Check(CheckConstraintDefinition definition)
+    {
+        state.AddCheck(definition);
+        return this;
+    }
+
     public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = ProviderReservedLedgerNames.DefaultAppendLedger)
     {
         state.SetAppendIdempotency(new AppendIdempotencyDeclaration { Window = window, LedgerName = ledgerName });
@@ -439,6 +474,7 @@ internal sealed class StorageDeclarationState
     private readonly List<ColumnDefinition> columns = [];
     private readonly List<IndexDefinition> indexes = [];
     private readonly List<ReferenceDeclarationState> references = [];
+    private readonly List<CheckConstraintDefinition> checkConstraints = [];
     private readonly List<AggregationProfile> aggregationProfiles = [];
     private readonly string id;
     private readonly string name;
@@ -539,12 +575,19 @@ internal sealed class StorageDeclarationState
         IEnumerable<string> columnNames) =>
         AddReference(name, targetUnitId, targetScope, columnNames, target: null);
 
+    public void AddPhysicalReference(string name, StorageUnit target, IEnumerable<string> columnNames)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        AddReference(name, target.Id, target.Scope, columnNames, new SchemaSubject(target).Definition, ReferenceEnforcement.Physical);
+    }
+
     private void AddReference(
         string name,
         StorageUnitId targetUnitId,
         ScopePolicy? targetScope,
         IEnumerable<string> columnNames,
-        StorageUnit? target)
+        StorageUnit? target,
+        ReferenceEnforcement enforcement = ReferenceEnforcement.LogicalOnly)
     {
         var referenceName = RequireText(name, nameof(name));
         if (references.Any(reference => string.Equals(reference.Definition.Name, referenceName, StringComparison.Ordinal)))
@@ -556,9 +599,26 @@ internal sealed class StorageDeclarationState
                 Name = referenceName,
                 Columns = Array.AsReadOnly(snapshot),
                 TargetUnitId = targetUnitId,
-                TargetScope = targetScope
+                TargetScope = targetScope,
+                Enforcement = enforcement
             },
             target));
+    }
+
+    public void AddCheck(CheckConstraintDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        var name = RequireText(definition.Name, nameof(definition));
+        if (checkConstraints.Any(check => string.Equals(check.Name, name, StringComparison.Ordinal)))
+            throw new ArgumentException($"Check constraint '{name}' is already declared.", nameof(definition));
+        checkConstraints.Add(definition with
+        {
+            Name = name,
+            Column = RequireText(definition.Column, nameof(definition)),
+            Value = definition.Value is null
+                ? throw new ArgumentException("A check constraint requires a value wrapper.", nameof(definition))
+                : new PortableDefault(definition.Value.Value)
+        });
     }
 
     public void SetScope(ScopePolicy value) => scope = value;
@@ -583,6 +643,10 @@ internal sealed class StorageDeclarationState
             Key = new KeyDefinition { Columns = Array.AsReadOnly((key?.Columns ?? []).ToArray()) },
             Indexes = Array.AsReadOnly(indexes.ToArray()),
             References = Array.AsReadOnly(references.Select(reference => reference.SnapshotDefinition(scope)).ToArray()),
+            CheckConstraints = Array.AsReadOnly(checkConstraints.Select(check => check with
+            {
+                Value = new PortableDefault(check.Value.Value)
+            }).ToArray()),
             AggregationProfiles = Array.AsReadOnly(aggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()),
             Scope = scope,
             ForeignColumns = foreignColumns,
@@ -645,6 +709,7 @@ internal sealed class StorageDeclarationState
             throw new DeclarationBuildException(diagnostics);
 
         AggregationProfileValidator.ValidateUnit(unit);
+        PhysicalConstraintValidation.ThrowIfInvalid(unit);
         appendIdempotency?.Validate(unit);
         return unit;
     }
@@ -668,7 +733,15 @@ internal sealed record ReferenceDeclarationState(ReferenceDefinition Definition,
     public ReferenceDefinition SnapshotDefinition(ScopePolicy sourceScope) => Definition with
     {
         Columns = Array.AsReadOnly((Definition.Columns ?? []).ToArray()),
-        TargetScope = Definition.TargetScope ?? sourceScope
+        TargetScope = Definition.TargetScope ?? sourceScope,
+        TargetName = Definition.Enforcement == ReferenceEnforcement.Physical ? Target?.Name : Definition.TargetName,
+        TargetKeyColumns = Definition.Enforcement == ReferenceEnforcement.Physical
+            ? (Target?.Key.Columns.ToArray() ?? Definition.TargetKeyColumns?.ToArray())
+            : Definition.TargetKeyColumns?.ToArray(),
+        TargetKeyHasProviderSequence = Definition.Enforcement == ReferenceEnforcement.Physical
+            ? Target?.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence) ??
+              Definition.TargetKeyHasProviderSequence
+            : Definition.TargetKeyHasProviderSequence
     };
 }
 

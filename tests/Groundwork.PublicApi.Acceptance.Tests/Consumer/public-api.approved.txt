@@ -5,7 +5,15 @@ Groundwork.Kernel.ProviderOwnedColumns
 Groundwork.Kernel.MissingValueBehavior
 Groundwork.Kernel.IndexBuilder
 Groundwork.Kernel.ReferenceDefinition
+Groundwork.Kernel.ReferenceEnforcement
+Groundwork.Kernel.CheckConstraintOperator
+Groundwork.Kernel.CheckConstraintDefinition
+Groundwork.Kernel.Schema.PhysicalSchemaOperationKind
+Groundwork.Kernel.Schema.CreatePhysicalForeignKeyOperation
+Groundwork.Kernel.Schema.CreatePhysicalCheckConstraintOperation
 Groundwork.Schema.SchemaReference
+Groundwork.Schema.SchemaCheckOperator
+Groundwork.Schema.SchemaCheck
 Groundwork.Kernel.StorageDeclarationBuilder
 Groundwork.Kernel.PortabilityValidator
 Groundwork.Kernel.AggregationOrderTerm
@@ -36,6 +44,7 @@ Groundwork.Records.StorageDeclarationBuilder
 Groundwork.Records.RecordTableStoreUnitOfWork
 Groundwork.Records.RecordWriteOptions
 Groundwork.Store.BatchWriteOptions
+Groundwork.Store.SchemaChangeKind
 Groundwork.Store.RetentionIdempotencyDeclaration
 Groundwork.Store.RetentionOperationResult
 Groundwork.Store.IStorageInspectionSession

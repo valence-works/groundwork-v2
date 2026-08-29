@@ -1,5 +1,6 @@
 using Groundwork.Documents;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Query.Model;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Linq.Execution;
@@ -26,7 +27,15 @@ internal static class PublicApiApprovalFixture
         _ = typeof(MissingValueBehavior);
         _ = typeof(IndexBuilder);
         _ = typeof(ReferenceDefinition);
+        _ = typeof(ReferenceEnforcement);
+        _ = typeof(CheckConstraintOperator);
+        _ = typeof(CheckConstraintDefinition);
+        _ = typeof(PhysicalSchemaOperationKind);
+        _ = typeof(CreatePhysicalForeignKeyOperation);
+        _ = typeof(CreatePhysicalCheckConstraintOperation);
         _ = typeof(Groundwork.Schema.SchemaReference);
+        _ = typeof(Groundwork.Schema.SchemaCheckOperator);
+        _ = typeof(Groundwork.Schema.SchemaCheck);
         _ = typeof(Groundwork.Kernel.StorageDeclarationBuilder);
         _ = typeof(PortabilityValidator);
         _ = typeof(AggregationOrderTerm);
@@ -58,6 +67,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(RecordTableStoreUnitOfWork<>);
         _ = typeof(RecordWriteOptions);
         _ = typeof(BatchWriteOptions);
+        _ = typeof(SchemaChangeKind);
         _ = typeof(RowWrite);
         _ = typeof(AppendOutcomeReport);
         _ = typeof(IExactAppendStorageSession);
@@ -102,6 +112,10 @@ internal static class PublicApiApprovalFixture
             builder.Reference("customer", new StorageUnitId("customer"), "customer_id"));
         _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
             builder.Reference("customer", new StorageUnitId("customer"), ScopePolicy.Global, "customer_id"));
+        _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageUnit, Groundwork.Kernel.StorageDeclarationBuilder>(
+            (builder, target) => builder.PhysicalReference("fk_customer", target, "customer_id"));
+        _ = new Func<Groundwork.Kernel.StorageDeclarationBuilder, Groundwork.Kernel.StorageDeclarationBuilder>(builder =>
+            builder.Check("ck_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0));
         _ = new Func<ColumnBuilder, ColumnBuilder>(column => column.LocaleOrder("sv-SE", 12));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.Validate(unit));
         _ = new Func<Groundwork.Kernel.StorageUnit, PortabilityValidationResult>(unit => PortabilityValidator.ValidatePortableDefaults(unit));
@@ -132,6 +146,10 @@ internal static class PublicApiApprovalFixture
             builder.Reference("customer", new StorageUnitId("customer"), "customer_id"));
         _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
             builder.Reference("customer", new StorageUnitId("customer"), ScopePolicy.Global, "customer_id"));
+        _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Kernel.StorageUnit, Groundwork.Records.StorageDeclarationBuilder>(
+            (builder, target) => builder.PhysicalReference("fk_customer", target, "customer_id"));
+        _ = new Func<Groundwork.Records.StorageDeclarationBuilder, Groundwork.Records.StorageDeclarationBuilder>(builder =>
+            builder.Check("ck_quantity", "quantity", CheckConstraintOperator.GreaterThan, 0));
         _ = new Func<IStorageSession, OperationId, StorageValues, AppendOutcomeReport>(
             (session, operation, values) => session.AppendWithOutcomes(operation, values));
         _ = new Func<IStorageSession, StorageKey, IReadOnlyDictionary<string, object?>, WriteOutcome>(
