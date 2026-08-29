@@ -17,13 +17,10 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly PostgreSqlProviderConnection owner;
     private readonly NpgsqlConnection connection;
     private readonly NpgsqlTransaction? transaction;
+    private readonly RelationalSessionExecution execution;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
-    private NpgsqlTransaction? activeTransaction;
-    private readonly AsyncLocal<bool> batchFallbackScope = new();
-    private readonly AsyncLocal<bool> writeExecutionScope = new();
-    private bool closed;
 
     /// <summary>
     /// True when this session was opened through <c>OpenOwnedSession</c> and must return its connection on
@@ -49,6 +46,12 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         this.connection = connection;
         this.transaction = transaction;
         commandObserver = observer;
+        execution = new RelationalSessionExecution(
+            access,
+            transaction,
+            ownsConnection,
+            new PostgreSqlSessionExecutionAdapter(owner, connection),
+            nameof(PostgreSqlStorageSession));
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -114,7 +117,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         QueryRequest request,
         QueryRenderOptions? options,
         RelationalExecution mode) => Execute(
-            () => queries.Query(request, options, activeTransaction ?? transaction, mode),
+            () => queries.Query(request, options, execution.Transaction, mode),
             mode);
 
     public CrossScopeQueryResult QueryAcrossScopes(
@@ -144,7 +147,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         AggregateCore(query, RelationalExecution.Asynchronous(cancellationToken));
 
     private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) =>
-        Execute(() => aggregations.Aggregate(query, activeTransaction ?? transaction, mode), mode);
+        Execute(() => aggregations.Aggregate(query, execution.Transaction, mode), mode);
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {
@@ -880,24 +883,24 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private static string FormatLedgerTime(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
-    internal void Close() => closed = true;
+    internal void Close() => execution.Close();
 
-    public bool IsReleased => closed;
+    public bool IsReleased => execution.IsReleased;
 
     public void Dispose()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             connection.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             await connection.DisposeAsync().ConfigureAwait(false);
     }
@@ -1072,9 +1075,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         // -> Execute tried to acquire that same non-reentrant gate. Keep the fallback in an operation-
         // local scope so it reuses the active transaction instead of waiting on itself.
         var outcomes = new List<RowWriteOutcome>(writes.Count);
-        var previousScope = batchFallbackScope.Value;
-        batchFallbackScope.Value = true;
-        try
+        using (execution.EnterBatchFallback())
         {
             foreach (var write in writes)
             {
@@ -1092,10 +1093,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
                 }));
             }
             return outcomes;
-        }
-        finally
-        {
-            batchFallbackScope.Value = previousScope;
         }
     }
 
@@ -1493,88 +1490,29 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         if (mutation == Mutation.Upsert)
         {
             if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
-                throw new ConcurrencyConflictException(existing.Version);
+                throw new RelationalConcurrencyConflictException(existing.Version);
             if (precondition.Kind == WritePreconditionKind.IfVersion &&
                 (existing is null || precondition.Version != existing.Version))
-                throw new ConcurrencyConflictException(existing?.Version);
+                throw new RelationalConcurrencyConflictException(existing?.Version);
             return;
         }
         if (precondition.Kind == WritePreconditionKind.IfVersion &&
             (existing is null || precondition.Version != existing.Version))
-            throw new ConcurrencyConflictException(existing?.Version);
+            throw new RelationalConcurrencyConflictException(existing?.Version);
     }
 
-    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
-    {
-        // Serialized for the whole operation: a cached session is shared by concurrent callers and Npgsql
-        // refuses concurrent commands on one connection. Reads need this as much as writes — a colliding
-        // read is what surfaces on SQL Server as "already an open DataReader". An owned session has an
-        // independent connection, and a batch fallback marks its own logical execution scope; neither path
-        // may wait for this session's non-reentrant gate a second time.
-        using var lease = ownsConnection || batchFallbackScope.Value
-            ? null
-            : await owner.EnterGate(mode).ConfigureAwait(false);
-        try
-        {
-            ThrowIfClosed();
-            return await operation().ConfigureAwait(false);
-        }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
-        }
-    }
+    private ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode) =>
+        execution.Execute(operation, mode);
 
-    private async ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "write");
-        ThrowIfClosed();
-        if (transaction is not null || batchFallbackScope.Value)
-            return await Translate(operation).ConfigureAwait(false);
-        if (writeExecutionScope.Value)
-            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        using var lease = ownsConnection
-            ? null
-            : await owner.EnterGate(mode).ConfigureAwait(false);
-        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        var write = (NpgsqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.ReadCommitted).ConfigureAwait(false);
-        activeTransaction = write;
-        var previousScope = writeExecutionScope.Value;
-        writeExecutionScope.Value = true;
-        try
-        {
-            var result = await Translate(operation).ConfigureAwait(false);
-            await mode.Commit(write).ConfigureAwait(false);
-            return result;
-        }
-        catch (Exception failure)
-        {
-            await WriteFailureCleanup.Run(failure, () => mode.Rollback(write)).ConfigureAwait(false);
-            throw;
-        }
-        finally
-        {
-            writeExecutionScope.Value = previousScope;
-            activeTransaction = null;
-            await mode.Dispose(write).ConfigureAwait(false);
-        }
-    }
-
-    private static async ValueTask<T> Translate<T>(Func<ValueTask<T>> operation)
-    {
-        try { return await operation().ConfigureAwait(false); }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
-        }
-    }
+    private ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode) =>
+        execution.ExecuteWrite(operation, mode);
 
     private NpgsqlCommand Command(string sql)
     {
-        ThrowIfClosed();
+        execution.EnsureOpen();
         var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Transaction = activeTransaction ?? transaction;
+        command.Transaction = (NpgsqlTransaction?)execution.Transaction;
         return command;
     }
 
@@ -1632,13 +1570,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
-    private void ThrowIfClosed()
-    {
-        owner.ThrowIfDisposed();
-        if (closed)
-            throw new ObjectDisposedException(nameof(PostgreSqlStorageSession));
-    }
-
     private enum Mutation
     {
         Insert,
@@ -1654,10 +1585,24 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
     }
 
-    private sealed class ConcurrencyConflictException(long? version = null) : Exception
+    private sealed class PostgreSqlSessionExecutionAdapter(
+        PostgreSqlProviderConnection owner,
+        NpgsqlConnection connection) : IRelationalSessionExecutionAdapter
     {
-        public long? Version { get; } = version;
+        public bool SerializeAmbientReads => true;
+
+        public void EnsureUsable() => owner.ThrowIfDisposed();
+
+        public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
+            owner.EnterGate(execution);
+
+        public ValueTask<DbTransaction> BeginWrite(RelationalExecution execution) =>
+            execution.BeginTransaction(connection, IsolationLevel.ReadCommitted);
+
+        public ValueTask Rollback(DbTransaction transaction, RelationalExecution execution) =>
+            execution.Rollback(transaction);
     }
+
 }
 
 internal sealed class OwnedPostgreSqlStorageSession : PostgreSqlStorageSession, IOwnedStorageSession

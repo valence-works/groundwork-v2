@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Data;
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
@@ -15,13 +16,10 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly SqliteProviderConnection owner;
     private readonly SqliteConnection connection;
     private readonly SqliteTransaction? transaction;
+    private readonly RelationalSessionExecution execution;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
-    private SqliteTransaction? activeTransaction;
-    private readonly AsyncLocal<bool> batchFallbackScope = new();
-    private readonly AsyncLocal<bool> writeExecutionScope = new();
-    private bool closed;
 
     /// <summary>
     /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
@@ -45,6 +43,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        execution = new RelationalSessionExecution(
+            access,
+            transaction,
+            ownsConnection,
+            new SqliteSessionExecutionAdapter(owner, connection, RollbackOrRetire),
+            nameof(SqliteStorageSession));
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -103,7 +107,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         StringComparer.Ordinal);
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null) => Execute(() =>
-        queries.Query(request, options, activeTransaction ?? transaction, RelationalExecution.Synchronous)
+        queries.Query(request, options, execution.Transaction, RelationalExecution.Synchronous)
             .GetAwaiter().GetResult());
 
     /// <summary>
@@ -120,7 +124,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             return queries.Query(
                     request,
                     options,
-                    activeTransaction ?? transaction,
+                    execution.Transaction,
                     RelationalExecution.Asynchronous(cancellationToken))
                 .GetAwaiter().GetResult();
         }));
@@ -228,7 +232,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     public AggregationResult Aggregate(AggregationQuery query) => Execute(() =>
         aggregations.Aggregate(
                 query,
-                activeTransaction ?? transaction,
+                execution.Transaction,
                 RelationalExecution.Synchronous)
             .GetAwaiter().GetResult());
 
@@ -825,24 +829,24 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
     }
 
-    internal void Close() => closed = true;
+    internal void Close() => execution.Close();
 
-    public bool IsReleased => closed;
+    public bool IsReleased => execution.IsReleased;
 
     public void Dispose()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             connection.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             await connection.DisposeAsync().ConfigureAwait(false);
     }
@@ -1042,9 +1046,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private IReadOnlyList<RowWriteOutcome> ApplyBatchFallback(IReadOnlyList<RowWrite> writes)
     {
-        var previousScope = batchFallbackScope.Value;
-        batchFallbackScope.Value = true;
-        try
+        using (execution.EnterBatchFallback())
         {
             return writes.Select(write => new RowWriteOutcome(write, write.Mode switch
             {
@@ -1057,10 +1059,6 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
                 RowWriteMode.CompareAndDelete => CompareAndDelete(write.Key!, write.ExpectedValues, write.Options),
                 _ => throw new ArgumentOutOfRangeException(nameof(write.Mode), write.Mode, null)
             })).ToArray();
-        }
-        finally
-        {
-            batchFallbackScope.Value = previousScope;
         }
     }
 
@@ -1493,15 +1491,15 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         if (mutation == Mutation.Upsert)
         {
             if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
-                throw new ConcurrencyConflictException(existing.Version);
+                throw new RelationalConcurrencyConflictException(existing.Version);
             if (precondition.Kind == WritePreconditionKind.IfVersion &&
                 (existing is null || precondition.Version != existing.Version))
-                throw new ConcurrencyConflictException(existing?.Version);
+                throw new RelationalConcurrencyConflictException(existing?.Version);
             return;
         }
         if (precondition.Kind == WritePreconditionKind.IfVersion &&
             (existing is null || precondition.Version != existing.Version))
-            throw new ConcurrencyConflictException(existing?.Version);
+            throw new RelationalConcurrencyConflictException(existing?.Version);
     }
 
     private (string Predicate, Dictionary<string, object?> Parameters) KeyPredicate(IReadOnlyDictionary<string, object?> values)
@@ -1528,10 +1526,10 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private SqliteCommand Command(string sql)
     {
-        ThrowIfClosed();
+        execution.EnsureOpen();
         var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Transaction = activeTransaction ?? transaction;
+        command.Transaction = (SqliteTransaction?)execution.Transaction;
         return command;
     }
 
@@ -1540,69 +1538,17 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         foreach (var pair in parameters) command.Parameters.AddWithValue(pair.Key, pair.Value ?? DBNull.Value);
     }
 
-    private T Execute<T>(Func<T> operation)
-    {
-        ThrowIfClosed();
-        try
-        {
-            if (transaction is not null || batchFallbackScope.Value) return operation();
-            if (ownsConnection)
-            {
-                owner.ThrowIfDisposed();
-                return operation();
-            }
-            lock (owner.Gate) { owner.ThrowIfDisposed(); return operation(); }
-        }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
-        }
-    }
+    private T Execute<T>(Func<T> operation) =>
+        execution.Execute(
+                () => ValueTask.FromResult(operation()),
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
 
-    private T ExecuteWrite<T>(Func<T> operation)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "write");
-        ThrowIfClosed();
-        if (transaction is not null || batchFallbackScope.Value) return Translate(operation);
-        if (writeExecutionScope.Value)
-            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        if (ownsConnection)
-        {
-            owner.ThrowIfDisposed();
-            return ExecuteWriteTransaction(operation);
-        }
-        lock (owner.Gate)
-        {
-            owner.ThrowIfDisposed();
-            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-            return ExecuteWriteTransaction(operation);
-        }
-    }
-
-    private T ExecuteWriteTransaction<T>(Func<T> operation)
-    {
-        using var writeTransaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-        activeTransaction = writeTransaction;
-        var previousScope = writeExecutionScope.Value;
-        writeExecutionScope.Value = true;
-        try
-        {
-            var result = Translate(operation);
-            writeTransaction.Commit();
-            return result;
-        }
-        catch (Exception failure)
-        {
-            WriteFailureCleanup.Run(failure,
-                () => RollbackOrRetire(writeTransaction));
-            throw;
-        }
-        finally
-        {
-            writeExecutionScope.Value = previousScope;
-            activeTransaction = null;
-        }
-    }
+    private T ExecuteWrite<T>(Func<T> operation) =>
+        execution.ExecuteWrite(
+                () => ValueTask.FromResult(operation()),
+                RelationalExecution.Synchronous)
+            .GetAwaiter().GetResult();
 
     private void RollbackOrRetire(SqliteTransaction writeTransaction)
     {
@@ -1615,21 +1561,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             // ClearPool marks the checked-out native handle non-poolable but leaves it open. A
             // failed rollback can leave the native transaction active, so this session must not
             // attempt another write against that handle before it is retired.
-            closed = true;
+            execution.Close();
             if (owner.UsesSharedSessionConnection)
                 owner.Dispose();
             else
                 connection.Close();
             throw;
-        }
-    }
-
-    private static T Translate<T>(Func<T> operation)
-    {
-        try { return operation(); }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
         }
     }
 
@@ -1654,19 +1591,34 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private static object? FromSqlite(object value, ColumnDefinition definition) =>
         SqliteDialect.ReadPortableValue(value, definition);
 
-    private void ThrowIfClosed()
-    {
-        owner.ThrowIfDisposed();
-        if (closed) throw new ObjectDisposedException(nameof(SqliteStorageSession));
-    }
-
     private enum Mutation { Insert, Update, Upsert, Delete }
     private sealed record AppendExecution(WriteOutcomeStatus Status, IReadOnlyList<WriteOutcome>? Outcomes)
     {
         internal AppendOutcomeReport ToReport() =>
             new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
     }
-    private sealed class ConcurrencyConflictException(long? version = null) : Exception { public long? Version { get; } = version; }
+    private sealed class SqliteSessionExecutionAdapter(
+        SqliteProviderConnection owner,
+        SqliteConnection connection,
+        Action<SqliteTransaction> rollback) : IRelationalSessionExecutionAdapter
+    {
+        public bool SerializeAmbientReads => false;
+
+        public void EnsureUsable() => owner.ThrowIfDisposed();
+
+        public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
+            RelationalSessionExecution.EnterMonitor(owner.Gate);
+
+        public ValueTask<DbTransaction> BeginWrite(RelationalExecution execution) =>
+            ValueTask.FromResult<DbTransaction>(
+                connection.BeginTransaction(IsolationLevel.Serializable, deferred: false));
+
+        public ValueTask Rollback(DbTransaction transaction, RelationalExecution execution)
+        {
+            rollback((SqliteTransaction)transaction);
+            return default;
+        }
+    }
 }
 
 internal sealed class OwnedSqliteStorageSession : SqliteStorageSession, IOwnedStorageSession

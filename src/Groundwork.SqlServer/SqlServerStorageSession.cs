@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.Common;
 using System.Data.SqlTypes;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -17,14 +18,11 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private readonly SqlServerProviderConnection owner;
     private readonly SqlConnection connection;
     private readonly SqlTransaction? transaction;
+    private readonly RelationalSessionExecution execution;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
     private readonly SqlServerDialect dialect = new();
-    private SqlTransaction? activeTransaction;
-    private readonly AsyncLocal<bool> batchFallbackScope = new();
-    private readonly AsyncLocal<bool> writeExecutionScope = new();
-    private bool closed;
 
     /// <summary>
     /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
@@ -44,6 +42,12 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        execution = new RelationalSessionExecution(
+            access,
+            transaction,
+            ownsConnection,
+            new SqlServerSessionExecutionAdapter(owner, connection),
+            nameof(SqlServerStorageSession));
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -108,7 +112,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         QueryRequest request,
         QueryRenderOptions? options,
         RelationalExecution mode) => Execute(
-            () => queries.Query(request, options, activeTransaction ?? transaction, mode),
+            () => queries.Query(request, options, execution.Transaction, mode),
             mode);
 
     public CrossScopeQueryResult QueryAcrossScopes(
@@ -138,7 +142,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         AggregateCore(query, RelationalExecution.Asynchronous(cancellationToken));
 
     private ValueTask<AggregationResult> AggregateCore(AggregationQuery query, RelationalExecution mode) =>
-        Execute(() => aggregations.Aggregate(query, activeTransaction ?? transaction, mode), mode);
+        Execute(() => aggregations.Aggregate(query, execution.Transaction, mode), mode);
 
     private async ValueTask AssertExplainPlan(RelationalQueryCommand query, QueryRenderOptions options, RelationalExecution mode)
     {
@@ -942,24 +946,24 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         return new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc));
     }
 
-    internal void Close() => closed = true;
+    internal void Close() => execution.Close();
 
-    public bool IsReleased => closed;
+    public bool IsReleased => execution.IsReleased;
 
     public void Dispose()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             connection.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (closed)
+        if (execution.IsReleased)
             return;
-        closed = true;
+        execution.Close();
         if (ownsConnection)
             await connection.DisposeAsync().ConfigureAwait(false);
     }
@@ -1225,9 +1229,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private async ValueTask<IReadOnlyList<RowWriteOutcome>> ApplyBatchFallback(IReadOnlyList<RowWrite> writes, RelationalExecution mode)
     {
         var outcomes = new List<RowWriteOutcome>(writes.Count);
-        var previousScope = batchFallbackScope.Value;
-        batchFallbackScope.Value = true;
-        try
+        using (execution.EnterBatchFallback())
         {
             foreach (var write in writes)
             {
@@ -1245,10 +1247,6 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
                 }));
             }
             return outcomes;
-        }
-        finally
-        {
-            batchFallbackScope.Value = previousScope;
         }
     }
 
@@ -1691,15 +1689,15 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         if (mutation == Mutation.Upsert)
         {
             if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
-                throw new ConcurrencyConflictException(existing.Version);
+                throw new RelationalConcurrencyConflictException(existing.Version);
             if (precondition.Kind == WritePreconditionKind.IfVersion &&
                 (existing is null || precondition.Version != existing.Version))
-                throw new ConcurrencyConflictException(existing?.Version);
+                throw new RelationalConcurrencyConflictException(existing?.Version);
             return;
         }
         if (precondition.Kind == WritePreconditionKind.IfVersion &&
             (existing is null || precondition.Version != existing.Version))
-            throw new ConcurrencyConflictException(existing?.Version);
+            throw new RelationalConcurrencyConflictException(existing?.Version);
     }
 
     private (string Predicate, Dictionary<string, (object? Value, ColumnDefinition Definition)> Parameters) KeyPredicate(
@@ -1732,11 +1730,10 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private SqlCommand Command(string sql)
     {
-        owner.ThrowIfDisposed();
-        if (closed) throw new ObjectDisposedException(nameof(SqlServerStorageSession));
+        execution.EnsureOpen();
         var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Transaction = activeTransaction ?? transaction;
+        command.Transaction = (SqlTransaction?)execution.Transaction;
         return command;
     }
 
@@ -1745,73 +1742,11 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         foreach (var pair in parameters) SqlServerProviderConnection.AddParameter(command, pair.Key, pair.Value.Value, pair.Value.Definition);
     }
 
-    private async ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
-    {
-        // Reads take the connection gate for the same reason writes do: a cached session is shared by
-        // concurrent callers, and a colliding read is what SqlClient reports as "already an open
-        // DataReader". A session inside a unit of work already holds its transaction's exclusive use. An
-        // owned session has an independent connection, and a batch fallback marks its own logical scope.
-        using var lease = ownsConnection || transaction is not null || batchFallbackScope.Value
-            ? null
-            : await owner.EnterGate(mode).ConfigureAwait(false);
-        try
-        {
-            if (transaction is not null || batchFallbackScope.Value) return await operation().ConfigureAwait(false);
-            owner.ThrowIfDisposed();
-            return await operation().ConfigureAwait(false);
-        }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        {
-            return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version);
-        }
-    }
+    private ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode) =>
+        execution.Execute(operation, mode);
 
-    private async ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode)
-    {
-        StorageAccessValidation.EnsurePointOperation(Access, "write");
-        if (closed)
-            throw new ObjectDisposedException(nameof(SqlServerStorageSession));
-        if (transaction is not null || batchFallbackScope.Value)
-            return await Translate(operation).ConfigureAwait(false);
-        // The connection gate is a non-reentrant semaphore, so a nested write must be refused
-        // before it is asked for; a batch fallback is the intentional exception and reuses its active
-        // transaction above instead of waiting on a permit this call already holds.
-        if (writeExecutionScope.Value)
-            WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        using var lease = ownsConnection
-            ? null
-            : await owner.EnterGate(mode).ConfigureAwait(false);
-        owner.ThrowIfDisposed();
-        WritePreconditionValidator.EnsureNoNestedTransaction(activeTransaction);
-        var writeTransaction = (SqlTransaction)await mode.BeginTransaction(connection, IsolationLevel.Serializable).ConfigureAwait(false);
-        activeTransaction = writeTransaction;
-        var previousScope = writeExecutionScope.Value;
-        writeExecutionScope.Value = true;
-        try
-        {
-            var result = await Translate(operation).ConfigureAwait(false);
-            await mode.Commit(writeTransaction).ConfigureAwait(false);
-            return result;
-        }
-        catch (Exception failure)
-        {
-            await WriteFailureCleanup.Run(failure, () => mode.Rollback(writeTransaction)).ConfigureAwait(false);
-            throw;
-        }
-        finally
-        {
-            writeExecutionScope.Value = previousScope;
-            activeTransaction = null;
-            await mode.Dispose(writeTransaction).ConfigureAwait(false);
-        }
-    }
-
-    private static async ValueTask<T> Translate<T>(Func<ValueTask<T>> operation)
-    {
-        try { return await operation().ConfigureAwait(false); }
-        catch (ConcurrencyConflictException exception) when (typeof(T) == typeof(WriteOutcome))
-        { return (T)(object)new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, exception.Version); }
-    }
+    private ValueTask<T> ExecuteWrite<T>(Func<ValueTask<T>> operation, RelationalExecution mode) =>
+        execution.ExecuteWrite(operation, mode);
 
     private ColumnDefinition Column(string name) => UserColumns.First(column => column.Name == name);
     private IReadOnlyList<ColumnDefinition> UserColumns => Unit.Columns.Where(column => column.Name is not SqlServerSchemaCoordinator.ScopeColumn and not SqlServerSchemaCoordinator.VersionColumn).ToArray();
@@ -1834,17 +1769,30 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private static object? FromSqlServer(object value, ColumnDefinition definition) =>
         SqlServerDialect.ReadPortableValue(value, definition);
 
-    private sealed class ConcurrencyConflictException(long? version = null) : Exception
-    {
-        public long? Version { get; } = version;
-    }
-
     private enum Mutation { Insert, Update, Upsert, Delete }
 
     private sealed record AppendExecution(WriteOutcomeStatus Status, IReadOnlyList<WriteOutcome>? Outcomes)
     {
         internal AppendOutcomeReport ToReport() =>
             new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
+    }
+
+    private sealed class SqlServerSessionExecutionAdapter(
+        SqlServerProviderConnection owner,
+        SqlConnection connection) : IRelationalSessionExecutionAdapter
+    {
+        public bool SerializeAmbientReads => false;
+
+        public void EnsureUsable() => owner.ThrowIfDisposed();
+
+        public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
+            owner.EnterGate(execution);
+
+        public ValueTask<DbTransaction> BeginWrite(RelationalExecution execution) =>
+            execution.BeginTransaction(connection, IsolationLevel.Serializable);
+
+        public ValueTask Rollback(DbTransaction transaction, RelationalExecution execution) =>
+            execution.Rollback(transaction);
     }
 }
 
