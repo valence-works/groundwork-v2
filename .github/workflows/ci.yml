@@ -13,7 +13,10 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Emergency cost brake: set the repository variable GROUNDWORK_CI_PAUSED=true
+  # to skip every billable correctness job without disabling Actions globally.
   architecture-boundaries:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +31,7 @@ jobs:
         run: python3 -m unittest discover -s tests/project_board_sync -p 'test_*.py'
 
   build-and-test:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +44,7 @@ jobs:
       - run: dotnet test Groundwork.slnx --no-restore --configuration Release --filter "Category!=Concurrency"
 
   documents-package-boundary:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +57,7 @@ jobs:
         run: tests/Groundwork.Documents.External/verify-local-package.sh
 
   public-api-acceptance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +74,7 @@ jobs:
         run: dotnet test tests/Groundwork.PublicApi.Acceptance.Tests/Groundwork.PublicApi.Acceptance.Tests.csproj --configuration Release
 
   query-differential:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -162,6 +169,7 @@ jobs:
           retention-days: 14
 
   sqlite-provider:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -176,6 +184,7 @@ jobs:
           --no-restore --configuration Release --filter "Category!=Concurrency"
 
   event-log-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -229,6 +238,7 @@ jobs:
         run: dotnet test tests/Groundwork.Samples.EventLog.Tests/Groundwork.Samples.EventLog.Tests.csproj --no-restore --configuration Release
 
   records-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -280,6 +290,7 @@ jobs:
         run: dotnet test tests/Groundwork.Records.Tests/Groundwork.Records.Tests.csproj --no-restore --configuration Release
 
   sqlserver-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     name: SQL Server conformance (${{ matrix.target-framework }})
     runs-on: ubuntu-latest
     strategy:
@@ -330,6 +341,7 @@ jobs:
           retention-days: 14
 
   provider-infrastructure:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -369,6 +381,7 @@ jobs:
           test "${{ job.services.mongodb.id }}" != ""
 
   mongo-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -398,6 +411,7 @@ jobs:
           --no-restore --configuration Release --filter "Category!=Concurrency"
 
   mongo-schema-tool:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -448,6 +462,7 @@ jobs:
           fi
 
   mongo-standalone-exact-append:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     services:
       mongodb:
@@ -483,6 +498,7 @@ jobs:
           --filter FullyQualifiedName~MongoSetMutationGuardTests.MongoDB_standalone_set_mutation
 
   capability-conformance:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -577,6 +593,7 @@ jobs:
           --filter "(FullyQualifiedName~UnitOfWorkQueryConformanceTests)&(Category!=Concurrency)"
 
   postgresql-provider:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -606,6 +623,7 @@ jobs:
           --no-restore --configuration Release --filter "Category!=Concurrency"
 
   retention-correctness:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
