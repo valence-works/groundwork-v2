@@ -53,6 +53,8 @@ public sealed class MongoDbProviderFactory : IMongoProviderFactory
 
 public sealed class MongoDbProviderConnection : IMongoProviderConnection
 {
+    internal static IReadOnlyList<CapabilityDescriptor> ConstraintCapabilities { get; } =
+        Array.Empty<CapabilityDescriptor>();
     private readonly MongoProviderState state;
     private bool disposed;
 
@@ -80,6 +82,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
     public MongoSchemaAdmissionReport InspectSchema(StorageUnit unit, MongoStorageAccess access)
     {
         ThrowIfDisposed();
+        SchemaCapabilityAdmission.EnsureSupported(unit, ConstraintCapabilities);
         var applied = state.Resolve(unit, access);
         return MongoSchemaCoordinator.InspectAdmission(state, applied, access);
     }
@@ -87,6 +90,7 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
     public IMongoStorageSession OpenSession(StorageUnit unit, MongoStorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
+        SchemaCapabilityAdmission.EnsureSupported(unit, ConstraintCapabilities);
         var applied = state.Resolve(unit, access);
         var collection = access.IsPrivilegedAcrossScopes
             ? state.Context.Database.GetCollection<BsonDocument>(applied.CollectionName)
@@ -109,6 +113,8 @@ public sealed class MongoDbProviderConnection : IMongoProviderConnection
                 "GW-ACCESS-003: privileged cross-scope access is query-only and cannot begin a unit of work.");
         if (units.Length == 0)
             throw new ArgumentException("A unit of work must declare at least one storage unit.", nameof(units));
+        foreach (var unit in units)
+            SchemaCapabilityAdmission.EnsureSupported(unit, ConstraintCapabilities);
 
         var applied = units.Select(unit => state.Resolve(unit, access)).ToArray();
         if (applied.Select(unit => unit.Declaration.Id).Distinct().Count() != applied.Length)
@@ -453,6 +459,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        SchemaCapabilityAdmission.EnsureSupported(desired, MongoDbProviderConnection.ConstraintCapabilities);
         var target = MongoSchemaTargets.Compile(desired);
         var inspection = executor.InspectHistory(target);
         var stableRefusal = MongoDeclarationRules.StableDeclarationRefusals(
@@ -493,6 +500,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
     public SchemaDiff Diff(StorageUnit desired)
     {
+        SchemaCapabilityAdmission.EnsureSupported(desired, MongoDbProviderConnection.ConstraintCapabilities);
         var target = MongoSchemaTargets.Compile(desired);
         using var applicationLock = executor.AcquireApplicationLock(target.Identity);
         var history = executor.ReadHistory(target.Identity, applicationLock);
@@ -508,6 +516,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
 
     public SchemaApplyResult Apply(StorageUnit desired)
     {
+        SchemaCapabilityAdmission.EnsureSupported(desired, MongoDbProviderConnection.ConstraintCapabilities);
         var target = MongoSchemaTargets.Compile(desired);
         if (target.Subject.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
             state.Context.RequireTransactions("ProviderSequence");

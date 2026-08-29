@@ -88,16 +88,17 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
-        "PostgreSQL", nativeBatch: true,
-        exactOutcomeCost: "one RETURNING result per native batch",
-        batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback",
-        exactAppendOutcomes: true,
-        durableHighWaterInspection: true,
-        exactRetention: true,
-        atomicCommit: true,
-        compareAndDelete: true,
-        setMutation: "Updates or deletes every row matching an index-covered portable predicate on PostgreSQL in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.");
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(
+        BatchWriteCapabilities.ForProvider(
+            "PostgreSQL", nativeBatch: true,
+            exactOutcomeCost: "one RETURNING result per native batch",
+            batchCost: "uses multi-row INSERT/ON CONFLICT with a 32,000-parameter safety limit; secondary unique declarations use the row-attributed fallback",
+            exactAppendOutcomes: true,
+            durableHighWaterInspection: true,
+            exactRetention: true,
+            atomicCommit: true,
+            compareAndDelete: true,
+            setMutation: "Updates or deletes every row matching an index-covered portable predicate on PostgreSQL in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count."));
 
     internal string ConnectionString => connectionString;
 

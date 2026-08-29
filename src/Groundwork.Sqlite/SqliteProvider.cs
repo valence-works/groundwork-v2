@@ -66,16 +66,17 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
 
     public ISchemaCoordinator Schema { get; }
 
-    public IReadOnlyList<CapabilityDescriptor> Capabilities => BatchWriteCapabilities.ForProvider(
-        "SQLite", nativeBatch: true,
-        exactOutcomeCost: "one RETURNING result per native batch",
-        batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback",
-        exactAppendOutcomes: true,
-        durableHighWaterInspection: true,
-        exactRetention: true,
-        atomicCommit: true,
-        compareAndDelete: true,
-        setMutation: "Updates or deletes every row matching an index-covered portable predicate on SQLite in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count.");
+    public IReadOnlyList<CapabilityDescriptor> Capabilities => SchemaCapabilityAdmission.AdvertiseEnforcedConstraints(
+        BatchWriteCapabilities.ForProvider(
+            "SQLite", nativeBatch: true,
+            exactOutcomeCost: "one RETURNING result per native batch",
+            batchCost: "uses variable-limit-aware multi-row INSERT/UPSERT commands; secondary unique declarations use the row-attributed fallback",
+            exactAppendOutcomes: true,
+            durableHighWaterInspection: true,
+            exactRetention: true,
+            atomicCommit: true,
+            compareAndDelete: true,
+            setMutation: "Updates or deletes every row matching an index-covered portable predicate on SQLite in one UPDATE/DELETE statement; the statement is atomic and reports its affected-row count."));
 
     internal object Gate => gate;
 
