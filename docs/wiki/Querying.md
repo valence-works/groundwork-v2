@@ -24,7 +24,7 @@ translate it, fall back to client evaluation, or throw. A closed surface accepts
 translate, and tells you *at build time* when you've stepped outside it.
 
 Supported: `Where`, `WhereIf`, `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenByDescending`, `Skip`,
-`Take`, mapped-column `Select`, `Distinct`, `LatestPer`, `AcceptScan`, and the terminals `ToList`,
+`Take`, mapped-column `Select`, `Distinct`, `LatestPer`, `AcceptScan`, one declared-reference `Join`, and the terminals `ToList`,
 `ToListAsync`, `Count`, `Any`, `CountAsync`, `AnyAsync`, `First`, `FirstOrDefault`, `Single`,
 `SingleOrDefault`, `Sum`, `Min`, and `Max`. The async reduction forms `SumAsync`, `MinAsync`, and
 `MaxAsync` dispatch through the provider-native scalar executor. `First` and
@@ -32,6 +32,36 @@ Supported: `Where`, `WhereIf`, `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenBy
 values before paging. `Sum` is limited to mapped `Int32`, `Int64`, and `Decimal` columns (integer
 sums return nullable `Int64`); `Min` and `Max` use mapped orderable columns, ignore nulls, and return null
 when no non-null value exists.
+
+### Declared-reference navigation
+
+The front-end can activate one provider-neutral declared-reference join and then lower exactly one
+two-level navigation. The reference binding connects a direct CLR navigation member to the existing
+provider-neutral `ReferenceJoin`; it does not infer a relationship from names or member depth:
+
+```csharp
+var customerReference = orderModel.Reference(
+    order => order.Customer,
+    customerModel,
+    declaredCustomerJoin);
+
+var request = database.Table(orderModel)
+    .Join(customerReference)
+    .Where(order => order.Status == "open" && order.Customer.Name == "Ada")
+    .OrderBy(order => order.Id)
+    .ThenBy(order => order.Customer.Name)
+    .ToQueryRequest();
+```
+
+Navigation-bearing row types use explicit `GwTableModel<T>` instances. `GwTableModel<T>.Infer`
+remains scalar-only and continues to reject complex members rather than silently deciding that an
+arbitrary object property is a relationship.
+
+Source and target columns stay table-qualified even when they have the same logical name. A
+navigation used without its matching `Join`, a different navigation, a deeper member chain, a
+second join, or an arbitrary LINQ `Join` remains refused. Provider rendering and composite
+source/target materialization are separate capabilities; until a provider supports the join node,
+execution fails closed before I/O.
 
 `ToQueryRequest()` is the provider-neutral boundary:
 

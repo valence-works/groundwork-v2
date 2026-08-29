@@ -9,27 +9,42 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
     private readonly GwTableModel<T>? model;
     private readonly IGwQueryExecutor? executor;
     private readonly GwQueryState state;
+    private readonly IGwNavigation? navigation;
     internal GwTableModel<T>? Model => model;
 
     internal GwQueryable(GwTableModel<T> model, IGwQueryExecutor? executor = null)
-        : this(model, executor, new GwQueryState(model.Table))
+        : this(model, executor, new GwQueryState(model.Table), null)
     {
     }
 
-    private GwQueryable(GwTableModel<T>? model, IGwQueryExecutor? executor, GwQueryState state)
+    private GwQueryable(GwTableModel<T>? model, IGwQueryExecutor? executor, GwQueryState state, IGwNavigation? navigation)
     {
         this.model = model; this.executor = executor;
         this.state = state;
+        this.navigation = navigation;
     }
 
     public QueryRequest ToQueryRequest() => state.Build();
+
+    public IGwQueryable<T> Join<TTarget>(GwReference<T, TTarget> reference)
+    {
+        if (reference is null) throw new ArgumentNullException(nameof(reference));
+        if (!ReferenceEquals(RequireModel(), reference.Source))
+            throw new ArgumentException("The declared reference must belong to this query's table model.", nameof(reference));
+        if (state.Join is not null)
+            throw new LinqTranslationException(new[]
+            {
+                new LinqDiagnostic("GW-LINQ-104", "Only one declared-reference join is portable", Expression.Empty())
+            });
+        return new GwQueryable<T>(model, executor, state with { Join = reference.Declaration }, reference);
+    }
 
     public IGwQueryable<T> Where(Expression<Func<T, bool>> predicate)
     {
         if (predicate is null) throw new ArgumentNullException(nameof(predicate));
         var model = RequireModel();
-        var diagnostics = ExpressionLowerer.Diagnose(predicate, model);
-        var lower = ExpressionLowerer.Lower(predicate, model);
+        var diagnostics = ExpressionLowerer.Diagnose(predicate, model, navigation);
+        var lower = ExpressionLowerer.Lower(predicate, model, navigation);
         return New(state with
         {
             Where = state.Where is Predicate.AlwaysTrue ? lower : new Predicate.And(new[] { state.Where, lower }),
@@ -72,7 +87,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         var columns = ProjectionColumns(selector.Body, selector.Parameters[0]).ToArray();
         if (columns.Length == 0)
             throw new LinqTranslationException(new[] { new LinqDiagnostic("GW-LINQ-101", "Select must contain mapped columns; declare a computed column; expressions over columns are not portable", selector.Body) });
-        return new GwQueryable<TResult>(null, executor, state with { Projection = Projection.ColumnsOnly(columns) });
+        return new GwQueryable<TResult>(null, executor, state with { Projection = Projection.ColumnsOnly(columns) }, null);
     }
 
     public IGwQueryable<T> Distinct() => New(state with { Distinct = true });
@@ -81,7 +96,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         New(state with { AcceptedScan = ScanAcceptance.Allow(id, reason, owner, expiresOn) });
 
     public IGwQueryable<T> LatestPer<TKey, TTimestamp>(Expression<Func<T, TKey>> key, Expression<Func<T, TTimestamp>> timestamp) =>
-        New(state with { LatestPerKey = new LatestPerKey(ExpressionLowerer.LowerColumn(key, RequireModel()), ExpressionLowerer.LowerColumn(timestamp, RequireModel())) });
+        New(state with { LatestPerKey = new LatestPerKey(ExpressionLowerer.LowerColumn(key, RequireModel(), navigation), ExpressionLowerer.LowerColumn(timestamp, RequireModel(), navigation)) });
 
     public LinqTerminal<T> ToList() => new(ToQueryRequest());
     public Task<IReadOnlyList<T>> ToListAsync(CancellationToken cancellationToken = default) =>
@@ -90,12 +105,11 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
             : (executor ?? throw new InvalidOperationException("Configure GwQueryDatabase with an IGwQueryExecutor before using ToListAsync."))
                 .ToListAsync<T>(ToQueryRequest(), model, cancellationToken);
 
-    public LinqTerminal<long> Count() => new(new QueryRequest(state.Table, state.Where, state.Order, state.Projection, Paging.None, ResultShape.TotalCount.Instance, state.LatestPerKey, state.AcceptedScan, state.Distinct));
+    public LinqTerminal<long> Count() => new(state.Build(Paging.None, ResultShape.TotalCount.Instance));
 
     public LinqTerminal<bool> Any()
     {
-        return new LinqTerminal<bool>(new QueryRequest(state.Table, state.Where, state.Order, state.Projection,
-            Paging.OffsetLimit(0, 1), ResultShape.Rows.Instance, state.LatestPerKey, state.AcceptedScan, state.Distinct));
+        return new LinqTerminal<bool>(state.Build(Paging.OffsetLimit(0, 1), ResultShape.Rows.Instance));
     }
 
     public LinqTerminal<T> First() => new(CardinalityRequest(ResultShape.First.Instance, 1));
@@ -149,7 +163,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
     public LinqTerminal<Guid?> Max(Expression<Func<T, Guid?>> selector) => new(ReductionRequest(selector, static column => new ResultShape.Max(column), "Max"));
 
     private GwTableModel<T> RequireModel() => model ?? throw new InvalidOperationException("A projection is terminal; apply filters and ordering before Select.");
-    private GwQueryable<T> New(GwQueryState next) => new(model, executor, next);
+    private GwQueryable<T> New(GwQueryState next) => new(model, executor, next, navigation);
 
     private QueryRequest CardinalityRequest(ResultShape result, int limit)
     {
@@ -160,8 +174,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
             });
         var offset = state.Skip ?? 0;
         var boundedLimit = state.Take is int take ? Math.Min(take, limit) : limit;
-        return new QueryRequest(state.Table, state.Where, state.Order, state.Projection,
-            Paging.OffsetLimit(offset, boundedLimit), result, state.LatestPerKey, state.AcceptedScan, state.Distinct);
+        return state.Build(Paging.OffsetLimit(offset, boundedLimit), result);
     }
 
     private QueryRequest ReductionRequest<TValue>(
@@ -170,7 +183,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         string operation)
     {
         if (selector is null) throw new ArgumentNullException(nameof(selector));
-        var column = ExpressionLowerer.LowerColumn(selector, RequireModel());
+        var column = ExpressionLowerer.LowerColumn(selector, RequireModel(), navigation);
         if (operation == "Sum"
             ? column.Type is not (QueryType.Int32 or QueryType.Int64 or QueryType.Decimal)
             : column.Type is not (QueryType.Int32 or QueryType.Int64 or QueryType.Decimal or QueryType.String or QueryType.DateTimeOffset or QueryType.Guid))
@@ -185,16 +198,17 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         if (state.Skip is not null && state.Take is null)
             throw OffsetRequiresTake();
 
-        return new QueryRequest(state.Table, state.Where, state.Order, Projection.ColumnsOnly(column),
+        return state.Build(
             state.Take is null ? Paging.None : Paging.OffsetLimit(state.Skip ?? 0, state.Take.Value),
-            shape(column), state.LatestPerKey, state.AcceptedScan, state.Distinct);
+            shape(column),
+            Projection.ColumnsOnly(column));
     }
 
     private static LinqTranslationException OffsetRequiresTake() => LinqTranslationErrors.OffsetRequiresTake();
 
     private OrderTerm Order<TKey>(Expression<Func<T, TKey>> selector, OrderDirection direction)
     {
-        var column = ExpressionLowerer.LowerColumn(selector ?? throw new ArgumentNullException(nameof(selector)), RequireModel());
+        var column = ExpressionLowerer.LowerColumn(selector ?? throw new ArgumentNullException(nameof(selector)), RequireModel(), navigation);
         return new OrderTerm(column, direction, direction == OrderDirection.Ascending ? NullOrder.Last : NullOrder.First);
     }
 
@@ -203,7 +217,7 @@ internal sealed class GwQueryable<T> : IGwQueryable<T>
         expression = Unwrap(expression);
         if (expression is MemberExpression)
         {
-            yield return ExpressionLowerer.LowerColumn(Expression.Lambda<Func<T, object>>(Expression.Convert(expression, typeof(object)), parameter), RequireModel());
+            yield return ExpressionLowerer.LowerColumn(Expression.Lambda<Func<T, object>>(Expression.Convert(expression, typeof(object)), parameter), RequireModel(), navigation);
             yield break;
         }
         if (expression is NewExpression created)
@@ -239,10 +253,11 @@ internal sealed record GwQueryState(
     LatestPerKey? LatestPerKey,
     ScanAcceptance? AcceptedScan,
     bool RequiresScan = false,
-    bool Distinct = false)
+    bool Distinct = false,
+    ReferenceJoin? Join = null)
 {
     public GwQueryState(TableId table)
-        : this(table, Predicate.AlwaysTrue.Instance, ImmutableArray<OrderTerm>.Empty, Projection.All, null, null, null, null, false, false)
+        : this(table, Predicate.AlwaysTrue.Instance, ImmutableArray<OrderTerm>.Empty, Projection.All, null, null, null, null, false, false, null)
     {
     }
 
@@ -256,8 +271,12 @@ internal sealed record GwQueryState(
         if (Skip is not null && Take is null)
             throw LinqTranslationErrors.OffsetRequiresTake();
         var paging = Take is null ? Paging.None : Paging.OffsetLimit(Skip ?? 0, Take.Value);
-        return new QueryRequest(Table, Where, Order, Projection, paging, ResultShape.Rows.Instance, LatestPerKey, AcceptedScan, Distinct);
+        return Build(paging, ResultShape.Rows.Instance);
     }
+
+    public QueryRequest Build(Paging paging, ResultShape result, Projection? projection = null) => Join is null
+        ? new QueryRequest(Table, Where, Order, projection ?? Projection, paging, result, LatestPerKey, AcceptedScan, Distinct)
+        : new QueryRequest(Table, Join, Where, Order, projection ?? Projection, paging, result, LatestPerKey, AcceptedScan, Distinct);
 }
 
 internal static class LinqTranslationErrors
