@@ -11,6 +11,9 @@ namespace Groundwork.Analyzers;
 public sealed class LinqAnalyzer : DiagnosticAnalyzer
 {
     private readonly record struct ResolutionSite(SyntaxTree Tree, int Start, int Length);
+    private sealed record JoinedReferenceResolution(
+        IReadOnlyList<ExpressionSyntax> References,
+        bool IsResolved);
 
     private const string NavigationRefusal =
         "GW-LINQ-104: undeclared cross-table member access is not portable; activate one declared reference with `.Join(reference)`";
@@ -50,21 +53,23 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         if (query?.Expression is not MemberAccessExpressionSyntax queryMember) return null;
 
         var visited = new HashSet<ResolutionSite>();
-        var references = FindJoinedReferences(context, queryMember.Expression, visited);
-        return references.Count == 1 ? FindReferenceNavigation(context, references[0], visited) : null;
+        var resolution = FindJoinedReferences(context, queryMember.Expression, visited);
+        return resolution is { IsResolved: true, References.Count: 1 }
+            ? FindReferenceNavigation(context, resolution.References[0], visited)
+            : null;
     }
 
-    private static IReadOnlyList<ExpressionSyntax> FindJoinedReferences(
+    private static JoinedReferenceResolution FindJoinedReferences(
         SyntaxNodeAnalysisContext context,
         ExpressionSyntax source,
         ISet<ResolutionSite> visited)
     {
         var references = new List<ExpressionSyntax>();
-        CollectJoinedReferences(context, source, visited, references);
-        return references;
+        var isResolved = CollectJoinedReferences(context, source, visited, references);
+        return new JoinedReferenceResolution(references, isResolved);
     }
 
-    private static void CollectJoinedReferences(
+    private static bool CollectJoinedReferences(
         SyntaxNodeAnalysisContext context,
         ExpressionSyntax source,
         ISet<ResolutionSite> visited,
@@ -78,13 +83,13 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             if (IsGroundworkMethod(method, "Join") && invocation.ArgumentList.Arguments.Count == 1)
                 references.Add(invocation.ArgumentList.Arguments[0].Expression);
             if (invocation.Expression is MemberAccessExpressionSyntax member)
-                CollectJoinedReferences(context, member.Expression, visited, references);
-            return;
+                return CollectJoinedReferences(context, member.Expression, visited, references);
+            return true;
         }
 
-        var initializer = FindInitializer(context, source, visited);
-        if (initializer is not null)
-            CollectJoinedReferences(context, initializer, visited, references);
+        var initializer = FindInitializer(context, source, visited, out var isAmbiguous);
+        return !isAmbiguous && (initializer is null ||
+            CollectJoinedReferences(context, initializer, visited, references));
     }
 
     private static ISymbol? FindReferenceNavigation(
@@ -107,21 +112,28 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             }
         }
 
-        var initializer = FindInitializer(context, source, visited);
-        return initializer is null ? null : FindReferenceNavigation(context, initializer, visited);
+        var initializer = FindInitializer(context, source, visited, out var isAmbiguous);
+        return isAmbiguous || initializer is null
+            ? null
+            : FindReferenceNavigation(context, initializer, visited);
     }
 
     private static ExpressionSyntax? FindInitializer(
         SyntaxNodeAnalysisContext context,
         ExpressionSyntax source,
-        ISet<ResolutionSite> visited)
+        ISet<ResolutionSite> visited,
+        out bool isAmbiguous)
     {
+        isAmbiguous = false;
         if (!visited.Add(new ResolutionSite(source.SyntaxTree, source.SpanStart, source.Span.Length))) return null;
         var model = SemanticModelFor(context, source);
         var symbol = model.GetSymbolInfo(source).Symbol;
         if (symbol is null) return null;
-        if (symbol is ILocalSymbol local && FindLatestAssignment(model, source, local) is { } assignment)
-            return assignment;
+        if (symbol is ILocalSymbol local)
+        {
+            var assignment = FindLatestAssignment(model, source, local, out isAmbiguous);
+            if (isAmbiguous || assignment is not null) return assignment;
+        }
         foreach (var syntaxReference in symbol.DeclaringSyntaxReferences)
         {
             switch (syntaxReference.GetSyntax(context.CancellationToken))
@@ -140,8 +152,10 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
     private static ExpressionSyntax? FindLatestAssignment(
         SemanticModel model,
         ExpressionSyntax source,
-        ILocalSymbol local)
+        ILocalSymbol local,
+        out bool isAmbiguous)
     {
+        isAmbiguous = false;
         var block = source.Ancestors().OfType<BlockSyntax>().FirstOrDefault();
         var statement = source.Ancestors().OfType<StatementSyntax>()
             .FirstOrDefault(candidate => candidate.Parent == block);
@@ -149,14 +163,20 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
 
         for (var index = block.Statements.IndexOf(statement) - 1; index >= 0; index--)
         {
-            if (block.Statements[index] is not ExpressionStatementSyntax
+            var candidate = block.Statements[index];
+            if (candidate is ExpressionStatementSyntax
                 {
                     Expression: AssignmentExpressionSyntax assignment
-                } ||
-                !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) ||
-                !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local))
-                continue;
-            return assignment.Right;
+                } &&
+                assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local))
+                return assignment.Right;
+            if (candidate.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(assignment =>
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local)))
+            {
+                isAmbiguous = true;
+                return null;
+            }
         }
         return null;
     }
@@ -201,17 +221,20 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         if (context.Node is not InvocationExpressionSyntax invocation) return;
         var method = context.SemanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
         if (IsGroundworkMethod(method, "Join") &&
-            invocation.Expression is MemberAccessExpressionSyntax joinMember &&
-            FindJoinedReferences(
+            invocation.Expression is MemberAccessExpressionSyntax joinMember)
+        {
+            var prior = FindJoinedReferences(
                 context,
                 joinMember.Expression,
-                new HashSet<ResolutionSite>()).Count > 0)
-        {
-            context.ReportDiagnostic(Diagnostic.Create(
-                AnalyzerDiagnostics.For("GW-LINQ-104"),
-                invocation.GetLocation(),
-                NavigationRefusal));
-            return;
+                new HashSet<ResolutionSite>());
+            if (!prior.IsResolved || prior.References.Count > 0)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    AnalyzerDiagnostics.For("GW-LINQ-104"),
+                    invocation.GetLocation(),
+                    NavigationRefusal));
+                return;
+            }
         }
         if (!IsGroundworkWhereMethod(method)) return;
         var argumentIndex = method!.Name == "WhereIf" ? 1 : 0;

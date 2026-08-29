@@ -275,6 +275,73 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Linq_analyzer_refuses_an_unconditional_join_after_a_conditional_join()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order
+            {
+                public Customer Customer { get; set; } = new();
+                public Customer OtherCustomer { get; set; } = new();
+            }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Use
+            {
+                public static void Run(bool enabled, GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin first, ReferenceJoin second)
+                {
+                    var customer = orders.Reference(order => order.Customer, customers, first);
+                    var otherCustomer = orders.Reference(order => order.OtherCustomer, customers, second);
+                    var query = database.Table(orders);
+                    if (enabled) query = query.Join(customer);
+                    query = query.Join(otherCustomer);
+                    query.Where(order => order.OtherCustomer.Name == "Ada");
+                }
+            }
+            """;
+
+        var diagnostics = (await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_104").ToArray();
+
+        Assert.Contains(diagnostics, item => source.Substring(
+            item.Location.SourceSpan.Start,
+            item.Location.SourceSpan.Length).Contains("Join(otherCustomer)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_accepts_a_join_after_an_unconditional_query_reset()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order
+            {
+                public Customer Customer { get; set; } = new();
+                public Customer OtherCustomer { get; set; } = new();
+            }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Use
+            {
+                public static void Run(bool enabled, GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin first, ReferenceJoin second)
+                {
+                    var customer = orders.Reference(order => order.Customer, customers, first);
+                    var otherCustomer = orders.Reference(order => order.OtherCustomer, customers, second);
+                    var query = database.Table(orders);
+                    if (enabled) query = query.Join(customer);
+                    query = database.Table(orders);
+                    query = query.Join(otherCustomer);
+                    query.Where(order => order.OtherCustomer.Name == "Ada");
+                }
+            }
+            """;
+
+        var diagnostics = await AnalyzeLinq(source);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_LINQ_104");
+    }
+
+    [Fact]
     public async Task Linq_code_fix_inserts_the_explicit_ordinal_overload()
     {
         const string source = "using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { [AttributeUsage(AttributeTargets.Property)] public sealed class GwStringComparisonAttribute : Attribute { public GwStringComparisonAttribute(StringComparison comparison) { } } public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { [Groundwork.Query.Linq.GwStringComparison(StringComparison.Ordinal)] public string Name { get; set; } = \"\"; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Name.StartsWith(\"x\")); } }";
