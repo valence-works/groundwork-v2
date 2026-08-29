@@ -17,41 +17,114 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
-    public void Reference_join_refuses_before_command_observation()
+    public void Joined_row_query_refuses_before_command_observation_until_composite_materialization_lands()
     {
         var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
-        var name = "mongo_join_guard_" + Guid.NewGuid().ToString("N");
-        var unit = new StorageUnit
-        {
-            Id = new StorageUnitId(name),
-            Name = name,
-            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
-            Key = new KeyDefinition { Columns = ["id"] }
-        };
-        Assert.True(connection.Schema.Apply(unit).Applied);
-        var source = new TableId(unit.Name);
-        var target = new TableId(unit.Name + "_target");
+        var fixture = JoinFixture("row-guard", ScopePolicy.Global);
+        Assert.True(connection.Schema.Apply(fixture.Target).Applied);
+        Assert.True(connection.Schema.Apply(fixture.Source).Applied);
         var request = new QueryRequest(
-            source,
-            new ReferenceJoin(
-                "target",
-                target,
-                [new JoinColumnPair(
-                    new ColumnRef(source, "id", QueryType.String, isNullable: false),
-                    new ColumnRef(target, "id", QueryType.String, isNullable: false))]),
+            fixture.SourceTable,
+            fixture.Join,
             Predicate.AlwaysTrue.Instance,
             [],
             Projection.All,
             Paging.None);
         var observer = new ProviderCommandObserver();
-        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+        var session = connection.OpenSession(fixture.Source, StorageAccess.Global, observer);
 
         var refusal = Assert.Throws<QueryRenderException>(() => session.Query(request));
 
         Assert.Equal("GW-QUERY-032", refusal.Code);
+        Assert.Contains("composite source/target", refusal.Message, StringComparison.Ordinal);
+        Assert.Empty(observer.Commands);
+    }
+
+    [SkippableFact]
+    public void Joined_target_reduction_executes_one_native_lookup_pipeline()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var fixture = JoinFixture("target-sum", ScopePolicy.Scoped);
+        var access = StorageAccess.Scoped(new StorageScope("tenant-a"));
+        Assert.True(connection.Schema.Apply(fixture.Target).Applied);
+        Assert.True(connection.Schema.Apply(fixture.Source).Applied);
+        var target = connection.OpenSession(fixture.Target, access);
+        Assert.True(target.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "customer-a",
+            ["score"] = 10
+        })).Succeeded);
+        Assert.True(target.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "customer-b",
+            ["score"] = 20
+        })).Succeeded);
+        var source = connection.OpenSession(fixture.Source, access);
+        foreach (var row in new[]
+                 {
+                     (Id: "order-a", CustomerId: "customer-a"),
+                     (Id: "order-b", CustomerId: "customer-b"),
+                     (Id: "order-missing", CustomerId: "missing")
+                 })
+        {
+            Assert.True(source.Insert(new StorageValues(new Dictionary<string, object?>
+            {
+                ["id"] = row.Id,
+                ["customer_id"] = row.CustomerId
+            })).Succeeded);
+        }
+        var observer = new ProviderCommandObserver();
+        var querying = connection.OpenSession(fixture.Source, access, observer);
+        var request = new QueryRequest(
+            fixture.SourceTable,
+            fixture.Join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(fixture.TargetScore),
+            Paging.None,
+            new ResultShape.Sum(fixture.TargetScore));
+
+        var result = querying.Query(request);
+
+        Assert.Equal(30L, Assert.Single(result.Rows)["score"]);
+        var command = Assert.Single(observer.Commands);
+        Assert.Equal("mongodb.query", command.Operation);
+        Assert.Contains("Aggregate", command.CommandText, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void Privileged_cross_scope_join_refuses_before_command_observation()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var fixture = JoinFixture("cross-scope-guard", ScopePolicy.Scoped);
+        Assert.True(connection.Schema.Apply(fixture.Target).Applied);
+        Assert.True(connection.Schema.Apply(fixture.Source).Applied);
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(
+            fixture.Source,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit(
+                "join-guard", "prove joins never fan out across scopes")),
+            observer);
+        var request = new QueryRequest(
+            fixture.SourceTable,
+            fixture.Join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => session.QueryAcrossScopes(request));
+
+        Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
         Assert.Empty(observer.Commands);
     }
 
@@ -1769,6 +1842,74 @@ public sealed class MongoProviderIntegrationTests
 
     private static StorageValues OptimisticUpsertStoreValues(string id, string payload) =>
         new(new Dictionary<string, object?> { ["id"] = id, ["payload"] = payload });
+
+    private static MongoJoinFixture JoinFixture(string idPrefix, ScopePolicy scope)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var target = new StorageUnit
+        {
+            Id = new StorageUnitId($"mongo-{idPrefix}-target-{suffix}"),
+            Name = $"MongoJoinTarget_{suffix}",
+            Scope = scope,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+                new() { Name = "score", Type = PortableType.Int32, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes =
+            [
+                new IndexDefinition
+                {
+                    Name = "by_id_score",
+                    Columns = [new IndexColumn("id"), new IndexColumn("score")]
+                }
+            ]
+        };
+        var source = new StorageUnit
+        {
+            Id = new StorageUnitId($"mongo-{idPrefix}-source-{suffix}"),
+            Name = $"MongoJoinSource_{suffix}",
+            Scope = scope,
+            Columns =
+            [
+                new() { Name = "id", Type = PortableType.String, IsNullable = false, MaxLength = 64 },
+                new() { Name = "customer_id", Type = PortableType.String, IsNullable = false, MaxLength = 64 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Indexes = [new IndexDefinition { Name = "by_customer", Columns = [new IndexColumn("customer_id")] }],
+            References =
+            [
+                new ReferenceDefinition
+                {
+                    Name = "customer",
+                    Columns = ["customer_id"],
+                    TargetUnitId = target.Id
+                }
+            ]
+        };
+        var sourceTable = new TableId(source.Name);
+        var targetTable = new TableId(target.Name);
+        var targetScore = new ColumnRef(targetTable, "score", QueryType.Int32, isNullable: false);
+        return new MongoJoinFixture(
+            source,
+            target,
+            sourceTable,
+            new ReferenceJoin(
+                "customer",
+                targetTable,
+                [new JoinColumnPair(
+                    new ColumnRef(sourceTable, "customer_id", QueryType.String, isNullable: false),
+                    new ColumnRef(targetTable, "id", QueryType.String, isNullable: false))]),
+            targetScore);
+    }
+
+    private sealed record MongoJoinFixture(
+        StorageUnit Source,
+        StorageUnit Target,
+        TableId SourceTable,
+        ReferenceJoin Join,
+        ColumnRef TargetScore);
 
     [SkippableFact]
     public void Provider_side_count_over_an_empty_collection_reports_zero()
