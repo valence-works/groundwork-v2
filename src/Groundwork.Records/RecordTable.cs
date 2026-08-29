@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Diagnostics.CodeAnalysis;
 using Groundwork.Kernel;
+using Groundwork.Query.Linq;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 using DeclarationState = Groundwork.Kernel.StorageDeclarationState;
 
@@ -13,6 +14,28 @@ public static class RecordTable
     [RequiresUnreferencedCode(
         "Infers a declaration from CLR members. Use the generated schema declaration directly in trimmed applications.")]
     public static RecordTableBuilder<T> For<T>(string name) => new(name);
+
+    /// <summary>
+    /// Binds a source-generated row accessor to its generated storage declaration without using
+    /// reflection or runtime code generation.
+    /// </summary>
+    /// <remarks>
+    /// Native AOT applications get the accessor registration and declaration from
+    /// <c>Groundwork.Schema.Generator</c>. This entry point fails closed when that registration is
+    /// absent instead of falling back to the reflection-based fluent declaration path.
+    /// </remarks>
+    public static RecordTable<T> FromGenerated<T>(KernelStorageUnit definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!GwGeneratedRows.TryGet<T>(out _))
+        {
+            throw new InvalidOperationException(
+                $"Type '{typeof(T).FullName}' has no generated Groundwork record accessor. " +
+                "Add Groundwork.Schema.Generator and annotate the row with [GwTable].");
+        }
+
+        return new RecordTable<T>(definition);
+    }
 }
 
 /// <summary>Expression-based authoring state for a CLR row type.</summary>

@@ -49,6 +49,19 @@ tests/Groundwork.Aot.Conformance/verify-native-aot.sh artifacts/aot-packages osx
 Use `linux-x64` on a Linux workstation. The last command must print an ELF/Mach-O executable
 description and `Native AOT conformance passed`; a managed-only publish is not evidence.
 
+The SQLite minimal-API proof exercises the shipped provider, generated declaration and mapping,
+unit of work, point read, and covered query through native HTTP endpoints. Reuse the same packed
+package directory:
+
+```bash
+GROUNDWORK_AOT_STARTUP_RUNS=1 \
+  samples/Groundwork.Samples.NativeAotApi/verify-native-aot.sh \
+  artifacts/aot-packages osx-arm64
+```
+
+One launch is correctness evidence. Repeated startup observations belong only in the manual
+performance workflow.
+
 ## Performance evidence
 
 `.github/workflows/performance.yml` (`Performance evidence`) is manual-only. Run it for the final
@@ -72,5 +85,6 @@ verify the exact-head Correctness and Concurrency results itself.
 
 All three correctness, concurrency, and Native AOT jobs honor the repository-level
 `GROUNDWORK_CI_PAUSED` cost brake. A skipped job is not evidence; while paused, record the equivalent
-focused local command and rerun the exact-head hosted lane after unpausing when that evidence is
-required.
+focused local command and native/package boundary where applicable. After unpausing, consolidate
+required exact-head hosted evidence into one candidate checkpoint instead of rerunning a matrix for
+each intermediate commit.

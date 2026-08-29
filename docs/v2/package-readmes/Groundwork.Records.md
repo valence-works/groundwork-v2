@@ -13,9 +13,10 @@ That generated accessor/materializer path is the Native AOT record-mapping contr
 `RecordTable.For<T>` declaration still infers columns from CLR members, and runtime-typed projection
 and aggregation selectors still compile expressions; those boundaries are explicitly annotated as
 requiring unreferenced and/or dynamic code. Native AOT applications must add
-`Groundwork.Schema.Generator`, preserve members used by fluent declaration inference, and keep row
-and projection shapes on generated surfaces. An ungenerated row type is refused with an explicit
-generator-oriented error instead of attempting dynamic code.
+`Groundwork.Schema.Generator`, construct tables with
+`RecordTable.FromGenerated<Customer>(CustomerStorageUnit.Definition)`, and keep row and projection shapes on
+generated surfaces. That constructor fails closed for an ungenerated row. Managed applications may
+continue using fluent declaration inference when they preserve the reflected members.
 
 This package deliberately has **no provider dependency**, which means it also has no
 `table.Open(connection)`. That is the point: a library can declare its storage and stay

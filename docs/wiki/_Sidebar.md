@@ -23,6 +23,7 @@
 - [Streams: Append & Retention](Streams-Append-and-Retention)
 - [Aggregation](Aggregation)
 - [Multi-Tenancy & Scopes](Multi-Tenancy-and-Scopes)
+- [Native AOT](Native-AOT)
 
 **Operating**
 - [Hosting & DI](Hosting-and-Dependency-Injection)
