@@ -14,7 +14,27 @@ public sealed class RelationalQueryCommand
         bool isMatchNone,
         string? selectedIndex,
         bool indexHintApplied,
-        IReadOnlyList<string> appliedOrder)
+        IReadOnlyList<string> appliedOrder) : this(
+            commandText,
+            parameters,
+            includesTotalCount,
+            isMatchNone,
+            selectedIndex,
+            indexHintApplied,
+            appliedOrder,
+            requiresCompositeMaterializer: false)
+    {
+    }
+
+    internal RelationalQueryCommand(
+        string commandText,
+        IEnumerable<QueryRenderParameter> parameters,
+        bool includesTotalCount,
+        bool isMatchNone,
+        string? selectedIndex,
+        bool indexHintApplied,
+        IReadOnlyList<string> appliedOrder,
+        bool requiresCompositeMaterializer)
     {
         CommandText = commandText ?? throw new ArgumentNullException(nameof(commandText));
         Parameters = (parameters ?? throw new ArgumentNullException(nameof(parameters))).ToImmutableArray();
@@ -25,6 +45,7 @@ public sealed class RelationalQueryCommand
         SelectedIndex = selectedIndex;
         IndexHintApplied = indexHintApplied;
         AppliedOrder = (appliedOrder ?? throw new ArgumentNullException(nameof(appliedOrder))).ToImmutableArray();
+        RequiresCompositeMaterializer = requiresCompositeMaterializer;
     }
 
     public string CommandText { get; }
@@ -34,6 +55,7 @@ public sealed class RelationalQueryCommand
     public string? SelectedIndex { get; }
     public bool IndexHintApplied { get; }
     public ImmutableArray<string> AppliedOrder { get; }
+    internal bool RequiresCompositeMaterializer { get; }
 }
 
 /// <summary>Native SQL and parameter values produced for one set-based mutation.</summary>
@@ -118,6 +140,12 @@ public static class RelationalQueryResultReader
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(decode);
+        if (query.RequiresCompositeMaterializer)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-032",
+                "Relational join rendering is available, but composite source/target result materialization has not landed yet.");
+        }
         mode.CancellationToken.ThrowIfCancellationRequested();
         using var command = CreateCommand(connection, query, transaction);
         await using var readerScope = await mode.ExecuteReader(command).ConfigureAwait(false);
@@ -631,7 +659,8 @@ public abstract class RelationalQueryRenderer
                 matchNone,
                 expectedIndex?.Name,
                 indexHintApplied,
-                effectiveOrder.Select(term => term.Column.Name).ToArray());
+                effectiveOrder.Select(term => term.Column.Name).ToArray(),
+                requiresCompositeMaterializer: true);
         }
         finally
         {

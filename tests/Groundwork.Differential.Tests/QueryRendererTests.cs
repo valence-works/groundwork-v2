@@ -69,6 +69,29 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Joined_result_reader_fails_closed_before_provider_io_until_composite_materialization_lands()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+
+        var command = new SqliteQueryRenderer().Render(request);
+        using var unopenedConnection = new SqliteConnection("Data Source=:memory:");
+        var refusal = Assert.Throws<QueryRenderException>(() =>
+            RelationalQueryResultReader.Read(unopenedConnection, command, (_, value) => value));
+
+        Assert.Equal("GW-QUERY-032", refusal.Code);
+        Assert.Contains("composite source/target", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Joined_sqlite_decimal_expressions_keep_their_relation_qualification()
     {
         var orders = new TableId("orders");

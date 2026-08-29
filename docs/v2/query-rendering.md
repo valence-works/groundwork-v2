@@ -48,7 +48,9 @@ PostgreSQL keep both relations optimizer-selected. The join equality itself bind
 both sides' predicate values, continuation values, and page values consume one shared provider
 parameter budget. Mongo `$lookup` is a separate renderer capability, and composite public
 source/target row materialization is owned by the Records join materializer rather than the SQL
-renderer.
+renderer. Provider execution through the ordinary dictionary result reader therefore remains
+fail-closed before provider I/O until that composite materializer lands, preventing duplicate
+source/target field labels from being collapsed into one dictionary slot.
 
 An empty `In` normalizes to match-none; a pinned declaration is still carried on the native
 command. A pinned index that excludes null values is refused when the predicate could match an
