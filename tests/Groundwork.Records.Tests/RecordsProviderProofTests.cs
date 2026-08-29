@@ -88,7 +88,7 @@ public sealed class RecordsProviderProofTests
     public void SQLServer_executes_joined_count_and_any()
     {
         using var connection = new SqlServerProviderFactory().Create(LiveSqlServer.Required());
-        AssertJoinedScalarTerminals(connection, "sqlserver");
+        AssertJoinedScalarTerminals(connection, "sql");
     }
 
     [SkippableFact]
