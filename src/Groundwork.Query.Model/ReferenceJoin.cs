@@ -26,10 +26,10 @@ public sealed record JoinColumnPair
 /// map the referencing unit's columns to the target unit's complete key in key order.
 /// </summary>
 /// <remarks>
-/// The declaration named by <see cref="ReferenceName"/> is the authority for the relationship and
-/// guarantees that both units use the same scope policy. Arbitrary join conditions and outer joins
-/// are deliberately not represented by this node. Self-reference joins also remain refused until
-/// the portable model has distinct source and target aliases.
+/// <see cref="ReferenceName"/> identifies the declaration that the shared coverage and admission
+/// layer resolves and validates, including its target key and same-scope policy. Arbitrary join
+/// conditions and outer joins are deliberately not represented by this node. Self-reference joins
+/// also remain refused until the portable model has distinct source and target aliases.
 /// </remarks>
 public sealed record ReferenceJoin
 {
@@ -92,6 +92,12 @@ internal static class JoinedQueryValidation
     {
         if (join.SourceTable != table)
             throw new ArgumentException("The reference join source must be the query table.", nameof(join));
+        if (ContainsElementSet(where))
+        {
+            throw new ArgumentException(
+                "Element-set predicates require a table-qualified set identity in joined queries.",
+                nameof(join));
+        }
 
         foreach (var column in Columns(where)
                      .Concat(order.Select(term => term.Column))
@@ -109,6 +115,15 @@ internal static class JoinedQueryValidation
             }
         }
     }
+
+    private static bool ContainsElementSet(Predicate predicate) => predicate switch
+    {
+        Predicate.ElementOf => true,
+        Predicate.Not not => ContainsElementSet(not.Inner),
+        Predicate.And and => and.Terms.Any(ContainsElementSet),
+        Predicate.Or or => or.Terms.Any(ContainsElementSet),
+        _ => false
+    };
 
     private static IEnumerable<ColumnRef> Columns(Predicate predicate)
     {

@@ -852,6 +852,7 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
 
     public QueryMaterializedResult Query(QueryRequest request, QueryRenderOptions? options = null)
     {
+        RefuseUnrenderedJoin(request);
         // A query can observe any key in the unit, so its read barrier is the whole
         // staged set rather than the exact-key barrier used by Read.
         context.FlushAll();
@@ -863,8 +864,20 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         QueryRenderOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        RefuseUnrenderedJoin(request);
         await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
         return await inner.QueryAsync(request, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void RefuseUnrenderedJoin(QueryRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Join is not null)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-032",
+                $"Declared reference join '{request.Join.ReferenceName}' is modelled but this provider does not yet render the q3 join node.");
+        }
     }
 
     public AggregationResult Aggregate(AggregationQuery query)

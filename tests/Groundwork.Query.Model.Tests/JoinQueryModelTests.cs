@@ -52,6 +52,10 @@ public sealed class JoinQueryModelTests
         Assert.Throws<ArgumentException>(() => new ReferenceJoin("customer", Customers,
             [new JoinColumnPair(unqualifiedSource, CustomerId)]));
         Assert.Throws<ArgumentException>(() => new JoinColumnPair(OrderCustomerId, mismatchedType));
+        Assert.Throws<ArgumentException>(() => new ReferenceJoin("customer", Customers,
+            new JoinColumnPair[] { null! }));
+        Assert.Throws<ArgumentException>(() => new ReferenceJoin("customer", Customers,
+            [new JoinColumnPair(OrderCustomerId, CustomerId), null!]));
         Assert.Throws<ArgumentException>(() => new ReferenceJoin("parent-order", Orders,
             [new JoinColumnPair(OrderCustomerId, new ColumnRef(Orders, "parent_id", QueryType.Guid, isNullable: false))]));
         Assert.Throws<ArgumentException>(() => new ReferenceJoin("customer", Customers,
@@ -138,6 +142,37 @@ public sealed class JoinQueryModelTests
             Projection.All,
             Paging.None,
             latestPerKey: new LatestPerKey(foreignName, foreignTimestamp)));
+        Assert.Throws<ArgumentException>(() => new QueryRequest(
+            Orders,
+            join,
+            new Predicate.ElementOf(
+                new ElementSetRef("tags", QueryType.String),
+                [QueryConstant.Of("important")],
+                SetQuantifier.Any),
+            [],
+            Projection.All,
+            Paging.None));
+    }
+
+    [Fact]
+    public void Portable_semantics_validate_both_join_key_sides()
+    {
+        var source = new ColumnRef(Orders, "score", QueryType.Double, isNullable: false);
+        var target = new ColumnRef(Customers, "score", QueryType.Double, isNullable: false);
+        var request = new QueryRequest(
+            Orders,
+            new ReferenceJoin("customer-score", Customers, [new JoinColumnPair(source, target)]),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+
+        var result = PortableQuerySemantics.Validate(request);
+
+        Assert.False(result.IsPortable);
+        Assert.Equal(2, result.Refusals.Count(refusal => refusal.Code == "GW-SEM-TYPE-006"));
+        Assert.Contains(result.Refusals, refusal => refusal.Path == "join.columnPairs[0].source");
+        Assert.Contains(result.Refusals, refusal => refusal.Path == "join.columnPairs[0].target");
     }
 
     [Fact]
