@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.SqlTypes;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Collections.Immutable;
 using System.Text.Json;
@@ -1363,6 +1364,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             return new RowWriteOutcome(write, new WriteOutcome(status, result.Version));
         }).ToArray();
 
+    [return: DynamicallyAccessedMembers(
+        DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
     private static Type ClrType(PortableType type) => type switch
     {
         PortableType.String or PortableType.Json => typeof(string),

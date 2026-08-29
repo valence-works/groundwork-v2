@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 using Groundwork.Kernel;
 using KernelStorageUnit = Groundwork.Kernel.StorageUnit;
 
@@ -19,6 +20,8 @@ public sealed class RecordAggregationBinding<TGroup, TResult>
     private readonly Func<AggregationRow, TGroup> groupSelector;
     private readonly Func<AggregationRow, TResult> resultSelector;
 
+    [RequiresDynamicCode("Compiles typed aggregation selectors at runtime.")]
+    [RequiresUnreferencedCode("Inspects typed aggregation selector methods and CLR result types that may be trimmed.")]
     internal RecordAggregationBinding(
         object owner,
         string profileName,
@@ -84,6 +87,8 @@ public static class AggregationRowExtensions
 
 internal static class RecordAggregationBindingFactory
 {
+    [RequiresDynamicCode("Compiles typed aggregation selectors at runtime.")]
+    [RequiresUnreferencedCode("Inspects typed aggregation selector methods and CLR result types that may be trimmed.")]
     public static RecordAggregationBinding<TGroup, TResult> Create<TRecord, TGroup, TResult>(
         RecordTable<TRecord> table,
         string profileName,
@@ -191,10 +196,19 @@ internal static class RecordAggregationBindingFactory
         _ => throw new ArgumentException($"Portable type '{type}' cannot be a typed aggregation result.", nameof(type))
     };
 
-    private static Type MakeNullable(Type type, bool nullable) =>
-        nullable && type.IsValueType && Nullable.GetUnderlyingType(type) is null
-            ? typeof(Nullable<>).MakeGenericType(type)
-            : type;
+    private static Type MakeNullable(Type type, bool nullable)
+    {
+        if (!nullable || !type.IsValueType || Nullable.GetUnderlyingType(type) is not null)
+            return type;
+        if (type == typeof(int)) return typeof(int?);
+        if (type == typeof(long)) return typeof(long?);
+        if (type == typeof(decimal)) return typeof(decimal?);
+        if (type == typeof(bool)) return typeof(bool?);
+        if (type == typeof(DateTimeOffset)) return typeof(DateTimeOffset?);
+        if (type == typeof(Guid)) return typeof(Guid?);
+        if (type == typeof(double)) return typeof(double?);
+        throw new ArgumentException($"CLR type '{type}' has no portable nullable aggregation shape.", nameof(type));
+    }
 
     private static void Add(IDictionary<string, Type> aliases, string alias, Type type, string kind)
     {
@@ -210,6 +224,8 @@ internal static class RecordAggregationSelector
     private static readonly MethodInfo GetMethod = typeof(AggregationRowExtensions)
         .GetMethod(nameof(AggregationRowExtensions.Get), BindingFlags.Public | BindingFlags.Static)!;
 
+    [RequiresDynamicCode("Compiles a typed aggregation selector at runtime.")]
+    [RequiresUnreferencedCode("Inspects aggregation selector methods and generic result types that may be trimmed.")]
     public static Func<AggregationRow, TResult> Compile<TResult>(
         Expression<Func<AggregationRow, TResult>> selector,
         IReadOnlyDictionary<string, Type> aliases,

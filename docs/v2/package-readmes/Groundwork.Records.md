@@ -9,6 +9,13 @@ over both source and target records. Joined materialization keeps provider rows 
 does not add reflection to the per-row path.
 `[GwTable]` row types use the direct accessors and constructor/member materializers emitted by
 `Groundwork.Schema.Generator`; `AccessorDynamicCodeGenerationCount` remains zero for that path.
+That generated accessor/materializer path is the Native AOT record-mapping contract. The fluent
+`RecordTable.For<T>` declaration still infers columns from CLR members, and runtime-typed projection
+and aggregation selectors still compile expressions; those boundaries are explicitly annotated as
+requiring unreferenced and/or dynamic code. Native AOT applications must add
+`Groundwork.Schema.Generator`, preserve members used by fluent declaration inference, and keep row
+and projection shapes on generated surfaces. An ungenerated row type is refused with an explicit
+generator-oriented error instead of attempting dynamic code.
 
 This package deliberately has **no provider dependency**, which means it also has no
 `table.Open(connection)`. That is the point: a library can declare its storage and stay

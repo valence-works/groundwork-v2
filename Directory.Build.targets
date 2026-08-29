@@ -1,5 +1,12 @@
 <Project>
 
+  <!-- IsAotCompatible enables the SDK's trim, single-file, and AOT analyzers. Promote the
+       reflection, generic-annotation, and dynamic-code diagnostics exercised by this package graph
+       so an annotated library cannot silently regress between exact-head native checkpoints. -->
+  <PropertyGroup Condition="'$(IsAotCompatible)' == 'true'">
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2055;IL2060;IL2072;IL2087;IL2090;IL3050</WarningsAsErrors>
+  </PropertyGroup>
+
   <!-- Release contract for every public package, declared once rather than repeated 24 times.
        Source Link is in-box in the .NET 8+ SDK; Microsoft.SourceLink.GitHub stays referenced so a
        build on an older SDK still embeds the same commit metadata. Groundwork.Packaging.Tests packs

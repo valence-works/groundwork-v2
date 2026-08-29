@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Groundwork.Documents.Serialization;
 
@@ -35,6 +36,8 @@ public sealed class VersionedJsonDocumentCodec
             this.versionFormat.ValidateRoundTrips(policy);
     }
 
+    [RequiresDynamicCode("Serializes an application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Serializes an application document whose members may be trimmed. Supply preserved JSON metadata in the application.")]
     public VersionedJsonContent Serialize<TDocument>(string documentKind, TDocument document)
     {
         ArgumentNullException.ThrowIfNull(document);
@@ -53,6 +56,8 @@ public sealed class VersionedJsonDocumentCodec
     }
 
     /// <summary>Deserializes a typed payload without inventing an identity or timestamp.</summary>
+    [RequiresDynamicCode("Materializes an application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Materializes an application document whose members may be trimmed. Supply preserved JSON metadata in the application.")]
     public TDocument Deserialize<TDocument>(VersionedJsonPayload payload)
     {
         ArgumentNullException.ThrowIfNull(payload);
@@ -86,6 +91,8 @@ public sealed class VersionedJsonDocumentCodec
             registry.UpcastToCurrent(payload.DocumentKind, version, content));
     }
 
+    [RequiresDynamicCode("Materializes an application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Materializes an application document whose members may be trimmed.")]
     private TDocument DeserializePayloadContent<TDocument>(VersionedJsonPayload payload, DocumentSchemaVersionPolicy policy, int version, string content)
     {
         try { return JsonSerializer.Deserialize<TDocument>(content, jsonOptions) ?? throw InvalidPayloadContent(payload, policy, version, "deserialized to null content"); }
@@ -94,6 +101,8 @@ public sealed class VersionedJsonDocumentCodec
         { throw InvalidPayloadContent(payload, policy, version, "could not be deserialized", exception); }
     }
 
+    [RequiresDynamicCode("Materializes an application document with its configured reflection-based JSON contract.")]
+    [RequiresUnreferencedCode("Materializes an application document whose members may be trimmed.")]
     private TDocument DeserializePayloadContent<TDocument>(VersionedJsonPayload payload, DocumentSchemaVersionPolicy policy, int version, JsonObject content)
     {
         try { return content.Deserialize<TDocument>(jsonOptions) ?? throw InvalidPayloadContent(payload, policy, version, "upcasted to null content"); }

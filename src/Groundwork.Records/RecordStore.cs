@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Diagnostics.CodeAnalysis;
 using Groundwork.Kernel;
 using Groundwork.Query.Linq;
 using Groundwork.Query.Model;
@@ -106,6 +107,8 @@ public sealed partial class RecordTable<T>
     /// Only direct record members may supply projected values; constants may be used for intentionally
     /// omitted members of a same-type shape.
     /// </summary>
+    [RequiresDynamicCode("Compiles a runtime record projection. Use a generated query projection for Native AOT.")]
+    [RequiresUnreferencedCode("Builds a projection expression from CLR members that may be trimmed.")]
     public RecordProjection<TResult> Select<TResult>(
         IGwQueryable<T> query,
         Expression<Func<T, TResult>> selector)
@@ -118,6 +121,8 @@ public sealed partial class RecordTable<T>
             RecordProjectionAccessor.Compile(selector, accessor.Members));
     }
 
+    [RequiresDynamicCode("Compiles a runtime record projection. Use a generated query projection for Native AOT.")]
+    [RequiresUnreferencedCode("Builds a projection expression from CLR members that may be trimmed.")]
     public RecordProjection<TResult> Project<TResult>(
         IGwQueryable<T> query,
         Expression<Func<T, TResult>> selector) => Select(query, selector);
@@ -126,6 +131,8 @@ public sealed partial class RecordTable<T>
     /// Creates a terminal typed projection over both sides of one activated record reference.
     /// The selector is compiled once and result fields remain table-qualified through provider I/O.
     /// </summary>
+    [RequiresDynamicCode("Compiles a runtime joined record projection. Use a generated query projection for Native AOT.")]
+    [RequiresUnreferencedCode("Builds a joined projection expression from CLR members that may be trimmed.")]
     public RecordProjection<TResult> Select<TTarget, TResult>(
         IGwQueryable<T> query,
         RecordReference<T, TTarget> reference,
@@ -156,6 +163,8 @@ public sealed partial class RecordTable<T>
     /// read only the profile's declared group and reducer aliases; the profile itself supplies all
     /// grouping, reducer, and budget semantics.
     /// </summary>
+    [RequiresDynamicCode("Compiles typed aggregation selectors at runtime.")]
+    [RequiresUnreferencedCode("Inspects typed aggregation selector methods and CLR result types that may be trimmed.")]
     public RecordAggregationBinding<TGroup, TResult> Aggregate<TGroup, TResult>(
         string profileName,
         Expression<Func<AggregationRow, TGroup>> groupSelector,
@@ -163,6 +172,8 @@ public sealed partial class RecordTable<T>
         RecordAggregationBindingFactory.Create(this, profileName, groupSelector, resultSelector);
 
     /// <summary>Convenience form for a profile with one declared group alias.</summary>
+    [RequiresDynamicCode("Compiles typed aggregation selectors at runtime.")]
+    [RequiresUnreferencedCode("Inspects typed aggregation selector methods and CLR result types that may be trimmed.")]
     public RecordAggregationBinding<TGroup, TResult> Aggregate<TGroup, TResult>(
         string profileName,
         string groupAlias,
@@ -171,15 +182,11 @@ public sealed partial class RecordTable<T>
         if (string.IsNullOrWhiteSpace(groupAlias))
             throw new ArgumentException("An aggregation group alias is required.", nameof(groupAlias));
         ArgumentNullException.ThrowIfNull(resultSelector);
-        var row = Expression.Parameter(typeof(AggregationRow), "row");
+        Expression<Func<AggregationRow, TGroup>> template = row => row.Get<TGroup>(string.Empty);
+        var call = (MethodCallExpression)template.Body;
         var group = Expression.Lambda<Func<AggregationRow, TGroup>>(
-            Expression.Call(
-                typeof(AggregationRowExtensions),
-                nameof(AggregationRowExtensions.Get),
-                [typeof(TGroup)],
-                row,
-                Expression.Constant(groupAlias)),
-            row);
+            call.Update(call.Object, [call.Arguments[0], Expression.Constant(groupAlias)]),
+            template.Parameters);
         return Aggregate(profileName, group, resultSelector);
     }
 
@@ -448,6 +455,8 @@ public sealed class RecordTableSession<T>
     }
 
     /// <summary>Creates and executes a typed declared aggregation in one call.</summary>
+    [RequiresDynamicCode("Compiles typed aggregation selectors at runtime.")]
+    [RequiresUnreferencedCode("Inspects typed aggregation selector methods and CLR result types that may be trimmed.")]
     public IReadOnlyList<RecordAggregationResult<TGroup, TResult>> Aggregate<TGroup, TResult>(
         string profileName,
         Expression<Func<AggregationRow, TGroup>> groupSelector,
@@ -468,6 +477,8 @@ public sealed class RecordTableSession<T>
     }
 
     /// <summary>Creates and asynchronously executes a typed declared aggregation in one call.</summary>
+    [RequiresDynamicCode("Compiles typed aggregation selectors at runtime.")]
+    [RequiresUnreferencedCode("Inspects typed aggregation selector methods and CLR result types that may be trimmed.")]
     public Task<IReadOnlyList<RecordAggregationResult<TGroup, TResult>>> AggregateAsync<TGroup, TResult>(
         string profileName,
         Expression<Func<AggregationRow, TGroup>> groupSelector,

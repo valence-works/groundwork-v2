@@ -196,7 +196,7 @@ public static class MongoValueCodec
                 JsonElement element => element.GetRawText(),
                 JsonDocument document => document.RootElement.GetRawText(),
                 JsonNode node => node.ToJsonString(),
-                _ => JsonSerializer.Serialize(value)
+                _ => PortableJsonSerializer.Serialize(value)
             };
             return BsonSerializer.Deserialize<BsonValue>(json);
         }

@@ -38,33 +38,38 @@ public sealed class GroundworkSchemaBoundaryException : InvalidOperationExceptio
 }
 
 /// <summary>Canonical JSON persistence for the CAS schema history snapshot.</summary>
-public static class PhysicalSchemaAppliedStateSerializer
+public static partial class PhysicalSchemaAppliedStateSerializer
 {
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = false,
-        TypeInfoResolver = CreateTypeInfoResolver(),
-        Converters = { new PortableDefaultJsonConverter(), new ReadOnlySetJsonConverterFactory(), new JsonStringEnumConverter() }
-    };
+    private static readonly JsonSerializerOptions Options = CreateOptions();
+    private static readonly JsonTypeInfo<StatePayload> PayloadTypeInfo =
+        (JsonTypeInfo<StatePayload>)Options.GetTypeInfo(typeof(StatePayload));
 
-    private static IJsonTypeInfoResolver CreateTypeInfoResolver()
+    private static JsonSerializerOptions CreateOptions()
     {
-        var resolver = new DefaultJsonTypeInfoResolver();
-        resolver.Modifiers.Add(typeInfo =>
+        var options = new JsonSerializerOptions(AppliedStateJsonContext.Default.Options)
         {
-            if (typeInfo.Type != typeof(StorageUnit))
-                return;
-            var references = typeInfo.Properties.Single(property =>
-                string.Equals(property.Name, nameof(StorageUnit.References), StringComparison.OrdinalIgnoreCase));
-            references.ShouldSerialize = static (_, value) =>
-                value is IReadOnlyList<ReferenceDefinition> { Count: > 0 };
-            var checks = typeInfo.Properties.Single(property =>
-                string.Equals(property.Name, nameof(StorageUnit.CheckConstraints), StringComparison.OrdinalIgnoreCase));
-            checks.ShouldSerialize = static (_, value) =>
-                value is IReadOnlyList<CheckConstraintDefinition> { Count: > 0 };
-        });
-        return resolver;
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false,
+            TypeInfoResolver = AppliedStateJsonContext.Default.WithAddedModifier(ModifyTypeInfo)
+        };
+        options.Converters.Insert(0, new PortableDefaultJsonConverter());
+        options.Converters.Insert(1, new StringReadOnlySetJsonConverter());
+        options.Converters.Insert(2, new AggregationPredicateReadOnlySetJsonConverter());
+        return options;
+    }
+
+    private static void ModifyTypeInfo(JsonTypeInfo typeInfo)
+    {
+        if (typeInfo.Type != typeof(StorageUnit))
+            return;
+        var references = typeInfo.Properties.Single(property =>
+            string.Equals(property.Name, nameof(StorageUnit.References), StringComparison.OrdinalIgnoreCase));
+        references.ShouldSerialize = static (_, value) =>
+            value is IReadOnlyList<ReferenceDefinition> { Count: > 0 };
+        var checks = typeInfo.Properties.Single(property =>
+            string.Equals(property.Name, nameof(StorageUnit.CheckConstraints), StringComparison.OrdinalIgnoreCase));
+        checks.ShouldSerialize = static (_, value) =>
+            value is IReadOnlyList<CheckConstraintDefinition> { Count: > 0 };
     }
 
     public static string Serialize(PhysicalSchemaAppliedState state)
@@ -82,13 +87,13 @@ public static class PhysicalSchemaAppliedStateSerializer
             ProviderDefinitions = state.Snapshot.ProviderDefinitions.ToArray(),
             AppliedOperations = state.AppliedOperations.ToArray()
         };
-        return JsonSerializer.Serialize(payload, Options);
+        return JsonSerializer.Serialize(payload, PayloadTypeInfo);
     }
 
     public static PhysicalSchemaAppliedState Deserialize(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
-        var payload = JsonSerializer.Deserialize<StatePayload>(json, Options)
+        var payload = JsonSerializer.Deserialize(json, PayloadTypeInfo)
             ?? throw new ArgumentException("Applied schema state JSON is empty.", nameof(json));
         if (payload.Definition is null || payload.Provider is null || payload.Evolution is null)
             throw new ArgumentException("Applied schema state JSON is missing its subject or provider.", nameof(json));
@@ -133,33 +138,62 @@ public static class PhysicalSchemaAppliedStateSerializer
         public PhysicalSchemaAppliedOperation[]? AppliedOperations { get; set; }
     }
 
-    private sealed class ReadOnlySetJsonConverterFactory : JsonConverterFactory
+    private sealed class StringReadOnlySetJsonConverter : JsonConverter<IReadOnlySet<string>>
     {
-        public override bool CanConvert(Type typeToConvert) =>
-            typeToConvert.IsGenericType && typeToConvert.GetGenericTypeDefinition() == typeof(IReadOnlySet<>);
-
-        public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options) =>
-            (JsonConverter)Activator.CreateInstance(
-                typeof(ReadOnlySetJsonConverter<>).MakeGenericType(typeToConvert.GetGenericArguments()[0]))!;
-    }
-
-    private sealed class ReadOnlySetJsonConverter<T> : JsonConverter<IReadOnlySet<T>>
-    {
-        public override IReadOnlySet<T> Read(
+        public override IReadOnlySet<string> Read(
             ref Utf8JsonReader reader,
             Type typeToConvert,
-            JsonSerializerOptions options) =>
-            JsonSerializer.Deserialize<HashSet<T>>(ref reader, options)
-                ?? throw new JsonException("A set cannot be null.");
+            JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.StartArray)
+                throw new JsonException("A set must be an array.");
+            var values = new HashSet<string>(StringComparer.Ordinal);
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                values.Add(reader.GetString() ?? throw new JsonException("A string set cannot contain null."));
+            return values;
+        }
 
         public override void Write(
             Utf8JsonWriter writer,
-            IReadOnlySet<T> value,
+            IReadOnlySet<string> value,
             JsonSerializerOptions options)
         {
             writer.WriteStartArray();
             foreach (var item in value)
-                JsonSerializer.Serialize(writer, item, options);
+                writer.WriteStringValue(item);
+            writer.WriteEndArray();
+        }
+    }
+
+    private sealed class AggregationPredicateReadOnlySetJsonConverter
+        : JsonConverter<IReadOnlySet<AggregationPredicateOperator>>
+    {
+        public override IReadOnlySet<AggregationPredicateOperator> Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.StartArray)
+                throw new JsonException("A set must be an array.");
+            var values = new HashSet<AggregationPredicateOperator>();
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+            {
+                var name = reader.GetString() ?? throw new JsonException("An aggregation predicate cannot be null.");
+                if (!Enum.TryParse<AggregationPredicateOperator>(name, ignoreCase: true, out var value))
+                    throw new JsonException($"Unknown aggregation predicate '{name}'.");
+                values.Add(value);
+            }
+            return values;
+        }
+
+        public override void Write(
+            Utf8JsonWriter writer,
+            IReadOnlySet<AggregationPredicateOperator> value,
+            JsonSerializerOptions options)
+        {
+            writer.WriteStartArray();
+            foreach (var item in value)
+                writer.WriteStringValue(item.ToString());
             writer.WriteEndArray();
         }
     }
@@ -207,7 +241,7 @@ public static class PhysicalSchemaAppliedStateSerializer
             else if (value.Value is byte[] bytes)
                 writer.WriteBase64StringValue(bytes);
             else
-                JsonSerializer.Serialize(writer, value.Value, value.Value.GetType(), options);
+                PortableJsonSerializer.WriteClosed(writer, value.Value);
             writer.WriteEndObject();
         }
 
@@ -246,4 +280,12 @@ public static class PhysicalSchemaAppliedStateSerializer
             _ => throw new JsonException($"Unsupported JSON default token '{value.ValueKind}'.")
         };
     }
+
+    [JsonSourceGenerationOptions(
+        PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+        WriteIndented = false,
+        UseStringEnumConverter = true,
+        GenerationMode = JsonSourceGenerationMode.Metadata)]
+    [JsonSerializable(typeof(StatePayload))]
+    private sealed partial class AppliedStateJsonContext : JsonSerializerContext;
 }

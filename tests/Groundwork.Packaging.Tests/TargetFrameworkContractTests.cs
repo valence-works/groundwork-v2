@@ -41,6 +41,8 @@ public sealed class TargetFrameworkContractTests
     /// </summary>
     private static readonly Dictionary<string, string> SingleTargetSuites = new(StringComparer.Ordinal)
     {
+        ["tests/Groundwork.Aot.Conformance/Groundwork.Aot.Conformance.csproj"] =
+            "Publishes and runs a native executable with the latest SDK; it is not a managed multi-framework test host.",
         ["tests/Groundwork.Packaging.Tests/Groundwork.Packaging.Tests.csproj"] =
             "Inspects repository metadata and packed artifacts, which are the same whichever framework reads them.",
         ["tests/Groundwork.SchemaTool.Tests/Groundwork.SchemaTool.Tests.csproj"] =

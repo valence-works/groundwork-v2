@@ -28,6 +28,27 @@ Compare `headSha` with the pull request's current `headRefOid`. Any later push i
 evidence and requires another dispatch. Do not use a skipped job or a run from an older commit as a
 substitute.
 
+## Native AOT correctness
+
+`.github/workflows/aot.yml` (`Native AOT conformance`) packs the exact-head public packages, restores
+an isolated package-only consumer, publishes it with `PublishAot=true`, verifies that the result is
+an ELF/Mach-O executable, and runs that native binary. Runtime package builds already treat trim and
+dynamic-code analyzer findings as errors; this lane proves both the shipped package boundary and the
+closed in-memory execution path against the Native AOT compiler and runtime. It runs after a push to
+`main` and can be dispatched against an exact candidate SHA when an AOT-sensitive change needs
+pre-merge evidence. It does not run live-provider or concurrency matrices.
+
+The equivalent local proof is:
+
+```bash
+dotnet restore Groundwork.slnx --nologo -m:1
+eng/pack-public-packages.sh artifacts/aot-packages 0.2.0-aot.local
+tests/Groundwork.Aot.Conformance/verify-native-aot.sh artifacts/aot-packages osx-arm64
+```
+
+Use `linux-x64` on a Linux workstation. The last command must print an ELF/Mach-O executable
+description and `Native AOT conformance passed`; a managed-only publish is not evidence.
+
 ## Performance evidence
 
 `.github/workflows/performance.yml` (`Performance evidence`) is manual-only. Run it for the final
@@ -48,3 +69,8 @@ it is not allowed to hide a correctness failure.
 At the time this split was introduced, GitHub reported no branch protection or ruleset for `main`.
 Until repository governance explicitly makes checks required, the control-room merge procedure must
 verify the exact-head Correctness and Concurrency results itself.
+
+All three correctness, concurrency, and Native AOT jobs honor the repository-level
+`GROUNDWORK_CI_PAUSED` cost brake. A skipped job is not evidence; while paused, record the equivalent
+focused local command and rerun the exact-head hosted lane after unpausing when that evidence is
+required.

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -89,6 +90,37 @@ internal static class LinqRowMaterializer
                 return row => generatedAccessor.Materialize(row, columns, optionalColumns);
             }
 
+            return BuildCompatibilityWhenAvailable(model, projection);
+        }
+
+        [UnconditionalSuppressMessage(
+            "Trimming",
+            "IL2026",
+            Justification = "Native AOT refuses before this call; the managed preview fallback intentionally retains reflection compatibility.")]
+        [UnconditionalSuppressMessage(
+            "Aot",
+            "IL3050",
+            Justification = "RuntimeFeature.IsDynamicCodeSupported guards the managed-only compatibility materializer.")]
+        private static Func<IReadOnlyDictionary<string, object?>, T> BuildCompatibilityWhenAvailable(
+            GwTableModel<T>? model,
+            Projection? projection)
+        {
+            if (!RuntimeFeature.IsDynamicCodeSupported)
+            {
+                throw new NotSupportedException(
+                    $"Type '{typeof(T).FullName}' has no generated Groundwork materializer. " +
+                    "Add Groundwork.Schema.Generator for Native AOT query execution.");
+            }
+
+            return BuildCompatibility(model, projection);
+        }
+
+        [RequiresDynamicCode("Builds and compiles a compatibility materializer for an ungenerated CLR row type.")]
+        [RequiresUnreferencedCode("Reflects over an ungenerated CLR row type. Add Groundwork.Schema.Generator to use the trim-safe path.")]
+        private static Func<IReadOnlyDictionary<string, object?>, T> BuildCompatibility(
+            GwTableModel<T>? model,
+            Projection? projection)
+        {
             Interlocked.Increment(ref dynamicCodeGenerationCount);
 
             var row = Expression.Parameter(typeof(IReadOnlyDictionary<string, object?>), "row");

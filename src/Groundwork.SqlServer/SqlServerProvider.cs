@@ -260,7 +260,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
             PortableType.Decimal when value is decimal number => number,
             PortableType.Guid when value is Guid guid => guid,
             PortableType.Json when value is string text => text,
-            PortableType.Json => JsonSerializer.Serialize(value),
+            PortableType.Json => PortableJsonSerializer.Serialize(value),
             _ => value
         };
     }
