@@ -153,9 +153,10 @@ public static class QueryResultMaterializer
         {
             var last = visible[visible.Length - 1];
             var values = new List<QueryConstant>(effectiveOrder.Length);
-            foreach (var term in effectiveOrder)
+            for (var index = 0; index < effectiveOrder.Length; index++)
             {
-                if (!last.TryGetValue(term.Column.Name, out var value))
+                var term = effectiveOrder[index];
+                if (!TryGetOrderValue(last, effectiveOrder, index, out var value))
                 {
                     values.Clear();
                     break;
@@ -210,13 +211,32 @@ public static class QueryResultMaterializer
         for (var index = 0; index < order.Count; index++)
         {
             var term = order[index];
-            row.TryGetValue(term.Column.Name, out var actual);
+            TryGetOrderValue(row, order, index, out var actual);
             var boundary = cursor[index].Kind == QueryConstantKind.Null ? null : cursor[index].Value;
             var comparison = CompareForOrder(actual, boundary, term);
             if (comparison > 0) return true;
             if (comparison < 0) return false;
         }
         return false;
+    }
+
+    private static bool TryGetOrderValue(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<OrderTerm> order,
+        int index,
+        out object? value)
+    {
+        var fieldName = QueryRequestExecution.ContinuationFieldName(index);
+        if (row.TryGetValue(fieldName, out value))
+            return true;
+
+        var column = order[index].Column;
+        if (order.Count(term => ColumnRefIdentity.SameName(term.Column, column)) > 1)
+        {
+            throw new InvalidOperationException(
+                $"A joined provider result must expose continuation field '{fieldName}' for '{column}'.");
+        }
+        return row.TryGetValue(column.Name, out value);
     }
 
     private static int CompareForOrder(object? left, object? right, OrderTerm term)
@@ -260,6 +280,17 @@ public static class QueryResultMaterializer
 /// <summary>Builds the internal execution request without changing the public query binding.</summary>
 public static class QueryRequestExecution
 {
+    /// <summary>
+    /// Returns the stable provider-result field name for one effective continuation-order value.
+    /// Joined renderers use these internal aliases when qualified columns share a logical name.
+    /// </summary>
+    public static string ContinuationFieldName(int orderIndex)
+    {
+        if (orderIndex < 0)
+            throw new ArgumentOutOfRangeException(nameof(orderIndex));
+        return "__groundwork_continuation_" + orderIndex.ToString(CultureInfo.InvariantCulture);
+    }
+
     /// <summary>Bounds a direct model request for a cardinality result shape.</summary>
     public static QueryRequest ForResultShape(QueryRequest request)
     {

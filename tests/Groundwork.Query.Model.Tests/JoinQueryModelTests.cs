@@ -345,6 +345,38 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_composite_continuation_keeps_same_named_identity_values_distinct()
+    {
+        var sourceIdA = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var sourceIdB = Guid.Parse("00000000-0000-0000-0000-000000000002");
+        var targetId = Guid.Parse("00000000-0000-0000-0000-000000000010");
+        var options = new QueryRenderOptions().WithIdentityTieBreaks([OrderId]);
+        var firstRequest = ContinuationPage(Paging.Keyset(1));
+        var source = new[]
+        {
+            SameNamedIdentityRow(1, sourceIdA, targetId),
+            SameNamedIdentityRow(2, sourceIdB, targetId)
+        };
+
+        var first = QueryResultMaterializer.Materialize(
+            firstRequest,
+            options,
+            source,
+            sourceIncludesContinuation: false);
+        var cursor = QueryContinuationToken.Decode(first.NextContinuationToken!, firstRequest, options);
+        var second = QueryResultMaterializer.Materialize(
+            ContinuationPage(Paging.Continuation(first.NextContinuationToken!, 1)),
+            options,
+            source,
+            sourceIncludesContinuation: false);
+
+        Assert.Equal(sourceIdA, cursor[1].Value);
+        Assert.Equal(targetId, cursor[2].Value);
+        Assert.Equal(1L, first.Rows.Single()[OrderSequence.Name]);
+        Assert.Equal(2L, second.Rows.Single()[OrderSequence.Name]);
+    }
+
+    [Fact]
     public void Joined_composite_continuation_refuses_a_value_outside_its_typed_tuple_position()
     {
         var request = Request(Join());
@@ -410,13 +442,25 @@ public sealed class JoinQueryModelTests
         var token = QueryContinuationToken.Encode(
             request,
             options,
-            order.Select(term => QueryConstant.Of(term.Column, term.Column == OrderCustomerId
-                ? Guid.Empty
-                : term.Column == CustomerName ? "Alice"
-                : term.Column == CustomerId ? Guid.Empty
-                : "eu")));
+            order.Select(term => ContinuationValue(term.Column)));
 
         Assert.Equal(order.Length, QueryContinuationToken.Decode(token, request, options).Count);
+    }
+
+    [Fact]
+    public void Joined_composite_continuation_rejects_a_partial_identity_against_the_resolved_source_key()
+    {
+        var request = Request(Join());
+        var options = new QueryRenderOptions(drivingIdentityColumns: [OrderCustomerId])
+            .WithIdentityTieBreaks([OrderCustomerId, OrderRegion]);
+        var order = options.GetEffectiveOrder(request);
+
+        var failure = Assert.Throws<ArgumentException>(() => QueryContinuationToken.Encode(
+            request,
+            options,
+            order.Select(term => ContinuationValue(term.Column))));
+
+        Assert.Contains("match the source schema identity", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -490,6 +534,13 @@ public sealed class JoinQueryModelTests
         QueryConstant.Of(CustomerRegion, "eu")
     ];
 
+    private static QueryConstant ContinuationValue(ColumnRef column) => column.Type switch
+    {
+        QueryType.Guid => QueryConstant.Of(column, Guid.Empty),
+        QueryType.Int64 => QueryConstant.Of(column, 1L),
+        _ => QueryConstant.Of(column, column == CustomerName ? "Alice" : "eu")
+    };
+
     private static QueryRequest ContinuationPage(Paging paging) => new(
         Orders,
         Join(),
@@ -497,6 +548,21 @@ public sealed class JoinQueryModelTests
         [new OrderTerm(CustomerName, nullOrder: NullOrder.Last)],
         Projection.ColumnsOnly(OrderSequence, CustomerName),
         paging);
+
+    private static IReadOnlyDictionary<string, object?> SameNamedIdentityRow(
+        long sequence,
+        Guid sourceId,
+        Guid targetId) => new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        [OrderSequence.Name] = sequence,
+        [CustomerName.Name] = "Alice",
+        [CustomerRegion.Name] = "eu",
+        [OrderId.Name] = targetId,
+        [QueryRequestExecution.ContinuationFieldName(0)] = "Alice",
+        [QueryRequestExecution.ContinuationFieldName(1)] = sourceId,
+        [QueryRequestExecution.ContinuationFieldName(2)] = targetId,
+        [QueryRequestExecution.ContinuationFieldName(3)] = "eu"
+    };
 
     private static IReadOnlyDictionary<string, object?> Row(
         long order,
