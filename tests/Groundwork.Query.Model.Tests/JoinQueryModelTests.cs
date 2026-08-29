@@ -396,9 +396,11 @@ public sealed class JoinQueryModelTests
     public void Joined_composite_continuation_includes_every_declared_source_identity_component()
     {
         var request = Request(Join());
-        var options = new QueryRenderOptions(
-            tieBreakColumns: [OrderCustomerId],
-            drivingIdentityColumns: [OrderCustomerId, OrderRegion]);
+        var options = new QueryRenderOptions(tieBreakColumns: [OrderCustomerId])
+            .WithIdentityTieBreaks([OrderCustomerId, OrderRegion]) with
+            {
+                TieBreakColumns = [OrderCustomerId]
+            };
         var order = options.GetEffectiveOrder(request);
 
         Assert.Equal(
@@ -478,7 +480,7 @@ public sealed class JoinQueryModelTests
         [new JoinColumnPair(OrderCustomerId, CustomerId), new JoinColumnPair(OrderRegion, CustomerRegion)]);
 
     private static QueryRenderOptions CompositeOptions() =>
-        new(tieBreakColumns: [OrderSequence], drivingIdentityColumns: [OrderSequence]);
+        new QueryRenderOptions(tieBreakColumns: [OrderSequence]).WithIdentityTieBreaks([OrderSequence]);
 
     private static QueryConstant[] CompositeValues(QueryConstant? targetId = null) =>
     [

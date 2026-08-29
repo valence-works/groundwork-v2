@@ -219,6 +219,9 @@ public sealed record QueryRenderOptions
     /// </summary>
     public ImmutableArray<ColumnRef> DrivingIdentityColumns { get; init; }
 
+    /// <summary>Provider-resolved driving identity used to verify a joined continuation declaration.</summary>
+    internal ImmutableArray<ColumnRef> ResolvedDrivingIdentityColumns { get; init; }
+
     /// <summary>Provider-owned partition columns added to LatestPerKey grouping.</summary>
     public ImmutableArray<ColumnRef> LatestPartitionColumns { get; init; }
 
@@ -251,7 +254,10 @@ public sealed record QueryRenderOptions
         return this with
         {
             TieBreakColumns = merged,
-            DrivingIdentityColumns = identitySnapshot.ToImmutableArray()
+            DrivingIdentityColumns = DrivingIdentityColumns.Length == 0
+                ? identitySnapshot.ToImmutableArray()
+                : DrivingIdentityColumns,
+            ResolvedDrivingIdentityColumns = identitySnapshot.ToImmutableArray()
         };
     }
 
@@ -447,21 +453,31 @@ public static class QueryContinuationToken
             return;
 
         var declaredIdentity = options.DrivingIdentityColumns;
-        if (declaredIdentity.Length == 0)
+        var resolvedIdentity = options.ResolvedDrivingIdentityColumns;
+        if (declaredIdentity.Length == 0 || resolvedIdentity.Length == 0)
         {
             throw new ArgumentException(
-                "A joined continuation requires the complete declared driving identity.",
+                "A joined continuation requires the complete declared driving identity resolved from the source schema.",
                 nameof(options));
         }
 
-        if (declaredIdentity.Any(column => column is null || column.Table != request.Table))
+        if (declaredIdentity.Any(column => column is null || column.Table != request.Table) ||
+            resolvedIdentity.Any(column => column is null || column.Table != request.Table))
             throw new ArgumentException(
                 "Every declared driving identity column must belong to the joined query source table.",
                 nameof(options));
 
-        if (declaredIdentity.GroupBy(column => (column.Table, column.Name)).Any(group => group.Count() != 1))
+        if (declaredIdentity.GroupBy(column => (column.Table, column.Name)).Any(group => group.Count() != 1) ||
+            resolvedIdentity.GroupBy(column => (column.Table, column.Name)).Any(group => group.Count() != 1))
             throw new ArgumentException(
                 "A joined continuation requires every declared driving identity component exactly once.",
+                nameof(options));
+
+        if (declaredIdentity.Length != resolvedIdentity.Length ||
+            declaredIdentity.Where((column, index) =>
+                !ColumnRefIdentity.SameQualifiedColumn(column, resolvedIdentity[index])).Any())
+            throw new ArgumentException(
+                "The declared driving identity must match the source schema identity in order and completeness.",
                 nameof(options));
     }
 
