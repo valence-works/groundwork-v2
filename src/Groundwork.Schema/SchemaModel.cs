@@ -251,7 +251,9 @@ public sealed record SchemaReference
         Target = string.IsNullOrWhiteSpace(target)
             ? throw new ArgumentException("A non-empty value is required.", nameof(target))
             : target;
-        Columns = new ReadOnlyCollection<string>((columns ?? throw new ArgumentNullException(nameof(columns))).ToArray());
+        Columns = new ReadOnlyCollection<string>((columns ?? throw new ArgumentNullException(nameof(columns)))
+            .Select(column => column ?? throw new ArgumentException("Reference column names cannot be null.", nameof(columns)))
+            .ToArray());
     }
 
     public string Name { get; }

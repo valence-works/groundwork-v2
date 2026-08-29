@@ -7,6 +7,15 @@ namespace Groundwork.Schema.Generator.Tests;
 public sealed class ReferenceCanonicalTests
 {
     [Fact]
+    public void Reference_rejects_null_column_names_before_canonical_serialization()
+    {
+        var exception = Assert.Throws<ArgumentException>(() =>
+            new SchemaReference("customer", "customers", [null!]));
+
+        Assert.Equal("columns", exception.ParamName);
+    }
+
+    [Fact]
     public void Canonical_schema_round_trips_references_and_compiles_them_to_kernel_metadata()
     {
         var target = new SchemaTable(
