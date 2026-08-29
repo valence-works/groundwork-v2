@@ -129,6 +129,40 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Unequal_scope_declared_reference_join_refuses_before_command_observation()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var targetFixture = JoinFixture("unequal-scope-guard", ScopePolicy.Global);
+        var sourceFixture = targetFixture with
+        {
+            Source = targetFixture.Source with { Scope = ScopePolicy.Scoped }
+        };
+        Assert.True(connection.Schema.Apply(targetFixture.Target).Applied);
+        Assert.True(connection.Schema.Apply(sourceFixture.Source).Applied);
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(
+            sourceFixture.Source,
+            StorageAccess.Scoped(new StorageScope("tenant-a")),
+            observer);
+        var request = new QueryRequest(
+            sourceFixture.SourceTable,
+            sourceFixture.Join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(sourceFixture.TargetScore),
+            Paging.None,
+            new ResultShape.Sum(sourceFixture.TargetScore));
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => session.Query(request));
+
+        Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
+        Assert.Empty(observer.Commands);
+    }
+
+    [SkippableFact]
     public void Owned_session_marker_matches_the_opening_path()
     {
         var connectionString = LiveMongo.ConnectionString;

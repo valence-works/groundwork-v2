@@ -195,15 +195,50 @@ internal sealed class MongoProviderState
 
         EnsureSameDeclaration(appliedState.Snapshot.Subject.Definition, declaration);
 
+        MongoAppliedUnit resolved;
         lock (gate)
         {
             if (units.TryGetValue(declaration.Id, out var raced))
             {
                 EnsureSameDeclaration(raced.Declaration, declaration);
-                return raced;
+                resolved = raced;
             }
-            units.Add(declaration.Id, applied);
-            return applied;
+            else
+            {
+                units.Add(declaration.Id, applied);
+                resolved = applied;
+            }
+        }
+        CacheReferenceTargets(resolved.Declaration);
+        return resolved;
+    }
+
+    /// <summary>
+    /// Resolves declared reference targets while the source unit is being admitted. Query execution
+    /// must be able to enforce the source/target scope boundary from memory, before it performs any
+    /// target collection or admission work. A target that is not applied is intentionally left out;
+    /// the query resolver will refuse that join without doing a second metadata lookup.
+    /// </summary>
+    private void CacheReferenceTargets(StorageUnit source)
+    {
+        foreach (var reference in source.References)
+        {
+            if (reference is null || TryGet(reference.TargetUnitId, out _))
+                continue;
+
+            var targetState = ReadAppliedState(reference.TargetUnitId);
+            if (targetState is null)
+                continue;
+
+            var target = new MongoAppliedUnit(
+                MongoDeclarationSnapshot.Clone(targetState.Snapshot.Subject.Definition),
+                targetState.Snapshot.Subject.Name,
+                targetState.Snapshot.Subject.Evolution.RetiresPrimaryStorage);
+            lock (gate)
+            {
+                if (!units.ContainsKey(reference.TargetUnitId))
+                    units.Add(reference.TargetUnitId, target);
+            }
         }
     }
 
@@ -224,13 +259,9 @@ internal sealed class MongoProviderState
             throw InvalidReferenceJoin(join, "does not name exactly one applied source reference");
 
         var reference = references[0];
-        var targetState = ReadAppliedState(reference.TargetUnitId);
-        if (targetState is null || targetState.Snapshot.Subject.Evolution.RetiresPrimaryStorage)
+        if (!TryGet(reference.TargetUnitId, out var target) || target.RetiresPrimaryStorage)
             throw InvalidReferenceJoin(join, "targets a storage unit that is not currently applied");
 
-        var target = new MongoAppliedUnit(
-            MongoDeclarationSnapshot.Clone(targetState.Snapshot.Subject.Definition),
-            targetState.Snapshot.Subject.Name);
         if (source.Scope != target.Declaration.Scope)
         {
             throw new InvalidOperationException(
@@ -368,7 +399,10 @@ internal sealed class MongoProviderState
     }
 }
 
-internal sealed record MongoAppliedUnit(StorageUnit Declaration, string CollectionName);
+internal sealed record MongoAppliedUnit(
+    StorageUnit Declaration,
+    string CollectionName,
+    bool RetiresPrimaryStorage = false);
 
 internal sealed record MongoScopeRegistration(StorageScope Scope, string Token, string CollectionName);
 
