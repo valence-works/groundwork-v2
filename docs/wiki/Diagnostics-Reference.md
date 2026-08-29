@@ -246,7 +246,7 @@ Raised by `Groundwork.Extensions.DependencyInjection`, carried on
 | --- | --- |
 | `GW-ACCESS-001` | Cross-scope query without privileged access |
 | `GW-ACCESS-002` | Provider session does not advertise privileged cross-scope queries |
-| `GW-ACCESS-003` | Point operation under privileged access (ambiguous) |
+| `GW-ACCESS-003` | Point operation under privileged access, or a declared-reference join whose persisted target scope differs from its source scope |
 | `GW-ACCESS-004`…`006` | Additional access-context refusals |
 
 ---

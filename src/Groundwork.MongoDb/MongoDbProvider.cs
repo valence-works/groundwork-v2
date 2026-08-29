@@ -209,37 +209,7 @@ internal sealed class MongoProviderState
                 resolved = applied;
             }
         }
-        CacheReferenceTargets(resolved.Declaration);
         return resolved;
-    }
-
-    /// <summary>
-    /// Resolves declared reference targets while the source unit is being admitted. Query execution
-    /// must be able to enforce the source/target scope boundary from memory, before it performs any
-    /// target collection or admission work. A target that is not applied is intentionally left out;
-    /// the query resolver will refuse that join without doing a second metadata lookup.
-    /// </summary>
-    private void CacheReferenceTargets(StorageUnit source)
-    {
-        foreach (var reference in source.References)
-        {
-            if (reference is null || TryGet(reference.TargetUnitId, out _))
-                continue;
-
-            var targetState = ReadAppliedState(reference.TargetUnitId);
-            if (targetState is null)
-                continue;
-
-            var target = new MongoAppliedUnit(
-                MongoDeclarationSnapshot.Clone(targetState.Snapshot.Subject.Definition),
-                targetState.Snapshot.Subject.Name,
-                targetState.Snapshot.Subject.Evolution.RetiresPrimaryStorage);
-            lock (gate)
-            {
-                if (!units.ContainsKey(reference.TargetUnitId))
-                    units.Add(reference.TargetUnitId, target);
-            }
-        }
     }
 
     internal MongoAppliedUnit ResolveReferenceTarget(
@@ -259,14 +229,40 @@ internal sealed class MongoProviderState
             throw InvalidReferenceJoin(join, "does not name exactly one applied source reference");
 
         var reference = references[0];
-        if (!TryGet(reference.TargetUnitId, out var target) || target.RetiresPrimaryStorage)
-            throw InvalidReferenceJoin(join, "targets a storage unit that is not currently applied");
+        if (reference.TargetScope is null)
+            throw InvalidReferenceJoin(
+                join,
+                "does not carry persisted target scope metadata and cannot be admitted safely");
 
-        if (source.Scope != target.Declaration.Scope)
+        if (source.Scope != reference.TargetScope)
         {
             throw new InvalidOperationException(
                 $"GW-ACCESS-003: declared reference join '{join.ReferenceName}' crosses storage scope policies and was refused before provider I/O.");
         }
+
+        if (!TryGet(reference.TargetUnitId, out var target))
+        {
+            var targetState = ReadAppliedState(reference.TargetUnitId);
+            if (targetState is null || targetState.Snapshot.Subject.Evolution.RetiresPrimaryStorage)
+                throw InvalidReferenceJoin(join, "targets a storage unit that is not currently applied");
+
+            var candidate = new MongoAppliedUnit(
+                MongoDeclarationSnapshot.Clone(targetState.Snapshot.Subject.Definition),
+                targetState.Snapshot.Subject.Name);
+            lock (gate)
+            {
+                target = units.TryGetValue(reference.TargetUnitId, out var raced)
+                    ? raced
+                    : units[reference.TargetUnitId] = candidate;
+            }
+        }
+        if (target.Declaration.Scope != reference.TargetScope)
+        {
+            throw InvalidReferenceJoin(
+                join,
+                $"persists target scope {target.Declaration.Scope} but the reference requires {reference.TargetScope}; schema history is inconsistent");
+        }
+
         ValidateScope(target.Declaration, access);
         if (!string.Equals(join.SourceTable.Value, source.Name, StringComparison.Ordinal) ||
             !string.Equals(join.TargetTable.Value, target.Declaration.Name, StringComparison.Ordinal) ||
@@ -401,8 +397,7 @@ internal sealed class MongoProviderState
 
 internal sealed record MongoAppliedUnit(
     StorageUnit Declaration,
-    string CollectionName,
-    bool RetiresPrimaryStorage = false);
+    string CollectionName);
 
 internal sealed record MongoScopeRegistration(StorageScope Scope, string Token, string CollectionName);
 

@@ -142,6 +142,22 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public void Manifest_compilation_enriches_reference_target_scope_from_the_resolved_target_unit()
+    {
+        var schema = GroundworkSchemaCanonical.Read("""
+            {"tables":[
+              {"name":"customers","scope":"Scoped","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]},
+              {"name":"orders","scope":"Scoped","columns":[{"name":"id","type":"Guid","nullable":false},{"name":"customer_id","type":"Guid","nullable":false}],"key":["id"],"indexes":[{"name":"by_customer","columns":[{"name":"customer_id","descending":false}],"includeNulls":true,"unique":false}],"references":[{"name":"customer","target":"customers","columns":["customer_id"]}]}
+            ]}
+            """);
+
+        var units = SchemaCompilation.Compile(schema);
+        var source = Assert.Single(units, unit => unit.Id.Value == "orders");
+
+        Assert.Equal(ScopePolicy.Scoped, Assert.Single(source.References).TargetScope);
+    }
+
+    [Fact]
     public void An_offset_less_timestamp_default_reads_as_utc_on_any_machine()
     {
         var schema = ValidSchema.Replace(

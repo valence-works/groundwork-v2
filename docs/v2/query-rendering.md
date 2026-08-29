@@ -51,7 +51,12 @@ source/target row materialization is owned by the Records join materializer rath
 renderer. MongoDB renders the reference as one `$lookup` whose pipeline compares the ordered
 source columns with the target key under `$expr`. Runtime admission resolves the target's exact
 physical collection from its applied schema history and applies the source session's same-scope
-route; it never infers a target collection by rewriting the source name. Target fields remain
+route; it never infers a target collection by rewriting the source name. The reference snapshot
+persists the target scope policy, so a missing or unequal policy is refused before MongoDB reads
+target history. Builders record the source's required same-scope policy even for identity-only
+references. Applied declarations that predate this metadata must be reapplied before opening with
+a newly built declaration; a direct legacy declaration that still omits it fails closed before join I/O.
+Target fields remain
 nested under `__groundwork_target`, so same-named source and target columns cannot collide. Joined
 scalar reductions can execute over that native pipeline. Public joined rows still fail closed
 before provider I/O until the composite materializer lands, and privileged cross-scope queries

@@ -111,6 +111,13 @@ public sealed class StorageDeclarationBuilder
     public StorageDeclarationBuilder Reference(string name, StorageUnitId targetUnitId, params string[] columns) =>
         Wrap(inner.Reference(name, targetUnitId, columns));
 
+    public StorageDeclarationBuilder Reference(
+        string name,
+        StorageUnitId targetUnitId,
+        ScopePolicy targetScope,
+        params string[] columns) =>
+        Wrap(inner.Reference(name, targetUnitId, targetScope, columns));
+
     public StorageDeclarationBuilder AppendIdempotency(TimeSpan window, string ledgerName = "__groundwork_operations") =>
         Wrap(inner.AppendIdempotency(window, ledgerName));
 

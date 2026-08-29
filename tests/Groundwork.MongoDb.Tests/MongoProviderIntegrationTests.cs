@@ -1925,7 +1925,8 @@ public sealed class MongoProviderIntegrationTests
                 {
                     Name = "customer",
                     Columns = ["customer_id"],
-                    TargetUnitId = target.Id
+                    TargetUnitId = target.Id,
+                    TargetScope = scope
                 }
             ]
         };
