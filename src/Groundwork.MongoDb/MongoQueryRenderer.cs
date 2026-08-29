@@ -331,7 +331,7 @@ public sealed class MongoQueryRenderer
             expectedIndex?.Name);
     }
 
-    private const string TargetOutputField = "__groundwork_target";
+    internal const string TargetOutputField = "__groundwork_target";
 
     private static string TargetField(string column) => TargetOutputField + "." + column;
 

@@ -30,6 +30,8 @@ Groundwork.Query.Linq.GwReference
 Groundwork.Query.Planning.QueryCoverageException
 Groundwork.Query.Planning.QueryCoverageCandidates
 Groundwork.Records.RecordTable
+Groundwork.Records.RecordReference
+Groundwork.Records.RecordProjection
 Groundwork.Records.StorageDeclarationBuilder
 Groundwork.Records.RecordTableStoreUnitOfWork
 Groundwork.Records.RecordWriteOptions

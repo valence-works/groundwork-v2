@@ -17,8 +17,9 @@ native reduction.
 provider-neutral `ReferenceJoin`. After `.Join(reference)`, exactly that navigation's two-level
 members lower to target-qualified columns; arbitrary, deeper, and multiple navigations remain
 outside the closed surface. SQLite, PostgreSQL, and SQL Server render the provider-neutral node as
-one native `INNER JOIN`; Mongo, in-memory, and batched execution remain fail-closed until their
-join paths land. Composite source/target materialization is a separate Records capability.
+one native `INNER JOIN`, and MongoDB renders one same-scope `$lookup`. Explicit composite
+source/target materialization is available through the terminal Records projection surface;
+in-memory and batched join execution remain fail-closed.
 Navigation-bearing row types use explicit table models; scalar-only `GwTableModel<T>.Infer` keeps
 rejecting complex members rather than guessing which object property represents a relationship.
 

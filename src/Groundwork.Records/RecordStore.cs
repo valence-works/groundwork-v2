@@ -12,14 +12,26 @@ public sealed partial class RecordTable<T>
     private readonly GwTableModel<T> queryModel;
     private readonly IReadOnlySet<string> optionalReadColumns;
 
-    internal RecordTable(KernelStorageUnit definition)
+    private readonly IReadOnlyDictionary<string, RecordReferenceBinding> references;
+
+    internal RecordTable(
+        KernelStorageUnit definition,
+        IEnumerable<RecordReferenceBinding>? referenceBindings = null)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
         accessor = RecordAccessor<T>.Instance;
         queryModel = CreateQueryModel(definition, accessor.Members);
-        optionalReadColumns = definition.Concurrency is { IsOptimistic: true, TokenColumn: { } token }
-            ? new HashSet<string>([token], StringComparer.Ordinal)
-            : EmptyColumns.Instance;
+        references = (referenceBindings ?? [])
+            .ToDictionary(reference => reference.Name, StringComparer.Ordinal);
+        optionalReadColumns = new HashSet<string>(
+            accessor.Members
+                .Where(member => definition.Columns.All(column =>
+                    !string.Equals(column.Name, member.ColumnName, StringComparison.Ordinal)))
+                .Select(member => member.ColumnName)
+                .Concat(definition.Concurrency is { IsOptimistic: true, TokenColumn: { } token }
+                    ? [token]
+                    : []),
+            StringComparer.Ordinal);
     }
 
     /// <summary>The provider-neutral declaration produced by the typed authoring surface.</summary>
@@ -59,6 +71,33 @@ public sealed partial class RecordTable<T>
 
     public RecordTableSession<T> Use(IRecordStore store) => Open(store);
 
+    /// <summary>Resolves one typed navigation that was declared by this record table's builder.</summary>
+    public RecordReference<T, TTarget> Reference<TTarget>(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("A record reference name is required.", nameof(name));
+        if (!references.TryGetValue(name, out var binding) ||
+            binding.Target is not RecordTable<TTarget> target ||
+            binding.Navigation is not Expression<Func<T, TTarget>> navigation)
+        {
+            throw new ArgumentException(
+                $"Record reference '{name}' is not bound from '{typeof(T).FullName}' to '{typeof(TTarget).FullName}'.",
+                nameof(name));
+        }
+
+        var definition = Definition.References.Single(reference =>
+            string.Equals(reference.Name, name, StringComparison.Ordinal));
+        var pairs = definition.Columns.Zip(target.Definition.Key.Columns, (source, targetColumn) =>
+            new JoinColumnPair(
+                queryModel.Columns.Values.Single(column => string.Equals(column.Name, source, StringComparison.Ordinal)),
+                target.queryModel.Columns.Values.Single(column => string.Equals(column.Name, targetColumn, StringComparison.Ordinal))));
+        var declaration = new ReferenceJoin(name, target.queryModel.Table, pairs);
+        return new RecordReference<T, TTarget>(
+            this,
+            target,
+            queryModel.Reference(navigation, target.queryModel, declaration));
+    }
+
     /// <summary>
     /// Creates a typed projection that retains both its provider query and its compiled result shape.
     /// Only direct record members may supply projected values; constants may be used for intentionally
@@ -79,6 +118,35 @@ public sealed partial class RecordTable<T>
     public RecordProjection<TResult> Project<TResult>(
         IGwQueryable<T> query,
         Expression<Func<T, TResult>> selector) => Select(query, selector);
+
+    /// <summary>
+    /// Creates a terminal typed projection over both sides of one activated record reference.
+    /// The selector is compiled once and result fields remain table-qualified through provider I/O.
+    /// </summary>
+    public RecordProjection<TResult> Select<TTarget, TResult>(
+        IGwQueryable<T> query,
+        RecordReference<T, TTarget> reference,
+        Expression<Func<T, TTarget, TResult>> selector)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(reference);
+        ArgumentNullException.ThrowIfNull(selector);
+        reference.EnsureSource(this);
+        var request = query.ToQueryRequest();
+        ValidateRequest(request);
+        reference.EnsureActivated(request);
+        var compiled = RecordProjectionAccessor.CompileJoined(
+            selector,
+            this,
+            reference.Target,
+            request.Join!);
+        if (compiled.Columns.Count == 0)
+            throw new ArgumentException("A joined record projection must select at least one source or target member.", nameof(selector));
+        return new RecordProjection<TResult>(
+            this,
+            WithProjection(request, compiled.Columns),
+            compiled.Materializer);
+    }
 
     /// <summary>
     /// Binds typed selectors to one aggregation profile declared by this table. The selectors can
@@ -113,6 +181,32 @@ public sealed partial class RecordTable<T>
     }
 
     internal T Read(RowValues values) => accessor.Read(values, optionalReadColumns);
+
+    internal IReadOnlyList<RecordMember> Members => accessor.Members;
+    internal GwTableModel<T> QueryModel => queryModel;
+
+    internal T ReadQualified(RowValues values, ReferenceJoin join)
+    {
+        var logical = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var column in queryModel.Columns.Values)
+        {
+            if (values.Values.TryGetValue(QueryRequestExecution.ResultFieldName(join, column), out var value))
+                logical[column.Name] = value;
+        }
+        return accessor.Read(new RowValues(logical), optionalReadColumns);
+    }
+
+    internal void EnsureWholeRecordQueryable()
+    {
+        var missing = accessor.Members.FirstOrDefault(member =>
+            !optionalReadColumns.Contains(member.ColumnName) &&
+            !queryModel.Columns.ContainsKey(member.Name));
+        if (missing is not null)
+        {
+            throw new ArgumentException(
+                $"Whole-record joined projection is unavailable because member '{missing.Name}' is not a queryable scalar column.");
+        }
+    }
 
     internal void ValidateRequest(QueryRequest request)
     {
@@ -191,6 +285,63 @@ public sealed partial class RecordTable<T>
         };
         return type != PortableType.Json;
     }
+
+    private static QueryRequest WithProjection(QueryRequest request, IReadOnlyList<ColumnRef> columns) =>
+        new(
+            request.Table,
+            request.Join ?? throw new InvalidOperationException("A joined record projection requires one activated reference."),
+            request.Where,
+            request.Order,
+            Projection.ColumnsOnly(columns),
+            request.Paging,
+            request.Result,
+            request.LatestPerKey,
+            request.AcceptedScan,
+            request.Distinct);
+}
+
+internal sealed record RecordReferenceBinding(
+    string Name,
+    LambdaExpression Navigation,
+    System.Reflection.MemberInfo NavigationMember,
+    object Target);
+
+/// <summary>A declared typed record navigation and its target materializer.</summary>
+public sealed class RecordReference<TSource, TTarget>
+{
+    private readonly RecordTable<TSource> source;
+    private readonly GwReference<TSource, TTarget> queryReference;
+
+    internal RecordReference(
+        RecordTable<TSource> source,
+        RecordTable<TTarget> target,
+        GwReference<TSource, TTarget> queryReference)
+    {
+        this.source = source;
+        Target = target;
+        this.queryReference = queryReference;
+    }
+
+    internal RecordTable<TTarget> Target { get; }
+
+    /// <summary>Activates this declared reference on a source record query.</summary>
+    public IGwQueryable<TSource> Join(IGwQueryable<TSource> query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        return query.Join(queryReference);
+    }
+
+    internal void EnsureSource(RecordTable<TSource> expected)
+    {
+        if (!ReferenceEquals(source, expected))
+            throw new InvalidOperationException("A record reference must be projected by the source table that declared it.");
+    }
+
+    internal void EnsureActivated(QueryRequest request)
+    {
+        if (!ReferenceEquals(request.Join, queryReference.Declaration))
+            throw new InvalidOperationException("The joined projection requires the same activated record reference.");
+    }
 }
 
 /// <summary>Typed CRUD and query execution over a provider-neutral record store.</summary>
@@ -239,6 +390,11 @@ public sealed class RecordTableSession<T>
         ArgumentNullException.ThrowIfNull(query);
         var request = query.ToQueryRequest();
         table.ValidateRequest(request);
+        if (request.Join is not null)
+        {
+            throw new InvalidOperationException(
+                "A joined Records query must use the terminal table.Select(query, reference, selector) projection surface.");
+        }
         return store.Query(request, table.CreateRenderOptions(options)).Rows.Select(table.FromRowValues).ToArray();
     }
 

@@ -940,11 +940,13 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
-        if (request.Join is not null && request.Result is not ResultShape.Reduction)
+        if (request.Join is not null &&
+            request.Result is not ResultShape.Reduction &&
+            request.Projection.AllColumns)
         {
             throw new QueryRenderException(
                 "GW-QUERY-032",
-                "MongoDB join rendering is available, but composite source/target result materialization has not landed yet.");
+                "Joined row materialization requires an explicit projection so source and target fields remain unambiguous.");
         }
         var targetApplied = request.Join is null
             ? null
@@ -1032,6 +1034,39 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                     ? (reducedValue.IsBsonNull ? null : reducedValue.ToInt64())
                     : MongoValueCodec.Decode(reducedValue, reductionColumn);
             }
+            else if (reductionColumn is null && targetApplied is not null)
+            {
+                foreach (var column in executionRequest.Projection.Columns)
+                {
+                    var definition = ResolveResultColumn(column, targetApplied);
+                    BsonValue? value = null;
+                    if (string.Equals(column.Table.Value, Unit.Name, StringComparison.Ordinal))
+                    {
+                        document.TryGetValue(column.Name, out value);
+                    }
+                    else if (document.TryGetValue(MongoQueryRenderer.TargetOutputField, out var targetValue) &&
+                             targetValue.IsBsonDocument)
+                    {
+                        targetValue.AsBsonDocument.TryGetValue(column.Name, out value);
+                    }
+
+                    if (value is not null)
+                        row[QueryRequestExecution.ResultFieldName(executionSource, column)] =
+                            MongoValueCodec.Decode(value, definition);
+                }
+
+                var effectiveOrder = renderOptions.GetEffectiveOrder(executionSource);
+                for (var index = 0; index < effectiveOrder.Length; index++)
+                {
+                    var alias = QueryRequestExecution.ContinuationFieldName(index);
+                    if (document.TryGetValue(alias, out var value))
+                    {
+                        row[alias] = MongoValueCodec.Decode(
+                            value,
+                            ResolveResultColumn(effectiveOrder[index].Column, targetApplied));
+                    }
+                }
+            }
             else if (reductionColumn is null)
             {
                 foreach (var column in Unit.Columns)
@@ -1096,15 +1131,20 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     private ColumnDefinition ResolveReductionColumn(
         ResultShape.Reduction reduction,
         MongoAppliedUnit? targetApplied)
+        => ResolveResultColumn(reduction.Column, targetApplied);
+
+    private ColumnDefinition ResolveResultColumn(
+        ColumnRef queryColumn,
+        MongoAppliedUnit? targetApplied)
     {
         StorageUnit declaration;
-        if (string.Equals(reduction.Column.Table.Value, Unit.Name, StringComparison.Ordinal))
+        if (string.Equals(queryColumn.Table.Value, Unit.Name, StringComparison.Ordinal))
         {
             declaration = Unit;
         }
         else if (targetApplied is not null &&
                  string.Equals(
-                     reduction.Column.Table.Value,
+                     queryColumn.Table.Value,
                      targetApplied.Declaration.Name,
                      StringComparison.Ordinal))
         {
@@ -1114,16 +1154,16 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         {
             throw new QueryRenderException(
                 "GW-QUERY-032",
-                $"Reduction column '{reduction.Column}' does not belong to the applied source or joined target.");
+                $"Result column '{queryColumn}' does not belong to the applied source or joined target.");
         }
 
         var column = declaration.Columns.SingleOrDefault(candidate =>
-            string.Equals(candidate.Name, reduction.Column.Name, StringComparison.Ordinal));
-        if (column is null || QueryTypeOf(column.Type) != reduction.Column.Type)
+            string.Equals(candidate.Name, queryColumn.Name, StringComparison.Ordinal));
+        if (column is null || QueryTypeOf(column.Type) != queryColumn.Type)
         {
             throw new QueryRenderException(
                 "GW-QUERY-032",
-                $"Reduction column '{reduction.Column}' does not match its applied storage declaration.");
+                $"Result column '{queryColumn}' does not match its applied storage declaration.");
         }
         return column;
     }

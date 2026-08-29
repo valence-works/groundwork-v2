@@ -61,6 +61,45 @@ public sealed class RecordsProviderProofTests
     }
 
     [Fact]
+    public void SQLite_executes_a_typed_joined_record_projection()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "groundwork-records-join-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using var connection = new SqliteProviderFactory().Create("Data Source=" + path);
+            var suffix = Guid.NewGuid().ToString("N");
+            var customers = RecordTable.For<JoinedProviderCustomer>("records_join_customers_" + suffix)
+                .Key(customer => customer.Id)
+                .Build();
+            var orders = RecordTable.For<JoinedProviderOrder>("records_join_orders_" + suffix)
+                .Key(order => order.Id)
+                .Index("by_customer", order => order.CustomerId)
+                .Reference("customer", order => order.Customer, customers, order => order.CustomerId)
+                .Build();
+            Assert.True(connection.Schema.Apply(customers.Definition).Applied);
+            Assert.True(connection.Schema.Apply(orders.Definition).Applied);
+            var customer = new JoinedProviderCustomer(Guid.NewGuid(), "Ada");
+            var order = new JoinedProviderOrder(Guid.NewGuid(), customer.Id, customer);
+            Assert.Equal(RecordWriteStatus.Inserted, customers.Open(connection).Insert(customer).Status);
+            var records = orders.Open(connection);
+            Assert.Equal(RecordWriteStatus.Inserted, records.Insert(order).Status);
+            var reference = orders.Reference<JoinedProviderCustomer>("customer");
+            var projection = orders.Select(
+                reference.Join(orders.Query),
+                reference,
+                (source, target) => new JoinedProviderResult(source.Id, target.Id, target.Name));
+
+            var result = Assert.Single(records.Query(projection));
+
+            Assert.Equal(new JoinedProviderResult(order.Id, customer.Id, "Ada"), result);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void SQLite_typed_batch_unit_of_work_can_delete_by_record_key()
     {
         var path = Path.Combine(Path.GetTempPath(), "groundwork-records-batch-" + Guid.NewGuid().ToString("N") + ".db");
@@ -221,4 +260,8 @@ public sealed class RecordsProviderProofTests
         Assert.Equal(RecordWriteStatus.Deleted, deleted.Status);
         Assert.Empty(records.Query(table.Query.Where(row => row.Email == email)));
     }
+
+    private sealed record JoinedProviderCustomer(Guid Id, string Name);
+    private sealed record JoinedProviderOrder(Guid Id, Guid CustomerId, JoinedProviderCustomer Customer);
+    private sealed record JoinedProviderResult(Guid OrderId, Guid CustomerId, string CustomerName);
 }

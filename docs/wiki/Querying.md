@@ -60,9 +60,10 @@ arbitrary object property is a relationship.
 Source and target columns stay table-qualified even when they have the same logical name. A
 navigation used without its matching `Join`, a different navigation, a deeper member chain, a
 second join, or an arbitrary LINQ `Join` remains refused. SQLite, PostgreSQL, and SQL Server render
-the node as one native qualified `INNER JOIN`; Mongo, in-memory, and batched query execution remain
-fail-closed until their join paths land. Composite source/target materialization is a separate
-Records capability rather than a renderer concern.
+the node as one native qualified `INNER JOIN`; MongoDB renders one same-scope `$lookup`. Explicit
+joined rows use stable `table.column` fields and can be consumed by the terminal Records composite
+projection surface. Joined `Projection.All`, in-memory execution, and batched execution remain
+fail-closed rather than collapsing duplicate source/target fields.
 
 `ToQueryRequest()` is the provider-neutral boundary:
 
