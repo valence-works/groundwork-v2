@@ -10,6 +10,44 @@ namespace Groundwork.Testing.SelfTests;
 public sealed class InMemoryProviderTests
 {
     [Fact]
+    public void Reference_join_execution_fails_closed_until_the_reference_renderer_lands()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://join-model-guard");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("orders"),
+            Name = "orders",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new ColumnDefinition { Name = "customer_id", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var orders = new TableId("orders");
+        var customers = new TableId("customers");
+        var join = new ReferenceJoin(
+            "customer",
+            customers,
+            [new JoinColumnPair(
+                new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false),
+                new ColumnRef(customers, "id", QueryType.Int64, isNullable: false))]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+
+        var refusal = Assert.Throws<QueryRenderException>(() =>
+            connection.OpenSession(unit, StorageAccess.Global).Query(request));
+
+        Assert.Equal("GW-QUERY-032", refusal.Code);
+    }
+
+    [Fact]
     public void Owned_session_marker_matches_the_opening_path()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://session-ownership");

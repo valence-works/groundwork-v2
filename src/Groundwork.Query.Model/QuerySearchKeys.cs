@@ -58,7 +58,7 @@ public static class QuerySearchKeyRewriter
         return ReferenceEquals(where, request.Where) && order.Equals(request.Order)
             ? request
             : new QueryRequest(request.Table, where, order, request.Projection, request.Paging,
-                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
             {
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,
@@ -74,6 +74,8 @@ public static class QuerySearchKeyRewriter
         var changed = false;
         var rewritten = order.Select(term =>
         {
+            if (term.Column.Table != TableId.Empty && term.Column.Table != table)
+                return term;
             if (!mappings.TryGetValue(term.Column.Name, out var mapping) || !mapping.OrderByPhysicalColumn)
                 return term;
             changed = true;
@@ -98,6 +100,8 @@ public static class QuerySearchKeyRewriter
         switch (predicate)
         {
             case Predicate.StartsWith starts:
+                if (starts.Column.Table != TableId.Empty && starts.Column.Table != table)
+                    return starts;
                 if (!mappings.TryGetValue(starts.Column.Name, out var mapping))
                 {
                     if (starts.Column.StringComparison != QueryStringComparisonPolicy.Ordinal)

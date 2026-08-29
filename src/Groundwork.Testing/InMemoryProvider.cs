@@ -658,6 +658,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
         StorageAccessValidation.EnsureOrdinaryQuery(Access);
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
+        RefuseUnrenderedJoin(request);
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
         var executionRequest = QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns);
@@ -794,6 +795,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
             throw new ArgumentException(
                 $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
                 nameof(request));
+        RefuseUnrenderedJoin(request);
         StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
 
         var suppliedOptions = options ?? QueryRenderOptions.Default;
@@ -865,6 +867,16 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
                 renderOptions,
                 rows,
                 renderOptions.FindPinnedIndex()?.Name);
+        }
+    }
+
+    private static void RefuseUnrenderedJoin(QueryRequest request)
+    {
+        if (request.Join is not null)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-032",
+                $"Declared reference join '{request.Join.ReferenceName}' is modelled but this provider does not yet render the q3 join node.");
         }
     }
 
