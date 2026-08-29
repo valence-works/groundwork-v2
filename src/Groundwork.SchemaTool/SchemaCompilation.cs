@@ -146,6 +146,7 @@ public static class SchemaCompilation
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(targets);
         var units = schema.Tables.Select(Compile).ToArray();
+        SchemaSubject.ValidateManifestWithoutCrossUnitReferences(units);
         var refusals = StorageReferenceValidation.ValidateManifestBySource(units)
             .GroupBy(result => result.SourceUnitId)
             .ToDictionary(

@@ -75,6 +75,22 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task Deferring_reference_validation_preserves_manifest_name_collisions()
+    {
+        var schema = Temp("colliding-table-names.json", """
+            {"tables":[{"name":"orders","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]},{"name":"Orders","columns":[{"name":"id","type":"Guid","nullable":false}],"key":["id"],"indexes":[]}]}
+            """);
+
+        Assert.Equal(
+            SchemaToolExitCodes.ValidationFailed,
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"],
+                _ => new FakeSession()));
+
+        Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("storage unit names must be unique", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_reference_type_mismatch_blocks_apply_before_mutation()
     {
         var schema = Temp("mismatched-reference-target.json", """

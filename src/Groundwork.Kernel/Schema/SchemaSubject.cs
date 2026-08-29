@@ -199,13 +199,7 @@ public sealed class SchemaSubject
     /// </summary>
     public static void ValidateManifest(IEnumerable<StorageUnit> declarations)
     {
-        ArgumentNullException.ThrowIfNull(declarations);
-        var units = declarations.ToArray();
-        if (units.Any(unit => unit is null))
-            throw new ArgumentException("A schema manifest cannot contain null storage units.", nameof(declarations));
-
-        foreach (var unit in units)
-            Validate(unit);
+        var units = ValidateManifestDeclarations(declarations);
 
         var referenceFindings = StorageReferenceValidation.ValidateManifest(units);
         if (referenceFindings.Count != 0)
@@ -216,6 +210,29 @@ public sealed class SchemaSubject
                 nameof(declarations));
         }
 
+        ValidateManifestIdentifiers(units, nameof(declarations));
+    }
+
+    internal static void ValidateManifestWithoutCrossUnitReferences(IEnumerable<StorageUnit> declarations)
+    {
+        var units = ValidateManifestDeclarations(declarations);
+        ValidateManifestIdentifiers(units, nameof(declarations));
+    }
+
+    private static StorageUnit[] ValidateManifestDeclarations(IEnumerable<StorageUnit> declarations)
+    {
+        ArgumentNullException.ThrowIfNull(declarations);
+        var units = declarations.ToArray();
+        if (units.Any(unit => unit is null))
+            throw new ArgumentException("A schema manifest cannot contain null storage units.", nameof(declarations));
+
+        foreach (var unit in units)
+            Validate(unit);
+        return units;
+    }
+
+    private static void ValidateManifestIdentifiers(IReadOnlyList<StorageUnit> units, string parameterName)
+    {
         var names = new Dictionary<string, StorageUnit>(StringComparer.OrdinalIgnoreCase);
         foreach (var unit in units)
         {
@@ -223,7 +240,7 @@ public sealed class SchemaSubject
             {
                 throw new ArgumentException(
                     $"Schema manifest storage unit names must be unique under provider identifier comparison: '{unit.Name}'.",
-                    nameof(declarations));
+                    parameterName);
             }
         }
 
@@ -239,14 +256,14 @@ public sealed class SchemaSubject
                 {
                     throw new ArgumentException(
                         $"Schema manifest ledger names cannot differ only by provider identifier casing: '{prior.Name}' and '{declaration}'.",
-                        nameof(declarations));
+                        parameterName);
                 }
                 ledgers.TryAdd(declaration, (declaration, unit));
                 if (names.TryGetValue(declaration, out var owner))
                 {
                     throw new ArgumentException(
                         $"Schema manifest ledger '{declaration}' collides with storage unit '{owner.Name}' under provider identifier comparison.",
-                        nameof(declarations));
+                        parameterName);
                 }
             }
         }
