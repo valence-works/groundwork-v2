@@ -129,6 +129,7 @@ Published codes appear in messages; Roslyn ids use underscores.
 | `GW-QUERY-020` | Query rendering refusal |
 | `GW-QUERY-030` | Query rendering refusal |
 | `GW-QUERY-031` | `ColumnRef` policy does not match the schema's persisted search-key mapping |
+| `GW-QUERY-032` | A declared-reference join reached a provider whose join renderer has not landed yet; the request fails closed instead of executing only its driving table |
 
 ---
 

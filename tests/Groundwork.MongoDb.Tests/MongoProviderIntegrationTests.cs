@@ -17,6 +17,45 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
+    public void Reference_join_refuses_before_command_observation()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var name = "mongo_join_guard_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var source = new TableId(unit.Name);
+        var target = new TableId(unit.Name + "_target");
+        var request = new QueryRequest(
+            source,
+            new ReferenceJoin(
+                "target",
+                target,
+                [new JoinColumnPair(
+                    new ColumnRef(source, "id", QueryType.String, isNullable: false),
+                    new ColumnRef(target, "id", QueryType.String, isNullable: false))]),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+        var observer = new ProviderCommandObserver();
+        var session = connection.OpenSession(unit, StorageAccess.Global, observer);
+
+        var refusal = Assert.Throws<QueryRenderException>(() => session.Query(request));
+
+        Assert.Equal("GW-QUERY-032", refusal.Code);
+        Assert.Empty(observer.Commands);
+    }
+
+    [SkippableFact]
     public void Owned_session_marker_matches_the_opening_path()
     {
         var connectionString = LiveMongo.ConnectionString;

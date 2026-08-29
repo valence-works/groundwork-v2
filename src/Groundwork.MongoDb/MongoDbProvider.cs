@@ -858,7 +858,6 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
                 "GW-ACCESS-004: privileged cross-scope sessions must use QueryAcrossScopes so every row retains its scope.");
         if (!string.Equals(request.Table.Value, Unit.Name, StringComparison.Ordinal))
             throw new ArgumentException($"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.", nameof(request));
-        commandObserver?.Observe(new ProviderCommandEvent("mongodb.query", "MongoDB.Aggregate(page)", ProviderCommandKind.Read, IsProbe: false));
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var executionSource = Access.Policy == ScopePolicy.Scoped
             ? QueryRequestExecution.WithProviderPredicate(request, request.Where,
@@ -873,6 +872,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         };
         var executionRequest = QueryRequestExecution.ForPage(executionSource, renderOptions);
         var command = new MongoQueryRenderer().Render(executionRequest, renderOptions, collection.CollectionNamespace.CollectionName);
+        commandObserver?.Observe(new ProviderCommandEvent("mongodb.query", "MongoDB.Aggregate(page)", ProviderCommandKind.Read, IsProbe: false));
         List<BsonDocument> documents;
         long? facetTotalCount = null;
         if (command.Pipeline.Length != 0)

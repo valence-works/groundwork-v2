@@ -275,7 +275,7 @@ public static class QueryRequestExecution
         return ReferenceEquals(paging, request.Paging)
             ? request
             : new QueryRequest(request.Table, request.Where, request.Order, request.Projection, paging,
-                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+                request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
             {
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,
@@ -297,7 +297,7 @@ public static class QueryRequestExecution
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (predicate is null) throw new ArgumentNullException(nameof(predicate));
         return new QueryRequest(request.Table, predicate, request.Order, request.Projection, request.Paging,
-            request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+            request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -315,7 +315,7 @@ public static class QueryRequestExecution
         if (request is null) throw new ArgumentNullException(nameof(request));
         return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
             request.Distinct ? Paging.None : ProbePaging(request.Paging, keepOffset: false),
-            ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+            ResultShape.TotalCount.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -328,7 +328,7 @@ public static class QueryRequestExecution
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
         return new QueryRequest(request.Table, request.Where, request.Order, request.Projection,
-            ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+            ProbePaging(request.Paging, keepOffset: true), ResultShape.Rows.Instance, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -356,7 +356,7 @@ public static class QueryRequestExecution
         if (request is null) throw new ArgumentNullException(nameof(request));
         if (projection is null) throw new ArgumentNullException(nameof(projection));
         return new QueryRequest(request.Table, request.Where, request.Order, projection, request.Paging,
-            request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+            request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
         {
             CanonicalPredicate = request.CanonicalPredicate,
             ContinuationFingerprint = request.ContinuationFingerprint,
@@ -416,7 +416,7 @@ public static class QueryRequestExecution
         }
         return ReferenceEquals(projection, request.Projection) && ReferenceEquals(paging, request.Paging)
             ? request
-            : new QueryRequest(request.Table, request.Where, request.Order, projection, paging, request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct)
+            : new QueryRequest(request.Table, request.Where, request.Order, projection, paging, request.Result, request.LatestPerKey, request.AcceptedScan, request.Distinct, request.Join)
             {
                 // The extra projected tie-break fields are an execution detail, not a new
                 // continuation identity. Keep the token bound to the caller's projection.

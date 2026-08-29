@@ -10,7 +10,7 @@ surface. The following diagnostic table is generated deterministically from the 
 decision rows and checked byte-for-byte by the corpus test; the test locks the ten predicate
 codes and 250 predicate cases together. The query-shape corpus below extends that versioned
 contract with projection, distinct, cardinality, and scalar-reduction terminals.
-The query-shape corpus and `QueryFingerprint.QueryShapeVersion` are currently `q2`; changing a
+The query-shape corpus and `QueryFingerprint.QueryShapeVersion` are currently `q3`; changing a
 lowered shape requires an intentional version bump.
 
 | Code | AST equivalent / fix |

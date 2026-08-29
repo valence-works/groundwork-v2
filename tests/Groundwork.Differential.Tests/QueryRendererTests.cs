@@ -19,6 +19,39 @@ public sealed class QueryRendererTests
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Int32, isNullable: true);
 
     [Fact]
+    public void Existing_renderers_fail_closed_for_the_new_join_node()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin(
+            "customer",
+            Table,
+            [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+
+        var renderers = new Action[]
+        {
+            () => new SqliteQueryRenderer().Render(request),
+            () => new PostgreSqlQueryRenderer().Render(request),
+            () => new SqlServerQueryRenderer().Render(request),
+            () => new MongoQueryRenderer().Render(request)
+        };
+
+        foreach (var render in renderers)
+        {
+            var refusal = Assert.Throws<QueryRenderException>(render);
+            Assert.Equal("GW-QUERY-032", refusal.Code);
+            Assert.Contains("not yet render", refusal.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void All_four_renderers_use_a_native_reduction_after_distinct_and_input_paging()
     {
         var request = new QueryRequest(

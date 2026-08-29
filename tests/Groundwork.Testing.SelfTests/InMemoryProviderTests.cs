@@ -10,6 +10,30 @@ namespace Groundwork.Testing.SelfTests;
 public sealed class InMemoryProviderTests
 {
     [Fact]
+    public void Reference_join_execution_fails_closed_until_the_reference_renderer_lands()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://join-model-guard");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("orders"),
+            Name = "orders",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int64, IsNullable = false },
+                new ColumnDefinition { Name = "customer_id", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] }
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var request = UnsupportedJoinRequest(unit, QueryType.Int64);
+
+        var refusal = Assert.Throws<QueryRenderException>(() =>
+            connection.OpenSession(unit, StorageAccess.Global).Query(request));
+
+        Assert.Equal("GW-QUERY-032", refusal.Code);
+    }
+
+    [Fact]
     public void Owned_session_marker_matches_the_opening_path()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://session-ownership");
@@ -1421,6 +1445,35 @@ public sealed class InMemoryProviderTests
         Assert.True(work.CommitWithOutcomes().IsSuccessful);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Batched_join_refusal_precedes_every_flush_barrier(bool asynchronous)
+    {
+        using var connection = new InMemoryProviderFactory().Create(
+            "memory://batched-join-refusal-" + asynchronous);
+        var unit = TestingFixture.GlobalUnit("batched-join-refusal-" + asynchronous);
+        connection.Schema.Apply(unit);
+        var observer = new ProviderCommandObserver();
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            BatchWriteOptions.Exact,
+            observer,
+            unit);
+        work.Stage(RowWrite.Insert(unit, TestingFixture.Values("pending", "staged")));
+        var session = work.OpenSession(unit);
+        var request = UnsupportedJoinRequest(unit, QueryType.String);
+
+        var refusal = asynchronous
+            ? await Assert.ThrowsAsync<QueryRenderException>(() => session.QueryAsync(request).AsTask())
+            : Assert.Throws<QueryRenderException>(() => session.Query(request));
+
+        Assert.Equal("GW-QUERY-032", refusal.Code);
+        Assert.Equal(0, observer.RoundTrips);
+        Assert.Null(connection.OpenSession(unit, StorageAccess.Global).Read(TestingFixture.Key("pending")));
+        work.Rollback();
+    }
+
     [Fact]
     public async Task Batched_aggregate_validates_ad_hoc_acceptance_before_flushing_staged_writes()
     {
@@ -1843,6 +1896,24 @@ public sealed class InMemoryProviderTests
             distinct: true));
 
         Assert.Equal(2, result.Rows.Count);
+    }
+
+    private static QueryRequest UnsupportedJoinRequest(StorageUnit unit, QueryType keyType)
+    {
+        var source = new TableId(unit.Name);
+        var target = new TableId(unit.Name + "_target");
+        return new QueryRequest(
+            source,
+            new ReferenceJoin(
+                "target",
+                target,
+                [new JoinColumnPair(
+                    new ColumnRef(source, "id", keyType, isNullable: false),
+                    new ColumnRef(target, "id", keyType, isNullable: false))]),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
     }
 
     private sealed class ExternalFactory : IStorageProviderFactory

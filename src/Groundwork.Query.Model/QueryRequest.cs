@@ -194,7 +194,22 @@ public sealed record QueryRequest
         LatestPerKey? latestPerKey = null,
         ScanAcceptance? acceptedScan = null,
         bool distinct = false)
-        : this(table, where, order, projection, paging, ResultShape.Rows.Instance, latestPerKey, acceptedScan, distinct)
+        : this(table, where, order, projection, paging, ResultShape.Rows.Instance, latestPerKey, acceptedScan, distinct, null)
+    {
+    }
+
+    public QueryRequest(
+        TableId table,
+        ReferenceJoin join,
+        Predicate where,
+        ImmutableArray<OrderTerm> order,
+        Projection projection,
+        Paging paging,
+        LatestPerKey? latestPerKey = null,
+        ScanAcceptance? acceptedScan = null,
+        bool distinct = false)
+        : this(table, where, order, projection, paging, ResultShape.Rows.Instance, latestPerKey, acceptedScan, distinct,
+            join ?? throw new ArgumentNullException(nameof(join)))
     {
     }
 
@@ -208,6 +223,37 @@ public sealed record QueryRequest
         LatestPerKey? latestPerKey = null,
         ScanAcceptance? acceptedScan = null,
         bool distinct = false)
+        : this(table, where, order, projection, paging, result, latestPerKey, acceptedScan, distinct, null)
+    {
+    }
+
+    public QueryRequest(
+        TableId table,
+        ReferenceJoin join,
+        Predicate where,
+        ImmutableArray<OrderTerm> order,
+        Projection projection,
+        Paging paging,
+        ResultShape result,
+        LatestPerKey? latestPerKey = null,
+        ScanAcceptance? acceptedScan = null,
+        bool distinct = false)
+        : this(table, where, order, projection, paging, result, latestPerKey, acceptedScan, distinct,
+            join ?? throw new ArgumentNullException(nameof(join)))
+    {
+    }
+
+    internal QueryRequest(
+        TableId table,
+        Predicate where,
+        ImmutableArray<OrderTerm> order,
+        Projection projection,
+        Paging paging,
+        ResultShape result,
+        LatestPerKey? latestPerKey,
+        ScanAcceptance? acceptedScan,
+        bool distinct,
+        ReferenceJoin? join)
     {
         Table = table ?? throw new ArgumentNullException(nameof(table));
         Where = PredicateNormalizer.Normalize(where ?? throw new ArgumentNullException(nameof(where)));
@@ -220,6 +266,9 @@ public sealed record QueryRequest
         LatestPerKey = latestPerKey;
         AcceptedScan = acceptedScan;
         Distinct = distinct;
+        Join = join;
+        if (join is not null)
+            JoinedQueryValidation.Validate(Table, join, Where, Order, Projection, Result, LatestPerKey);
         CanonicalPredicate = PredicateCanonicalizer.ToCanonicalString(Where);
         ShapeFingerprint = QueryFingerprint.Create(this, includeResultShape: true);
         ContinuationFingerprint = QueryFingerprint.Create(this, includeResultShape: false, includePaging: false);
@@ -231,6 +280,7 @@ public sealed record QueryRequest
     public Projection Projection { get; }
     public Paging Paging { get; }
     public ResultShape Result { get; }
+    public ReferenceJoin? Join { get; }
     public LatestPerKey? LatestPerKey { get; }
     public ScanAcceptance? AcceptedScan { get; }
     /// <summary>Whether duplicate projected values are removed before paging or cardinality checks.</summary>
@@ -257,7 +307,7 @@ public sealed record QueryResult<T>
 public static class QueryFingerprint
 {
     /// <summary>Version of the provider-neutral query-shape encoding.</summary>
-    public const string QueryShapeVersion = "q2";
+    public const string QueryShapeVersion = "q3";
 
     public static string Create(QueryRequest request, bool includeResultShape = true, bool includePaging = true)
     {
@@ -265,6 +315,7 @@ public static class QueryFingerprint
             throw new ArgumentNullException(nameof(request));
         var builder = new StringBuilder();
         builder.Append(QueryShapeVersion).Append("|table=").Append(PredicateCanonicalizer.Escape(request.Table.Value));
+        builder.Append("|join=").Append(Join(request.Join));
         builder.Append("|where=").Append(PredicateCanonicalizer.ToShapeString(request.Where));
         builder.Append("|order=");
         foreach (var term in request.Order)
@@ -286,6 +337,22 @@ public static class QueryFingerprint
 
     public static string CreateShapeFingerprint(QueryRequest request) => Create(request, includeResultShape: true);
     public static string CreateContinuationFingerprint(QueryRequest request) => Create(request, includeResultShape: false, includePaging: false);
+
+    private static string Join(ReferenceJoin? join)
+    {
+        if (join is null)
+            return "none";
+
+        var builder = new StringBuilder("inner-reference(");
+        builder.Append(PredicateCanonicalizer.Escape(join.ReferenceName)).Append(',');
+        builder.Append(PredicateCanonicalizer.Escape(join.TargetTable.Value)).Append(',');
+        foreach (var pair in join.ColumnPairs)
+        {
+            builder.Append(PredicateCanonicalizer.Column(pair.Source)).Append('=');
+            builder.Append(PredicateCanonicalizer.Column(pair.Target)).Append(';');
+        }
+        return builder.Append(')').ToString();
+    }
 
     private static string Sha256(string value)
     {

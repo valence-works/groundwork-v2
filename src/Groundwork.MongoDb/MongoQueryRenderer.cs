@@ -16,6 +16,12 @@ public sealed class MongoQueryRenderer
         IReadOnlyList<BsonDocument>? sourcePrefix = null)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.Join is not null)
+        {
+            throw new QueryRenderException(
+                "GW-QUERY-032",
+                $"Declared reference join '{request.Join.ReferenceName}' is modelled but this provider does not yet render the q3 join node.");
+        }
         options ??= QueryRenderOptions.Default;
         request = QuerySearchKeyRewriter.Rewrite(request, options.SearchKeyColumns);
         if (options.InValueLimit <= 0)

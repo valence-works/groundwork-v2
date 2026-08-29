@@ -55,6 +55,16 @@ public static class PortableQuerySemantics
         var refusals = new List<PortableSemanticRefusal>();
         ValidatePredicate(request.Where, refusals, "where");
 
+        if (request.Join is not null)
+        {
+            foreach (var (pair, index) in request.Join.ColumnPairs.Select((pair, index) => (pair, index)))
+            {
+                var path = "join.columnPairs[" + index.ToString(CultureInfo.InvariantCulture) + "]";
+                ValidateColumn(pair.Source, refusals, path + ".source");
+                ValidateColumn(pair.Target, refusals, path + ".target");
+            }
+        }
+
         foreach (var term in request.Order)
         {
             ValidateColumn(term.Column, refusals, "order." + term.Column.Name);
