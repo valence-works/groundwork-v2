@@ -48,14 +48,25 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         if (query?.Expression is not MemberAccessExpressionSyntax queryMember) return null;
 
         var visited = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-        var reference = FindJoinedReference(context, queryMember.Expression, visited);
-        return reference is null ? null : FindReferenceNavigation(context, reference, visited);
+        var references = FindJoinedReferences(context, queryMember.Expression, visited);
+        return references.Count == 1 ? FindReferenceNavigation(context, references[0], visited) : null;
     }
 
-    private static ExpressionSyntax? FindJoinedReference(
+    private static IReadOnlyList<ExpressionSyntax> FindJoinedReferences(
         SyntaxNodeAnalysisContext context,
         ExpressionSyntax source,
         ISet<ISymbol> visited)
+    {
+        var references = new List<ExpressionSyntax>();
+        CollectJoinedReferences(context, source, visited, references);
+        return references;
+    }
+
+    private static void CollectJoinedReferences(
+        SyntaxNodeAnalysisContext context,
+        ExpressionSyntax source,
+        ISet<ISymbol> visited,
+        ICollection<ExpressionSyntax> references)
     {
         source = Unwrap(source);
         var model = SemanticModelFor(context, source);
@@ -63,13 +74,15 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         {
             var method = model.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
             if (IsGroundworkMethod(method, "Join") && invocation.ArgumentList.Arguments.Count == 1)
-                return invocation.ArgumentList.Arguments[0].Expression;
+                references.Add(invocation.ArgumentList.Arguments[0].Expression);
             if (invocation.Expression is MemberAccessExpressionSyntax member)
-                return FindJoinedReference(context, member.Expression, visited);
+                CollectJoinedReferences(context, member.Expression, visited, references);
+            return;
         }
 
         var initializer = FindInitializer(context, source, visited);
-        return initializer is null ? null : FindJoinedReference(context, initializer, visited);
+        if (initializer is not null)
+            CollectJoinedReferences(context, initializer, visited, references);
     }
 
     private static ISymbol? FindReferenceNavigation(
@@ -157,6 +170,19 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
     {
         if (context.Node is not InvocationExpressionSyntax invocation) return;
         var method = context.SemanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+        if (IsGroundworkMethod(method, "Join") &&
+            invocation.Expression is MemberAccessExpressionSyntax joinMember &&
+            FindJoinedReferences(
+                context,
+                joinMember.Expression,
+                new HashSet<ISymbol>(SymbolEqualityComparer.Default)).Count > 0)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                AnalyzerDiagnostics.For("GW-LINQ-104"),
+                invocation.GetLocation(),
+                NavigationRefusal));
+            return;
+        }
         if (!IsGroundworkWhereMethod(method)) return;
         var argumentIndex = method!.Name == "WhereIf" ? 1 : 0;
         if (invocation.ArgumentList.Arguments.Count <= argumentIndex) return;
