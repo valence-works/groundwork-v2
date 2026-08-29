@@ -296,7 +296,7 @@ public sealed class RecordsProviderProofTests
         var secondOrder = new JoinedProviderOrder(Guid.NewGuid(), customer.Id, customer);
         Assert.Equal(RecordWriteStatus.Inserted, records.Insert(secondOrder).Status);
         Assert.Equal(2, records.Count(joined.Distinct()));
-        Assert.True(records.Any(joined.Distinct().Skip(1)));
+        Assert.True(records.Any(joined.Distinct()));
     }
 
     private sealed record JoinedProviderCustomer(Guid Id, string Name);

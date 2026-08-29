@@ -62,8 +62,7 @@ public static class QuerySearchKeyRewriter
             {
                 CanonicalPredicate = request.CanonicalPredicate,
                 ContinuationFingerprint = request.ContinuationFingerprint,
-                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator,
-                ExecutionPurpose = request.ExecutionPurpose
+                ContinuationBindingDiscriminator = request.ContinuationBindingDiscriminator
             };
     }
 

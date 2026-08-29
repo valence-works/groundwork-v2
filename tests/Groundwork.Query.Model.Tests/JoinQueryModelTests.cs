@@ -312,7 +312,7 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
-    public void Joined_scalar_probes_avoid_row_materialization_without_changing_distinct_count_values()
+    public void Joined_scalar_probes_avoid_row_materialization_without_changing_distinct_semantics()
     {
         var request = new QueryRequest(
             Orders,
@@ -324,7 +324,7 @@ public sealed class JoinQueryModelTests
 
         var count = QueryRequestExecution.ForProviderCount(request);
         var any = QueryRequestExecution.ForExistenceProbe(request);
-        var distinctCount = QueryRequestExecution.ForProviderCount(new QueryRequest(
+        var distinctRequest = new QueryRequest(
             request.Table,
             request.Join!,
             request.Where,
@@ -332,34 +332,33 @@ public sealed class JoinQueryModelTests
             request.Projection,
             request.Paging,
             request.Result,
-            distinct: true));
+            distinct: true);
+        var distinctCount = QueryRequestExecution.ForProviderCount(distinctRequest);
+        var distinctAny = QueryRequestExecution.ForExistenceProbe(distinctRequest);
+        var explicitDistinctRequest = new QueryRequest(
+            request.Table,
+            request.Join!,
+            request.Where,
+            request.Order,
+            Projection.ColumnsOnly(CustomerName),
+            request.Paging,
+            request.Result,
+            distinct: true);
+        var explicitDistinctCount = QueryRequestExecution.ForProviderCount(explicitDistinctRequest);
+        var explicitDistinctAny = QueryRequestExecution.ForExistenceProbe(explicitDistinctRequest);
 
-        Assert.True(QueryRequestExecution.IsProviderScalarProbe(count));
-        Assert.True(QueryRequestExecution.IsProviderScalarProbe(any));
-        Assert.False(QueryRequestExecution.IsProviderScalarProbe(request));
         Assert.IsType<ResultShape.TotalCount>(count.Result);
         Assert.IsType<ResultShape.Rows>(any.Result);
-        Assert.All(
-            new[]
-            {
-                QueryRequestExecution.WithProviderPredicate(count, Predicate.AlwaysTrue.Instance),
-                QueryRequestExecution.WithProjection(count, Projection.ColumnsOnly(OrderCustomerId)),
-                QueryRequestExecution.ForPage(count, QueryRenderOptions.Default)
-            },
-            transformed => Assert.True(QueryRequestExecution.IsProviderScalarProbe(transformed)));
         Assert.Equal(OrderCustomerId, Assert.Single(count.Projection.Columns));
         Assert.Equal(OrderCustomerId, Assert.Single(any.Projection.Columns));
-        Assert.True(distinctCount.Distinct);
-        Assert.True(distinctCount.Projection.AllColumns);
-        Assert.True(QueryRequestExecution.ForExistenceProbe(new QueryRequest(
-            request.Table,
-            request.Join!,
-            request.Where,
-            request.Order,
-            request.Projection,
-            request.Paging,
-            request.Result,
-            distinct: true)).Projection.AllColumns);
+        Assert.False(distinctCount.Distinct);
+        Assert.False(distinctAny.Distinct);
+        Assert.Equal(OrderCustomerId, Assert.Single(distinctCount.Projection.Columns));
+        Assert.Equal(OrderCustomerId, Assert.Single(distinctAny.Projection.Columns));
+        Assert.True(explicitDistinctCount.Distinct);
+        Assert.True(explicitDistinctAny.Distinct);
+        Assert.Equal(CustomerName, Assert.Single(explicitDistinctCount.Projection.Columns));
+        Assert.Equal(CustomerName, Assert.Single(explicitDistinctAny.Projection.Columns));
     }
 
     [Fact]

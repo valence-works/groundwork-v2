@@ -352,12 +352,14 @@ public sealed class QueryRendererTests
             (_, value) => value));
 
         var scalarCount = QueryRequestExecution.ForProviderCount(ordinaryCountedRows);
+        Assert.False(scalarCount.Distinct);
+        Assert.Equal(customerId, Assert.Single(scalarCount.Projection.Columns));
         var counted = Assert.Single(RelationalQueryResultReader.Read(
             connection,
             new SqliteQueryRenderer().Render(scalarCount),
             (_, value) => value));
         Assert.Equal(1L, counted["__groundwork_total_count"]);
-        Assert.Equal(1L, counted["__groundwork_count_only"]);
+        Assert.Equal(0L, counted["__groundwork_count_only"]);
     }
 
     [Fact]
