@@ -80,6 +80,8 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         if (source is InvocationExpressionSyntax invocation)
         {
             var method = model.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+            if (IsGroundworkMethod(method, "Table")) return true;
+            if (!IsGroundworkQueryMethod(method)) return false;
             if (IsGroundworkMethod(method, "Join") && invocation.ArgumentList.Arguments.Count == 1)
                 references.Add(invocation.ArgumentList.Arguments[0].Expression);
             if (invocation.Expression is MemberAccessExpressionSyntax member)
@@ -125,10 +127,18 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         out bool isAmbiguous)
     {
         isAmbiguous = false;
-        if (!visited.Add(new ResolutionSite(source.SyntaxTree, source.SpanStart, source.Span.Length))) return null;
+        if (!visited.Add(new ResolutionSite(source.SyntaxTree, source.SpanStart, source.Span.Length)))
+        {
+            isAmbiguous = true;
+            return null;
+        }
         var model = SemanticModelFor(context, source);
         var symbol = model.GetSymbolInfo(source).Symbol;
-        if (symbol is null) return null;
+        if (symbol is null)
+        {
+            isAmbiguous = true;
+            return null;
+        }
         if (symbol is ILocalSymbol local)
         {
             var assignment = FindLatestAssignment(model, source, local, out isAmbiguous);
@@ -146,6 +156,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                     return property.ExpressionBody.Expression;
             }
         }
+        isAmbiguous = true;
         return null;
     }
 
@@ -156,30 +167,49 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
         out bool isAmbiguous)
     {
         isAmbiguous = false;
+        SyntaxNode cursor = source;
         var block = source.Ancestors().OfType<BlockSyntax>().FirstOrDefault();
-        var statement = source.Ancestors().OfType<StatementSyntax>()
-            .FirstOrDefault(candidate => candidate.Parent == block);
-        if (block is null || statement is null) return null;
-
-        for (var index = block.Statements.IndexOf(statement) - 1; index >= 0; index--)
+        while (block is not null)
         {
-            var candidate = block.Statements[index];
-            if (candidate is ExpressionStatementSyntax
-                {
-                    Expression: AssignmentExpressionSyntax assignment
-                } &&
-                assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
-                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local))
-                return assignment.Right;
-            if (candidate.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(assignment =>
-                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local)))
+            var statement = cursor.AncestorsAndSelf().OfType<StatementSyntax>()
+                .FirstOrDefault(candidate => candidate.Parent == block);
+            if (statement is null) return null;
+            if (statement.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(assignment =>
+                    assignment.SpanStart < source.SpanStart &&
+                    !assignment.Span.Contains(source.Span) &&
+                    IsAssignmentTo(assignment, model, local)))
             {
                 isAmbiguous = true;
                 return null;
             }
+            for (var index = block.Statements.IndexOf(statement) - 1; index >= 0; index--)
+            {
+                var candidate = block.Statements[index];
+                if (candidate is ExpressionStatementSyntax
+                    {
+                        Expression: AssignmentExpressionSyntax assignment
+                    } &&
+                    assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                    IsAssignmentTo(assignment, model, local))
+                    return assignment.Right;
+                if (candidate.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(assignment =>
+                        IsAssignmentTo(assignment, model, local)))
+                {
+                    isAmbiguous = true;
+                    return null;
+                }
+            }
+            cursor = block;
+            block = block.Ancestors().OfType<BlockSyntax>().FirstOrDefault();
         }
         return null;
     }
+
+    private static bool IsAssignmentTo(
+        AssignmentExpressionSyntax assignment,
+        SemanticModel model,
+        ILocalSymbol local) =>
+        SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local);
 
     private static bool IsDirectLambdaMember(
         SyntaxNodeAnalysisContext context,
@@ -206,8 +236,11 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
 #pragma warning restore RS1030
     }
 
-    private static bool IsGroundworkMethod(IMethodSymbol? method, string name) => method is not null &&
-        method.Name == name && method.ContainingAssembly.Identity.Name == "Groundwork.Query.Linq" &&
+    private static bool IsGroundworkMethod(IMethodSymbol? method, string name) =>
+        method?.Name == name && IsGroundworkQueryMethod(method);
+
+    private static bool IsGroundworkQueryMethod(IMethodSymbol? method) => method is not null &&
+        method.ContainingAssembly.Identity.Name == "Groundwork.Query.Linq" &&
         method.ContainingType?.OriginalDefinition.ContainingNamespace.ToDisplayString() == "Groundwork.Query.Linq";
 
     private static ExpressionSyntax Unwrap(ExpressionSyntax source)

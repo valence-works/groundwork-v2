@@ -119,9 +119,11 @@ public sealed class CoverageAnalyzerTests
             public sealed class Customer { public string Name { get; set; } = ""; }
             public static class Use
             {
-                public static void Run(IGwQueryable<Order> query, GwReference<Order, Customer> compiledReference)
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwReference<Order, Customer> compiledReference)
                 {
-                    query.Join(compiledReference).Where(order => order.Customer.Name == "Ada");
+                    database.Table(orders).Join(compiledReference)
+                        .Where(order => order.Customer.Name == "Ada");
                 }
             }
             """;
@@ -178,9 +180,10 @@ public sealed class CoverageAnalyzerTests
             using Groundwork.Query.Linq;
             public static class Use
             {
-                public static void Run(IGwQueryable<Order> query)
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders)
                 {
-                    query.Join(Declarations.Customer).Where(order => order.Customer.Name == "Ada");
+                    database.Table(orders).Join(Declarations.Customer)
+                        .Where(order => order.Customer.Name == "Ada");
                 }
             }
             """;
@@ -339,6 +342,138 @@ public sealed class CoverageAnalyzerTests
         var diagnostics = await AnalyzeLinq(source);
 
         Assert.DoesNotContain(diagnostics, item => item.Id == "GW_LINQ_104");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_refuses_a_second_join_inside_a_nested_block()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order
+            {
+                public Customer Customer { get; set; } = new();
+                public Customer OtherCustomer { get; set; } = new();
+            }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Use
+            {
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin first, ReferenceJoin second)
+                {
+                    var customer = orders.Reference(order => order.Customer, customers, first);
+                    var otherCustomer = orders.Reference(order => order.OtherCustomer, customers, second);
+                    var query = database.Table(orders);
+                    query = query.Join(customer);
+                    {
+                        query = query.Join(otherCustomer);
+                        query.Where(order => order.OtherCustomer.Name == "Ada");
+                    }
+                }
+            }
+            """;
+
+        var diagnostics = (await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_104").ToArray();
+
+        Assert.Contains(diagnostics, item => source.Substring(
+            item.Location.SourceSpan.Start,
+            item.Location.SourceSpan.Length).Contains("Join(otherCustomer)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_refuses_a_join_after_a_conditional_expression_assignment()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order
+            {
+                public Customer Customer { get; set; } = new();
+                public Customer OtherCustomer { get; set; } = new();
+            }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Use
+            {
+                public static void Run(bool enabled, GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin first, ReferenceJoin second)
+                {
+                    var customer = orders.Reference(order => order.Customer, customers, first);
+                    var otherCustomer = orders.Reference(order => order.OtherCustomer, customers, second);
+                    var query = database.Table(orders);
+                    query = enabled ? query.Join(customer) : query;
+                    query = query.Join(otherCustomer);
+                    query.Where(order => order.OtherCustomer.Name == "Ada");
+                }
+            }
+            """;
+
+        var diagnostics = (await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_104").ToArray();
+
+        Assert.Contains(diagnostics, item => source.Substring(
+            item.Location.SourceSpan.Start,
+            item.Location.SourceSpan.Length).Contains("Join(otherCustomer)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_refuses_a_nested_join_after_an_enclosing_condition_assignment()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order
+            {
+                public Customer Customer { get; set; } = new();
+                public Customer OtherCustomer { get; set; } = new();
+            }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Use
+            {
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin first, ReferenceJoin second)
+                {
+                    var customer = orders.Reference(order => order.Customer, customers, first);
+                    var otherCustomer = orders.Reference(order => order.OtherCustomer, customers, second);
+                    var query = database.Table(orders);
+                    if ((query = query.Join(customer)) is not null)
+                    {
+                        query = query.Join(otherCustomer);
+                        query.Where(order => order.OtherCustomer.Name == "Ada");
+                    }
+                }
+            }
+            """;
+
+        var diagnostics = (await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_104").ToArray();
+
+        Assert.Contains(diagnostics, item => source.Substring(
+            item.Location.SourceSpan.Start,
+            item.Location.SourceSpan.Length).Contains("Join(otherCustomer)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_fails_closed_for_opaque_query_composition()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order { public Customer Customer { get; set; } = new(); }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Use
+            {
+                private static IGwQueryable<Order> Compose(IGwQueryable<Order> query) => query;
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin declaration)
+                {
+                    var reference = orders.Reference(order => order.Customer, customers, declaration);
+                    var query = Compose(database.Table(orders));
+                    query.Join(reference).Where(order => order.Customer.Name == "Ada");
+                }
+            }
+            """;
+
+        var diagnostics = await AnalyzeLinq(source);
+
+        Assert.Contains(diagnostics, item => item.Id == "GW_LINQ_104");
     }
 
     [Fact]
