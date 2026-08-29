@@ -17,7 +17,7 @@ namespace Groundwork.MongoDb.Tests;
 public sealed class MongoProviderIntegrationTests
 {
     [SkippableFact]
-    public void Joined_row_query_refuses_before_command_observation_until_composite_materialization_lands()
+    public void Joined_explicit_projection_materializes_qualified_source_and_target_rows()
     {
         var connectionString = LiveMongo.ConnectionString;
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
@@ -26,7 +26,21 @@ public sealed class MongoProviderIntegrationTests
         var fixture = JoinFixture("row-guard", ScopePolicy.Global);
         Assert.True(connection.Schema.Apply(fixture.Target).Applied);
         Assert.True(connection.Schema.Apply(fixture.Source).Applied);
-        var request = new QueryRequest(
+        var target = connection.OpenSession(fixture.Target, StorageAccess.Global);
+        Assert.True(target.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "customer-a",
+            ["score"] = 10
+        })).Succeeded);
+        var source = connection.OpenSession(fixture.Source, StorageAccess.Global);
+        Assert.True(source.Insert(new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "order-a",
+            ["customer_id"] = "customer-a"
+        })).Succeeded);
+        var sourceId = new ColumnRef(fixture.SourceTable, "id", QueryType.String, isNullable: false);
+        var targetId = new ColumnRef(fixture.Join.TargetTable, "id", QueryType.String, isNullable: false);
+        var allColumns = new QueryRequest(
             fixture.SourceTable,
             fixture.Join,
             Predicate.AlwaysTrue.Instance,
@@ -36,11 +50,26 @@ public sealed class MongoProviderIntegrationTests
         var observer = new ProviderCommandObserver();
         var session = connection.OpenSession(fixture.Source, StorageAccess.Global, observer);
 
-        var refusal = Assert.Throws<QueryRenderException>(() => session.Query(request));
+        var refusal = Assert.Throws<QueryRenderException>(() => session.Query(allColumns));
 
         Assert.Equal("GW-QUERY-032", refusal.Code);
-        Assert.Contains("composite source/target", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("explicit projection", refusal.Message, StringComparison.Ordinal);
         Assert.Empty(observer.Commands);
+
+        var request = new QueryRequest(
+            fixture.SourceTable,
+            fixture.Join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(sourceId, targetId, fixture.TargetScore),
+            Paging.None);
+        var result = session.Query(request);
+
+        var row = Assert.Single(result.Rows);
+        Assert.Equal("order-a", row[QueryRequestExecution.ResultFieldName(request, sourceId)]);
+        Assert.Equal("customer-a", row[QueryRequestExecution.ResultFieldName(request, targetId)]);
+        Assert.Equal(10, row[QueryRequestExecution.ResultFieldName(request, fixture.TargetScore)]);
+        Assert.Single(observer.Commands);
     }
 
     [SkippableFact]

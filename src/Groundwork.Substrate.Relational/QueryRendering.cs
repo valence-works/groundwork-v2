@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Data.Common;
+using Groundwork.Kernel;
 using Groundwork.Query.Model;
 
 namespace Groundwork.Substrate.Relational;
@@ -106,6 +107,56 @@ internal sealed class RelationalPredicateFragment
 /// <summary>Executes a rendered relational command while leaving value decoding to the provider.</summary>
 public static class RelationalQueryResultReader
 {
+    internal static ColumnDefinition? ResolveColumnDefinition(
+        StorageUnit source,
+        QueryRequest request,
+        QueryRenderOptions options,
+        string fieldName)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var queryColumn = QueryRequestExecution.ResolveResultColumn(request, options, fieldName);
+        if (queryColumn is null && request.Join is null && request.Projection.AllColumns)
+        {
+            return source.Columns.FirstOrDefault(column =>
+                string.Equals(column.Name, fieldName, StringComparison.Ordinal));
+        }
+        if (queryColumn is null)
+            return null;
+        if (request.Join is null || queryColumn.Table == request.Join.SourceTable)
+        {
+            var declared = source.Columns.FirstOrDefault(column =>
+                string.Equals(column.Name, queryColumn.Name, StringComparison.Ordinal));
+            if (declared is not null)
+                return declared;
+        }
+
+        return new ColumnDefinition
+        {
+            Name = queryColumn.Name,
+            Type = queryColumn.Type switch
+            {
+                QueryType.Boolean => PortableType.Boolean,
+                QueryType.Int32 => PortableType.Int32,
+                QueryType.Int64 => PortableType.Int64,
+                QueryType.Decimal => PortableType.Decimal,
+                QueryType.String => PortableType.String,
+                QueryType.DateTimeOffset => PortableType.DateTimeOffset,
+                QueryType.Guid => PortableType.Guid,
+                QueryType.Binary => PortableType.Binary,
+                _ => throw new ArgumentOutOfRangeException(nameof(queryColumn), queryColumn.Type, null)
+            },
+            IsNullable = queryColumn.IsNullable,
+            MaxLength = queryColumn.MaxLength,
+            Precision = queryColumn.DecimalPrecision,
+            Scale = queryColumn.DecimalScale,
+            Collation = queryColumn.Type == QueryType.String
+                ? queryColumn.StringComparison == QueryStringComparisonPolicy.UnicodeOrdinalIgnoreCase
+                    ? PortableCollation.UnicodeOrdinalIgnoreCase
+                    : PortableCollation.Ordinal
+                : null
+        };
+    }
+
     public static IReadOnlyList<IReadOnlyDictionary<string, object?>> Read(
         DbConnection connection,
         RelationalQueryCommand query,
@@ -144,7 +195,7 @@ public static class RelationalQueryResultReader
         {
             throw new QueryRenderException(
                 "GW-QUERY-032",
-                "Relational join rendering is available, but composite source/target result materialization has not landed yet.");
+                "Joined row materialization requires an explicit projection so source and target fields remain unambiguous.");
         }
         mode.CancellationToken.ThrowIfCancellationRequested();
         using var command = CreateCommand(connection, query, transaction);
@@ -228,8 +279,6 @@ public abstract class RelationalQueryRenderer
 
     private sealed class JoinedColumnScope
     {
-        private readonly Dictionary<(TableId Table, string Name), string> fields = new();
-
         public JoinedColumnScope(QueryRequest request)
         {
             Join = request.Join!;
@@ -259,13 +308,7 @@ public abstract class RelationalQueryRenderer
 
         public string Field(ColumnRef column)
         {
-            var key = (column.Table, column.Name);
-            if (!fields.TryGetValue(key, out var field))
-            {
-                field = "__groundwork_join_" + fields.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                fields.Add(key, field);
-            }
-            return field;
+            return QueryRequestExecution.ResultFieldName(Join, column);
         }
     }
 
@@ -660,7 +703,7 @@ public abstract class RelationalQueryRenderer
                 expectedIndex?.Name,
                 indexHintApplied,
                 effectiveOrder.Select(term => term.Column.Name).ToArray(),
-                requiresCompositeMaterializer: request.Result is not ResultShape.Reduction);
+                requiresCompositeMaterializer: request.Projection.AllColumns && request.Result is not ResultShape.Reduction);
         }
         finally
         {
@@ -1103,7 +1146,7 @@ public abstract class RelationalQueryRenderer
     /// <summary>Renders one selected expression and preserves the model column name as its result alias.</summary>
     protected virtual string RenderSelection(ColumnRef column) =>
         RenderColumn(column) + " AS " + dialect.QuoteIdentifier(
-            joinedColumnScope.Value is { UsesDerivedSource: true } scope
+            joinedColumnScope.Value is { } scope
                 ? scope.Field(column)
                 : column.Name);
 

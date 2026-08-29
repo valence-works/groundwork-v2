@@ -26,6 +26,33 @@ and intentionally partial same-type constructors/member initializers, so omitted
 read. `RecordQueryOptions.UsingIndex(name)` carries a declared logical index to the provider for
 native selection/plan verification.
 
+A navigation-bearing Records type declares its relationship explicitly on the builder. The complex
+navigation is not persisted as a column; the named reference binds its ordered source columns to the
+target table key:
+
+```csharp
+var orders = RecordTable.For<Order>("orders")
+    .Key(order => order.Id)
+    .Index("by-customer", order => order.CustomerId)
+    .Reference("customer", order => order.Customer, customers, order => order.CustomerId)
+    .Build();
+
+var customer = orders.Reference<Customer>("customer");
+var query = customer.Join(orders.Query)
+    .Where(order => order.Customer.Name == "Ada");
+var projection = orders.Select(
+    query,
+    customer,
+    (order, target) => new OrderCustomer(order.Id, target.Id, target.Name));
+```
+
+The joined selector is terminal and may read direct scalar members, construct typed or anonymous
+results, or materialize both complete record parameters. It compiles once and retains the
+zero-reflection hot path. Providers expose joined fields as stable `table.column` keys internally;
+the compiled Records accessor consumes those qualified values without exposing SQL aliases or
+MongoDB's nested lookup document. Generic post-projection query composition is intentionally not
+part of this surface.
+
 ## Typed declared aggregations
 
 `RecordTable<T>.Aggregate` binds expressions over `AggregationRow` to one profile declared by the

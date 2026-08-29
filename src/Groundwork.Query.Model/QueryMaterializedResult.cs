@@ -180,8 +180,9 @@ public static class QueryResultMaterializer
             IEnumerable<KeyValuePair<string, object?>> fields = request.Projection.AllColumns
                 ? row.Where(pair => !IsInternalField(pair.Key))
                 : request.Projection.Columns
-                    .Where(column => !IsInternalField(column.Name) && row.ContainsKey(column.Name))
-                    .Select(column => new KeyValuePair<string, object?>(column.Name, row[column.Name]));
+                    .Select(column => (Column: column, Field: QueryRequestExecution.ResultFieldName(request, column)))
+                    .Where(item => !IsInternalField(item.Field) && row.ContainsKey(item.Field))
+                    .Select(item => new KeyValuePair<string, object?>(item.Field, row[item.Field]));
             return (IReadOnlyDictionary<string, object?>)new ReadOnlyDictionary<string, object?>(fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
         }).ToArray();
         return new QueryMaterializedResult(rows, totalCount, nextToken, selectedIndex, indexHintApplied);
@@ -198,8 +199,9 @@ public static class QueryResultMaterializer
             var fields = request.Projection.AllColumns
                 ? row.Where(pair => !IsInternalField(pair.Key)).OrderBy(pair => pair.Key, StringComparer.Ordinal)
                 : request.Projection.Columns
-                    .Where(column => !IsInternalField(column.Name))
-                    .Select(column => new KeyValuePair<string, object?>(column.Name, row.TryGetValue(column.Name, out var value) ? value : null));
+                    .Select(column => QueryRequestExecution.ResultFieldName(request, column))
+                    .Where(field => !IsInternalField(field))
+                    .Select(field => new KeyValuePair<string, object?>(field, row.TryGetValue(field, out var value) ? value : null));
             var key = string.Join("|", fields.Select(pair => pair.Key + "=" + QueryStructuralIdentity.ForDistinct(pair.Value)));
             if (seen.Add(key))
                 result.Add(row);
@@ -241,6 +243,11 @@ public static class QueryResultMaterializer
             return true;
 
         var column = order[index].Column;
+        if (requireQualifiedContinuationFields &&
+            row.TryGetValue(column.Table.Value + "." + column.Name, out value))
+        {
+            return true;
+        }
         if (requireQualifiedContinuationFields &&
             order.Count(term => ColumnRefIdentity.SameName(term.Column, column)) > 1)
         {
@@ -292,6 +299,27 @@ public static class QueryResultMaterializer
 public static class QueryRequestExecution
 {
     /// <summary>
+    /// Returns the stable public result field for a projected column. Joined fields retain their
+    /// logical table qualification so same-named source and target columns cannot collide.
+    /// </summary>
+    public static string ResultFieldName(QueryRequest request, ColumnRef column)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (column is null) throw new ArgumentNullException(nameof(column));
+        return request.Join is null ? column.Name : ResultFieldName(request.Join, column);
+    }
+
+    /// <summary>Returns the stable qualified result field for one side of a declared join.</summary>
+    public static string ResultFieldName(ReferenceJoin join, ColumnRef column)
+    {
+        if (join is null) throw new ArgumentNullException(nameof(join));
+        if (column is null) throw new ArgumentNullException(nameof(column));
+        if (column.Table != join.SourceTable && column.Table != join.TargetTable)
+            throw new ArgumentException("A joined result column must belong to its declared source or target table.", nameof(column));
+        return column.Table.Value + "." + column.Name;
+    }
+
+    /// <summary>
     /// Returns the stable provider-result field name for one effective continuation-order value.
     /// Joined renderers use these internal aliases when qualified columns share a logical name.
     /// </summary>
@@ -300,6 +328,36 @@ public static class QueryRequestExecution
         if (orderIndex < 0)
             throw new ArgumentOutOfRangeException(nameof(orderIndex));
         return "__groundwork_continuation_" + orderIndex.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Resolves a provider result field back to its portable column metadata. This covers public
+    /// projection fields and the internal continuation aliases emitted by every joined renderer.
+    /// </summary>
+    public static ColumnRef? ResolveResultColumn(
+        QueryRequest request,
+        QueryRenderOptions options,
+        string fieldName)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        if (options is null) throw new ArgumentNullException(nameof(options));
+        if (string.IsNullOrWhiteSpace(fieldName))
+            throw new ArgumentException("A provider result field name is required.", nameof(fieldName));
+
+        const string continuationPrefix = "__groundwork_continuation_";
+        if (fieldName.StartsWith(continuationPrefix, StringComparison.Ordinal) &&
+            int.TryParse(fieldName.Substring(continuationPrefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var index))
+        {
+            var order = options.GetEffectiveOrder(request);
+            return index >= 0 && index < order.Length ? order[index].Column : null;
+        }
+
+        if (request.Result is ResultShape.Reduction reduction &&
+            string.Equals(fieldName, reduction.Column.Name, StringComparison.Ordinal))
+            return reduction.Column;
+
+        return request.Projection.Columns.FirstOrDefault(column =>
+            string.Equals(ResultFieldName(request, column), fieldName, StringComparison.Ordinal));
     }
 
     /// <summary>Bounds a direct model request for a cardinality result shape.</summary>

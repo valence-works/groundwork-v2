@@ -143,6 +143,37 @@ public sealed class JoinQueryModelTests
     }
 
     [Fact]
+    public void Joined_result_fields_are_qualified_and_keep_same_named_columns_distinct()
+    {
+        var join = Join();
+        var request = new QueryRequest(
+            Orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(OrderId, CustomerId),
+            Paging.None);
+        var sourceId = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var targetId = Guid.Parse("00000000-0000-0000-0000-000000000002");
+
+        Assert.Equal("orders.id", QueryRequestExecution.ResultFieldName(request, OrderId));
+        Assert.Equal("customers.id", QueryRequestExecution.ResultFieldName(request, CustomerId));
+
+        var result = QueryResultMaterializer.Materialize(
+            request,
+            QueryRenderOptions.Default,
+            [new Dictionary<string, object?>
+            {
+                ["orders.id"] = sourceId,
+                ["customers.id"] = targetId
+            }]);
+
+        var row = Assert.Single(result.Rows);
+        Assert.Equal(sourceId, row["orders.id"]);
+        Assert.Equal(targetId, row["customers.id"]);
+    }
+
+    [Fact]
     public void Provider_identity_resolution_preserves_single_table_name_deduplication()
     {
         var unqualifiedId = new ColumnRef("id", QueryType.Guid, isNullable: false);
@@ -383,8 +414,8 @@ public sealed class JoinQueryModelTests
             source,
             sourceIncludesContinuation: false);
 
-        Assert.Equal([1L, 2L], first.Rows.Select(row => row[OrderSequence.Name]));
-        Assert.Equal([3L, 4L], second.Rows.Select(row => row[OrderSequence.Name]));
+        Assert.Equal([1L, 2L], first.Rows.Select(row => row[JoinedField(OrderSequence)]));
+        Assert.Equal([3L, 4L], second.Rows.Select(row => row[JoinedField(OrderSequence)]));
         Assert.Null(second.NextContinuationToken);
         Assert.Equal(
             ["string:416C696365", "int64:2", "guid:00000000-0000-0000-0000-000000000001", "string:6575"],
@@ -420,8 +451,8 @@ public sealed class JoinQueryModelTests
 
         Assert.Equal(sourceIdA, cursor[1].Value);
         Assert.Equal(targetId, cursor[2].Value);
-        Assert.Equal(1L, first.Rows.Single()[OrderSequence.Name]);
-        Assert.Equal(2L, second.Rows.Single()[OrderSequence.Name]);
+        Assert.Equal(1L, first.Rows.Single()[JoinedField(OrderSequence)]);
+        Assert.Equal(2L, second.Rows.Single()[JoinedField(OrderSequence)]);
     }
 
     [Fact]
@@ -651,10 +682,11 @@ public sealed class JoinQueryModelTests
         Guid sourceId,
         Guid targetId) => new Dictionary<string, object?>(StringComparer.Ordinal)
     {
-        [OrderSequence.Name] = sequence,
-        [CustomerName.Name] = "Alice",
-        [CustomerRegion.Name] = "eu",
-        [OrderId.Name] = targetId,
+        [JoinedField(OrderSequence)] = sequence,
+        [JoinedField(CustomerName)] = "Alice",
+        [JoinedField(CustomerRegion)] = "eu",
+        [JoinedField(OrderId)] = sourceId,
+        [JoinedField(CustomerId)] = targetId,
         [QueryRequestExecution.ContinuationFieldName(0)] = "Alice",
         [QueryRequestExecution.ContinuationFieldName(1)] = sourceId,
         [QueryRequestExecution.ContinuationFieldName(2)] = targetId,
@@ -667,11 +699,14 @@ public sealed class JoinQueryModelTests
         string region,
         string name) => new Dictionary<string, object?>(StringComparer.Ordinal)
     {
-        [OrderSequence.Name] = order,
-        [CustomerId.Name] = customer,
-        [CustomerRegion.Name] = region,
-        [CustomerName.Name] = name
+        [JoinedField(OrderSequence)] = order,
+        [JoinedField(CustomerId)] = customer,
+        [JoinedField(CustomerRegion)] = region,
+        [JoinedField(CustomerName)] = name
     };
+
+    private static string JoinedField(ColumnRef column) =>
+        QueryRequestExecution.ResultFieldName(Join(), column);
 
     private static QueryRequest Request(
         ReferenceJoin join,

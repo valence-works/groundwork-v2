@@ -107,7 +107,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             if (executionSource.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
                 string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
                 return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
-            var column = Unit.Columns.FirstOrDefault(item => item.Name == name);
+            var column = RelationalQueryResultReader.ResolveColumnDefinition(Unit, executionSource, renderOptions, name);
             return column is null ? value : FromDatabase(value ?? DBNull.Value, column);
         }, activeTransaction ?? transaction, mode).ConfigureAwait(false);
         await AssertExplainPlan(command, renderOptions, mode).ConfigureAwait(false);

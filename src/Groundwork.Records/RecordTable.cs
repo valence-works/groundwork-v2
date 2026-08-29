@@ -16,6 +16,8 @@ public static class RecordTable
 public sealed class RecordTableBuilder<T>
 {
     private readonly DeclarationState state;
+    private readonly List<RecordReferenceBinding> references = [];
+    private readonly List<MemberInfo> unsupportedMembers = [];
 
     internal RecordTableBuilder(string name)
     {
@@ -71,6 +73,28 @@ public sealed class RecordTableBuilder<T>
         return this;
     }
 
+    /// <summary>
+    /// Declares and binds one direct navigation to a target record table. The source columns are
+    /// interpreted in the target table's declared key order.
+    /// </summary>
+    public RecordTableBuilder<T> Reference<TTarget, TColumns>(
+        string name,
+        Expression<Func<T, TTarget>> navigation,
+        RecordTable<TTarget> target,
+        Expression<Func<T, TColumns>> columns)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        var navigationMember = SingleMember(navigation);
+        if (MemberType(navigationMember) != typeof(TTarget))
+            throw new ArgumentException("The navigation member type must exactly match the target record type.", nameof(navigation));
+        if (references.Any(reference => string.Equals(reference.Name, name, StringComparison.Ordinal)))
+            throw new ArgumentException($"Record reference '{name}' is already bound.", nameof(name));
+
+        state.AddReference(name, target.Definition, MemberNames(columns, allowComposite: true));
+        references.Add(new RecordReferenceBinding(name, navigation, navigationMember, target));
+        return this;
+    }
+
     /// <summary>Declares a closed aggregation profile alongside this typed table.</summary>
     public RecordTableBuilder<T> Aggregate(
         string name,
@@ -84,9 +108,13 @@ public sealed class RecordTableBuilder<T>
 
     public RecordTable<T> Build(PortabilityValidationContext? context = null)
     {
+        var unbound = unsupportedMembers.FirstOrDefault(member =>
+            references.All(reference => reference.NavigationMember != member));
+        if (unbound is not null)
+            throw new NotSupportedException($"Member '{unbound.Name}' has unsupported type '{MemberType(unbound)}'; bind it as a declared record reference or remove it from the row type.");
         try
         {
-            return new(state.Build(context));
+            return new(state.Build(context), references);
         }
         catch (DeclarationBuildException exception)
         {
@@ -103,7 +131,11 @@ public sealed class RecordTableBuilder<T>
             .OrderBy(member => member.MetadataToken))
         {
             var type = MemberType(member);
-            var portableType = ToPortableType(type, member);
+            if (!TryToPortableType(type, out var portableType))
+            {
+                unsupportedMembers.Add(member);
+                continue;
+            }
             var columnName = GetColumnName(member);
             var nullable = IsNullable(member, type);
             state.AddColumn(new ColumnBuilder().InferNullable(nullable).Build(columnName, portableType));
@@ -160,20 +192,22 @@ public sealed class RecordTableBuilder<T>
         _ => throw new ArgumentException("Only properties and fields can be declared.", nameof(member))
     };
 
-    private static PortableType ToPortableType(Type type, MemberInfo member)
+    private static bool TryToPortableType(Type type, out PortableType portableType)
     {
         type = Nullable.GetUnderlyingType(type) ?? type;
-        if (type == typeof(string)) return PortableType.String;
-        if (type == typeof(int)) return PortableType.Int32;
-        if (type == typeof(long)) return PortableType.Int64;
-        if (type == typeof(decimal)) return PortableType.Decimal;
-        if (type == typeof(bool)) return PortableType.Boolean;
-        if (type == typeof(DateTimeOffset)) return PortableType.DateTimeOffset;
-        if (type == typeof(Guid)) return PortableType.Guid;
-        if (type == typeof(byte[])) return PortableType.Binary;
-        if (type == typeof(object)) return PortableType.Json;
-
-        throw new NotSupportedException($"Member '{member.Name}' has unsupported type '{type}'.");
+        portableType = type == typeof(string) ? PortableType.String
+            : type == typeof(int) ? PortableType.Int32
+            : type == typeof(long) ? PortableType.Int64
+            : type == typeof(decimal) ? PortableType.Decimal
+            : type == typeof(bool) ? PortableType.Boolean
+            : type == typeof(DateTimeOffset) ? PortableType.DateTimeOffset
+            : type == typeof(Guid) ? PortableType.Guid
+            : type == typeof(byte[]) ? PortableType.Binary
+            : type == typeof(object) ? PortableType.Json
+            : default;
+        return type == typeof(string) || type == typeof(int) || type == typeof(long) ||
+            type == typeof(decimal) || type == typeof(bool) || type == typeof(DateTimeOffset) ||
+            type == typeof(Guid) || type == typeof(byte[]) || type == typeof(object);
     }
 
     private static bool IsNullable(MemberInfo member, Type type)
