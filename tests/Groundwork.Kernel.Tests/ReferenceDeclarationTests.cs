@@ -156,14 +156,14 @@ public sealed class ReferenceDeclarationTests
     [Fact]
     public void Reference_identity_participates_in_the_schema_subject_fingerprint()
     {
-        var customers = new SchemaSubject(SourceBuilder()
+        var subjectReferencingCustomer = new SchemaSubject(SourceBuilder()
             .Reference("customer", new StorageUnitId("customer"), "customer_id")
             .Build());
-        var accounts = new SchemaSubject(SourceBuilder()
+        var subjectReferencingAccount = new SchemaSubject(SourceBuilder()
             .Reference("customer", new StorageUnitId("account"), "customer_id")
             .Build());
 
-        Assert.NotEqual(customers.Fingerprint, accounts.Fingerprint);
+        Assert.NotEqual(subjectReferencingCustomer.Fingerprint, subjectReferencingAccount.Fingerprint);
     }
 
     [Fact]
