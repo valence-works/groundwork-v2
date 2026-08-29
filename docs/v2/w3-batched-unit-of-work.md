@@ -106,4 +106,5 @@ The target is one batch command for a 1,000-row homogeneous upsert group on
 SQLite, PostgreSQL, SQL Server, and MongoDB aggregate commits; exact MongoDB
 outcomes intentionally cost one command per coalesced row. Select
 `OutcomeMode.Aggregate` for this benchmark target. The transaction boundary is
-owned by the unit of work.
+owned by the unit of work. Repository CI captures the measurement through the manual `Performance
+evidence` workflow rather than on each pull-request update.

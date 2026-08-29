@@ -116,6 +116,12 @@ var report = ConcurrencyHarness.Run(
 
 SQLite and in-memory runs need no external services.
 
+Groundwork CI keeps this high-contention matrix out of ordinary pull-request correctness runs.
+Dispatch the dedicated `Concurrency` workflow against the candidate's exact commit once it is ready
+to merge; the workflow also runs after every push to `main`. A later candidate commit requires fresh
+concurrency evidence. Timing, hot-path, and round-trip measurements belong to the separate manual
+`Performance evidence` workflow.
+
 ## Running against real providers
 
 Live provider tests activate through environment variables; without them they are **explicitly

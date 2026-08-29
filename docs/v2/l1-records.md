@@ -63,4 +63,5 @@ dotnet run --project benchmarks/Groundwork.Benchmarks -- records --n 1000
 ```
 
 The command exercises both writes and materialization and fails if accessor compilation happens on
-either hot path.
+either hot path. Repository CI captures this command through the manual `Performance evidence`
+workflow rather than rerunning it during ordinary pull-request iteration.

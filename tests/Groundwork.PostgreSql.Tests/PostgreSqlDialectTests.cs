@@ -948,6 +948,7 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public void Async_writes_hold_every_named_concurrency_invariant_under_contention()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();
@@ -970,6 +971,7 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public void Async_unit_of_work_commits_hold_every_named_concurrency_invariant_under_contention()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();

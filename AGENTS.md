@@ -112,3 +112,13 @@ provider servers themselves.
   MongoDB unconfigured **skips** those cases — it is not evidence that the four-provider CI job
   passes. Live-provider classes there must join `NativeProviderDifferentialCollection`, which
   serializes them; provider infrastructure DDL is created on first use and races otherwise.
+
+## CI workflow cadence
+
+- `Correctness` runs on every pull-request head and push to `main`; it excludes tests explicitly
+  tagged `Category=Concurrency` but retains deterministic provider and capability conformance.
+- Dispatch `Concurrency` once against the exact candidate branch head before merge. A later push
+  invalidates that evidence and requires another dispatch. It also runs automatically on `main`.
+- `Performance evidence` is manual-only and belongs to the final performance/release phase or an
+  explicit investigation. Do not run it during ordinary issue iteration.
+- See `docs/agents/ci-workflows.md` for invocation and exact-head verification commands.
