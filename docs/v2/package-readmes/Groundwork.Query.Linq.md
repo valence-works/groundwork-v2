@@ -16,8 +16,9 @@ native reduction.
 `GwTableModel<T>.Reference` binds one direct CLR navigation member to an existing
 provider-neutral `ReferenceJoin`. After `.Join(reference)`, exactly that navigation's two-level
 members lower to target-qualified columns; arbitrary, deeper, and multiple navigations remain
-outside the closed surface. Provider rendering and composite source/target materialization are
-separate capabilities and fail closed until their provider packages implement them.
+outside the closed surface. SQLite, PostgreSQL, and SQL Server render the provider-neutral node as
+one native `INNER JOIN`; Mongo, in-memory, and batched execution remain fail-closed until their
+join paths land. Composite source/target materialization is a separate Records capability.
 Navigation-bearing row types use explicit table models; scalar-only `GwTableModel<T>.Infer` keeps
 rejecting complex members rather than guessing which object property represents a relationship.
 

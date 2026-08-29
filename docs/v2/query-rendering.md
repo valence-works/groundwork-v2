@@ -33,6 +33,25 @@ Consumers querying an ordinary `IStorageSession` can call
 names, column types, nullability, and missing-value policy without restating schema metadata. The
 optional selection remains provider-default: it enables coverage/explain evidence but never silently
 turns into an optimizer hint.
+
+### Declared-reference joins
+
+SQLite, PostgreSQL, and SQL Server render one declared-reference node as a qualified native
+`INNER JOIN`. Stable driving and target aliases qualify the join key, predicates, projections,
+ordering, latest-per-key windows, distinct keys, reductions, and continuation comparisons. The
+renderer emits `QueryRequestExecution.ContinuationFieldName(index)` for every effective joined
+order value so equal logical names on opposite sides cannot collapse a cursor tuple.
+
+The existing `QueryRenderOptions` index selection describes the driving relation. A pinned SQL
+Server index is attached only to that driving alias; it is never copied to the target. SQLite and
+PostgreSQL keep both relations optimizer-selected. The join equality itself binds no values, and
+both sides' predicate values, continuation values, and page values consume one shared provider
+parameter budget. Mongo `$lookup` is a separate renderer capability, and composite public
+source/target row materialization is owned by the Records join materializer rather than the SQL
+renderer. Provider execution through the ordinary dictionary result reader therefore remains
+fail-closed before provider I/O until that composite materializer lands, preventing duplicate
+source/target field labels from being collapsed into one dictionary slot.
+
 An empty `In` normalizes to match-none; a pinned declaration is still carried on the native
 command. A pinned index that excludes null values is refused when the predicate could match an
 excluded null, except for match-none. This preserves the v1 sparse-index safety rule.
