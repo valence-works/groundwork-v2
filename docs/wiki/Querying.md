@@ -59,9 +59,10 @@ arbitrary object property is a relationship.
 
 Source and target columns stay table-qualified even when they have the same logical name. A
 navigation used without its matching `Join`, a different navigation, a deeper member chain, a
-second join, or an arbitrary LINQ `Join` remains refused. Provider rendering and composite
-source/target materialization are separate capabilities; until a provider supports the join node,
-execution fails closed before I/O.
+second join, or an arbitrary LINQ `Join` remains refused. SQLite, PostgreSQL, and SQL Server render
+the node as one native qualified `INNER JOIN`; Mongo, in-memory, and batched query execution remain
+fail-closed until their join paths land. Composite source/target materialization is a separate
+Records capability rather than a renderer concern.
 
 `ToQueryRequest()` is the provider-neutral boundary:
 

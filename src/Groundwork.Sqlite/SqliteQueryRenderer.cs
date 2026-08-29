@@ -24,7 +24,7 @@ public sealed class SqliteQueryRenderer : RelationalQueryRenderer
             return "groundwork_scope_token(" + Dialect.QuoteIdentifier(SqliteSchemaCoordinator.ScopeColumn) + ") COLLATE GROUNDWORK_UTF16_ORDINAL";
         return column.Type switch
         {
-            QueryType.Decimal => Dialect.QuoteIdentifier(column.Name) + " COLLATE GROUNDWORK_DECIMAL_18_4",
+            QueryType.Decimal => base.RenderColumn(column) + " COLLATE GROUNDWORK_DECIMAL_18_4",
             QueryType.String => base.RenderColumn(column) + " COLLATE GROUNDWORK_UTF16_ORDINAL",
             _ => base.RenderColumn(column)
         };

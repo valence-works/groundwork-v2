@@ -6,6 +6,7 @@ using Groundwork.Query.Model;
 using Groundwork.SqlServer;
 using Groundwork.Sqlite;
 using Groundwork.Substrate.Relational;
+using Microsoft.Data.Sqlite;
 using MongoDB.Bson;
 using Xunit;
 
@@ -19,35 +20,370 @@ public sealed class QueryRendererTests
     private static readonly ColumnRef Amount = new(Table, "amount", QueryType.Int32, isNullable: true);
 
     [Fact]
-    public void Existing_renderers_fail_closed_for_the_new_join_node()
+    public void Relational_renderers_emit_a_qualified_inner_join_while_mongo_remains_closed()
     {
         var orders = new TableId("orders");
+        var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
         var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var orderRegion = new ColumnRef(orders, "customer_region", QueryType.String, isNullable: false);
+        var customerRegion = new ColumnRef(Table, "region", QueryType.String, isNullable: false);
         var join = new ReferenceJoin(
             "customer",
             Table,
-            [new JoinColumnPair(customerId, Id)]);
+            [new JoinColumnPair(customerId, Id), new JoinColumnPair(orderRegion, customerRegion)]);
         var request = new QueryRequest(
             orders,
             join,
-            Predicate.AlwaysTrue.Instance,
-            [],
-            Projection.All,
+            new Predicate.And([
+                new Predicate.Equal(orderId, QueryConstant.Of(orderId, 7L)),
+                new Predicate.Equal(Name, QueryConstant.Of(Name, "Alice"))
+            ]),
+            [
+                new OrderTerm(orderId, nullOrder: NullOrder.First),
+                new OrderTerm(Name, nullOrder: NullOrder.Last)
+            ],
+            Projection.ColumnsOnly(orderId, Id, Name),
             Paging.None);
 
-        var renderers = new Action[]
+        var sqlite = new SqliteQueryRenderer().Render(request);
+        var postgres = new PostgreSqlQueryRenderer().Render(request);
+        var sqlServer = new SqlServerQueryRenderer().Render(request);
+
+        Assert.Contains("FROM \"orders\" AS \"__groundwork_source\" INNER JOIN \"customers\" AS \"__groundwork_target\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("\"__groundwork_source\".\"customer_id\" = \"__groundwork_target\".\"id\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("\"__groundwork_source\".\"customer_region\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("\"__groundwork_target\".\"region\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("\"__groundwork_source\".\"id\" AS \"id\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("\"__groundwork_target\".\"name\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("FROM \"orders\" AS \"__groundwork_source\" INNER JOIN \"customers\" AS \"__groundwork_target\"", postgres.CommandText, StringComparison.Ordinal);
+        Assert.Contains("\"__groundwork_source\".\"customer_id\" = \"__groundwork_target\".\"id\"", postgres.CommandText, StringComparison.Ordinal);
+        Assert.Contains("FROM [orders] AS [__groundwork_source] INNER JOIN [customers] AS [__groundwork_target]", sqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("[__groundwork_source].[customer_id] = [__groundwork_target].[id]", sqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("[__groundwork_source].[customer_region]", sqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("[__groundwork_target].[region]", sqlServer.CommandText, StringComparison.Ordinal);
+        Assert.All(new[] { sqlite, postgres, sqlServer }, command => Assert.Equal(2, command.Parameters.Length));
+
+        var refusal = Assert.Throws<QueryRenderException>(() => new MongoQueryRenderer().Render(request));
+        Assert.Equal("GW-QUERY-032", refusal.Code);
+        Assert.Contains("not yet render", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_sqlite_decimal_expressions_keep_their_relation_qualification()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var sourceBalance = new ColumnRef(
+            orders, "balance", QueryType.Decimal, isNullable: false, decimalPrecision: 18, decimalScale: 4);
+        var targetBalance = new ColumnRef(
+            Table, "balance", QueryType.Decimal, isNullable: false, decimalPrecision: 18, decimalScale: 4);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            new Predicate.And([
+                new Predicate.Equal(sourceBalance, QueryConstant.Of(sourceBalance, 10m)),
+                new Predicate.Equal(targetBalance, QueryConstant.Of(targetBalance, 20m))
+            ]),
+            [new OrderTerm(targetBalance, nullOrder: NullOrder.First)],
+            Projection.ColumnsOnly(sourceBalance, targetBalance),
+            Paging.None);
+
+        var command = new SqliteQueryRenderer().Render(request);
+
+        Assert.Contains(
+            "\"__groundwork_source\".\"balance\" COLLATE GROUNDWORK_DECIMAL_18_4",
+            command.CommandText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"__groundwork_target\".\"balance\" COLLATE GROUNDWORK_DECIMAL_18_4",
+            command.CommandText,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_relational_renderers_alias_every_effective_continuation_value()
+    {
+        var orders = new TableId("orders");
+        var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var firstPage = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, nullOrder: NullOrder.Last)],
+            Projection.ColumnsOnly(orderId, Name),
+            Paging.Keyset(10));
+        var options = new QueryRenderOptions().WithIdentityTieBreaks([orderId]);
+        var token = QueryContinuationToken.Encode(firstPage, options,
+        [
+            QueryConstant.Of(Name, "Alice"),
+            QueryConstant.Of(orderId, 17L),
+            QueryConstant.Of(Id, 42L)
+        ]);
+        var request = new QueryRequest(
+            firstPage.Table,
+            join,
+            firstPage.Where,
+            firstPage.Order,
+            firstPage.Projection,
+            Paging.Continuation(token, 10));
+
+        var commands = new RelationalQueryCommand[]
         {
-            () => new SqliteQueryRenderer().Render(request),
-            () => new PostgreSqlQueryRenderer().Render(request),
-            () => new SqlServerQueryRenderer().Render(request),
-            () => new MongoQueryRenderer().Render(request)
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options)
         };
 
+        foreach (var command in commands)
+        {
+            Assert.Contains("__groundwork_continuation_0", command.CommandText, StringComparison.Ordinal);
+            Assert.Contains("__groundwork_continuation_1", command.CommandText, StringComparison.Ordinal);
+            Assert.Contains("__groundwork_continuation_2", command.CommandText, StringComparison.Ordinal);
+            Assert.Equal(7, command.Parameters.Length);
+        }
+    }
+
+    [Fact]
+    public void Joined_sql_server_hint_applies_only_to_the_driving_side()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(orders, join, Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None);
+        var options = new QueryRenderOptions([
+            new QueryIndexDeclaration("ix_orders_customer", ["customer_id"], QueryIndexPinning.Pinned)
+        ]);
+
+        var command = new SqlServerQueryRenderer().Render(request, options);
+        var sqlite = new SqliteQueryRenderer().Render(request, options);
+        var postgres = new PostgreSqlQueryRenderer().Render(request, options);
+
+        Assert.True(command.IndexHintApplied);
+        Assert.Contains("[orders] AS [__groundwork_source] WITH (INDEX([ix_orders_customer])) INNER JOIN [customers] AS [__groundwork_target]", command.CommandText, StringComparison.Ordinal);
+        Assert.Equal(1, command.CommandText.Split("WITH (INDEX", StringSplitOptions.None).Length - 1);
+        Assert.False(sqlite.IndexHintApplied);
+        Assert.False(postgres.IndexHintApplied);
+        Assert.DoesNotContain("ix_orders_customer", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("ix_orders_customer", postgres.CommandText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_target_predicate_does_not_prove_a_same_named_sparse_source_column()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var sourceName = new ColumnRef(orders, "name", QueryType.String, isNullable: true);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var targetOnly = new QueryRequest(
+            orders,
+            join,
+            new Predicate.Equal(Name, QueryConstant.Of(Name, "Ada")),
+            [],
+            Projection.ColumnsOnly(sourceName, Name),
+            Paging.None);
+        var options = new QueryRenderOptions([
+            new QueryIndexDeclaration(
+                "ix_orders_name",
+                [new QueryIndexColumn("name", isNullable: true, type: QueryType.String)],
+                QueryIndexPinning.Pinned,
+                includesNulls: false)
+        ]);
+
+        var refusal = Assert.Throws<QueryRenderException>(() => new SqlServerQueryRenderer().Render(targetOnly, options));
+
+        Assert.Equal("GW-QUERY-009", refusal.Code);
+
+        var sourceProven = new QueryRequest(
+            orders,
+            join,
+            new Predicate.And([
+                targetOnly.Where,
+                new Predicate.Equal(sourceName, QueryConstant.Of(sourceName, "local"))
+            ]),
+            [],
+            targetOnly.Projection,
+            Paging.None);
+        var command = new SqlServerQueryRenderer().Render(sourceProven, options);
+        Assert.True(command.IndexHintApplied);
+    }
+
+    [Fact]
+    public void Joined_sqlite_parameter_budget_counts_both_sides_and_paging_once()
+    {
+        var orders = new TableId("orders");
+        var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var names = Enumerable.Range(0, 998)
+            .Select(value => QueryConstant.Of(Name, "customer-" + value))
+            .ToArray();
+        var request = new QueryRequest(
+            orders,
+            join,
+            new Predicate.And([
+                new Predicate.Equal(orderId, QueryConstant.Of(orderId, 7L)),
+                new Predicate.In(Name, names)
+            ]),
+            [],
+            Projection.All,
+            Paging.Keyset(1));
+
+        var refusal = Assert.Throws<QueryRenderException>(() => new SqliteQueryRenderer().Render(request));
+
+        Assert.Equal("GW-QUERY-015", refusal.Code);
+        Assert.Contains("1000 parameters", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("999", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_relational_cte_shapes_leave_relation_aliases_inside_the_base_query()
+    {
+        var orders = new TableId("orders");
+        var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var group = new ColumnRef(orders, "group_id", QueryType.Int64, isNullable: false);
+        var createdAt = new ColumnRef(orders, "created_at", QueryType.DateTimeOffset, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var order = ImmutableArray.Create(
+            new OrderTerm(orderId, nullOrder: NullOrder.First),
+            new OrderTerm(Name, nullOrder: NullOrder.Last));
+        var projection = Projection.ColumnsOnly(orderId, Name, Amount);
+        var requests = new (string Marker, QueryRequest Request)[]
+        {
+            ("__groundwork_total", new QueryRequest(
+                orders, join, Predicate.AlwaysTrue.Instance, order, projection,
+                Paging.OffsetLimit(1, 2), ResultShape.TotalCount.Instance)),
+            ("__groundwork_distinct", new QueryRequest(
+                orders, join, Predicate.AlwaysTrue.Instance, order, projection,
+                Paging.OffsetLimit(1, 2), ResultShape.Rows.Instance, distinct: true)),
+            ("__groundwork_latest_rank", new QueryRequest(
+                orders, join, Predicate.AlwaysTrue.Instance, order, projection,
+                Paging.OffsetLimit(1, 2), ResultShape.Rows.Instance,
+                latestPerKey: new LatestPerKey(group, createdAt))),
+            ("SUM", new QueryRequest(
+                orders, join, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(Amount),
+                Paging.OffsetLimit(1, 2), new ResultShape.Sum(Amount)))
+        };
+        var renderers = new Func<QueryRequest, RelationalQueryCommand>[]
+        {
+            request => new SqliteQueryRenderer().Render(request),
+            request => new PostgreSqlQueryRenderer().Render(request),
+            request => new SqlServerQueryRenderer().Render(request)
+        };
+
+        foreach (var (marker, request) in requests)
         foreach (var render in renderers)
         {
-            var refusal = Assert.Throws<QueryRenderException>(render);
-            Assert.Equal("GW-QUERY-032", refusal.Code);
-            Assert.Contains("not yet render", refusal.Message, StringComparison.Ordinal);
+            var command = render(request);
+
+            Assert.Contains("INNER JOIN", command.CommandText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(marker, command.CommandText, StringComparison.OrdinalIgnoreCase);
+            var finalOrder = command.CommandText.LastIndexOf("ORDER BY", StringComparison.OrdinalIgnoreCase);
+            if (finalOrder >= 0)
+            {
+                var derivedOrder = command.CommandText.Substring(finalOrder);
+                Assert.DoesNotContain("__groundwork_source", derivedOrder, StringComparison.Ordinal);
+                Assert.DoesNotContain("__groundwork_target", derivedOrder, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
+    public void Joined_reduction_applies_continuation_before_aggregation()
+    {
+        var orders = new TableId("orders");
+        var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var options = new QueryRenderOptions().WithIdentityTieBreaks([orderId]);
+        var firstPage = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(Name, nullOrder: NullOrder.Last)],
+            Projection.ColumnsOnly(Amount),
+            Paging.Keyset(10),
+            new ResultShape.Sum(Amount));
+        var token = QueryContinuationToken.Encode(firstPage, options,
+        [
+            QueryConstant.Of(Name, "Alice"),
+            QueryConstant.Of(orderId, 17L),
+            QueryConstant.Of(Id, 42L)
+        ]);
+        var request = new QueryRequest(
+            firstPage.Table,
+            join,
+            firstPage.Where,
+            firstPage.Order,
+            firstPage.Projection,
+            Paging.Continuation(token, 10),
+            firstPage.Result);
+
+        var commands = new RelationalQueryCommand[]
+        {
+            new SqliteQueryRenderer().Render(request, options),
+            new PostgreSqlQueryRenderer().Render(request, options),
+            new SqlServerQueryRenderer().Render(request, options)
+        };
+
+        Assert.All(commands, command =>
+        {
+            Assert.Contains("__groundwork_reduction_input", command.CommandText, StringComparison.Ordinal);
+            Assert.Equal(7, command.Parameters.Length);
+        });
+    }
+
+    [Fact]
+    public void Joined_sqlite_commands_execute_for_rows_count_distinct_latest_and_reduction()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", string.CompareOrdinal);
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText = """
+                CREATE TABLE orders (id INTEGER NOT NULL, customer_id INTEGER NOT NULL, group_id INTEGER NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE customers (id INTEGER NOT NULL, name TEXT NULL, amount INTEGER NULL);
+                INSERT INTO customers VALUES (1, 'Ada', 10), (2, 'Bob', 20), (3, 'Cara', 30);
+                INSERT INTO orders VALUES
+                    (101, 1, 7, '2026-01-01T00:00:00.0000000+00:00'),
+                    (102, 2, 7, '2026-01-02T00:00:00.0000000+00:00'),
+                    (103, 3, 8, '2026-01-03T00:00:00.0000000+00:00');
+                """;
+            schema.ExecuteNonQuery();
+        }
+
+        var orders = new TableId("orders");
+        var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var group = new ColumnRef(orders, "group_id", QueryType.Int64, isNullable: false);
+        var createdAt = new ColumnRef(orders, "created_at", QueryType.DateTimeOffset, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var order = ImmutableArray.Create(new OrderTerm(orderId, nullOrder: NullOrder.First));
+        var projection = Projection.ColumnsOnly(orderId, Name, Amount);
+        var requests = new QueryRequest[]
+        {
+            new(orders, join, Predicate.AlwaysTrue.Instance, order, projection, Paging.None),
+            new(orders, join, Predicate.AlwaysTrue.Instance, order, projection, Paging.None, ResultShape.TotalCount.Instance),
+            new(orders, join, Predicate.AlwaysTrue.Instance, order, projection, Paging.None, distinct: true),
+            new(orders, join, Predicate.AlwaysTrue.Instance, order, projection, Paging.None,
+                latestPerKey: new LatestPerKey(group, createdAt)),
+            new(orders, join, Predicate.AlwaysTrue.Instance, order, Projection.ColumnsOnly(Amount), Paging.None,
+                new ResultShape.Sum(Amount))
+        };
+
+        foreach (var request in requests)
+        {
+            var rendered = new SqliteQueryRenderer().Render(request);
+            using var command = connection.CreateCommand();
+            command.CommandText = rendered.CommandText;
+            foreach (var parameter in rendered.Parameters)
+                command.Parameters.AddWithValue("@" + parameter.Name, parameter.Value ?? DBNull.Value);
+            using var reader = command.ExecuteReader();
+            Assert.True(reader.Read(), rendered.CommandText);
         }
     }
 
