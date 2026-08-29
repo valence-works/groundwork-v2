@@ -100,9 +100,11 @@ internal sealed class RelationalSessionPointReads
         return new StoredEntry(new StorageValues(values), version);
     }
 
+    internal void ValidatePublicRead() =>
+        StorageAccessValidation.EnsurePointOperation(access, "read");
+
     internal async ValueTask<StoredEntry?> ReadPublic(StorageKey key, RelationalExecution execution)
     {
-        StorageAccessValidation.EnsurePointOperation(access, "read");
         return RelationalSessionPolicy.PublicEntry(await Read(
             key,
             execution,

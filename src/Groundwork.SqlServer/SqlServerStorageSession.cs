@@ -206,7 +206,10 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         ReadEntry(key, RelationalExecution.Asynchronous(cancellationToken));
 
     private ValueTask<StoredEntry?> ReadEntry(StorageKey key, RelationalExecution mode)
-        => Execute(() => pointReads.ReadPublic(key, mode), mode);
+    {
+        pointReads.ValidatePublicRead();
+        return Execute(() => pointReads.ReadPublic(key, mode), mode);
+    }
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null) =>
         InsertAsync(values, options, RelationalExecution.Synchronous).GetAwaiter().GetResult();

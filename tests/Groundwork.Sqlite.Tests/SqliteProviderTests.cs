@@ -265,6 +265,31 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Point_read_access_is_refused_before_owned_session_lifecycle_checks()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("read-access-order"),
+            Name = "read_access_order",
+            Columns = [new ColumnDefinition { Name = "id", Type = PortableType.String, IsNullable = false }],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Scope = ScopePolicy.Scoped
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var session = connection.OpenOwnedSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("sqlite-proof", "read-access-order")));
+        session.Dispose();
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => session.Read(new StorageKey(
+            new Dictionary<string, object?> { ["id"] = "after-release" })));
+
+        Assert.StartsWith("GW-ACCESS-003:", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Provider_disposal_cannot_miss_a_registering_legacy_session()
     {
         using var store = TemporaryStore.Create();

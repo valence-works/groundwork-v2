@@ -264,8 +264,11 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     }
 
     public StoredEntry? Read(StorageKey key)
-        => Execute(() => pointReads.ReadPublic(key, RelationalExecution.Synchronous)
+    {
+        pointReads.ValidatePublicRead();
+        return Execute(() => pointReads.ReadPublic(key, RelationalExecution.Synchronous)
             .GetAwaiter().GetResult());
+    }
 
     public WriteOutcome Insert(StorageValues values, WriteOptions? options = null)
     {
