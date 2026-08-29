@@ -278,11 +278,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
         ? request
-        : QueryRequestExecution.WithProviderPredicate(request, new Predicate.And([
-            request.Where,
-            new Predicate.Equal(new ColumnRef(new TableId(Unit.Name), SqlServerSchemaCoordinator.ScopeColumn, QueryType.String),
-                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqlServerSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
-            QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
+        : RelationalQueryExecution.BindScope(request, SqlServerSchemaCoordinator.ScopeColumn, Access.Scope!.Value);
 
     public StoredEntry? Read(StorageKey key) =>
         ReadEntry(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();

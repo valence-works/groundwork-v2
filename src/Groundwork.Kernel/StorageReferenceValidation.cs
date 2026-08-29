@@ -188,9 +188,27 @@ internal static class StorageReferenceValidation
     }
 
     private static bool HasCoveringIndex(StorageUnit unit, IReadOnlyList<string> columns) =>
-        Prefix(unit.Key?.Columns ?? [], columns) ||
+        CoversReference(unit, unit.Key?.Columns ?? [], columns) ||
         (unit.Indexes ?? []).Any(index => index?.Columns is not null &&
-            Prefix(index.Columns.Select(column => column?.Column ?? string.Empty).ToArray(), columns));
+            CoversReference(
+                unit,
+                index.Columns.Select(column => column?.Column ?? string.Empty).ToArray(),
+                columns));
+
+    private static bool CoversReference(
+        StorageUnit unit,
+        IReadOnlyList<string> candidate,
+        IReadOnlyList<string> required) =>
+        Prefix(candidate, required) ||
+        IsScopedPhysicalDeclaration(unit) &&
+        candidate.Count != 0 &&
+        string.Equals(candidate[0], ProviderOwnedColumns.Scope, StringComparison.Ordinal) &&
+        Prefix(candidate.Skip(1).ToArray(), required);
+
+    private static bool IsScopedPhysicalDeclaration(StorageUnit unit) =>
+        unit.Scope == ScopePolicy.Scoped &&
+        (unit.Columns ?? []).Any(column => column is not null &&
+            string.Equals(column.Name, ProviderOwnedColumns.Scope, StringComparison.Ordinal));
 
     private static bool Prefix(IReadOnlyList<string> candidate, IReadOnlyList<string> required) =>
         candidate.Count >= required.Count &&

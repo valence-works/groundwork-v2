@@ -91,6 +91,34 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Scoped_relational_join_binds_both_tables_to_the_same_scope()
+    {
+        var orders = new TableId("orders");
+        var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
+        var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
+        var request = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.ColumnsOnly(customerId, Name),
+            Paging.None);
+
+        var scoped = RelationalQueryExecution.BindScope(request, "__groundwork_scope", "scope-a");
+        var command = new SqliteQueryRenderer().Render(scoped);
+
+        Assert.Contains(
+            "\"__groundwork_source\".\"__groundwork_scope\"",
+            command.CommandText,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"__groundwork_target\".\"__groundwork_scope\"",
+            command.CommandText,
+            StringComparison.Ordinal);
+        Assert.Equal(["scope-a", "scope-a"], command.Parameters.Select(parameter => parameter.Value));
+    }
+
+    [Fact]
     public void Mongo_join_qualifies_target_predicate_projection_and_order()
     {
         var orders = new TableId("orders");
