@@ -46,7 +46,7 @@ jobs:
       - name: Publish Native AOT sample evidence
         uses: actions/upload-artifact@v4
         with:
-          name: native-aot-sample-${{ github.sha }}-${{ github.run_attempt }}
+          name: native-aot-sample-${{ inputs.ref || github.sha }}-${{ github.run_attempt }}
           path: artifacts/native-aot-sample/evidence.md
           if-no-files-found: error
           retention-days: 30
