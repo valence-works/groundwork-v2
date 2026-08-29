@@ -339,6 +339,40 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
+    public void Single_table_execution_only_order_field_keeps_its_declared_decoder_type()
+    {
+        var sort = new ColumnRef(Table, "sort_key", QueryType.Int32, isNullable: false);
+        var projected = new ColumnRef(Table, "amount", QueryType.Int32, isNullable: true);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(sort, nullOrder: NullOrder.Last)],
+            Projection.ColumnsOnly(projected),
+            Paging.Keyset(1));
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("decoder-order-field"),
+            Name = Table.Value,
+            Columns =
+            [
+                new ColumnDefinition { Name = sort.Name, Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = projected.Name, Type = PortableType.Int32, IsNullable = true }
+            ],
+            Key = new KeyDefinition { Columns = [sort.Name] }
+        };
+
+        var definition = RelationalQueryResultReader.ResolveColumnDefinition(
+            unit,
+            request,
+            QueryRenderOptions.Default,
+            sort.Name);
+        var decoded = SqliteDialect.ReadPortableValue(10L, Assert.IsType<ColumnDefinition>(definition));
+
+        Assert.IsType<int>(decoded);
+        Assert.Equal(10, decoded);
+    }
+
+    [Fact]
     public void Joined_sqlite_decimal_expressions_keep_their_relation_qualification()
     {
         var orders = new TableId("orders");

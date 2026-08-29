@@ -115,7 +115,7 @@ public static class RelationalQueryResultReader
     {
         ArgumentNullException.ThrowIfNull(source);
         var queryColumn = QueryRequestExecution.ResolveResultColumn(request, options, fieldName);
-        if (queryColumn is null && request.Join is null && request.Projection.AllColumns)
+        if (queryColumn is null && request.Join is null)
         {
             return source.Columns.FirstOrDefault(column =>
                 string.Equals(column.Name, fieldName, StringComparison.Ordinal));
