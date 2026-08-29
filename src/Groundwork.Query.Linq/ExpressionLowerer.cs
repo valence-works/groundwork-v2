@@ -646,7 +646,7 @@ public static class ExpressionLowerer
                 string.Equals(member.Member.Name, navigation.NavigationMember, StringComparison.Ordinal)) return true;
             return member.Expression is MemberExpression nested && HasColumn(nested);
         }
-        private void AddNavigationRefusal(Expression source) => Add("GW-LINQ-104", "Navigation and Join are not portable; v2 has no joins; use a declared element set or two queries", source);
+        private void AddNavigationRefusal(Expression source) => Add("GW-LINQ-104", "Undeclared cross-table member access is not portable; activate one declared reference with .Join(reference)", source);
         private bool HasUnsupportedColumnMethod(Expression source) => Unwrap(source) is MethodCallExpression call && call.Object is not null && HasColumn(call.Object) && call.Method.Name is "ToLower" or "ToUpper" or "Substring" or "Trim";
         private bool HasUnsupportedColumnMember(Expression source) => Unwrap(source) is MemberExpression member && member.Member.Name == "Length" && HasColumn(member.Expression!);
         private static bool ContainsGroupBy(MethodCallExpression call) => call.Method.Name == "GroupBy" || call.Object is MethodCallExpression nested && ContainsGroupBy(nested) || call.Arguments.Any(argument => Unwrap(argument) is MethodCallExpression nested && ContainsGroupBy(nested));

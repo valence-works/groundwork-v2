@@ -192,7 +192,8 @@ differ across providers, rather than delegating to each database's dialect:
 - Date/times are compared as **UTC ticks**; `DateTime` and unspecified/local kinds are not accepted.
 - GUID equality and ordering use an **RFC-4122 network-byte key**, so ordering is stable across
   providers rather than following each store's internal byte layout.
-- There are **no joins**. Use a declared element set, or two queries.
+- One schema-declared reference can be activated explicitly with `.Join(reference)`; arbitrary,
+  undeclared, deeper, or multiple joins remain refused.
 
 Every refusal carries a stable `GW-*` code, the offending path, and a named alternative. See
 **[Portable Semantics](Portable-Semantics)** and **[Diagnostics Reference](Diagnostics-Reference)**.

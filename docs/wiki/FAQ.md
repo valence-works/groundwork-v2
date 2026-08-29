@@ -2,8 +2,9 @@
 
 ### Is Groundwork an ORM?
 
-No. There is no change tracking, no lazy loading, no navigation properties, and **no joins**. It is a
-provider-neutral storage kernel: you declare typed storage, and you read and write it explicitly.
+No. There is no change tracking, lazy loading, or implicit navigation discovery. Groundwork is a
+provider-neutral storage kernel: you declare typed storage and references, then read and write them
+explicitly. The query model supports one explicitly activated schema-declared reference join.
 
 ### Why is `IGwQueryable<T>` not `IQueryable`?
 
@@ -12,12 +13,13 @@ translate it — leading to client-side evaluation, silent full scans, or a runt
 production. A closed surface accepts only what it can translate and tells you **at build time**, with
 a `GW-LINQ-*` code and a named fix.
 
-### Why no joins?
+### Why can't I use an arbitrary LINQ join?
 
-A portable join across four very different stores would either constrain the model to the weakest
-provider or produce a different plan on each. v2 instead offers **declared element sets** and
-**latest-per-key**, and expects you to issue two queries where a join would have been used. This is
-`GW-LINQ-104`.
+A portable join across four very different stores must have one schema-owned shape. Bind a direct
+navigation with `table.Reference(...)` and activate it with `.Join(reference)`. Arbitrary
+`Join`/`GroupJoin`, undeclared navigations, deeper chains, and multiple joins remain refused as
+`GW-LINQ-104`. Provider execution also stays fail-closed until that provider advertises the
+corresponding rendering capability.
 
 ### Can I store a `double`?
 

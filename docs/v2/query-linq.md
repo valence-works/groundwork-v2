@@ -7,9 +7,9 @@ existing session APIs.
 
 The conformance corpus in `tests/Groundwork.Query.Linq.Tests` is the source of truth for this
 surface. The following diagnostic table is generated deterministically from the predicate corpus
-decision rows and checked byte-for-byte by the corpus test; the test locks the ten predicate
-codes and 250 predicate cases together. The query-shape corpus below extends that versioned
-contract with projection, distinct, cardinality, and scalar-reduction terminals.
+decision rows and checked byte-for-byte by the corpus test; predicate corpus version `p2` locks the
+ten predicate codes and 250 predicate cases together. The query-shape corpus below extends that
+versioned contract with projection, distinct, cardinality, and scalar-reduction terminals.
 The query-shape corpus and `QueryFingerprint.QueryShapeVersion` are currently `q3`; changing a
 lowered shape requires an intentional version bump.
 
@@ -18,7 +18,7 @@ lowered shape requires an intentional version bump.
 | GW-LINQ-101 | Declare a computed column; expressions over columns are not portable. |
 | GW-LINQ-102 | Declare a computed column; expressions over columns are not portable. |
 | GW-LINQ-103 | Add `.AcceptScan(...)`. |
-| GW-LINQ-104 | V2 has no joins; use a declared element set or two queries. |
+| GW-LINQ-104 | Activate one declared reference with `.Join(reference)`. |
 | GW-LINQ-105 | Use `.LatestPer(...)` for grouped top-1. |
 | GW-LINQ-106 | Declare the element set. |
 | GW-LINQ-107 | Mark it `[GwQueryFragment]`. |
@@ -40,7 +40,7 @@ lowered shape requires an intentional version bump.
 | Computed/member expression | GW-LINQ-101: declare a computed column; expressions over columns are not portable |
 | Arithmetic expression | GW-LINQ-102: declare a computed column; expressions over columns are not portable |
 | Column-to-column comparison | GW-LINQ-103: add `.AcceptScan(...)` |
-| Cross-table expression | GW-LINQ-104: v2 has no joins; use a declared element set or two queries |
+| Undeclared cross-table expression | GW-LINQ-104: activate one declared reference with `.Join(reference)` |
 | Grouped top-one | GW-LINQ-105: use `.LatestPer(...)` for grouped top-1 |
 | Unsupported element-set predicate | GW-LINQ-106: declare the element set |
 | Opaque helper | GW-LINQ-107: mark it `[GwQueryFragment]` |

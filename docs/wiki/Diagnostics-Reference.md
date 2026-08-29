@@ -86,7 +86,7 @@ Raised by `PortableQuerySemantics.Validate`. See **[Portable Semantics](Portable
 | `GW-LINQ-101` | Computed/member expression over columns | Declare a computed column |
 | `GW-LINQ-102` | Arithmetic expression over columns | Declare a computed column |
 | `GW-LINQ-103` | Column-to-column comparison | Add `.AcceptScan(...)` |
-| `GW-LINQ-104` | Cross-table expression | v2 has no joins — element set or two queries |
+| `GW-LINQ-104` | Undeclared cross-table expression | Activate one declared reference with `.Join(reference)` |
 | `GW-LINQ-105` | Grouped top-one | Use `.LatestPer(...)` |
 | `GW-LINQ-106` | Unsupported element-set predicate | Declare the element set |
 | `GW-LINQ-107` | Opaque helper | Mark it `[GwQueryFragment]` |

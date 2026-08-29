@@ -24,9 +24,9 @@ rejecting complex members rather than guessing which object property represents 
 Deliberately *not* `IQueryable`. An open provider surface is what lets an expression compile
 happily and then fall back to client-side evaluation, or fail at runtime on one database and not
 another. A closed surface can be checked completely. `Groundwork.Query.Planning` proves the
-provider-neutral request; analyzer recognition of the new declared-navigation syntax is a separate
-versioned contract slice and fails closed until that slice is installed rather than admitting a
-joined query as source-only coverage.
+provider-neutral request. The analyzer recognizes an exact declared navigation only when it can
+resolve the `.Reference(...)` source declaration; compiled or otherwise opaque declarations remain
+fail-closed rather than being admitted as source-only coverage.
 
 Execution needs an adapter — see
 [`Groundwork.Query.Linq.Sqlite`](https://www.nuget.org/packages/Groundwork.Query.Linq.Sqlite).

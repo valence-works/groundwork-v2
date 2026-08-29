@@ -203,7 +203,9 @@ Mark the helper `[GwQueryFragment]`.
 
 ### `GW-LINQ-104` — cross-table expression
 
-v2 has **no joins**. Use a declared element set, or two queries.
+Activate exactly one schema-declared reference with `.Join(reference)`. Arbitrary LINQ joins,
+undeclared navigations, deeper member chains, and a reference whose source declaration cannot be
+proven remain fail-closed.
 
 ---
 

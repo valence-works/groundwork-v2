@@ -107,7 +107,7 @@ call**. Unsupported expression nodes are rejected rather than evaluated on the c
 | `GW-LINQ-101` | Computed/member expression over columns | Declare a computed column |
 | `GW-LINQ-102` | Arithmetic expression over columns | Declare a computed column |
 | `GW-LINQ-103` | Column-to-column comparison | Add `.AcceptScan(...)` |
-| `GW-LINQ-104` | Cross-table expression | **v2 has no joins** — use a declared element set or two queries |
+| `GW-LINQ-104` | Undeclared cross-table expression | Activate one declared reference with `.Join(reference)` |
 | `GW-LINQ-105` | Grouped top-one | Use `.LatestPer(...)` |
 | `GW-LINQ-106` | Unsupported element-set predicate | Declare the element set |
 | `GW-LINQ-107` | Opaque helper method | Mark it `[GwQueryFragment]` |
@@ -118,7 +118,7 @@ call**. Unsupported expression nodes are rejected rather than evaluated on the c
 | `GW-LINQ-112` | Sum/Min/Max selector is not a mapped portable column | Select a mapped numeric or orderable column |
 | `GW-LINQ-113` | Skip without Take | Add a bounded Take; offset-only pages are not portable |
 
-The predicate codes are locked by a **250-case conformance corpus** checked byte-for-byte in CI;
+The predicate codes are locked by the **`p2` 250-case conformance corpus** checked byte-for-byte in CI;
 the query-shape rows are covered by the model, lowering, and coverage suites so those contracts
 cannot drift either.
 

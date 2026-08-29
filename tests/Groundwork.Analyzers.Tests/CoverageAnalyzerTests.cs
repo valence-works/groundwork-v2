@@ -38,6 +38,159 @@ public sealed class CoverageAnalyzerTests
     }
 
     [Fact]
+    public async Task Linq_analyzer_accepts_the_navigation_activated_by_a_declared_reference()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order { public Customer Customer { get; set; } = new(); }
+            public sealed class Customer
+            {
+                public string Name { get; set; } = "";
+                public int? OptionalScore { get; set; }
+                public System.DateTimeOffset CreatedAt { get; set; }
+            }
+            public static class Use
+            {
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin declaration)
+                {
+                    var reference = orders.Reference(order => order.Customer, customers, declaration);
+                    var query = database.Table(orders).Join(reference);
+                    query.Where(order => order.Customer.Name == "Ada" &&
+                        order.Customer.OptionalScore.Value > 0 &&
+                        order.Customer.CreatedAt.Year == 2026 &&
+                        order.Customer.CreatedAt.Date == new System.DateTime(2026, 1, 1));
+                    query.OrderBy(order => order.Customer.Name);
+                    query.Select(order => order.Customer.Name);
+                }
+            }
+            """;
+
+        var diagnostics = await AnalyzeLinq(source);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id == "GW_LINQ_104");
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_keeps_refusing_unactivated_different_and_deeper_member_chains()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order
+            {
+                public Customer Customer { get; set; } = new();
+                public Customer OtherCustomer { get; set; } = new();
+            }
+            public sealed class Customer
+            {
+                public string Name { get; set; } = "";
+                public CustomerProfile Profile { get; set; } = new();
+            }
+            public sealed class CustomerProfile { public string Code { get; set; } = ""; }
+            public static class Use
+            {
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin declaration)
+                {
+                    var reference = orders.Reference(order => order.Customer, customers, declaration);
+                    database.Table(orders).Where(order => order.Customer.Name == "Ada");
+                    var query = database.Table(orders).Join(reference);
+                    query.Where(order => order.OtherCustomer.Name == "Grace");
+                    query.Where(order => order.Customer.Profile.Code == "vip");
+                }
+            }
+            """;
+
+        var diagnostics = (await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_104").ToArray();
+
+        Assert.Equal(3, diagnostics.Length);
+        Assert.All(diagnostics, item => Assert.Contains(".Join", item.GetMessage(), StringComparison.Ordinal));
+        Assert.All(diagnostics, item => Assert.Contains("declared reference", item.GetMessage(), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_fails_closed_when_the_reference_declaration_cannot_be_resolved()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            public sealed class Order { public Customer Customer { get; set; } = new(); }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Use
+            {
+                public static void Run(IGwQueryable<Order> query, GwReference<Order, Customer> compiledReference)
+                {
+                    query.Join(compiledReference).Where(order => order.Customer.Name == "Ada");
+                }
+            }
+            """;
+
+        var diagnostic = Assert.Single((await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_104"));
+
+        Assert.Contains("declared reference", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_accepts_a_declared_field_navigation_but_refuses_the_reference_object()
+    {
+        const string source = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order { public Customer Customer = new(); }
+            public sealed class Customer { public string Name = ""; }
+            public static class Use
+            {
+                public static void Run(GwQueryDatabase database, GwTableModel<Order> orders,
+                    GwTableModel<Customer> customers, ReferenceJoin declaration)
+                {
+                    var reference = orders.Reference(order => order.Customer, customers, declaration);
+                    var query = database.Table(orders).Join(reference);
+                    query.Where(order => order.Customer.Name == "Ada");
+                    query.Where(order => order.Customer == null);
+                }
+            }
+            """;
+
+        var diagnostic = Assert.Single((await AnalyzeLinq(source)).Where(item => item.Id == "GW_LINQ_104"));
+
+        Assert.Contains("declared reference", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Linq_analyzer_resolves_a_declared_reference_from_another_source_file()
+    {
+        const string declarations = """
+            using Groundwork.Query.Linq;
+            using Groundwork.Query.Model;
+            public sealed class Order { public Customer Customer { get; set; } = new(); }
+            public sealed class Customer { public string Name { get; set; } = ""; }
+            public static class Declarations
+            {
+                private static readonly GwTableModel<Order> Orders = default!;
+                private static readonly GwTableModel<Customer> Customers = default!;
+                private static readonly ReferenceJoin Declaration = default!;
+                public static GwReference<Order, Customer> Customer =>
+                    Orders.Reference(order => order.Customer, Customers, Declaration);
+            }
+            """;
+        const string use = """
+            using Groundwork.Query.Linq;
+            public static class Use
+            {
+                public static void Run(IGwQueryable<Order> query)
+                {
+                    query.Join(Declarations.Customer).Where(order => order.Customer.Name == "Ada");
+                }
+            }
+            """;
+
+        var diagnostics = await AnalyzeLinqSources([declarations, use]);
+
+        Assert.DoesNotContain(diagnostics, item => item.Id is "GW_LINQ_104" or "AD0001");
+    }
+
+    [Fact]
     public async Task Linq_code_fix_inserts_the_explicit_ordinal_overload()
     {
         const string source = "using System; using System.Linq.Expressions; namespace Groundwork.Query.Linq { [AttributeUsage(AttributeTargets.Property)] public sealed class GwStringComparisonAttribute : Attribute { public GwStringComparisonAttribute(StringComparison comparison) { } } public sealed class GwQueryTable<T> { public void Where(Expression<Func<T, bool>> predicate) { } } } public sealed class Ticket { [Groundwork.Query.Linq.GwStringComparison(StringComparison.Ordinal)] public string Name { get; set; } = \"\"; } public static class Use { public static void Run(Groundwork.Query.Linq.GwQueryTable<Ticket> table) { table.Where(ticket => ticket.Name.StartsWith(\"x\")); } }";
@@ -794,11 +947,16 @@ public sealed class CoverageAnalyzerTests
         return result;
     }
 
-    private static async Task<ImmutableArray<Diagnostic>> AnalyzeLinq(string source, IEnumerable<MetadataReference>? references = null)
+    private static Task<ImmutableArray<Diagnostic>> AnalyzeLinq(string source, IEnumerable<MetadataReference>? references = null) =>
+        AnalyzeLinqSources([source], references);
+
+    private static async Task<ImmutableArray<Diagnostic>> AnalyzeLinqSources(
+        IEnumerable<string> sources,
+        IEnumerable<MetadataReference>? references = null)
     {
         var compilation = CSharpCompilation.Create(
             "LinqInput",
-            [CSharpSyntaxTree.ParseText(SourceText.From(NormalizeLinqSource(source), Encoding.UTF8))],
+            sources.Select(source => CSharpSyntaxTree.ParseText(SourceText.From(NormalizeLinqSource(source), Encoding.UTF8))),
             References().Concat(references ?? Array.Empty<MetadataReference>()),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         return await compilation.WithAnalyzers(

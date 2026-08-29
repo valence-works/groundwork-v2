@@ -10,6 +10,8 @@ namespace Groundwork.Query.Linq.Tests;
 /// <summary>Versioned source spellings and their expected public lowering decision.</summary>
 public sealed class LinqCorpusTests
 {
+    private const string PredicateCorpusVersion = "p2";
+
     public sealed record CorpusDecision(string? Code, string Title, string AstEquivalent, string? FixText);
     private sealed record CorpusShape(string Spelling, Func<int, Expression<Func<LinqFrontEndTests.Ticket, bool>>> Build, CorpusDecision Decision, string? ExpectedSpan, string? ExpectedSignature);
     public sealed record CorpusCase(string Spelling, int Value, CorpusDecision Decision, string? ExpectedSpan, string? ExpectedSignature, Expression<Func<LinqFrontEndTests.Ticket, bool>> Expression);
@@ -28,7 +30,7 @@ public sealed class LinqCorpusTests
         new CorpusDecision("GW-LINQ-101", "Computed/member expression", "", "declare a computed column; expressions over columns are not portable"),
         new CorpusDecision("GW-LINQ-102", "Arithmetic expression", "", "declare a computed column; expressions over columns are not portable"),
         new CorpusDecision("GW-LINQ-103", "Column-to-column comparison", "", "add `.AcceptScan(...)`"),
-        new CorpusDecision("GW-LINQ-104", "Cross-table expression", "", "v2 has no joins; use a declared element set or two queries"),
+        new CorpusDecision("GW-LINQ-104", "Undeclared cross-table expression", "", "activate one declared reference with `.Join(reference)`"),
         new CorpusDecision("GW-LINQ-105", "Grouped top-one", "", "use `.LatestPer(...)` for grouped top-1"),
         new CorpusDecision("GW-LINQ-106", "Unsupported element-set predicate", "", "declare the element set"),
         new CorpusDecision("GW-LINQ-107", "Opaque helper", "", "mark it `[GwQueryFragment]`"),
@@ -50,6 +52,7 @@ public sealed class LinqCorpusTests
         var docs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../docs/v2/query-linq.md"));
         Assert.True(File.Exists(docs), $"Expected generated documentation at {docs}");
         var document = File.ReadAllText(docs);
+        Assert.Contains($"`{PredicateCorpusVersion}`", document, StringComparison.Ordinal);
         var start = document.IndexOf("| Code | AST equivalent / fix |", StringComparison.Ordinal);
         Assert.True(start >= 0, "The generated diagnostic table is missing.");
         var tableLines = document[start..].Split('\n').TakeWhile(line => line.StartsWith("|", StringComparison.Ordinal)).ToArray();

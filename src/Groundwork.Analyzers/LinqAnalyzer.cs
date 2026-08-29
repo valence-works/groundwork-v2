@@ -10,6 +10,9 @@ namespace Groundwork.Analyzers;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class LinqAnalyzer : DiagnosticAnalyzer
 {
+    private const string NavigationRefusal =
+        "GW-LINQ-104: undeclared cross-table member access is not portable; activate one declared reference with `.Join(reference)`";
+
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
         AnalyzerIds.Select(AnalyzerDiagnostics.For).ToImmutableArray();
 
@@ -33,8 +36,121 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             return;
         if (!IsClosedSurfaceLambda(context, lambda))
             return;
-        var visitor = new Visitor(context, lambda);
+        var visitor = new Visitor(context, lambda, FindDeclaredNavigation(context, lambda));
         visitor.Visit(body);
+    }
+
+    private static ISymbol? FindDeclaredNavigation(SyntaxNodeAnalysisContext context, LambdaExpressionSyntax lambda)
+    {
+        var query = lambda.Ancestors().OfType<InvocationExpressionSyntax>().FirstOrDefault(invocation =>
+            invocation.ArgumentList.Arguments.Any(argument => argument.Expression == lambda) &&
+            IsClosedSurfaceMethod(context.SemanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol));
+        if (query?.Expression is not MemberAccessExpressionSyntax queryMember) return null;
+
+        var visited = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        var reference = FindJoinedReference(context, queryMember.Expression, visited);
+        return reference is null ? null : FindReferenceNavigation(context, reference, visited);
+    }
+
+    private static ExpressionSyntax? FindJoinedReference(
+        SyntaxNodeAnalysisContext context,
+        ExpressionSyntax source,
+        ISet<ISymbol> visited)
+    {
+        source = Unwrap(source);
+        var model = SemanticModelFor(context, source);
+        if (source is InvocationExpressionSyntax invocation)
+        {
+            var method = model.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+            if (IsGroundworkMethod(method, "Join") && invocation.ArgumentList.Arguments.Count == 1)
+                return invocation.ArgumentList.Arguments[0].Expression;
+            if (invocation.Expression is MemberAccessExpressionSyntax member)
+                return FindJoinedReference(context, member.Expression, visited);
+        }
+
+        var initializer = FindInitializer(context, source, visited);
+        return initializer is null ? null : FindJoinedReference(context, initializer, visited);
+    }
+
+    private static ISymbol? FindReferenceNavigation(
+        SyntaxNodeAnalysisContext context,
+        ExpressionSyntax source,
+        ISet<ISymbol> visited)
+    {
+        source = Unwrap(source);
+        var model = SemanticModelFor(context, source);
+        if (source is InvocationExpressionSyntax invocation)
+        {
+            var method = model.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+            if (IsGroundworkMethod(method, "Reference") && invocation.ArgumentList.Arguments.Count >= 1 &&
+                invocation.ArgumentList.Arguments[0].Expression is LambdaExpressionSyntax navigation)
+            {
+                var body = navigation.Body as ExpressionSyntax;
+                body = body is null ? null : Unwrap(body);
+                if (body is MemberAccessExpressionSyntax member && IsDirectLambdaMember(context, navigation, member))
+                    return SemanticModelFor(context, member).GetSymbolInfo(member).Symbol;
+            }
+        }
+
+        var initializer = FindInitializer(context, source, visited);
+        return initializer is null ? null : FindReferenceNavigation(context, initializer, visited);
+    }
+
+    private static ExpressionSyntax? FindInitializer(
+        SyntaxNodeAnalysisContext context,
+        ExpressionSyntax source,
+        ISet<ISymbol> visited)
+    {
+        var symbol = SemanticModelFor(context, source).GetSymbolInfo(source).Symbol;
+        if (symbol is null || !visited.Add(symbol)) return null;
+        foreach (var syntaxReference in symbol.DeclaringSyntaxReferences)
+        {
+            switch (syntaxReference.GetSyntax(context.CancellationToken))
+            {
+                case VariableDeclaratorSyntax variable when variable.Initializer is not null:
+                    return variable.Initializer.Value;
+                case PropertyDeclarationSyntax property when property.Initializer is not null:
+                    return property.Initializer.Value;
+                case PropertyDeclarationSyntax property when property.ExpressionBody is not null:
+                    return property.ExpressionBody.Expression;
+            }
+        }
+        return null;
+    }
+
+    private static bool IsDirectLambdaMember(
+        SyntaxNodeAnalysisContext context,
+        LambdaExpressionSyntax lambda,
+        MemberAccessExpressionSyntax member)
+    {
+        var model = SemanticModelFor(context, lambda);
+        var parameter = lambda switch
+        {
+            SimpleLambdaExpressionSyntax simple => model.GetDeclaredSymbol(simple.Parameter),
+            ParenthesizedLambdaExpressionSyntax { ParameterList.Parameters.Count: 1 } parenthesized =>
+                model.GetDeclaredSymbol(parenthesized.ParameterList.Parameters[0]),
+            _ => null
+        };
+        return parameter is not null && member.Expression is IdentifierNameSyntax receiver &&
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(receiver).Symbol, parameter);
+    }
+
+    private static SemanticModel SemanticModelFor(SyntaxNodeAnalysisContext context, SyntaxNode node)
+    {
+        if (node.SyntaxTree == context.SemanticModel.SyntaxTree) return context.SemanticModel;
+#pragma warning disable RS1030 // Source-visible reference declarations may live in another syntax tree.
+        return context.Compilation.GetSemanticModel(node.SyntaxTree);
+#pragma warning restore RS1030
+    }
+
+    private static bool IsGroundworkMethod(IMethodSymbol? method, string name) => method is not null &&
+        method.Name == name && method.ContainingAssembly.Identity.Name == "Groundwork.Query.Linq" &&
+        method.ContainingType?.OriginalDefinition.ContainingNamespace.ToDisplayString() == "Groundwork.Query.Linq";
+
+    private static ExpressionSyntax Unwrap(ExpressionSyntax source)
+    {
+        while (source is ParenthesizedExpressionSyntax parenthesized) source = parenthesized.Expression;
+        return source;
     }
 
     private static void AnalyzeInvocation(SyntaxNodeAnalysisContext context)
@@ -95,10 +211,11 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
     {
         private readonly SyntaxNodeAnalysisContext context;
         private readonly LambdaExpressionSyntax lambda;
+        private readonly ISymbol? declaredNavigation;
 
-        public Visitor(SyntaxNodeAnalysisContext context, LambdaExpressionSyntax lambda)
+        public Visitor(SyntaxNodeAnalysisContext context, LambdaExpressionSyntax lambda, ISymbol? declaredNavigation)
         {
-            this.context = context; this.lambda = lambda;
+            this.context = context; this.lambda = lambda; this.declaredNavigation = declaredNavigation;
         }
 
         public override void VisitInvocationExpression(InvocationExpressionSyntax node)
@@ -121,7 +238,7 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
             else if (name is "ToLower" or "ToUpper" or "Substring" or "Trim")
                 Report("GW-LINQ-101", node, "GW-LINQ-101: declare a computed column; expressions over columns are not portable");
             else if (name is "Join" or "GroupJoin")
-                Report("GW-LINQ-104", node, "GW-LINQ-104: v2 has no joins; use a declared element set or two queries");
+                Report("GW-LINQ-104", node, NavigationRefusal);
             else if (name == "GroupBy")
                 Report("GW-LINQ-105", node, "GW-LINQ-105: use `.LatestPer(...)` for grouped top-1");
             else if (IsEnumerableAnyAll(symbol, node) && node.ArgumentList.Arguments[node.ArgumentList.Arguments.Count - 1].Expression is LambdaExpressionSyntax nested && !IsSupportedElementEquality(nested, node))
@@ -144,11 +261,43 @@ public sealed class LinqAnalyzer : DiagnosticAnalyzer
                 ((instant.ContainingType?.ToDisplayString() == "System.DateTime" && instant.Name is "Now" or "Today") ||
                  (instant.ContainingType?.ToDisplayString() == "System.DateTimeOffset" && instant.Name == "Now")))
                 Report("GW-LINQ-109", node, "GW-LINQ-109: use `DateTimeOffset.UtcNow`");
-            if (symbol is IPropertySymbol && node.Name.Identifier.ValueText is not ("Value" or "Date" or "Year") &&
-                node.Expression is MemberAccessExpressionSyntax nested && HasLambdaParameter(nested))
-                Report("GW-LINQ-104", node, "GW-LINQ-104: v2 has no joins; use a declared element set or two queries");
+            if ((symbol is IPropertySymbol or IFieldSymbol) && node.Name.Identifier.ValueText is not ("Value" or "Date" or "Year") &&
+                node.Expression is MemberAccessExpressionSyntax nested && HasLambdaParameter(nested) &&
+                !IsIntermediateMemberChain(node) && !IsDeclaredTargetMember(node))
+                Report("GW-LINQ-104", node, NavigationRefusal);
+            else if (IsDeclaredNavigationAccess(node) && !IsNavigationReceiver(node))
+                Report("GW-LINQ-104", node, NavigationRefusal);
             base.VisitMemberAccessExpression(node);
         }
+
+        private bool IsDeclaredTargetMember(MemberAccessExpressionSyntax node) => declaredNavigation is not null &&
+            node.Expression is MemberAccessExpressionSyntax navigation && IsLambdaParameter(navigation.Expression) &&
+            SymbolEqualityComparer.Default.Equals(context.SemanticModel.GetSymbolInfo(navigation).Symbol, declaredNavigation);
+
+        private bool IsDeclaredNavigationAccess(MemberAccessExpressionSyntax node) => declaredNavigation is not null &&
+            IsLambdaParameter(node.Expression) &&
+            SymbolEqualityComparer.Default.Equals(context.SemanticModel.GetSymbolInfo(node).Symbol, declaredNavigation);
+
+        private bool IsLambdaParameter(ExpressionSyntax source)
+        {
+            source = Unwrap(source);
+            if (source is not IdentifierNameSyntax identifier) return false;
+            var symbol = context.SemanticModel.GetSymbolInfo(identifier).Symbol;
+            return lambda switch
+            {
+                SimpleLambdaExpressionSyntax simple => SymbolEqualityComparer.Default.Equals(symbol, context.SemanticModel.GetDeclaredSymbol(simple.Parameter)),
+                ParenthesizedLambdaExpressionSyntax parenthesized => parenthesized.ParameterList.Parameters.Any(parameter =>
+                    SymbolEqualityComparer.Default.Equals(symbol, context.SemanticModel.GetDeclaredSymbol(parameter))),
+                _ => false
+            };
+        }
+
+        private static bool IsIntermediateMemberChain(MemberAccessExpressionSyntax node) =>
+            node.Parent is MemberAccessExpressionSyntax parent && parent.Expression == node &&
+            parent.Name.Identifier.ValueText is not ("Value" or "Date" or "Year");
+
+        private static bool IsNavigationReceiver(MemberAccessExpressionSyntax node) =>
+            node.Parent is MemberAccessExpressionSyntax parent && parent.Expression == node;
 
         public override void VisitLiteralExpression(LiteralExpressionSyntax node)
         {

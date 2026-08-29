@@ -12,6 +12,10 @@ runtime coverage gate all agree by construction.
 Targets `netstandard2.0` and ships its dependencies under `analyzers/dotnet/cs`, so it has no
 runtime footprint.
 
+For typed navigation, the analyzer follows the source-visible `.Join(reference)` back to the exact
+`.Reference(row => row.Navigation, ...)` declaration. An undeclared, different, deeper, or opaque
+navigation remains `GW-LINQ-104`; target type or member depth alone never implies a join.
+
 Full analyzer notes, including which query shapes are enumerated:
 [docs/query-coverage-analyzer.md](https://github.com/valence-works/groundwork-v2/blob/main/docs/query-coverage-analyzer.md).
 
