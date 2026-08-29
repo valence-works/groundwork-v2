@@ -20,7 +20,32 @@ public static class QueryCoverageEnforcer
         if (indexes is null)
             throw new ArgumentNullException(nameof(indexes));
 
-        var result = QueryCoverageChecker.Check(request, indexes);
+        EnsureCovered(request, QueryCoverageChecker.Check(request, indexes), now);
+    }
+
+    public static void EnsureCovered(
+        QueryRequest request,
+        QueryCoverageCandidates candidates) =>
+        EnsureCovered(request, candidates, DateTimeOffset.UtcNow);
+
+    public static void EnsureCovered(
+        QueryRequest request,
+        QueryCoverageCandidates candidates,
+        DateTimeOffset now)
+    {
+        if (request is null)
+            throw new ArgumentNullException(nameof(request));
+        if (candidates is null)
+            throw new ArgumentNullException(nameof(candidates));
+
+        EnsureCovered(request, QueryCoverageChecker.Check(request, candidates), now);
+    }
+
+    private static void EnsureCovered(
+        QueryRequest request,
+        QueryCoverageResult result,
+        DateTimeOffset now)
+    {
         if (result.IsCovered)
             return;
 

@@ -38,6 +38,28 @@ Both kinds of candidate come from one derivation, `CoverageCandidates.Derive`, w
 call — so there is no place for the analyzer, the build gate, and the runtime gate to disagree about
 what a unit offers.
 
+For a declared-reference join, coverage is deliberately table-scoped. The driving query must be
+covered by a driving-side index exactly as a single-table query would be. Separately, the target
+join columns must be the complete leading prefix of one target index in declared target-key order;
+every target predicate and order term must be covered by the remainder of that same index. A target
+predicate cannot make an unbounded driving scan safe, and an index from one side can never rescue
+the other. Predicate terms that mix both tables (for example, a cross-table `Or`) fail closed because
+they are not an index-nested-loop-equivalent shape.
+
+Callers that already have a joined `QueryRequest` supply the two immutable candidate snapshots
+explicitly:
+
+```csharp
+var candidates = new QueryCoverageCandidates(
+    driving: drivingIndexes,
+    target: targetIndexes);
+
+var result = QueryCoverageChecker.Check(request, candidates);
+```
+
+The existing `Check(request, indexes)` overload remains the single-table API. Passing a joined
+request to it returns `GW-COVER-006`, because no target-side evidence was supplied.
+
 Three details worth knowing:
 
 - **The key is ordered, like any compound index.** A key of `(tenant, id)` covers a filter on
@@ -118,10 +140,19 @@ if (decision.Coverage.Decision == CoverageDecision.Refuse)
     throw new QueryCoverageException(decision.Coverage);
 ```
 
+Joined runtime admission uses the corresponding side-aware constructor for both declarations and
+the deployed catalog:
+
+```csharp
+var gate = new RuntimeCoverageGate(
+    declaredCandidates: new QueryCoverageCandidates(declaredDriving, declaredTarget),
+    deployedCandidates: new QueryCoverageCandidates(deployedDriving, deployedTarget));
+```
+
 Or the enforcing form, which providers should call immediately before executing a resolved request:
 
 ```csharp
-QueryCoverageEnforcer.EnsureCovered(request, DateTimeOffset.UtcNow);
+QueryCoverageEnforcer.EnsureCovered(request, effectiveIndexes, DateTimeOffset.UtcNow);
 ```
 
 ```csharp
@@ -140,6 +171,7 @@ Behavior that matters operationally:
 - **Runtime coverage intersects your declared indexes with the deployed catalog.** An undeclared
   index that exists only in the database **cannot rescue a query** during a rolling deploy. This is
   intentional — otherwise the gate would pass in production and fail after the next clean deploy.
+  Joined requests perform this intersection independently for the driving and target tables.
 - Generated/recognized shapes use their verified plan **while its index is present**; other shapes go
   through the same `QueryCoverageChecker` and are cached by `ShapeFingerprint` in a bounded cache.
 - Cache eviction emits the `groundwork.runtime.coverage.cache.eviction` metric. Watch it: sustained

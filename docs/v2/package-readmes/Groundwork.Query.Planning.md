@@ -4,6 +4,11 @@ Query coverage checking. `QueryCoverageChecker` decides whether a query shape is
 declared index; `RuntimeCoverageGate` refuses an uncovered query at runtime with
 `QueryCoverageException` rather than letting it become a table scan in production.
 
+Declared-reference joins use `QueryCoverageCandidates` to keep driving and target index evidence
+separate. The driving side must be covered normally; the target join columns must be the leading
+target-index prefix in declared key order, followed by any covered target predicate/order suffix.
+The single-table checker overload fails closed when a joined request omits that target context.
+
 This is the single checker behind both the editor experience and the build failure:
 `Groundwork.Analyzers` and `Groundwork.SchemaTool.MSBuild` call into it, so a query that is green in
 the IDE is green at build and at runtime for the same reason.
