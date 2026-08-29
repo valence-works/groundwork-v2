@@ -7,6 +7,7 @@ declared index; `RuntimeCoverageGate` refuses an uncovered query at runtime with
 Declared-reference joins use `QueryCoverageCandidates` to keep driving and target index evidence
 separate. The driving side must be covered normally; the target join columns must be the leading
 target-index prefix in declared key order, followed by any covered target predicate/order suffix.
+Joined order terms must form a contiguous driving segment followed by an optional target segment.
 The single-table checker overload fails closed when a joined request omits that target context.
 
 This is the single checker behind both the editor experience and the build failure:

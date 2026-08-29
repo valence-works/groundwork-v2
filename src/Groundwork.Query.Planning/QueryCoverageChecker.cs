@@ -190,22 +190,15 @@ public static class QueryCoverageChecker
         if (partition.Failure is not null)
             return JoinedRefusal("both sides", partition.Failure, null, null);
 
-        var drivingOrder = request.Order.Where(term => term.Column.Table == request.Table).ToImmutableArray();
-        var targetOrder = request.Order.Where(term => term.Column.Table == join.TargetTable).ToImmutableArray();
-        if (drivingOrder.Length + targetOrder.Length != request.Order.Length)
-        {
-            return JoinedRefusal(
-                "both sides",
-                new Refusal("GW-COVER-016", "Every joined ordering term must belong to the driving or target table."),
-                null,
-                null);
-        }
+        var order = JoinedOrderPartition.Create(request.Order, request.Table, join.TargetTable);
+        if (order.Failure is not null)
+            return JoinedRefusal("both sides", order.Failure, null, null);
 
         var drivingRequest = CreateSideRequest(
             request,
             request.Table,
             partition.Driving,
-            drivingOrder,
+            order.Driving,
             SideProjection(request.Projection, request.Table),
             SideResult(request.Result, request.Table, keepCardinalityShape: true),
             SideDistinct(request, request.Table));
@@ -217,7 +210,7 @@ public static class QueryCoverageChecker
             request,
             join.TargetTable,
             partition.Target,
-            targetOrder,
+            order.Target,
             SideProjection(request.Projection, join.TargetTable),
             SideResult(request.Result, join.TargetTable, keepCardinalityShape: false),
             SideDistinct(request, join.TargetTable));
@@ -593,6 +586,59 @@ public static class QueryCoverageChecker
     private sealed record SortResolution(int Start, int SkippedEqualityCount);
 
     private sealed record Refusal(string Code, string Message, int Priority = 10);
+
+    private sealed record JoinedOrderPartition(
+        ImmutableArray<OrderTerm> Driving,
+        ImmutableArray<OrderTerm> Target,
+        Refusal? Failure)
+    {
+        public static JoinedOrderPartition Create(
+            ImmutableArray<OrderTerm> order,
+            TableId drivingTable,
+            TableId targetTable)
+        {
+            var driving = ImmutableArray.CreateBuilder<OrderTerm>();
+            var target = ImmutableArray.CreateBuilder<OrderTerm>();
+            var targetSegmentStarted = false;
+            foreach (var term in order)
+            {
+                if (term.Column.Table == drivingTable)
+                {
+                    if (targetSegmentStarted)
+                    {
+                        return Failed(
+                            "Joined ordering must keep all driving terms in one contiguous segment before target terms.");
+                    }
+                    driving.Add(term);
+                    continue;
+                }
+
+                if (term.Column.Table == targetTable)
+                {
+                    if (driving.Count == 0)
+                    {
+                        return Failed(
+                            "A target order requires a leading driving-side order segment for nested-loop coverage.");
+                    }
+                    targetSegmentStarted = true;
+                    target.Add(term);
+                    continue;
+                }
+
+                return new JoinedOrderPartition(
+                    [],
+                    [],
+                    new Refusal(
+                        "GW-COVER-016",
+                        "Every joined ordering term must belong to the driving or target table."));
+            }
+
+            return new JoinedOrderPartition(driving.ToImmutable(), target.ToImmutable(), null);
+        }
+
+        private static JoinedOrderPartition Failed(string message) =>
+            new([], [], new Refusal("GW-COVER-006", message));
+    }
 
     private sealed record PredicatePartition(Predicate Driving, Predicate Target, Refusal? Failure)
     {

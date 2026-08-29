@@ -46,6 +46,11 @@ predicate cannot make an unbounded driving scan safe, and an index from one side
 the other. Predicate terms that mix both tables (for example, a cross-table `Or`) fail closed because
 they are not an index-nested-loop-equivalent shape.
 
+Joined order terms retain their global lexicographic sequence. A covered nested-loop order has one
+non-empty contiguous driving-side segment followed by an optional target-side segment. A target-only
+order, or a sequence that returns to the driving side after a target term, is refused instead of
+validating two independent orders that the executor could not compose safely.
+
 Callers that already have a joined `QueryRequest` supply the two immutable candidate snapshots
 explicitly:
 
