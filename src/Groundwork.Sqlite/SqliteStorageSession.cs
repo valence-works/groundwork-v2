@@ -365,11 +365,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
 
     private QueryRequest WithScopePredicate(QueryRequest request) => Unit.Scope != ScopePolicy.Scoped
         ? request
-        : QueryRequestExecution.WithProviderPredicate(request, new Predicate.And([
-            request.Where,
-            new Predicate.Equal(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String),
-                QueryConstant.Of(new ColumnRef(new TableId(Unit.Name), SqliteSchemaCoordinator.ScopeColumn, QueryType.String), Access.Scope!.Value))]),
-            QueryRequestExecution.ScopeBindingDiscriminator(Access.Scope!.Value));
+        : RelationalQueryExecution.BindScope(request, SqliteSchemaCoordinator.ScopeColumn, Access.Scope!.Value);
 
     public StoredEntry? Read(StorageKey key)
     {

@@ -5,6 +5,37 @@ using Groundwork.Query.Model;
 
 namespace Groundwork.Substrate.Relational;
 
+internal static class RelationalQueryExecution
+{
+    internal static QueryRequest BindScope(QueryRequest request, string scopeColumnName, string scope)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(scopeColumnName))
+            throw new ArgumentException("A scope column name is required.", nameof(scopeColumnName));
+        if (string.IsNullOrWhiteSpace(scope))
+            throw new ArgumentException("A scope value is required.", nameof(scope));
+
+        var predicates = new List<Predicate>
+        {
+            request.Where,
+            ScopePredicate(request.Table)
+        };
+        if (request.Join is { } join)
+            predicates.Add(ScopePredicate(join.TargetTable));
+
+        return QueryRequestExecution.WithProviderPredicate(
+            request,
+            new Predicate.And(predicates),
+            QueryRequestExecution.ScopeBindingDiscriminator(scope));
+
+        Predicate ScopePredicate(TableId table)
+        {
+            var column = new ColumnRef(table, scopeColumnName, QueryType.String, isNullable: false);
+            return new Predicate.Equal(column, QueryConstant.Of(column, scope));
+        }
+    }
+}
+
 /// <summary>Native SQL and parameter values produced for one normalized query.</summary>
 public sealed class RelationalQueryCommand
 {

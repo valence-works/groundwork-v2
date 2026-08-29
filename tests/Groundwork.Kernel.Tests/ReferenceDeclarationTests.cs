@@ -175,6 +175,28 @@ public sealed class ReferenceDeclarationTests
     }
 
     [Fact]
+    public void Scoped_physical_reference_accepts_the_provider_owned_scope_index_prefix()
+    {
+        var target = GuidTarget() with { Scope = ScopePolicy.Scoped };
+        var source = SourceBuilder()
+            .Scoped()
+            .Reference("customer", target, "customer_id")
+            .Build();
+        var physical = ProviderOwnedColumns.Physicalize(source, new ProviderOwnedColumnPolicy
+        {
+            ProviderName = "test"
+        });
+
+        var subject = new SchemaSubject(physical);
+
+        Assert.Equal(
+            [ProviderOwnedColumns.Scope, "customer_id"],
+            Assert.Single(subject.Definition.Indexes, index => index.Name == "by_customer")
+                .Columns.Select(column => column.Column));
+        Assert.Equal(["customer_id"], Assert.Single(subject.Definition.References).Columns);
+    }
+
+    [Fact]
     public void Reference_identity_participates_in_the_schema_subject_fingerprint()
     {
         var subjectReferencingCustomer = new SchemaSubject(SourceBuilder()
