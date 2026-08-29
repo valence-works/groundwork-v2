@@ -19,6 +19,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly NpgsqlTransaction? transaction;
     private readonly RelationalSessionExecution execution;
     private readonly RelationalSessionPointReads pointReads;
+    private readonly RelationalSessionCrud crud;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
@@ -63,6 +64,14 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             new PostgreSqlPointReadAdapter(this),
             observer,
             "postgresql");
+        crud = new RelationalSessionCrud(
+            unit,
+            UserColumns,
+            SequenceColumn,
+            VersionColumn,
+            "PostgreSQL",
+            (key, mode) => ReadCore(key, mode),
+            new PostgreSqlCrudAdapter(this));
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -197,9 +206,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return Mutate(values, options, Mutation.Insert, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Insert);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) =>
@@ -213,9 +221,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return Mutate(values, options, Mutation.Update, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Update);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
@@ -229,9 +236,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return Mutate(values, options, Mutation.Upsert, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Upsert);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
@@ -288,38 +294,8 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
-        return ExecuteWrite(async () =>
-        {
-            if (Unit.Concurrency.IsNone)
-            {
-                var (noneWhere, noneParameters) = KeyPredicate(key.Values);
-                using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
-                AddParameters(noneCommand, noneParameters);
-                commandObserver?.Observe(new ProviderCommandEvent("postgresql.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
-                return (await mode.ExecuteNonQuery(noneCommand).ConfigureAwait(false)) == 0
-                    ? new WriteOutcome(WriteOutcomeStatus.NotFound)
-                    : new WriteOutcome(WriteOutcomeStatus.Deleted);
-            }
-
-            var existing = await ReadCore(key, mode).ConfigureAwait(false);
-            ValidateExpected(options, existing, Mutation.Delete);
-            if (existing is null)
-                return new WriteOutcome(WriteOutcomeStatus.NotFound);
-            var (where, parameters) = KeyPredicate(key.Values);
-            if (VersionColumn is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
-            {
-                where += $" AND {Quote(VersionColumn.Name)}=@expected";
-                parameters["@expected"] = options.Precondition.Version!.Value;
-            }
-            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
-            AddParameters(command, parameters);
-            commandObserver?.Observe(new ProviderCommandEvent("postgresql.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            var affected = await mode.ExecuteNonQuery(command).ConfigureAwait(false);
-            return affected == 0
-                ? new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version)
-                : new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-        }, mode);
+        var operation = crud.PrepareDelete(key, options);
+        return ExecuteWrite(() => crud.Delete(operation, mode), mode);
     }
 
     public WriteOutcome CompareAndDelete(
@@ -1014,11 +990,11 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         }
     }
 
-    private async ValueTask<WriteOutcome> Mutate(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode)
+    private async ValueTask<WriteOutcome> Mutate(RelationalCrudMutation operation, RelationalExecution mode)
     {
-        var outcome = await MutateCore(values, options, mutation, mode).ConfigureAwait(false);
+        var outcome = await ExecuteWrite(() => crud.Mutate(operation, mode), mode).ConfigureAwait(false);
         if (outcome.Succeeded && Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            mutation is Mutation.Insert or Mutation.Upsert)
+            operation.Kind is RelationalCrudKind.Insert or RelationalCrudKind.Upsert)
             await ApplyOnAppendRetention(mode).ConfigureAwait(false);
         return outcome;
     }
@@ -1055,49 +1031,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             ? OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup)
             : Cleanup();
     }
-
-    private ValueTask<WriteOutcome> MutateCore(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode) => ExecuteWrite(async () =>
-    {
-        ArgumentNullException.ThrowIfNull(values);
-        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "PostgreSQL", values.Values, mutation == Mutation.Insert,
-            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
-
-        // A provider sequence has no caller-visible key until the insert commits. Treat an
-        // upsert without a generated key as an insert; accepting a synthetic read here would
-        // both defeat the native identity and make the returned generated value ambiguous.
-        if (SequenceColumn is not null &&
-            (mutation is Mutation.Insert or Mutation.Upsert) &&
-            !values.Values.ContainsKey(SequenceColumn.Name))
-        {
-            ValidateExpected(options, null, mutation);
-            return await InsertCore(values, mode, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted)
-                .ConfigureAwait(false);
-        }
-
-        var key = KeyFromValues(values.Values);
-        // None mode has no token to inspect. Keep direct writes single-statement and let the
-        // database report uniqueness/not-found from the write itself.
-        var existing = Unit.Concurrency.IsNone ? null : await ReadCore(key, mode).ConfigureAwait(false);
-        if (mutation == Mutation.Insert && existing is not null)
-            return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
-        if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        if (mutation == Mutation.Upsert && SequenceColumn is not null &&
-            values.Values.ContainsKey(SequenceColumn.Name) && existing is null && Unit.Concurrency.IsOptimistic)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        ValidateExpected(options, existing, mutation);
-        return await (mutation switch
-        {
-            Mutation.Insert => InsertCore(values, mode),
-            Mutation.Update => UpdateCore(values, key, existing!, options, mode),
-            Mutation.Upsert when SequenceColumn is not null && values.Values.ContainsKey(SequenceColumn.Name) =>
-                UpdateCore(values, key, existing!, options, mode),
-            Mutation.Upsert => UpsertCore(values, key, existing, options, exactOutcome: false, mode),
-            Mutation.ConditionalUpsert => UpsertCore(values, key, existing, options, exactOutcome: true, mode),
-            _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null)
-        }).ConfigureAwait(false);
-    }, mode);
 
     private async ValueTask<WriteOutcome> ConditionalUpsertCore(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
@@ -1236,6 +1169,33 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         {
             return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
         }
+    }
+
+    private async ValueTask<WriteOutcome> DeleteCore(
+        StorageKey key,
+        StoredEntry? existing,
+        WriteOptions? options,
+        RelationalExecution mode)
+    {
+        var (where, parameters) = KeyPredicate(key.Values);
+        if (VersionColumn is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+        {
+            where += $" AND {Quote(VersionColumn.Name)}=@expected";
+            parameters["@expected"] = options.Precondition.Version!.Value;
+        }
+        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+        AddParameters(command, parameters);
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "postgresql.delete",
+            command.CommandText,
+            ProviderCommandKind.Write,
+            IsProbe: false));
+        var affected = await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+        if (affected != 0)
+            return new WriteOutcome(WriteOutcomeStatus.Deleted, existing?.Version);
+        return new WriteOutcome(
+            Unit.Concurrency.IsNone ? WriteOutcomeStatus.NotFound : WriteOutcomeStatus.ConcurrencyConflict,
+            existing?.Version);
     }
 
     private async ValueTask<WriteOutcome> UpdateCore(
@@ -1410,28 +1370,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         return index is null ? null : new PostgreSqlDialect().IndexFilter(index);
     }
 
-    private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
-    {
-        if (VersionColumn is null)
-            return;
-        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
-        if (mutation == Mutation.Insert)
-            return;
-
-        if (mutation == Mutation.Upsert)
-        {
-            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
-                throw new RelationalConcurrencyConflictException(existing.Version);
-            if (precondition.Kind == WritePreconditionKind.IfVersion &&
-                (existing is null || precondition.Version != existing.Version))
-                throw new RelationalConcurrencyConflictException(existing?.Version);
-            return;
-        }
-        if (precondition.Kind == WritePreconditionKind.IfVersion &&
-            (existing is null || precondition.Version != existing.Version))
-            throw new RelationalConcurrencyConflictException(existing?.Version);
-    }
-
     private ValueTask<T> Execute<T>(Func<ValueTask<T>> operation, RelationalExecution mode) =>
         execution.Execute(operation, mode);
 
@@ -1500,15 +1438,6 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private const string HighWaterValue = "high_water";
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
-
-    private enum Mutation
-    {
-        Insert,
-        Update,
-        Upsert,
-        ConditionalUpsert,
-        Delete
-    }
 
     private sealed class PostgreSqlAppendAdapter(PostgreSqlStorageSession session) : IRelationalAppendAdapter
     {
@@ -1672,6 +1601,41 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         public object? Decode(object value, ColumnDefinition column) => FromDatabase(value, column);
 
         public string LockingClause(bool forUpdate) => forUpdate ? " FOR UPDATE" : string.Empty;
+    }
+
+    private sealed class PostgreSqlCrudAdapter(
+        PostgreSqlStorageSession session) : IRelationalCrudAdapter
+    {
+        public ValueTask<WriteOutcome> Insert(
+            StorageValues values,
+            WriteOutcomeStatus status,
+            RelationalExecution execution) =>
+            session.InsertCore(values, execution, status);
+
+        public ValueTask<WriteOutcome> Update(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.UpdateCore(values, key, existing, options, execution);
+
+        public ValueTask<WriteOutcome> Upsert(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.SequenceColumn is not null && values.Values.ContainsKey(session.SequenceColumn.Name)
+                ? session.UpdateCore(values, key, existing, options, execution)
+                : session.UpsertCore(values, key, existing, options, exactOutcome: false, execution);
+
+        public ValueTask<WriteOutcome> Delete(
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.DeleteCore(key, existing, options, execution);
     }
 
 }

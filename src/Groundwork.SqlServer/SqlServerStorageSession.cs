@@ -20,6 +20,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private readonly SqlTransaction? transaction;
     private readonly RelationalSessionExecution execution;
     private readonly RelationalSessionPointReads pointReads;
+    private readonly RelationalSessionCrud crud;
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
@@ -59,6 +60,14 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             new SqlServerPointReadAdapter(),
             observer,
             "sqlserver");
+        crud = new RelationalSessionCrud(
+            unit,
+            UserColumns,
+            SequenceColumnDefinition,
+            VersionColumnDefinition,
+            "SQL Server",
+            (key, mode) => ReadCore(key, mode),
+            new SqlServerCrudAdapter(this));
         queries = new RelationalSessionQueries(
             unit,
             access,
@@ -224,9 +233,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private ValueTask<WriteOutcome> InsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Insert, options);
-        return Mutate(values, options, Mutation.Insert, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Insert);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome Update(StorageValues values, WriteOptions? options = null) =>
@@ -240,9 +248,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private ValueTask<WriteOutcome> UpdateAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Update, options);
-        return Mutate(values, options, Mutation.Update, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Update);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome Upsert(StorageValues values, WriteOptions? options = null) =>
@@ -256,9 +263,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private ValueTask<WriteOutcome> UpsertAsync(StorageValues values, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.ValidateWrittenValues(Unit, values.Values);
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Upsert, options);
-        return Mutate(values, options, Mutation.Upsert, mode);
+        var operation = crud.PrepareMutation(values, options, RelationalCrudKind.Upsert);
+        return Mutate(operation, mode);
     }
 
     public WriteOutcome ConditionalUpsert(StorageValues values, WriteOptions? options = null) =>
@@ -335,36 +341,8 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private ValueTask<WriteOutcome> DeleteAsync(StorageKey key, WriteOptions? options, RelationalExecution mode)
     {
-        WritePreconditionValidator.Validate(Unit, WriteOperation.Delete, options);
-        return ExecuteWrite(async () =>
-        {
-            if (Unit.Concurrency.IsNone)
-            {
-                var (noneWhere, noneParameters) = KeyPredicate(key.Values);
-                using var noneCommand = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {noneWhere};");
-                commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", noneCommand.CommandText, ProviderCommandKind.Write, IsProbe: false));
-                AddParameters(noneCommand, noneParameters);
-                return (await mode.ExecuteNonQuery(noneCommand).ConfigureAwait(false)) == 0
-                    ? new WriteOutcome(WriteOutcomeStatus.NotFound)
-                    : new WriteOutcome(WriteOutcomeStatus.Deleted);
-            }
-
-            var existing = await ReadCore(key, mode).ConfigureAwait(false);
-            ValidateExpected(options, existing, Mutation.Delete);
-            if (existing is null)
-                return new WriteOutcome(WriteOutcomeStatus.NotFound);
-            var (where, parameters) = KeyPredicate(key.Values);
-            if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
-            {
-                where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
-                parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
-            }
-            using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
-            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.delete", command.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            AddParameters(command, parameters);
-            if (await mode.ExecuteNonQuery(command).ConfigureAwait(false) == 0) return new WriteOutcome(WriteOutcomeStatus.ConcurrencyConflict, existing.Version);
-            return new WriteOutcome(WriteOutcomeStatus.Deleted, existing.Version);
-        }, mode);
+        var operation = crud.PrepareDelete(key, options);
+        return ExecuteWrite(() => crud.Delete(operation, mode), mode);
     }
 
     public WriteOutcome CompareAndDelete(
@@ -1145,15 +1123,15 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         }
     }
 
-    private async ValueTask<WriteOutcome> Mutate(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode)
+    private async ValueTask<WriteOutcome> Mutate(RelationalCrudMutation operation, RelationalExecution mode)
     {
         var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            mutation is Mutation.Insert or Mutation.Upsert;
+            operation.Kind is RelationalCrudKind.Insert or RelationalCrudKind.Upsert;
         var registration = BeginOnAppend(onAppend);
         WriteOutcome outcome;
         try
         {
-            outcome = await MutateCore(values, options, mutation, mode).ConfigureAwait(false);
+            outcome = await ExecuteWrite(() => crud.Mutate(operation, mode), mode).ConfigureAwait(false);
         }
         catch
         {
@@ -1200,84 +1178,6 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             ? OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup)
             : Cleanup();
     }
-
-    private ValueTask<WriteOutcome> MutateCore(StorageValues values, WriteOptions? options, Mutation mutation, RelationalExecution mode) => ExecuteWrite(async () =>
-    {
-        ArgumentNullException.ThrowIfNull(values);
-        values = new StorageValues(SearchKeyProjection.Populate(Unit, values.Values));
-        RelationalSessionPolicy.ValidateValues(Unit, UserColumns, "SQL Server", values.Values, mutation == Mutation.Insert,
-            allowGeneratedLocator: mutation is Mutation.Update or Mutation.Upsert);
-        if (SequenceColumnDefinition is not null &&
-            (mutation is Mutation.Insert or Mutation.Upsert) &&
-            !values.Values.ContainsKey(SequenceColumnDefinition.Name))
-        {
-            ValidateExpected(options, null, mutation);
-            return await InsertCore(values.Values, mode, mutation == Mutation.Upsert ? WriteOutcomeStatus.Upserted : WriteOutcomeStatus.Inserted)
-                .ConfigureAwait(false);
-        }
-        var key = new StorageKey(LogicalKeyColumns.ToDictionary(
-            column => column,
-            column => values.Values.TryGetValue(column, out var value)
-                ? value
-                : throw new ArgumentException($"Key column '{column}' is required.", nameof(values)),
-            StringComparer.Ordinal));
-        // None mode has no token to inspect. Keep direct writes single-statement and let the
-        // database report uniqueness/not-found from the write itself.
-        var existing = Unit.Concurrency.IsNone ? null : await ReadCore(key, mode).ConfigureAwait(false);
-        if (mutation == Mutation.Insert && existing is not null) return new WriteOutcome(WriteOutcomeStatus.UniqueViolation, existing.Version);
-        if (mutation == Mutation.Update && existing is null && Unit.Concurrency.IsOptimistic) return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        if (mutation == Mutation.Upsert && SequenceColumnDefinition is not null &&
-            values.Values.ContainsKey(SequenceColumnDefinition.Name) && existing is null && Unit.Concurrency.IsOptimistic)
-            return new WriteOutcome(WriteOutcomeStatus.NotFound);
-        ValidateExpected(options, existing, mutation);
-        if (mutation == Mutation.Upsert)
-        {
-            if (SequenceColumnDefinition is not null && values.Values.ContainsKey(SequenceColumnDefinition.Name))
-                return await UpdateCore(values.Values, existing, options, mode).ConfigureAwait(false);
-            if (Unit.Concurrency.IsNone) return await UpsertNoneCore(values.Values, options, mode).ConfigureAwait(false);
-            if (existing is null) return await InsertCore(values.Values, mode).ConfigureAwait(false);
-            return await UpdateCore(values.Values, existing, options, mode).ConfigureAwait(false);
-        }
-
-        var supplied = UserColumns.Where(column => values.Values.ContainsKey(column.Name)).ToArray();
-        var columns = supplied.ToList();
-        if (mutation == Mutation.Insert)
-        {
-            if (VersionColumnDefinition is not null) columns.Add(VersionColumnDefinition);
-            if (ScopeColumnDefinition is not null) columns.Add(ScopeColumnDefinition);
-            var parameters = BuildParameters(values.Values, supplied);
-            if (VersionColumnDefinition is not null) parameters["@__groundwork_version"] = (1L, VersionColumnDefinition);
-            if (ScopeColumnDefinition is not null) parameters["@__groundwork_scope"] = (Access.Scope!.Value, ScopeColumnDefinition);
-            var output = SequenceColumnDefinition is null ? string.Empty : $" OUTPUT INSERTED.{Quote(SequenceColumnDefinition.Name)}";
-            using var insert = Command($"INSERT INTO {Quote(Unit.Name)} ({string.Join(", ", columns.Select(column => Quote(column.Name)))}){output} VALUES ({string.Join(", ", columns.Select(column => "@" + column.Name))});");
-            AddParameters(insert, parameters);
-            commandObserver?.Observe(new ProviderCommandEvent("sqlserver.insert", insert.CommandText, ProviderCommandKind.Write, IsProbe: false));
-            try
-            {
-                if (SequenceColumnDefinition is null)
-                {
-                    await mode.ExecuteNonQuery(insert).ConfigureAwait(false);
-                    return new WriteOutcome(WriteOutcomeStatus.Inserted, VersionColumnDefinition is null ? null : 1);
-                }
-
-                var generated = await mode.ExecuteScalar(insert).ConfigureAwait(false);
-                var generatedValue = FromSqlServer(generated!, SequenceColumnDefinition);
-                await RecordHighWater(generatedValue, mode).ConfigureAwait(false);
-                return new WriteOutcome(
-                    WriteOutcomeStatus.Inserted,
-                    VersionColumnDefinition is null ? null : 1,
-                    generatedValues: new Dictionary<string, object?>(StringComparer.Ordinal)
-                    {
-                        [SequenceColumnDefinition.Name] = generatedValue
-                    });
-            }
-            catch (SqlException exception) when (dialect.TryMapUniqueViolation(exception, out _))
-            {
-                return new WriteOutcome(WriteOutcomeStatus.UniqueViolation);
-            }
-        }
-        return await UpdateCore(values.Values, existing, options, mode).ConfigureAwait(false);
-    }, mode);
 
     private async ValueTask<WriteOutcome> InsertCore(
         IReadOnlyDictionary<string, object?> values,
@@ -1369,12 +1269,44 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
                $"WHEN NOT MATCHED BY TARGET THEN INSERT ({sourceColumns}) VALUES ({string.Join(", ", columns.Select(column => $"source.{Quote(column.Name)}"))});";
     }
 
-    private async ValueTask<WriteOutcome> UpdateCore(IReadOnlyDictionary<string, object?> values, StoredEntry? existing, WriteOptions? options, RelationalExecution mode)
+    private async ValueTask<WriteOutcome> DeleteCore(
+        StorageKey key,
+        StoredEntry? existing,
+        WriteOptions? options,
+        RelationalExecution mode)
+    {
+        var (where, parameters) = KeyPredicate(key.Values);
+        if (VersionColumnDefinition is not null && options?.Precondition.Kind == WritePreconditionKind.IfVersion)
+        {
+            where += $" AND {Quote(VersionColumnDefinition.Name)}=@expected";
+            parameters["@expected"] = (options.Precondition.Version!.Value, VersionColumnDefinition);
+        }
+        using var command = Command($"DELETE FROM {Quote(Unit.Name)} WHERE {where};");
+        commandObserver?.Observe(new ProviderCommandEvent(
+            "sqlserver.delete",
+            command.CommandText,
+            ProviderCommandKind.Write,
+            IsProbe: false));
+        AddParameters(command, parameters);
+        var affected = await mode.ExecuteNonQuery(command).ConfigureAwait(false);
+        if (affected != 0)
+            return new WriteOutcome(WriteOutcomeStatus.Deleted, existing?.Version);
+        return new WriteOutcome(
+            Unit.Concurrency.IsNone ? WriteOutcomeStatus.NotFound : WriteOutcomeStatus.ConcurrencyConflict,
+            existing?.Version);
+    }
+
+    private async ValueTask<WriteOutcome> UpdateCore(
+        IReadOnlyDictionary<string, object?> values,
+        StorageKey key,
+        StoredEntry? existing,
+        WriteOptions? options,
+        RelationalExecution mode)
     {
         var supplied = UserColumns.Where(column => values.ContainsKey(column.Name) && !Unit.Key.Columns.Contains(column.Name, StringComparer.Ordinal)).ToArray();
         var sets = supplied.Select(column => $"{Quote(column.Name)}=@{column.Name}").ToList();
         var parameters = BuildParameters(values, supplied);
-        var (where, keyParameters) = KeyPredicate(values);
+        var (where, keyParameters) = KeyPredicate(key.Values);
         foreach (var pair in keyParameters) parameters[pair.Key] = pair.Value;
         if (VersionColumnDefinition is not null)
         {
@@ -1566,27 +1498,6 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             exactStringKeys,
             isProbe).ConfigureAwait(false);
 
-    private void ValidateExpected(WriteOptions? options, StoredEntry? existing, Mutation mutation)
-    {
-        if (VersionColumnDefinition is null) return;
-        var precondition = options?.Precondition ?? WritePrecondition.Unconditional;
-        if (mutation == Mutation.Insert)
-            return;
-
-        if (mutation == Mutation.Upsert)
-        {
-            if (precondition.Kind == WritePreconditionKind.CreateOnly && existing is not null)
-                throw new RelationalConcurrencyConflictException(existing.Version);
-            if (precondition.Kind == WritePreconditionKind.IfVersion &&
-                (existing is null || precondition.Version != existing.Version))
-                throw new RelationalConcurrencyConflictException(existing?.Version);
-            return;
-        }
-        if (precondition.Kind == WritePreconditionKind.IfVersion &&
-            (existing is null || precondition.Version != existing.Version))
-            throw new RelationalConcurrencyConflictException(existing?.Version);
-    }
-
     private (string Predicate, Dictionary<string, (object? Value, ColumnDefinition Definition)> Parameters) KeyPredicate(
         IReadOnlyDictionary<string, object?> values,
         bool exactStringKeys = false)
@@ -1655,8 +1566,6 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private static object? FromSqlServer(object value, ColumnDefinition definition) =>
         SqlServerDialect.ReadPortableValue(value, definition);
-
-    private enum Mutation { Insert, Update, Upsert, Delete }
 
     private sealed class SqlServerAppendAdapter(SqlServerStorageSession session) : IRelationalAppendAdapter
     {
@@ -1826,6 +1735,45 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         public object? Decode(object value, ColumnDefinition column) => FromSqlServer(value, column);
 
         public string LockingClause(bool forUpdate) => string.Empty;
+    }
+
+    private sealed class SqlServerCrudAdapter(
+        SqlServerStorageSession session) : IRelationalCrudAdapter
+    {
+        public ValueTask<WriteOutcome> Insert(
+            StorageValues values,
+            WriteOutcomeStatus status,
+            RelationalExecution execution) =>
+            session.InsertCore(values.Values, execution, status);
+
+        public ValueTask<WriteOutcome> Update(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.UpdateCore(values.Values, key, existing, options, execution);
+
+        public ValueTask<WriteOutcome> Upsert(
+            StorageValues values,
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.SequenceColumnDefinition is not null && values.Values.ContainsKey(session.SequenceColumnDefinition.Name)
+                ? session.UpdateCore(values.Values, key, existing, options, execution)
+                : session.Unit.Concurrency.IsNone
+                    ? session.UpsertNoneCore(values.Values, options, execution)
+                    : existing is null
+                        ? session.InsertCore(values.Values, execution)
+                        : session.UpdateCore(values.Values, key, existing, options, execution);
+
+        public ValueTask<WriteOutcome> Delete(
+            StorageKey key,
+            StoredEntry? existing,
+            WriteOptions? options,
+            RelationalExecution execution) =>
+            session.DeleteCore(key, existing, options, execution);
     }
 }
 
