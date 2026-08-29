@@ -34,6 +34,7 @@ concurrency:
 
 jobs:
   publish:
+    if: ${{ vars.GROUNDWORK_CI_PAUSED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out the source repository
