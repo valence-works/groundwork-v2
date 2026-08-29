@@ -239,7 +239,7 @@ public sealed class RecordTableTests
         var projection = orders.Select(
             reference.Join(orders.Query),
             reference,
-            (order, customer) => new JoinedPair(order, customer));
+            (order, customer) => new ValueTuple<JoinedOrder, JoinedCustomer>(order, customer));
         var store = new ReturningRecordStore(new RowValues(new Dictionary<string, object?>
         {
             ["tuple_orders.id"] = 11L,
@@ -250,9 +250,9 @@ public sealed class RecordTableTests
 
         var result = Assert.Single(orders.Open(store).Query(projection));
 
-        Assert.Equal((11L, 7L), (result.Parent.Id, result.Parent.CustomerId));
-        Assert.Null(result.Parent.Customer);
-        Assert.Equal(new JoinedCustomer(7, "Ada"), result.Child);
+        Assert.Equal((11L, 7L), (result.Item1.Id, result.Item1.CustomerId));
+        Assert.Null(result.Item1.Customer);
+        Assert.Equal(new JoinedCustomer(7, "Ada"), result.Item2);
     }
 
     [Fact]
@@ -589,7 +589,6 @@ public sealed class RecordTableTests
     public sealed record JoinedCustomer(long Id, string Name);
     public sealed record JoinedOrder(long Id, long CustomerId, JoinedCustomer Customer);
     public sealed record JoinedOrderCustomer(long OrderId, long CustomerId, string CustomerName);
-    public sealed record JoinedPair(JoinedOrder Parent, JoinedCustomer Child);
 
     private static RecordTable<AggregatedCustomer> AggregationTable() => RecordTable.For<AggregatedCustomer>(
             "record_aggregation_" + Guid.NewGuid().ToString("N"))
