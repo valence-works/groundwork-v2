@@ -22,6 +22,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly RelationalSessionQueries queries;
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
+    private readonly RelationalSessionAppends appends;
 
     /// <summary>
     /// True when this session was opened through <c>OpenOwnedSession</c> and must return its connection on
@@ -90,6 +91,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
                 Add((NpgsqlCommand)command, name, ConvertValue(value, column), column.Name),
             observer,
             "postgresql");
+        appends = new RelationalSessionAppends(unit, access, new PostgreSqlAppendAdapter(this));
     }
 
     /// <summary>
@@ -610,16 +612,24 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         IReadOnlyList<StorageValues> values,
         RelationalExecution mode)
     {
-        var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        foreach (var value in values)
-            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
-        var execution = await ExecuteWrite(
-            () => AppendCore(operationId, values, declaration, exactOutcomes: false, mode), mode).ConfigureAwait(false);
-        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            execution.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
-        return new WriteOutcome(execution.Status);
+        var operation = appends.Prepare(operationId, values, exactOutcomes: false);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        RelationalAppendResult result;
+        try
+        {
+            result = await ExecuteWrite(() => appends.Append(operation, mode), mode).ConfigureAwait(false);
+        }
+        catch
+        {
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
+            throw;
+        }
+        await CompleteOnAppend(
+            registration,
+            onAppend && result.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            mode).ConfigureAwait(false);
+        return new WriteOutcome(result.Status);
     }
 
     public AppendOutcomeReport AppendWithOutcomes(OperationId operationId, IReadOnlyList<StorageValues> values) =>
@@ -636,126 +646,25 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         IReadOnlyList<StorageValues> values,
         RelationalExecution mode)
     {
-        var declaration = IdempotencyRules.RequireDeclaration(Unit);
-        IdempotencyRules.ValidateOperation(Unit, operationId, values);
-        foreach (var value in values)
-            WritePreconditionValidator.ValidateWrittenValues(Unit, value.Values);
-        var outcome = await ExecuteWrite(async () => (await AppendCore(
-            operationId, values, declaration, exactOutcomes: true, mode).ConfigureAwait(false)).ToReport(), mode)
-            .ConfigureAwait(false);
-        if (Unit.Retention?.Trigger == RetentionTrigger.OnAppend &&
-            outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed)
-            await ApplyOnAppendRetention(mode).ConfigureAwait(false);
+        var operation = appends.Prepare(operationId, values, exactOutcomes: true);
+        var onAppend = Unit.Retention?.Trigger == RetentionTrigger.OnAppend;
+        var registration = BeginOnAppend(onAppend);
+        AppendOutcomeReport outcome;
+        try
+        {
+            outcome = await ExecuteWrite(async () => (await appends.Append(
+                operation, mode).ConfigureAwait(false)).ToReport(), mode).ConfigureAwait(false);
+        }
+        catch
+        {
+            await CompleteOnAppend(registration, cleanupRequired: false, mode).ConfigureAwait(false);
+            throw;
+        }
+        await CompleteOnAppend(
+            registration,
+            onAppend && outcome.Status is WriteOutcomeStatus.Inserted or WriteOutcomeStatus.Replayed,
+            mode).ConfigureAwait(false);
         return outcome;
-    }
-
-    private async ValueTask<AppendExecution> AppendCore(
-        OperationId operationId,
-        IReadOnlyList<StorageValues> values,
-        AppendIdempotencyDeclaration declaration,
-        bool exactOutcomes,
-        RelationalExecution mode)
-    {
-        await EnsureLedgerTable(declaration.LedgerName, mode).ConfigureAwait(false);
-        var providerNow = await ProviderNow(mode).ConfigureAwait(false);
-        var scope = Access.Scope?.Value ?? string.Empty;
-        var fingerprint = ExactAppendCodec.Fingerprint(Unit, values);
-        var cutoff = IdempotencyRules.ReclamationCutoff(providerNow, declaration.Window);
-        using (var reclaim = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE ctid IN (SELECT ctid FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);"))
-        {
-            Add(reclaim, "reclaim_unit", Unit.Id.Value);
-            Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
-            await mode.ExecuteNonQuery(reclaim).ConfigureAwait(false);
-        }
-
-        var expiredExisting = false;
-        using (var existing = Command($"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
-        {
-            AddLedgerParameters(existing, Unit.Id.Value, scope, operationId.Nonce);
-            await using var readerScope = await mode.ExecuteReader(existing).ConfigureAwait(false);
-            var reader = readerScope.Reader;
-            if (await mode.Read(reader).ConfigureAwait(false))
-            {
-                var committedAt = DateTimeOffset.Parse(Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-                if (IdempotencyRules.IsWithinWindow(committedAt, providerNow, declaration.Window))
-                {
-                    var storedFingerprint = reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture);
-                    var storedResult = reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture);
-                    if (string.IsNullOrEmpty(storedFingerprint) || string.IsNullOrEmpty(storedResult))
-                    {
-                        if (!exactOutcomes)
-                            return new AppendExecution(WriteOutcomeStatus.Replayed, null);
-                        throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
-                    }
-                    if (!exactOutcomes)
-                        return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
-                    if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                        throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(storedResult));
-                }
-                expiredExisting = true;
-            }
-        }
-        if (expiredExisting)
-        {
-            using var deleteExpired = Command($"DELETE FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-            AddLedgerParameters(deleteExpired, Unit.Id.Value, scope, operationId.Nonce);
-            await mode.ExecuteNonQuery(deleteExpired).ConfigureAwait(false);
-        }
-
-        using (var insertLedger = Command($"INSERT INTO {Quote(declaration.LedgerName)} ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result) ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;"))
-        {
-            AddLedgerParameters(insertLedger, Unit.Id.Value, scope, operationId.Nonce);
-            Add(insertLedger, "committed_at", FormatLedgerTime(providerNow));
-            Add(insertLedger, "fingerprint", fingerprint);
-            Add(insertLedger, "result", string.Empty);
-            if ((await mode.ExecuteNonQuery(insertLedger).ConfigureAwait(false)) == 0)
-            {
-                using var replay = Command($"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} FROM {Quote(declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
-                AddLedgerParameters(replay, Unit.Id.Value, scope, operationId.Nonce);
-                await using var readerScope = await mode.ExecuteReader(replay).ConfigureAwait(false);
-                var reader = readerScope.Reader;
-                if (!(await mode.Read(reader).ConfigureAwait(false)) || reader.IsDBNull(0) || reader.IsDBNull(1) || string.IsNullOrEmpty(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)))
-                {
-                    if (!exactOutcomes)
-                        return new AppendExecution(WriteOutcomeStatus.Replayed, null);
-                    throw new InvalidOperationException("GW-APPEND-002: an existing append ledger entry has no exact result; use a new operation nonce.");
-                }
-                var storedFingerprint = Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!;
-                if (!exactOutcomes)
-                    return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
-                if (!string.Equals(storedFingerprint, fingerprint, StringComparison.Ordinal))
-                    throw new AppendIdempotencyConflictException(Unit.Id.Value, scope, operationId.Nonce, storedFingerprint, fingerprint);
-                return new AppendExecution(WriteOutcomeStatus.Replayed, ExactAppendCodec.DeserializeOutcomes(Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture)!));
-            }
-        }
-
-        var logicalUnit = IdempotencyRules.LogicalUnit(Unit, PostgreSqlSchemaCoordinator.ScopeColumn);
-        var writes = values
-            .Select(value => RowWrite.Insert(logicalUnit, value))
-            .ToArray();
-        IReadOnlyList<RowWriteOutcome> outcomes;
-        if (SequenceColumn is not null)
-        {
-            var sequenced = new List<RowWriteOutcome>(writes.Length);
-            foreach (var write in writes)
-                sequenced.Add(await InsertAppendSequence(write, mode).ConfigureAwait(false));
-            outcomes = sequenced;
-        }
-        else
-        {
-            outcomes = await ApplyBatchCore(writes, mode).ConfigureAwait(false);
-        }
-        if (outcomes.Any(outcome => !outcome.Outcome.Succeeded))
-            throw new InvalidOperationException("An idempotent append payload row was not accepted; the ledger and payload were rolled back.");
-        var report = new AppendExecution(WriteOutcomeStatus.Inserted, outcomes.Select(outcome => outcome.Outcome).ToArray());
-        using (var complete = Command($"UPDATE {Quote(declaration.LedgerName)} SET {Quote(LedgerResult)}=@result WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;"))
-        {
-            AddLedgerParameters(complete, Unit.Id.Value, scope, operationId.Nonce);
-            Add(complete, "result", ExactAppendCodec.SerializeOutcomes(report.Outcomes!));
-            await mode.ExecuteNonQuery(complete).ConfigureAwait(false);
-        }
-        return report;
     }
 
     private async ValueTask<RowWriteOutcome> InsertAppendSequence(RowWrite write, RelationalExecution mode)
@@ -1118,6 +1027,30 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     {
         async ValueTask Cleanup() =>
             await ApplyRetention(new RetentionExecutionOptions(), mode).ConfigureAwait(false);
+        return transaction is null
+            ? OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup)
+            : Cleanup();
+    }
+
+    private OnAppendRetentionCoordinator.AppendRegistration? BeginOnAppend(bool eligible)
+    {
+        StorageAccessValidation.EnsurePointOperation(Access, "write");
+        return eligible && transaction is null
+            ? OnAppendRetentionCoordinator.Begin(owner, Unit, Access.Scope?.Value)
+            : null;
+    }
+
+    private ValueTask CompleteOnAppend(
+        OnAppendRetentionCoordinator.AppendRegistration? registration,
+        bool cleanupRequired,
+        RelationalExecution mode)
+    {
+        async ValueTask Cleanup() =>
+            await ApplyRetention(new RetentionExecutionOptions(), mode).ConfigureAwait(false);
+        if (registration is not null)
+            return registration.Complete(cleanupRequired, Cleanup);
+        if (!cleanupRequired)
+            return ValueTask.CompletedTask;
         return transaction is null
             ? OnAppendRetentionCoordinator.Run(owner, Unit, Access.Scope?.Value, Cleanup)
             : Cleanup();
@@ -1577,10 +1510,134 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         Delete
     }
 
-    private sealed record AppendExecution(WriteOutcomeStatus Status, IReadOnlyList<WriteOutcome>? Outcomes)
+    private sealed class PostgreSqlAppendAdapter(PostgreSqlStorageSession session) : IRelationalAppendAdapter
     {
-        internal AppendOutcomeReport ToReport() =>
-            new(Status, Outcomes ?? throw new InvalidOperationException("GW-APPEND-002: an exact append result was not recorded."));
+        public async ValueTask<DateTimeOffset> PrepareLedger(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            await session.EnsureLedgerTable(operation.Declaration.LedgerName, execution).ConfigureAwait(false);
+            return await session.ProviderNow(execution).ConfigureAwait(false);
+        }
+
+        public async ValueTask ReclaimExpired(
+            RelationalAppendOperation operation,
+            DateTimeOffset cutoff,
+            RelationalExecution execution)
+        {
+            using var reclaim = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE ctid IN " +
+                $"(SELECT ctid FROM {Quote(operation.Declaration.LedgerName)} WHERE " +
+                $"{Quote(LedgerUnit)}=@reclaim_unit AND {Quote(LedgerCommittedAt)} <= @cutoff LIMIT 128);");
+            session.Add(reclaim, "reclaim_unit", operation.Unit.Id.Value);
+            session.Add(reclaim, "cutoff", FormatLedgerTime(cutoff));
+            await execution.ExecuteNonQuery(reclaim).ConfigureAwait(false);
+        }
+
+        public async ValueTask<RelationalAppendLedgerEntry?> ReadLedger(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            using var existing = session.Command(
+                $"SELECT {Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(existing, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            await using var readerScope = await execution.ExecuteReader(existing).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (!(await execution.Read(reader).ConfigureAwait(false)))
+                return null;
+            return new RelationalAppendLedgerEntry(
+                DateTimeOffset.Parse(
+                    Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture)!,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2), CultureInfo.InvariantCulture));
+        }
+
+        public async ValueTask DeleteLedger(
+            RelationalAppendOperation operation,
+            RelationalAppendLedgerEntry existing,
+            RelationalExecution execution)
+        {
+            using var delete = session.Command(
+                $"DELETE FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce " +
+                $"AND {Quote(LedgerCommittedAt)}=@observed_committed_at;");
+            session.AddLedgerParameters(delete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(delete, "observed_committed_at", FormatLedgerTime(existing.CommittedAt));
+            await execution.ExecuteNonQuery(delete).ConfigureAwait(false);
+        }
+
+        public async ValueTask<bool> TryClaimLedger(
+            RelationalAppendOperation operation,
+            DateTimeOffset providerNow,
+            RelationalExecution execution)
+        {
+            using var insert = session.Command(
+                $"INSERT INTO {Quote(operation.Declaration.LedgerName)} " +
+                $"({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}, " +
+                $"{Quote(LedgerCommittedAt)}, {Quote(LedgerFingerprint)}, {Quote(LedgerResult)}) " +
+                $"VALUES (@unit, @scope, @nonce, @committed_at, @fingerprint, @result) " +
+                $"ON CONFLICT ({Quote(LedgerUnit)}, {Quote(LedgerScope)}, {Quote(LedgerNonce)}) DO NOTHING;");
+            session.AddLedgerParameters(insert, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(insert, "committed_at", FormatLedgerTime(providerNow));
+            session.Add(insert, "fingerprint", operation.Fingerprint);
+            session.Add(insert, "result", string.Empty);
+            return await execution.ExecuteNonQuery(insert).ConfigureAwait(false) == 1;
+        }
+
+        public async ValueTask<RelationalAppendReplayEntry?> ReadClaimWinner(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            using var replay = session.Command(
+                $"SELECT {Quote(LedgerFingerprint)}, {Quote(LedgerResult)} " +
+                $"FROM {Quote(operation.Declaration.LedgerName)} WHERE {Quote(LedgerUnit)}=@unit " +
+                $"AND {Quote(LedgerScope)}=@scope AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(replay, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            await using var readerScope = await execution.ExecuteReader(replay).ConfigureAwait(false);
+            var reader = readerScope.Reader;
+            if (!(await execution.Read(reader).ConfigureAwait(false)))
+                return null;
+            return new RelationalAppendReplayEntry(
+                reader.IsDBNull(0) ? null : Convert.ToString(reader.GetValue(0), CultureInfo.InvariantCulture),
+                reader.IsDBNull(1) ? null : Convert.ToString(reader.GetValue(1), CultureInfo.InvariantCulture));
+        }
+
+        public async ValueTask<IReadOnlyList<RowWriteOutcome>> InsertPayload(
+            RelationalAppendOperation operation,
+            RelationalExecution execution)
+        {
+            var logicalUnit = IdempotencyRules.LogicalUnit(
+                operation.Unit,
+                PostgreSqlSchemaCoordinator.ScopeColumn);
+            var writes = operation.Values
+                .Select(value => RowWrite.Insert(logicalUnit, value))
+                .ToArray();
+            if (session.SequenceColumn is null)
+                return await session.ApplyBatchCore(writes, execution).ConfigureAwait(false);
+
+            var outcomes = new List<RowWriteOutcome>(writes.Length);
+            foreach (var write in writes)
+                outcomes.Add(await session.InsertAppendSequence(write, execution).ConfigureAwait(false));
+            return outcomes;
+        }
+
+        public async ValueTask<bool> CompleteLedger(
+            RelationalAppendOperation operation,
+            string serializedOutcomes,
+            RelationalExecution execution)
+        {
+            using var complete = session.Command(
+                $"UPDATE {Quote(operation.Declaration.LedgerName)} SET {Quote(LedgerResult)}=@result " +
+                $"WHERE {Quote(LedgerUnit)}=@unit AND {Quote(LedgerScope)}=@scope " +
+                $"AND {Quote(LedgerNonce)}=@nonce;");
+            session.AddLedgerParameters(complete, operation.Unit.Id.Value, operation.Scope, operation.OperationId.Nonce);
+            session.Add(complete, "result", serializedOutcomes);
+            return await execution.ExecuteNonQuery(complete).ConfigureAwait(false) == 1;
+        }
     }
 
     private sealed class PostgreSqlSessionExecutionAdapter(
