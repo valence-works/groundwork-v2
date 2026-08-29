@@ -143,8 +143,25 @@ public static class SchemaCompilation
         SchemaDocument schema,
         IPhysicalSchemaTargetCompiler targets)
     {
+        ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(targets);
-        return Compile(schema).Select(targets.Compile).ToArray();
+        var units = schema.Tables.Select(Compile).ToArray();
+        SchemaSubject.ValidateManifestWithoutCrossUnitReferences(units);
+        var refusals = StorageReferenceValidation.ValidateManifestBySource(units)
+            .GroupBy(result => result.SourceUnitId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Select(result => new SchemaRefusal(
+                    result.Finding.Code,
+                    result.Finding.Message,
+                    result.Finding.Path)).ToArray());
+        return units.Select(unit =>
+        {
+            var target = targets.Compile(unit);
+            return refusals.TryGetValue(unit.Id, out var unitRefusals)
+                ? target.WithPlanningRefusals(unitRefusals)
+                : target;
+        }).ToArray();
     }
 
     private static PortableType Map(SchemaValueType type) => type switch

@@ -130,6 +130,7 @@ public sealed class SchemaSubject
                 // Indexes and aggregation profiles are sets, not sequences: naming the same ones
                 // in a different order describes the same subject.
                 .. Indexes.Select(CanonicalIndex).OrderBy(canonical => canonical, StringComparer.Ordinal),
+                .. References.Select(CanonicalReference).OrderBy(canonical => canonical, StringComparer.Ordinal),
                 .. (definition.AggregationProfiles ?? []).Select(CanonicalAggregationProfile)
                     .OrderBy(canonical => canonical, StringComparer.Ordinal),
                 Evolution.IsDestructive ? "destructive" : "safe",
@@ -198,13 +199,7 @@ public sealed class SchemaSubject
     /// </summary>
     public static void ValidateManifest(IEnumerable<StorageUnit> declarations)
     {
-        ArgumentNullException.ThrowIfNull(declarations);
-        var units = declarations.ToArray();
-        if (units.Any(unit => unit is null))
-            throw new ArgumentException("A schema manifest cannot contain null storage units.", nameof(declarations));
-
-        foreach (var unit in units)
-            Validate(unit);
+        var units = ValidateManifestDeclarations(declarations);
 
         var referenceFindings = StorageReferenceValidation.ValidateManifest(units);
         if (referenceFindings.Count != 0)
@@ -215,6 +210,29 @@ public sealed class SchemaSubject
                 nameof(declarations));
         }
 
+        ValidateManifestIdentifiers(units, nameof(declarations));
+    }
+
+    internal static void ValidateManifestWithoutCrossUnitReferences(IEnumerable<StorageUnit> declarations)
+    {
+        var units = ValidateManifestDeclarations(declarations);
+        ValidateManifestIdentifiers(units, nameof(declarations));
+    }
+
+    private static StorageUnit[] ValidateManifestDeclarations(IEnumerable<StorageUnit> declarations)
+    {
+        ArgumentNullException.ThrowIfNull(declarations);
+        var units = declarations.ToArray();
+        if (units.Any(unit => unit is null))
+            throw new ArgumentException("A schema manifest cannot contain null storage units.", nameof(declarations));
+
+        foreach (var unit in units)
+            Validate(unit);
+        return units;
+    }
+
+    private static void ValidateManifestIdentifiers(IReadOnlyList<StorageUnit> units, string parameterName)
+    {
         var names = new Dictionary<string, StorageUnit>(StringComparer.OrdinalIgnoreCase);
         foreach (var unit in units)
         {
@@ -222,7 +240,7 @@ public sealed class SchemaSubject
             {
                 throw new ArgumentException(
                     $"Schema manifest storage unit names must be unique under provider identifier comparison: '{unit.Name}'.",
-                    nameof(declarations));
+                    parameterName);
             }
         }
 
@@ -238,14 +256,14 @@ public sealed class SchemaSubject
                 {
                     throw new ArgumentException(
                         $"Schema manifest ledger names cannot differ only by provider identifier casing: '{prior.Name}' and '{declaration}'.",
-                        nameof(declarations));
+                        parameterName);
                 }
                 ledgers.TryAdd(declaration, (declaration, unit));
                 if (names.TryGetValue(declaration, out var owner))
                 {
                     throw new ArgumentException(
                         $"Schema manifest ledger '{declaration}' collides with storage unit '{owner.Name}' under provider identifier comparison.",
-                        nameof(declarations));
+                        parameterName);
                 }
             }
         }
@@ -463,6 +481,10 @@ public sealed class SchemaSubject
 
     private static string CanonicalIndex(IndexDefinition index) => CanonicalIndexPayload.From(index).Canonical;
 
+    private static string CanonicalReference(ReferenceDefinition reference) =>
+        SchemaFingerprint.Canonicalize(
+            [reference.Name, reference.TargetUnitId.Value, .. reference.Columns]);
+
     private static AggregationProfile Snapshot(AggregationProfile profile) =>
         AggregationProfileSnapshot.Capture(profile);
 
@@ -537,6 +559,15 @@ public sealed class PhysicalSchemaTarget
         SchemaSubject subject,
         ProviderIdentity provider,
         IEnumerable<ProviderPhysicalSchemaDefinition>? providerDefinitions = null)
+        : this(subject, provider, providerDefinitions, [])
+    {
+    }
+
+    private PhysicalSchemaTarget(
+        SchemaSubject subject,
+        ProviderIdentity provider,
+        IEnumerable<ProviderPhysicalSchemaDefinition>? providerDefinitions,
+        IEnumerable<SchemaRefusal> planningRefusals)
     {
         Subject = subject ?? throw new ArgumentNullException(nameof(subject));
         Provider = provider ?? throw new ArgumentNullException(nameof(provider));
@@ -561,6 +592,8 @@ public sealed class PhysicalSchemaTarget
             Provider.Version,
             .. ProviderDefinitions.Select(definition => definition.Fingerprint)
         ]);
+        PlanningRefusals = (planningRefusals ?? throw new ArgumentNullException(nameof(planningRefusals)))
+            .ToImmutableArray();
     }
 
     public SchemaSubject Subject { get; }
@@ -572,6 +605,11 @@ public sealed class PhysicalSchemaTarget
     public ImmutableArray<ProviderPhysicalSchemaDefinition> ProviderDefinitions { get; }
 
     public string Fingerprint { get; }
+
+    internal ImmutableArray<SchemaRefusal> PlanningRefusals { get; }
+
+    internal PhysicalSchemaTarget WithPlanningRefusals(IEnumerable<SchemaRefusal> refusals) =>
+        new(Subject, Provider, ProviderDefinitions, refusals);
 }
 
 /// <summary>Canonical, culture-independent schema fingerprint primitives.</summary>
