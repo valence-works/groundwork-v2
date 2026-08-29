@@ -53,6 +53,8 @@ internal static class PublicApiApprovalFixture
         _ = typeof(QueryCoverageException);
         _ = typeof(QueryCoverageCandidates);
         _ = typeof(RecordTable);
+        _ = typeof(RecordReference<,>);
+        _ = typeof(RecordProjection<>);
         _ = typeof(RecordTableStoreUnitOfWork<>);
         _ = typeof(RecordWriteOptions);
         _ = typeof(BatchWriteOptions);
@@ -202,6 +204,20 @@ internal static class PublicApiApprovalFixture
             approvalCustomerJoin);
         _ = new Func<IGwQueryable<ApprovalOrder>, IGwQueryable<ApprovalOrder>>(
             query => query.Join(approvalCustomerReference).Where(order => order.Customer.Name == "approved"));
+        var recordCustomers = RecordTable.For<ApprovalCustomer>("approval_record_customers")
+            .Key(customer => customer.Id)
+            .Build();
+        var recordOrders = RecordTable.For<ApprovalOrder>("approval_record_orders")
+            .Key(order => order.Id)
+            .Index("by_customer", order => order.CustomerId)
+            .Reference("customer", order => order.Customer, recordCustomers, order => order.CustomerId)
+            .Build();
+        var recordCustomerReference = recordOrders.Reference<ApprovalCustomer>("customer");
+        var recordJoin = recordCustomerReference.Join(recordOrders.Query);
+        _ = recordOrders.Select(
+            recordJoin,
+            recordCustomerReference,
+            (order, customer) => new ApprovalOrderCustomer(order.Id, customer.Id, customer.Name));
         _ = new Func<RecordTable<ApprovalRecord>, RecordAggregationBinding<string, long>>(table => table.Aggregate<string, long>(
             "summary",
             "value",
@@ -229,5 +245,6 @@ internal static class PublicApiApprovalFixture
     private sealed record ApprovalMetric(Guid Id, string Label, int Count, decimal Amount);
     private sealed record ApprovalOrder(Guid Id, Guid CustomerId, ApprovalCustomer Customer);
     private sealed record ApprovalCustomer(Guid Id, string Name);
+    private sealed record ApprovalOrderCustomer(Guid OrderId, Guid CustomerId, string CustomerName);
     private sealed record ApprovalDocument(Guid Id, string Value);
 }

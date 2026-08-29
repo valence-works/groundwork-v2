@@ -4,6 +4,9 @@ Typed rows. `RecordTable<T>` maps a CLR type to a kernel `StorageUnit` — key, 
 concurrency, scope — and exposes the `IRecordStore` seam. It also binds typed
 `AggregationRow` selectors to declared aggregation profiles; the binding preserves the profile's
 fixed grouping, reducers, and budgets and never creates an ad-hoc shape.
+Navigation-bearing tables can bind one declared reference and compile a terminal typed projection
+over both source and target records. Joined materialization keeps provider rows table-qualified and
+does not add reflection to the per-row path.
 
 This package deliberately has **no provider dependency**, which means it also has no
 `table.Open(connection)`. That is the point: a library can declare its storage and stay

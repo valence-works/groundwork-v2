@@ -53,14 +53,16 @@ public sealed class QueryRendererTests
         Assert.Contains("\"__groundwork_source\".\"customer_id\" = \"__groundwork_target\".\"id\"", sqlite.CommandText, StringComparison.Ordinal);
         Assert.Contains("\"__groundwork_source\".\"customer_region\"", sqlite.CommandText, StringComparison.Ordinal);
         Assert.Contains("\"__groundwork_target\".\"region\"", sqlite.CommandText, StringComparison.Ordinal);
-        Assert.Contains("\"__groundwork_source\".\"id\" AS \"id\"", sqlite.CommandText, StringComparison.Ordinal);
-        Assert.Contains("\"__groundwork_target\".\"name\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("\"__groundwork_source\".\"id\" AS \"orders.id\"", sqlite.CommandText, StringComparison.Ordinal);
+        Assert.Contains("AS \"customers.name\"", sqlite.CommandText, StringComparison.Ordinal);
         Assert.Contains("FROM \"orders\" AS \"__groundwork_source\" INNER JOIN \"customers\" AS \"__groundwork_target\"", postgres.CommandText, StringComparison.Ordinal);
         Assert.Contains("\"__groundwork_source\".\"customer_id\" = \"__groundwork_target\".\"id\"", postgres.CommandText, StringComparison.Ordinal);
         Assert.Contains("FROM [orders] AS [__groundwork_source] INNER JOIN [customers] AS [__groundwork_target]", sqlServer.CommandText, StringComparison.Ordinal);
         Assert.Contains("[__groundwork_source].[customer_id] = [__groundwork_target].[id]", sqlServer.CommandText, StringComparison.Ordinal);
         Assert.Contains("[__groundwork_source].[customer_region]", sqlServer.CommandText, StringComparison.Ordinal);
         Assert.Contains("[__groundwork_target].[region]", sqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("[__groundwork_source].[id] AS [orders.id]", sqlServer.CommandText, StringComparison.Ordinal);
+        Assert.Contains("AS [customers.name]", sqlServer.CommandText, StringComparison.Ordinal);
         Assert.All(new[] { sqlite, postgres, sqlServer }, command => Assert.Equal(2, command.Parameters.Length));
 
         var mongo = new MongoQueryRenderer().Render(
@@ -289,9 +291,10 @@ public sealed class QueryRendererTests
     }
 
     [Fact]
-    public void Joined_result_reader_fails_closed_before_provider_io_until_composite_materialization_lands()
+    public void Joined_result_reader_materializes_qualified_same_named_projection_fields()
     {
         var orders = new TableId("orders");
+        var orderId = new ColumnRef(orders, "id", QueryType.Int64, isNullable: false);
         var customerId = new ColumnRef(orders, "customer_id", QueryType.Int64, isNullable: false);
         var join = new ReferenceJoin("customer", Table, [new JoinColumnPair(customerId, Id)]);
         var request = new QueryRequest(
@@ -299,16 +302,74 @@ public sealed class QueryRendererTests
             join,
             Predicate.AlwaysTrue.Instance,
             [],
-            Projection.All,
+            Projection.ColumnsOnly(orderId, Id),
             Paging.None);
 
         var command = new SqliteQueryRenderer().Render(request);
-        using var unopenedConnection = new SqliteConnection("Data Source=:memory:");
-        var refusal = Assert.Throws<QueryRenderException>(() =>
-            RelationalQueryResultReader.Read(unopenedConnection, command, (_, value) => value));
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText = "CREATE TABLE orders (id INTEGER NOT NULL, customer_id INTEGER NOT NULL); " +
+                "CREATE TABLE customers (id INTEGER NOT NULL); " +
+                "INSERT INTO customers VALUES (7); INSERT INTO orders VALUES (11, 7);";
+            schema.ExecuteNonQuery();
+        }
 
+        var rows = RelationalQueryResultReader.Read(connection, command, (_, value) => value);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(11L, row["orders.id"]);
+        Assert.Equal(7L, row["customers.id"]);
+
+        var allColumns = new QueryRequest(
+            orders,
+            join,
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.None);
+        using var unopenedConnection = new SqliteConnection("Data Source=:memory:");
+        var refusal = Assert.Throws<QueryRenderException>(() => RelationalQueryResultReader.Read(
+            unopenedConnection,
+            new SqliteQueryRenderer().Render(allColumns),
+            (_, value) => value));
         Assert.Equal("GW-QUERY-032", refusal.Code);
-        Assert.Contains("composite source/target", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("explicit projection", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Single_table_execution_only_order_field_keeps_its_declared_decoder_type()
+    {
+        var sort = new ColumnRef(Table, "sort_key", QueryType.Int32, isNullable: false);
+        var projected = new ColumnRef(Table, "amount", QueryType.Int32, isNullable: true);
+        var request = new QueryRequest(
+            Table,
+            Predicate.AlwaysTrue.Instance,
+            [new OrderTerm(sort, nullOrder: NullOrder.Last)],
+            Projection.ColumnsOnly(projected),
+            Paging.Keyset(1));
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("decoder-order-field"),
+            Name = Table.Value,
+            Columns =
+            [
+                new ColumnDefinition { Name = sort.Name, Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = projected.Name, Type = PortableType.Int32, IsNullable = true }
+            ],
+            Key = new KeyDefinition { Columns = [sort.Name] }
+        };
+
+        var definition = RelationalQueryResultReader.ResolveColumnDefinition(
+            unit,
+            request,
+            QueryRenderOptions.Default,
+            sort.Name);
+        var decoded = SqliteDialect.ReadPortableValue(10L, Assert.IsType<ColumnDefinition>(definition));
+
+        Assert.IsType<int>(decoded);
+        Assert.Equal(10, decoded);
     }
 
     [Fact]

@@ -71,7 +71,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     {
         var (executionSource, renderOptions, command) = PrepareQuery(request, options);
         var rows = RelationalQueryResultReader.Read(connection, command,
-            (name, value) => DecodeQueryValue(name, value, executionSource), activeTransaction ?? transaction);
+            (name, value) => DecodeQueryValue(name, value, executionSource, renderOptions), activeTransaction ?? transaction);
         AssertExplainPlan(command, renderOptions);
         return QueryResultMaterializer.Materialize(executionSource, renderOptions, rows, command.SelectedIndex, command.IndexHintApplied,
             sourceIncludesRequestedOffset: true,
@@ -92,7 +92,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             cancellationToken.ThrowIfCancellationRequested();
             var (executionSource, renderOptions, command) = PrepareQuery(request, options);
             var rows = RelationalQueryResultReader.Read(
-                    connection, command, (name, value) => DecodeQueryValue(name, value, executionSource), activeTransaction ?? transaction,
+                    connection, command, (name, value) => DecodeQueryValue(name, value, executionSource, renderOptions), activeTransaction ?? transaction,
                     RelationalExecution.Asynchronous(cancellationToken))
                 .GetAwaiter().GetResult();
             AssertExplainPlan(command, renderOptions);
@@ -226,12 +226,18 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
     }
 
-    private object? DecodeQueryValue(string name, object? value, QueryRequest request)
+    private object? DecodeQueryValue(
+        string name,
+        object? value,
+        QueryRequest request,
+        QueryRenderOptions options)
     {
         if (request.Result is ResultShape.Sum { Column.Type: QueryType.Int32 } sum &&
             string.Equals(name, sum.Column.Name, StringComparison.Ordinal))
             return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
-        return DecodeQueryValue(name, value);
+        if (name == "__groundwork_total_count") return value;
+        var column = RelationalQueryResultReader.ResolveColumnDefinition(Unit, request, options, name);
+        return column is null ? value : FromSqlite(value ?? DBNull.Value, column);
     }
 
     public CrossScopeQueryResult QueryAcrossScopes(

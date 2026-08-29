@@ -191,6 +191,119 @@ public sealed class RecordTableTests
     }
 
     [Fact]
+    public void Joined_projections_materialize_typed_parent_child_shapes_without_hot_path_reflection()
+    {
+        var (orders, reference) = JoinedTables("joined");
+        var projection = orders.Select(
+            reference.Join(orders.Query).Where(order => order.Customer.Name == "Ada"),
+            reference,
+            (order, customer) => new JoinedOrderCustomer(order.Id, customer.Id, customer.Name));
+        var store = new ReturningRecordStore(new RowValues(new Dictionary<string, object?>
+        {
+            ["joined_orders.id"] = 11L,
+            ["joined_customers.id"] = 7L,
+            ["joined_customers.name"] = "Ada"
+        }));
+        var reflectionBefore = RecordTable<JoinedOrder>.AccessorReflectionInspectionCount +
+            RecordTable<JoinedCustomer>.AccessorReflectionInspectionCount;
+
+        var first = Assert.Single(orders.Open(store).Query(projection));
+        var second = Assert.Single(orders.Open(store).Query(projection));
+
+        Assert.Equal(new JoinedOrderCustomer(11, 7, "Ada"), first);
+        Assert.Equal(first, second);
+        Assert.Equal(reflectionBefore,
+            RecordTable<JoinedOrder>.AccessorReflectionInspectionCount +
+            RecordTable<JoinedCustomer>.AccessorReflectionInspectionCount);
+        Assert.NotNull(store.Request!.Join);
+        Assert.Equal(
+            ["joined_orders.id", "joined_customers.id", "joined_customers.name"],
+            store.Request.Projection.Columns.Select(column => column.ToString()));
+    }
+
+    [Fact]
+    public void Complex_record_members_must_be_bound_as_declared_references()
+    {
+        var failure = Assert.Throws<NotSupportedException>(() =>
+            RecordTable.For<JoinedOrder>("unbound_orders")
+                .Key(order => order.Id)
+                .Build());
+
+        Assert.Contains(nameof(JoinedOrder.Customer), failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_projection_materializes_a_full_parent_child_tuple()
+    {
+        var (orders, reference) = JoinedTables("tuple");
+        var projection = orders.Select(
+            reference.Join(orders.Query),
+            reference,
+            (order, customer) => new ValueTuple<JoinedOrder, JoinedCustomer>(order, customer));
+        var store = new ReturningRecordStore(new RowValues(new Dictionary<string, object?>
+        {
+            ["tuple_orders.id"] = 11L,
+            ["tuple_orders.customerId"] = 7L,
+            ["tuple_customers.id"] = 7L,
+            ["tuple_customers.name"] = "Ada"
+        }));
+
+        var result = Assert.Single(orders.Open(store).Query(projection));
+
+        Assert.Equal((11L, 7L), (result.Item1.Id, result.Item1.CustomerId));
+        Assert.Null(result.Item1.Customer);
+        Assert.Equal(new JoinedCustomer(7, "Ada"), result.Item2);
+    }
+
+    [Fact]
+    public void Joined_whole_record_projection_refuses_json_members_before_provider_io()
+    {
+        var customers = RecordTable.For<JoinedCustomer>("json_join_customers")
+            .Key(customer => customer.Id)
+            .Build();
+        var orders = RecordTable.For<JoinedJsonOrder>("json_join_orders")
+            .Key(order => order.Id)
+            .Index("by_customer", order => order.CustomerId)
+            .Reference("customer", order => order.Customer, customers, order => order.CustomerId)
+            .Build();
+        var reference = orders.Reference<JoinedCustomer>("customer");
+
+        var failure = Assert.Throws<ArgumentException>(() => orders.Select(
+            reference.Join(orders.Query),
+            reference,
+            (order, customer) => new ValueTuple<JoinedJsonOrder, JoinedCustomer>(order, customer)));
+
+        Assert.Contains(nameof(JoinedJsonOrder.Payload), failure.Message, StringComparison.Ordinal);
+        Assert.Contains("not a queryable scalar column", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_record_projection_refuses_an_empty_constant_shape()
+    {
+        var (orders, reference) = JoinedTables("constant");
+
+        var failure = Assert.Throws<ArgumentException>(() => orders.Select(
+            reference.Join(orders.Query),
+            reference,
+            (_, _) => 42));
+
+        Assert.Contains("at least one source or target member", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Joined_record_query_requires_the_terminal_composite_projection_surface()
+    {
+        var (orders, reference) = JoinedTables("terminal");
+        var store = new CapturingRecordStore();
+
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            orders.Open(store).Query(reference.Join(orders.Query)));
+
+        Assert.Contains("terminal table.Select", failure.Message, StringComparison.Ordinal);
+        Assert.Null(store.Request);
+    }
+
+    [Fact]
     public void Selected_index_metadata_reaches_the_public_record_store_seam()
     {
         var table = CustomerTable();
@@ -448,6 +561,20 @@ public sealed class RecordTableTests
 
     private static RecordTable<Customer> CustomerTable() => RecordTestFixture.CustomerTable();
 
+    private static (RecordTable<JoinedOrder> Orders, RecordReference<JoinedOrder, JoinedCustomer> Reference)
+        JoinedTables(string prefix)
+    {
+        var customers = RecordTable.For<JoinedCustomer>(prefix + "_customers")
+            .Key(customer => customer.Id)
+            .Build();
+        var orders = RecordTable.For<JoinedOrder>(prefix + "_orders")
+            .Key(order => order.Id)
+            .Index("by_customer", order => order.CustomerId)
+            .Reference("customer", order => order.Customer, customers, order => order.CustomerId)
+            .Build();
+        return (orders, orders.Reference<JoinedCustomer>("customer"));
+    }
+
     public sealed class MutableCustomer
     {
         public Guid Id { get; set; }
@@ -481,6 +608,10 @@ public sealed class RecordTableTests
     public sealed record JsonCustomer(Guid Id, object Payload);
     public sealed record AggregatedCustomer(Guid Id, string Name, int Amount);
     public sealed record AggregatedSummary(long Count, long Total);
+    public sealed record JoinedCustomer(long Id, string Name);
+    public sealed record JoinedOrder(long Id, long CustomerId, JoinedCustomer Customer);
+    public sealed record JoinedJsonOrder(long Id, long CustomerId, object Payload, JoinedCustomer Customer);
+    public sealed record JoinedOrderCustomer(long OrderId, long CustomerId, string CustomerName);
 
     private static RecordTable<AggregatedCustomer> AggregationTable() => RecordTable.For<AggregatedCustomer>(
             "record_aggregation_" + Guid.NewGuid().ToString("N"))
@@ -504,6 +635,20 @@ public sealed class RecordTableTests
             Request = request;
             Options = options;
             return new RecordQueryResult([], totalCount);
+        }
+    }
+
+    private sealed class ReturningRecordStore(params RowValues[] rows) : IRecordStore
+    {
+        public QueryRequest? Request { get; private set; }
+        public RecordWriteResult Insert(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordWriteResult Update(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordWriteResult Upsert(Groundwork.Kernel.StorageUnit unit, RowValues values, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordWriteResult Delete(Groundwork.Kernel.StorageUnit unit, RowValues key, RecordWriteOptions? options = null) => throw new NotSupportedException();
+        public RecordQueryResult Query(QueryRequest request, QueryRenderOptions? options = null)
+        {
+            Request = request;
+            return new RecordQueryResult(rows);
         }
     }
 }
