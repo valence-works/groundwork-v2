@@ -530,6 +530,7 @@ public sealed class PostgreSqlDialectTests
     }
 
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
     public async Task Live_concurrent_schema_admission_serializes_infrastructure_creation()
     {
         var baseConnection = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");

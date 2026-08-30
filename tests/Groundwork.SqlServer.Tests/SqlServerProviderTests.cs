@@ -14,6 +14,40 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerProviderTests(SqlServerFixture fixture)
 {
     [SkippableFact]
+    [Trait("Category", "Concurrency")]
+    public async Task Concurrent_first_schema_applies_serialize_infrastructure_creation()
+    {
+        var connectionString = fixture.Reset();
+        using var ready = new Barrier(2);
+        var tasks = Enumerable.Range(0, 2).Select(index => Task.Run(() =>
+        {
+            ready.SignalAndWait(TimeSpan.FromSeconds(10));
+            var name = $"sql_infrastructure_race_{index}_{Guid.NewGuid():N}";
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId(name),
+                Name = name,
+                Columns =
+                [
+                    new ColumnDefinition
+                    {
+                        Name = "id",
+                        Type = PortableType.String,
+                        MaxLength = 64,
+                        IsNullable = false
+                    }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            };
+
+            using var connection = new SqlServerProviderFactory().Create(connectionString);
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        })).ToArray();
+
+        await Task.WhenAll(tasks);
+    }
+
+    [SkippableFact]
     public void Physical_foreign_keys_and_checks_apply_as_native_sqlserver_constraints()
     {
         var connectionString = fixture.Reset();
@@ -863,7 +897,9 @@ public sealed class SqlServerFixture
             SELECT t.object_id
             FROM sys.tables t
             WHERE t.name IN (N'__groundwork_schema_history',N'__groundwork_schema_fences',N'__groundwork_sequence_high_waters',N'__groundwork_operations',N'__groundwork_retention_operations')
+               OR t.name IN (N'__groundwork_search_key_algorithms',N'__groundwork_data_migrations')
                OR t.name LIKE N'conformance[_]global%'
+               OR t.name LIKE N'sql[_]infrastructure[_]race[_]%'
                OR t.name LIKE N'conformance[_]scoped%'
                OR t.name LIKE N'boundary[_]%'
                OR t.name LIKE N'sqlserver[_]batch[_]boundary[_]%'

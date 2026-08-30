@@ -462,46 +462,55 @@ internal sealed class SqlServerDialect : RelationalDialect
 
     public override void EnsureInfrastructure(DbConnection connection)
     {
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            IF OBJECT_ID(N'[__groundwork_schema_history]', N'U') IS NULL
-            CREATE TABLE [__groundwork_schema_history] (
-                subject_id nvarchar(450) NOT NULL,
-                provider_name nvarchar(128) NOT NULL,
-                target_fingerprint nvarchar(128) NOT NULL,
-                state_json nvarchar(max) NOT NULL,
-                CONSTRAINT [PK___groundwork_schema_history] PRIMARY KEY NONCLUSTERED (subject_id, provider_name));
-            IF OBJECT_ID(N'[__groundwork_schema_fences]', N'U') IS NULL
-            CREATE TABLE [__groundwork_schema_fences] (
-                subject_id nvarchar(450) NOT NULL,
-                provider_name nvarchar(128) NOT NULL,
-                fence bigint NOT NULL,
-                owner nvarchar(64) NOT NULL,
-                CONSTRAINT [PK___groundwork_schema_fences] PRIMARY KEY NONCLUSTERED (subject_id, provider_name));
-            IF OBJECT_ID(N'[__groundwork_search_key_algorithms]', N'U') IS NULL
-            CREATE TABLE [__groundwork_search_key_algorithms] (
-                table_name nvarchar(450) NOT NULL,
-                column_name nvarchar(450) NOT NULL,
-                algorithm_id nvarchar(512) NOT NULL,
-                CONSTRAINT [PK___groundwork_search_key_algorithms] PRIMARY KEY NONCLUSTERED (table_name, column_name));
-            IF OBJECT_ID(N'[__groundwork_data_migrations]', N'U') IS NULL
-            CREATE TABLE [__groundwork_data_migrations] (
-                subject_id nvarchar(300) NOT NULL,
-                provider_name nvarchar(128) NOT NULL,
-                migration_id nvarchar(300) NOT NULL,
-                unit_name nvarchar(450) NOT NULL,
-                request_fingerprint nvarchar(128) NOT NULL,
-                state nvarchar(16) NOT NULL,
-                [cursor] nvarchar(max) NULL,
-                rows_scanned bigint NOT NULL,
-                rows_changed bigint NOT NULL,
-                batches int NOT NULL,
-                started_at nvarchar(40) NOT NULL,
-                updated_at nvarchar(40) NOT NULL,
-                completed_at nvarchar(40) NULL,
-                CONSTRAINT [PK___groundwork_data_migrations] PRIMARY KEY NONCLUSTERED (subject_id, provider_name, migration_id));
-            """;
-        command.ExecuteNonQuery();
+        const string infrastructureResource = "groundwork:infrastructure";
+        AcquireApplicationLock(connection, infrastructureResource);
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                IF OBJECT_ID(N'[__groundwork_schema_history]', N'U') IS NULL
+                CREATE TABLE [__groundwork_schema_history] (
+                    subject_id nvarchar(450) NOT NULL,
+                    provider_name nvarchar(128) NOT NULL,
+                    target_fingerprint nvarchar(128) NOT NULL,
+                    state_json nvarchar(max) NOT NULL,
+                    CONSTRAINT [PK___groundwork_schema_history] PRIMARY KEY NONCLUSTERED (subject_id, provider_name));
+                IF OBJECT_ID(N'[__groundwork_schema_fences]', N'U') IS NULL
+                CREATE TABLE [__groundwork_schema_fences] (
+                    subject_id nvarchar(450) NOT NULL,
+                    provider_name nvarchar(128) NOT NULL,
+                    fence bigint NOT NULL,
+                    owner nvarchar(64) NOT NULL,
+                    CONSTRAINT [PK___groundwork_schema_fences] PRIMARY KEY NONCLUSTERED (subject_id, provider_name));
+                IF OBJECT_ID(N'[__groundwork_search_key_algorithms]', N'U') IS NULL
+                CREATE TABLE [__groundwork_search_key_algorithms] (
+                    table_name nvarchar(450) NOT NULL,
+                    column_name nvarchar(450) NOT NULL,
+                    algorithm_id nvarchar(512) NOT NULL,
+                    CONSTRAINT [PK___groundwork_search_key_algorithms] PRIMARY KEY NONCLUSTERED (table_name, column_name));
+                IF OBJECT_ID(N'[__groundwork_data_migrations]', N'U') IS NULL
+                CREATE TABLE [__groundwork_data_migrations] (
+                    subject_id nvarchar(300) NOT NULL,
+                    provider_name nvarchar(128) NOT NULL,
+                    migration_id nvarchar(300) NOT NULL,
+                    unit_name nvarchar(450) NOT NULL,
+                    request_fingerprint nvarchar(128) NOT NULL,
+                    state nvarchar(16) NOT NULL,
+                    [cursor] nvarchar(max) NULL,
+                    rows_scanned bigint NOT NULL,
+                    rows_changed bigint NOT NULL,
+                    batches int NOT NULL,
+                    started_at nvarchar(40) NOT NULL,
+                    updated_at nvarchar(40) NOT NULL,
+                    completed_at nvarchar(40) NULL,
+                    CONSTRAINT [PK___groundwork_data_migrations] PRIMARY KEY NONCLUSTERED (subject_id, provider_name, migration_id));
+                """;
+            command.ExecuteNonQuery();
+        }
+        finally
+        {
+            ReleaseApplicationLock(connection, infrastructureResource);
+        }
     }
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(

@@ -10,6 +10,7 @@ using Groundwork.Store;
 using MongoDB.Driver;
 using Npgsql;
 using Groundwork.LiveDatabases;
+using Microsoft.Data.Sqlite;
 using Xunit;
 
 namespace Groundwork.Concurrency.Tests;
@@ -17,6 +18,61 @@ namespace Groundwork.Concurrency.Tests;
 [Trait("Category", "Concurrency")]
 public sealed class ConcurrencyHarnessTests
 {
+    [Fact]
+    public async Task Sqlite_concurrent_first_infrastructure_provisioning_is_idempotent()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var ready = new Barrier(2);
+        var tasks = Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        {
+            ready.SignalAndWait(TimeSpan.FromSeconds(10));
+            using var connection = new SqliteConnection(store.ConnectionString);
+            connection.Open();
+            new SqliteDialect().EnsureInfrastructure(connection);
+        })).ToArray();
+
+        await Task.WhenAll(tasks);
+
+        using var verify = new SqliteConnection(store.ConnectionString);
+        verify.Open();
+        using var command = verify.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '__groundwork_%';";
+        Assert.Equal(3L, command.ExecuteScalar());
+    }
+
+    [SkippableFact]
+    public async Task MySql_concurrent_first_schema_applies_serialize_infrastructure_creation()
+    {
+        using var store = LiveMySqlDatabase.OpenOrSkip();
+        using var ready = new Barrier(2);
+        var tasks = Enumerable.Range(0, 2).Select(index => Task.Run(() =>
+        {
+            ready.SignalAndWait(TimeSpan.FromSeconds(10));
+            var name = $"mysql_infrastructure_race_{index}_{Guid.NewGuid():N}";
+            var unit = new StorageUnit
+            {
+                Id = new StorageUnitId(name),
+                Name = name,
+                Columns =
+                [
+                    new ColumnDefinition
+                    {
+                        Name = "id",
+                        Type = PortableType.String,
+                        MaxLength = 64,
+                        IsNullable = false
+                    }
+                ],
+                Key = new KeyDefinition { Columns = ["id"] }
+            };
+
+            using var connection = new MySqlProviderFactory().Create(store.ConnectionString);
+            Assert.True(connection.Schema.Apply(unit).Applied);
+        })).ToArray();
+
+        await Task.WhenAll(tasks);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(1000)]

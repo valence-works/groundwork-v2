@@ -50,9 +50,25 @@ public sealed class RuntimeAdmissionInfrastructureTests
         Assert.DoesNotContain("dbo", sql, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void SqlServer_infrastructure_ddl_is_guarded_by_one_session_lock()
+    {
+        var connection = new RecordingConnection();
+
+        new SqlServerDialect().EnsureInfrastructure(connection);
+
+        Assert.Equal(3, connection.Commands.Count);
+        Assert.Contains("sp_getapplock", connection.Commands[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("groundwork:infrastructure", connection.Parameters[0], StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE", connection.Commands[1], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("sp_releaseapplock", connection.Commands[2], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("groundwork:infrastructure", connection.Parameters[1], StringComparison.Ordinal);
+    }
+
     private sealed class RecordingConnection : DbConnection
     {
         public List<string> Commands { get; } = [];
+        public List<string> Parameters { get; } = [];
 
 #pragma warning disable CS8765
         public override string ConnectionString { get; set; } = string.Empty;
@@ -79,7 +95,7 @@ public sealed class RuntimeAdmissionInfrastructureTests
         public override bool DesignTimeVisible { get; set; }
         public override UpdateRowSource UpdatedRowSource { get; set; }
         protected override DbConnection? DbConnection { get; set; } = owner;
-        protected override DbParameterCollection DbParameterCollection { get; } = new RecordingParameterCollection();
+        protected override DbParameterCollection DbParameterCollection { get; } = new RecordingParameterCollection(owner);
         protected override DbTransaction? DbTransaction { get; set; }
         public override void Cancel() { }
         public override int ExecuteNonQuery()
@@ -113,7 +129,7 @@ public sealed class RuntimeAdmissionInfrastructureTests
         public override void ResetDbType() { }
     }
 
-    private sealed class RecordingParameterCollection : DbParameterCollection
+    private sealed class RecordingParameterCollection(RecordingConnection owner) : DbParameterCollection
     {
         private readonly List<object> parameters = [];
 
@@ -122,9 +138,15 @@ public sealed class RuntimeAdmissionInfrastructureTests
         public override int Add(object value)
         {
             parameters.Add(value);
+            if (value is DbParameter parameter && parameter.Value is string text)
+                owner.Parameters.Add(text);
             return parameters.Count - 1;
         }
-        public override void AddRange(Array values) => parameters.AddRange(values.Cast<object>());
+        public override void AddRange(Array values)
+        {
+            foreach (var value in values)
+                Add(value!);
+        }
         public override void Clear() => parameters.Clear();
         public override bool Contains(object value) => parameters.Contains(value);
         public override bool Contains(string value) => IndexOf(value) >= 0;

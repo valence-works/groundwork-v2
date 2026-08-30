@@ -125,8 +125,8 @@ jobs:
             passed=$(grep -o 'testName="Groundwork.Concurrency.Tests.ConcurrencyHarnessTests.MySql_[^"]*"[^>]*outcome="Passed"' "$results" | wc -l || true)
             notExecuted=$(grep -o 'testName="Groundwork.Concurrency.Tests.ConcurrencyHarnessTests.MySql_[^"]*"[^>]*outcome="NotExecuted"' "$results" | wc -l || true)
             echo "[$tfm] MySQL concurrency proofs passed: $passed, not executed: $notExecuted"
-            if [ "$passed" -ne 9 ] || [ "$notExecuted" -ne 0 ]; then
-              echo "::error::[$tfm] The nine live MySQL concurrency proofs were absent or skipped." >&2
+            if [ "$passed" -ne 10 ] || [ "$notExecuted" -ne 0 ]; then
+              echo "::error::[$tfm] The ten live MySQL concurrency proofs were absent or skipped." >&2
               exit 1
             fi
           done
