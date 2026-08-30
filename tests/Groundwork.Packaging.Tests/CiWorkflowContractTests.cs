@@ -75,6 +75,40 @@ public sealed class CiWorkflowContractTests
     }
 
     [Fact]
+    public void Full_solution_recurrence_harness_preserves_the_clean_window_contract()
+    {
+        var script = File.ReadAllText(Path.Combine(
+            RepositoryRoot.Find(),
+            "eng",
+            "run-full-solution-recurrence.sh"));
+
+        Assert.Contains("GROUNDWORK_CONFIRM_IDLE_HOST", script, StringComparison.Ordinal);
+        Assert.Contains("eng/verify-exact-head.sh", script, StringComparison.Ordinal);
+        Assert.Contains("git status --porcelain", script, StringComparison.Ordinal);
+        Assert.Contains("/tmp/groundwork-tests.lock", script, StringComparison.Ordinal);
+        Assert.Contains("flock -n 9", script, StringComparison.Ordinal);
+        Assert.Contains("lockf -t 0 9", script, StringComparison.Ordinal);
+        Assert.Contains("[d]otnet[[:space:]]+test|[t]esthost|[v]stest", script, StringComparison.Ordinal);
+        Assert.Contains("seq 1 11", script, StringComparison.Ordinal);
+        Assert.Contains("sleep 30", script, StringComparison.Ordinal);
+        Assert.Contains("load <= 1.0", script, StringComparison.Ordinal);
+        Assert.Contains("seq 1 5", script, StringComparison.Ordinal);
+        Assert.Contains("dotnet restore Groundwork.slnx", script, StringComparison.Ordinal);
+        Assert.Contains("dotnet test Groundwork.slnx", script, StringComparison.Ordinal);
+        Assert.Contains("--no-restore --configuration Release", script, StringComparison.Ordinal);
+        Assert.Contains("--logger trx", script, StringComparison.Ordinal);
+        Assert.Contains("--results-directory \"$run_directory\"", script, StringComparison.Ordinal);
+        Assert.Contains("--blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full", script, StringComparison.Ordinal);
+        Assert.Contains("PIPESTATUS[0]", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("--filter", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("-m:1", script, StringComparison.Ordinal);
+
+        var restore = script.IndexOf("dotnet restore Groundwork.slnx", StringComparison.Ordinal);
+        var test = script.IndexOf("dotnet test Groundwork.slnx", StringComparison.Ordinal);
+        Assert.True(restore >= 0 && restore < test);
+    }
+
+    [Fact]
     public void MySql_live_evidence_covers_correctness_schema_tool_and_main_concurrency()
     {
         var correctness = ReadWorkflow("ci.yml");

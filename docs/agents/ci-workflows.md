@@ -41,6 +41,30 @@ has time to upload the dump, sequence XML, and any partial TRX from
 observed 11–13 minute successful W2 case duration; increasing the outer job timeout is not a hang
 diagnostic. Preserve the exact-head check and exact-once TRX guard when changing this command.
 
+### Local full-solution recurrence evidence
+
+Use `eng/run-full-solution-recurrence.sh` only when investigating an intermittent failure whose
+signal depends on the unfiltered, cross-assembly solution shape. It is not a routine pull-request
+gate. Reserve an idle host, check out the exact candidate commit in a clean worktree, and run:
+
+```bash
+GROUNDWORK_CONFIRM_IDLE_HOST=true \
+  eng/run-full-solution-recurrence.sh <40-character-commit-sha>
+```
+
+The harness holds `/tmp/groundwork-tests.lock` for the complete operation (`flock` on Linux,
+`lockf` on macOS), rejects neighboring test processes and a one-minute load above 1.0 throughout a
+five-minute preflight, restores once, and then runs the unfiltered Release solution five times in
+sequence. It stops on the first failure. Every iteration has its own directory containing console
+output and TRX results; a crash or hang also retains its sequence XML and any full dump requested
+after the 20-minute VSTest hang threshold. The manifest records the exact SHA, host, lock
+implementation, preflight samples, and per-run outcome.
+
+A failure is recurrence evidence and must be classified from its TRX, console output, and dump. Five
+passes mean only “not reproduced in this clean window”; they are not proof that an intermittent bug
+is fixed. Pair the local observation with the issue's required independent or hosted evidence before
+closing it.
+
 ## Native AOT correctness
 
 `.github/workflows/aot.yml` (`Native AOT conformance`) packs the exact-head public packages, restores
