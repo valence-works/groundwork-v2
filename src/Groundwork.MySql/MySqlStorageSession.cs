@@ -313,7 +313,10 @@ internal sealed class MySqlSessionAdapter : RelationalStorageSessionAdapter
         StorageKey key,
         StoredEntry? existing,
         WriteOptions? options,
-        RelationalExecution execution) => UpsertCore(values, existing, execution);
+        RelationalExecution execution) => sequenceColumn is not null &&
+            values.Values.ContainsKey(sequenceColumn.Name)
+            ? UpdateCore(values, key, existing, options, execution)
+            : UpsertCore(values, existing, execution);
 
     protected override ValueTask<WriteOutcome> Delete(
         StorageKey key,

@@ -171,6 +171,7 @@ public sealed class MySqlProviderConformanceTests
         });
 
         Assert.Equal(WriteOutcomeStatus.NotFound, second.Update(values).Status);
+        Assert.Equal(WriteOutcomeStatus.NotFound, second.Upsert(values).Status);
         Assert.Equal(
             WriteOutcomeStatus.UniqueViolation,
             Assert.IsAssignableFrom<IConcurrencyStorageSession>(second).ConditionalUpsert(values).Status);
