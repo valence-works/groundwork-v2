@@ -1,12 +1,16 @@
 # Groundwork.Substrate.Relational
 
-The shared relational seam. Connection ownership, schema dispatch, application locks, fencing, and
-the transaction and retry behavior every SQL provider needs — written once instead of four times.
+The shared relational schema, runtime-admission, rendering, materialization, and ADO.NET execution
+seam. Schema connection ownership, dispatch, application locks, fencing, and operation transactions
+are written once instead of once per SQL provider.
 
-Implement `RelationalDialect` to add a SQL provider: you supply the dialect's naming, type mapping,
-and statement shapes, and inherit the execution semantics `Groundwork.Sqlite`,
-`Groundwork.PostgreSql`, and `Groundwork.SqlServer` already prove out against the conformance
-suites.
+Implement `RelationalDialect` to reuse those facilities, derive from
+`RelationalStorageSessionBase` with one `RelationalStorageSessionAdapter`, and construct units of
+work with `RelationalUnitOfWork` and `RelationalUnitOfWorkLifetime`. A complete provider also owns
+its `Groundwork.Store` factory/connection, native commands supplied through
+`RelationalAppendAdapter` and `RelationalRetentionAdapter`, optional capability interfaces, and
+driver resource/error mechanics. The shared base supplies validation, replay, transaction, and
+`OnAppend` state machines. The individual shared state-machine classes remain internal.
 
 ## Referencing it
 

@@ -101,7 +101,7 @@ literal framework of its own, and `Groundwork.Packaging.Tests` enforces that.
 | Package | What it does |
 | --- | --- |
 | `Groundwork.Testing` | Public conformance suites (`ConformanceSuite`, `ConformanceScenario`), the deterministic `InMemoryProviderFactory`, and the concurrency harness. **Not an application database.** |
-| `Groundwork.Substrate.Relational` | Shared relational execution: connection ownership, schema dispatch, app locks, fencing. Implement `RelationalDialect` to add a SQL provider. |
+| `Groundwork.Substrate.Relational` | Shared relational schema/admission, session/CRUD, unit-of-work, rendering, materialization, and ADO.NET dispatch, with public dialect/session-adapter composition seams for SQL providers. |
 | `Groundwork.Substrate.Mongo` | The equivalent seam for document stores |
 | `Groundwork.Diagnostics` | Opt-in native explain-plan assertions (`GW_EXPLAIN_ASSERT`). Deliberately kept out of the Store contract — it is a test/diagnostic concern. |
 | `Groundwork.Query.Linq.Sqlite` | The named SQLite entry point to `GwLinqExecutor`, kept separate so `Groundwork.Sqlite` does not depend on the LINQ family. It adds no behavior of its own. |

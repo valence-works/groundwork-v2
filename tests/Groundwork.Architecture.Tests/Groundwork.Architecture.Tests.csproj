@@ -18,6 +18,10 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Groundwork.*/Groundwork.*.csproj" />
+    <!-- Compile the external-provider authoring proof on both runtime TFMs without making it part
+         of the architecture universe or granting it friend access. -->
+    <ProjectReference Include="../../samples/Groundwork.Samples.ExternalProviderStub/Groundwork.Samples.ExternalProviderStub.csproj"
+                      ReferenceOutputAssembly="false" />
     <!-- The MSBuild verification task exists only on the build-task framework, so on the other
          runtime targets there is nothing of its to inspect. Its layering is proved by the
          build-task-framework run of this same suite. -->

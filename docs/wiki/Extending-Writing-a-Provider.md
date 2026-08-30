@@ -21,10 +21,21 @@ public interface IStorageProviderConnection : IDisposable
     ISchemaCoordinator Schema { get; }
     IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
 
-    IStorageSession OpenSession(StorageUnit unit, StorageAccess access);
-    IOwnedStorageSession OpenOwnedSession(StorageUnit unit, StorageAccess access);
+    IStorageSession OpenSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null);
+    IOwnedStorageSession OpenOwnedSession(
+        StorageUnit unit,
+        StorageAccess access,
+        IProviderCommandObserver? observer = null);
     IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units);
     IUnitOfWork BeginUnitOfWork(StorageAccess access, BatchWriteOptions options, params StorageUnit[] units);
+    IUnitOfWork BeginUnitOfWork(
+        StorageAccess access,
+        BatchWriteOptions options,
+        IProviderCommandObserver? observer,
+        params StorageUnit[] units);
 }
 ```
 
@@ -32,15 +43,83 @@ public interface IStorageProviderConnection : IDisposable
 `IOwnedStorageSession`; providers must release its per-session resources from both `Dispose` and
 `DisposeAsync`, report that state through `IsReleased`, and reject operations after release.
 
+The Store package currently has eleven public session interfaces. Only `IStorageSession` is the
+required operation surface, and only the object returned by `OpenOwnedSession` implements
+`IOwnedStorageSession`. The other nine are capability contracts, not a checklist to implement:
+
+| Optional interface | Guarantee it adds |
+| --- | --- |
+| `IStorageInspectionSession` | Durable generated-sequence high-water inspection |
+| `IExactAppendStorageSession` | Replay-stable per-row append outcomes |
+| `IPrivilegedCrossScopeQuerySession` | Explicit privileged queries across scopes |
+| `IBatchedStorageSession` | Native batched write execution |
+| `IConcurrencyStorageSession` | Atomic optimistic conditional upsert |
+| `IRetentionStorageSession` | Retention execution |
+| `IExactRetentionStorageSession` | Exact compare-and-delete retention |
+| `ISetMutationStorageSession` | Set-based update/delete |
+| `ICompareAndDeleteStorageSession` | Atomic compare-and-delete |
+
+Implement an optional interface only when the connected deployment advertises and honors the
+matching capability. A basic external stub should implement none of them.
+
+The compile-only
+[`Groundwork.Samples.ExternalProviderStub`](https://github.com/valence-works/groundwork-v2/tree/main/samples/Groundwork.Samples.ExternalProviderStub)
+implements this complete boundary, including a non-owning session, an owned session, a unit of work,
+catalog, schema coordinator, and relational dialect. Its `DriverWork` members deliberately mark the
+native work a real provider still owns; it is not an executable database provider.
+
 ## Two routes
 
-### 1. Relational — implement `RelationalDialect`
+### 1. Relational — reuse the public substrate and implement the Store boundary
 
-`Groundwork.Substrate.Relational` already owns connection ownership, schema-operation dispatch,
-application-lock cleanup, and fencing in `RelationalSchemaExecutor`. You supply **only
-provider-specific behavior**:
+`Groundwork.Substrate.Relational` has a public, reusable schema and rendering seam:
+
+- `RelationalDialect` owns provider SQL, mapping, locking, fencing, history, and catalog hooks.
+- `RelationalSchemaExecutor` owns schema-operation dispatch, its connection lifetime,
+  application-lock cleanup, fencing checks, and operation-batch transactions.
+- `RelationalRuntimeAdmission` owns cached startup drift admission.
+- `RelationalSchemaToolSession` adapts the same executor to the CLI plug-in contract.
+- `RelationalStorageSessionBase` owns required read, query, aggregation, and CRUD lifecycle and
+  delegates native commands through one `RelationalStorageSessionAdapter`.
+- `RelationalAppendAdapter` and `RelationalRetentionAdapter` expose driver-shaped commands while
+  the base owns validation, durable claim/replay protocols, transaction admission, and `OnAppend`
+  cleanup. Protected runners let an opted-in session reuse exact append/retention, cross-scope query,
+  and set-mutation state machines.
+- `RelationalUnitOfWork`, `RelationalUnitOfWorkSession`, and `RelationalUnitOfWorkLifetime` own
+  staging, exact-outcome reporting, terminal-state enforcement, and transaction cleanup.
+- `RelationalQueryRenderer`, `RelationalAggregationRenderer`, `RelationalQueryResultReader`, and
+  `RelationalExecution` remove common query rendering, materialization, and sync/async ADO.NET
+  dispatch from the driver-specific code.
+
+That is not the whole provider. Derive the concrete session from `RelationalStorageSessionBase`,
+derive one driver adapter from `RelationalStorageSessionAdapter`, and construct units of work with
+the three public unit-of-work types. The individual provider-neutral state-machine classes remain
+internal implementation; an external provider must not depend on them through reflection or
+`InternalsVisibleTo`. You still own:
+
+- native connection creation, pooling/ownership, shared-session serialization, and transaction setup
+- one session adapter implementing native parameter binding and the four keyed mutation commands;
+  the base supplies their synchronous/asynchronous public surface
+- native append-ledger/payload commands through `RelationalAppendAdapter`; when retention is
+  declared, native retention/ledger commands through `RelationalRetentionAdapter`
+- `IOwnedStorageSession` cleanup and use-after-release enforcement
+- one serialization gate shared by every non-owning session on the same connection
+- one native connection/transaction supplied to `RelationalUnitOfWorkLifetime`, plus construction of
+  transaction-bound sessions returned as `RelationalUnitOfWorkSession`
+- parameter creation/binding, value decoding, provider error mapping, command observation, and
+  generated values
+- optional session interfaces only for capabilities the connected deployment can actually honor
+
+Within `RelationalDialect`, supply the provider-shaped schema and SQL behavior:
+
+At this release the dialect has **27 abstract members**, plus virtual hooks for provider-specific
+DDL, constraints, aggregation expressions, transactions, and catalog comparison. The external stub
+implements every abstract member so a signature change breaks its build instead of silently making
+this guide stale.
 
 - `ProviderName`, identifier quoting, portable type/collation/default mapping, column validation
+- ordinary query-renderer creation, aggregation SQL hooks, transaction isolation, read conversion,
+  and parameter-budget reporting
 - DDL emission: table creation, column addition/finalization, index creation/removal. Column
   finalization receives both the column name and the complete `ColumnDefinition`, so you can emit your
   type-specific `ALTER COLUMN` form
@@ -69,8 +148,8 @@ adapting to the provider-neutral contract.
 
 ## Rules
 
-Your provider project references the substrate and `Groundwork.Kernel` normally, and **must not** rely
-on:
+Your provider project normally references `Groundwork.Store`, `Groundwork.Kernel`,
+`Groundwork.Query.Planning`, and the appropriate substrate. It **must not** rely on:
 
 - `InternalsVisibleTo`
 - internal helper types
@@ -120,7 +199,7 @@ Descriptors should state honest cost — `AdditionalProviderCommandsPerWrite` an
 | **Concurrency** | Support both `None` and `Optimistic`. For `None`, add **no** version column or version work |
 | **Write outcomes** | Return portable `WriteOutcomeStatus` values, including `UniqueViolation` with the **logical declared** index name where available |
 | **Generated values** | Never synthesize from the caller payload or a read-after-write |
-| **Query** | Render the normalized `QueryRequest`; honor null ranks, tie-breaks, and parameter budgets. Call `RuntimeCoverageGate` before execution |
+| **Query** | Render the normalized `QueryRequest`; honor null ranks, tie-breaks, and parameter budgets. Use `Groundwork.Query.Planning.RuntimeCoverageGate` before execution |
 | **Errors** | Use the published `GW-*` codes |
 
 ## Prove it with the conformance suite
@@ -195,7 +274,10 @@ see **[Records: Typed Rows](Records-Typed-Rows)**.
 ## Checklist
 
 - [ ] `IStorageProviderFactory` + `IStorageProviderConnection`
-- [ ] `RelationalDialect` (relational) or direct contract implementation
+- [ ] `RelationalDialect`, `RelationalStorageSessionBase` + adapter, and the shared unit-of-work runtime (relational), or a direct non-relational implementation
+- [ ] Both sync and async session members use the matching native driver surface
+- [ ] Owned sessions release their own resources; ordinary and unit-of-work sessions remain non-owning
+- [ ] One native transaction owns every unit-of-work session until commit, rollback, or disposal
 - [ ] Capabilities reflect the **connected deployment**, not the package
 - [ ] Optional interfaces implemented **only** when the guarantee holds
 - [ ] `Apply` idempotent; `Diff` empty after apply

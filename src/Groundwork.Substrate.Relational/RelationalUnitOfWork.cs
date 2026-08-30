@@ -8,7 +8,7 @@ namespace Groundwork.Substrate.Relational;
 /// Owns the provider-neutral relational unit-of-work state machine. Provider packages supply only
 /// session construction and the transaction lifetime whose cleanup is local to their driver.
 /// </summary>
-internal sealed class RelationalUnitOfWork : IUnitOfWork
+public sealed class RelationalUnitOfWork : IUnitOfWork
 {
     private readonly IReadOnlyDictionary<StorageUnitId, StorageUnit> units;
     private readonly Func<StorageUnit, RelationalUnitOfWorkSession> sessionFactory;
@@ -17,7 +17,7 @@ internal sealed class RelationalUnitOfWork : IUnitOfWork
     private readonly BatchContext batch;
     private bool terminal;
 
-    internal RelationalUnitOfWork(
+    public RelationalUnitOfWork(
         IEnumerable<StorageUnit> declarations,
         BatchWriteOptions options,
         Func<StorageUnit, RelationalUnitOfWorkSession> sessionFactory,
@@ -141,10 +141,22 @@ internal sealed class RelationalUnitOfWork : IUnitOfWork
     }
 }
 
-internal sealed record RelationalUnitOfWorkSession(IStorageSession Session, Action Close);
+/// <summary>A transaction-bound session and the provider-owned action that closes its view.</summary>
+public sealed class RelationalUnitOfWorkSession
+{
+    public RelationalUnitOfWorkSession(IStorageSession session, Action close)
+    {
+        Session = session ?? throw new ArgumentNullException(nameof(session));
+        Close = close ?? throw new ArgumentNullException(nameof(close));
+    }
+
+    public IStorageSession Session { get; }
+
+    public Action Close { get; }
+}
 
 /// <summary>Contains the driver-local transaction cleanup decisions for a relational unit of work.</summary>
-internal sealed class RelationalUnitOfWorkLifetime : IDisposable
+public sealed class RelationalUnitOfWorkLifetime : IDisposable
 {
     private readonly DbConnection connection;
     private readonly DbTransaction transaction;
@@ -152,15 +164,15 @@ internal sealed class RelationalUnitOfWorkLifetime : IDisposable
     private readonly bool disposeTransaction;
     private readonly bool supportsAsync;
 
-    internal RelationalUnitOfWorkLifetime(
+    public RelationalUnitOfWorkLifetime(
         DbConnection connection,
         DbTransaction transaction,
         bool supportsAsync,
         bool disposeTransaction,
         Action? rollback = null)
     {
-        this.connection = connection;
-        this.transaction = transaction;
+        this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
+        this.transaction = transaction ?? throw new ArgumentNullException(nameof(transaction));
         this.supportsAsync = supportsAsync;
         this.disposeTransaction = disposeTransaction;
         this.rollback = rollback;

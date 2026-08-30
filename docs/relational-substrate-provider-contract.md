@@ -1,8 +1,19 @@
 # Relational substrate provider contract
 
-Groundwork.Substrate.Relational keeps connection ownership, schema-operation dispatch,
-application-lock cleanup, and fencing in RelationalSchemaExecutor. A provider implements the
-public RelationalDialect class and supplies only provider-specific behavior.
+Groundwork.Substrate.Relational exposes the shared relational schema, runtime-admission, rendering,
+materialization, and sync/async ADO.NET dispatch seams. `RelationalSchemaExecutor` owns the schema
+connection lifetime, schema-operation dispatch, application-lock cleanup, fencing, and operation
+transactions. A provider implements the public `RelationalDialect` class for that seam.
+
+`RelationalDialect` is not a complete storage provider. `RelationalStorageSessionBase` and
+`RelationalStorageSessionAdapter` expose one deliberate public composition seam over the shared
+read/query/aggregation/CRUD state machines. `RelationalUnitOfWork`, `RelationalUnitOfWorkSession`,
+and `RelationalUnitOfWorkLifetime` expose the shared staging and transaction-lifetime state machine.
+`RelationalAppendAdapter` and `RelationalRetentionAdapter` expose only native commands while the
+base retains validation, claim/replay, transaction, and `OnAppend` state machines. The provider
+still owns its factory/connection, native command implementations, optional capabilities, and
+driver resource/error mechanics. The individual shared state-machine classes remain internal
+implementation.
 
 The required public members are:
 
@@ -30,7 +41,9 @@ executed in one durable transaction with fencing before and after the batch; a f
 rolls back the complete batch. Dialect callbacks do not commit or roll back the transaction owned
 by the shared executor.
 
-The provider project references the substrate and Groundwork.Kernel normally. It must not rely on
-InternalsVisibleTo, internal helper types, contract-family assemblies, or provider assumptions in
-the substrate. A provider can therefore be maintained outside the Groundwork repository and still
-implement the complete dialect contract.
+The provider project references the substrate, `Groundwork.Store`, and `Groundwork.Kernel`
+normally. It must not rely on `InternalsVisibleTo`, internal helper types,
+contract-family assemblies, or provider assumptions in the substrate. The
+`Groundwork.Samples.ExternalProviderStub` project compiles the complete public provider boundary and
+marks every driver-owned operation explicitly; its dialect portion proves that schema reuse needs no
+friend access.

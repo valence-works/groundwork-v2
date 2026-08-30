@@ -100,7 +100,7 @@ If you want a storage contract you can reason about and move between databases, 
 
 ### Reference
 - **[Versioning & Support](Versioning-and-Support)** — the pre-1.0 policy, the support matrix, clean-break rules
-- **[Extending: Writing a Provider](Extending-Writing-a-Provider)** — the dialect contract and conformance proof
+- **[Extending: Writing a Provider](Extending-Writing-a-Provider)** — the complete provider boundary, reusable substrate, and conformance proof
 - **[FAQ](FAQ)**
 
 ---
