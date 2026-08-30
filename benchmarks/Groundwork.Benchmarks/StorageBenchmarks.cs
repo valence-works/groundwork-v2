@@ -23,9 +23,10 @@ public class StorageBenchmarks
 {
     private const string PointId = "item-0500";
     private const string CoveredCategory = "category-3";
-    private const string CommitId = "commit";
+    private const string BatchIdPrefix = "write-batch-";
+    private const string CommitId = "write-commit";
 
-    private readonly StorageUnit unit = CreateUnit();
+    private readonly StorageUnit unit = BenchmarkMethodology.CreateStorageUnit();
     private readonly GwTableModel<BenchmarkItem> tableModel = new("benchmark_items",
     [
         new(nameof(BenchmarkItem.Id), "id", QueryType.String, false),
@@ -35,6 +36,7 @@ public class StorageBenchmarks
     ]);
 
     private string? temporaryDirectory;
+    private string? connectionString;
     private IStorageProviderConnection? provider;
     private IStorageSession? session;
     private IBatchedStorageSession? batchedSession;
@@ -56,7 +58,7 @@ public class StorageBenchmarks
     {
         temporaryDirectory = Path.Combine(Path.GetTempPath(), "groundwork-bdn-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temporaryDirectory);
-        var connectionString = $"Data Source={Path.Combine(temporaryDirectory, "benchmark.db")};Pooling=False";
+        connectionString = $"Data Source={Path.Combine(temporaryDirectory, "benchmark.db")};Pooling=False";
 
         provider = new SqliteProviderFactory().Create(connectionString);
         var apply = provider.Schema.Apply(unit);
@@ -77,7 +79,10 @@ public class StorageBenchmarks
         efQueryContext = BenchmarkDbContext.Create(efConnection);
         efBatchContext = BenchmarkDbContext.Create(efConnection);
         efCommitContext = BenchmarkDbContext.Create(efConnection);
-        efBatchItems = efBatchContext.Items.Where(item => item.Id.StartsWith("batch-")).OrderBy(item => item.Id).ToArray();
+        efBatchItems = efBatchContext.Items
+            .Where(item => item.Id.StartsWith(BatchIdPrefix))
+            .OrderBy(item => item.Id)
+            .ToArray();
         efCommitItem = efCommitContext.Items.Single(item => item.Id == CommitId);
 
         var executor = new SqliteLinqExecutor(session, provider);
@@ -176,7 +181,7 @@ public class StorageBenchmarks
     {
         var payload = NextPayload();
         var writes = Enumerable.Range(0, BenchmarkMethodology.BatchSize)
-            .Select(index => RowWrite.Update(unit, UpdateValues($"batch-{index:D2}", payload)))
+            .Select(index => RowWrite.Update(unit, UpdateValues($"{BatchIdPrefix}{index:D2}", payload)))
             .ToArray();
         return BatchedSession.ApplyBatchAsync(writes, exactOutcomes: false);
     }
@@ -199,7 +204,7 @@ public class StorageBenchmarks
         var parameters = new DynamicParameters();
         for (var index = 0; index < BenchmarkMethodology.BatchSize; index++)
         {
-            parameters.Add($"id{index}", $"batch-{index:D2}");
+            parameters.Add($"id{index}", $"{BatchIdPrefix}{index:D2}");
             parameters.Add($"payload{index}", payload);
         }
         await using var transaction = await DapperConnection.BeginTransactionAsync();
@@ -241,6 +246,17 @@ public class StorageBenchmarks
         return affected;
     }
 
+    public async Task<IReadOnlyList<BenchmarkItem>> ReadItemsAsync(params string[] ids)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        return (await DapperConnection.QueryAsync<BenchmarkItem>(
+            "SELECT id, category, sequence, payload FROM benchmark_items WHERE id IN @ids ORDER BY id",
+            new { ids })).AsList();
+    }
+
+    public string DatabaseConnectionString => connectionString
+        ?? throw new InvalidOperationException("Setup has not run.");
+
     private IStorageProviderConnection Provider => provider ?? throw new InvalidOperationException("Setup has not run.");
     private IStorageSession Session => session ?? throw new InvalidOperationException("Setup has not run.");
     private IBatchedStorageSession BatchedSession => batchedSession ?? throw new InvalidOperationException("Setup has not run.");
@@ -269,7 +285,7 @@ public class StorageBenchmarks
         connection.Execute(insert, Enumerable.Range(0, BenchmarkMethodology.BatchSize)
             .Select(index => new BenchmarkItem
             {
-                Id = $"batch-{index:D2}",
+                Id = $"{BatchIdPrefix}{index:D2}",
                 Category = "write",
                 Sequence = index,
                 Payload = "batch-seed"
@@ -304,26 +320,4 @@ public class StorageBenchmarks
             ["id"] = id,
             ["payload"] = payload
         });
-
-    private static StorageUnit CreateUnit() => new()
-    {
-        Id = new StorageUnitId("benchmark-items"),
-        Name = "benchmark_items",
-        Columns =
-        [
-            new() { Name = "id", Type = PortableType.String, IsNullable = false },
-            new() { Name = "category", Type = PortableType.String, IsNullable = false },
-            new() { Name = "sequence", Type = PortableType.Int32, IsNullable = false },
-            new() { Name = "payload", Type = PortableType.String, IsNullable = false }
-        ],
-        Key = new KeyDefinition { Columns = ["id"] },
-        Indexes =
-        [
-            new IndexDefinition
-            {
-                Name = "ix_benchmark_items_category_id",
-                Columns = [new IndexColumn("category"), new IndexColumn("id")]
-            }
-        ]
-    };
 }

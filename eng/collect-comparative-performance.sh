@@ -32,13 +32,14 @@ dotnet list benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj packag
   > "$output_root/packages.txt"
 
 dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- \
-  benchmarks --list flat --filter '*PointRead*' '*CoveredQuery*' '*BatchedWrite*' \
+  benchmarks --list flat \
+  --filter '*PointRead*' '*CoveredQuery*' '*PagedQuery*' '*BatchedWrite*' '*UnitOfWorkCommit*' \
   | grep '^Groundwork\.Benchmarks\.StorageBenchmarks\.' \
   > "$output_root/key-scenarios.txt"
 diff -u benchmarks/Groundwork.Benchmarks/evidence/key-scenarios.txt "$output_root/key-scenarios.txt"
 
 dotnet run --project benchmarks/Groundwork.Benchmarks --no-restore --configuration Release -- \
-  benchmarks --filter '*PointRead*' '*CoveredQuery*' '*BatchedWrite*' \
+  benchmarks --filter '*PointRead*' '*CoveredQuery*' '*PagedQuery*' '*BatchedWrite*' '*UnitOfWorkCommit*' \
   --artifacts "$output_root/benchmarkdotnet" \
   --exporters json markdown csv
 

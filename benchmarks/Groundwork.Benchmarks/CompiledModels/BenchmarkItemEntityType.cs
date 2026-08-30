@@ -57,7 +57,7 @@ namespace Groundwork.Benchmarks
             runtimeEntityType.SetPrimaryKey(key);
 
             var index = runtimeEntityType.AddIndex(
-                new[] { category, id });
+                new[] { category, id, sequence, payload });
             index.AddAnnotation("Relational:Name", "ix_benchmark_items_category_id");
 
             return runtimeEntityType;
