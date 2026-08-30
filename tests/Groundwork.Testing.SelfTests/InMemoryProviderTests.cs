@@ -418,7 +418,7 @@ public sealed class InMemoryProviderTests
         Assert.True(connection.Schema.Diff(additive).IsEmpty);
 
         var changedKey = additive with { Key = new KeyDefinition { Columns = ["value"] } };
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedKey));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(changedKey));
     }
 
     [Fact]
@@ -485,7 +485,7 @@ public sealed class InMemoryProviderTests
             Key = new KeyDefinition { Columns = ["name"] }
         };
 
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(dropped));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(dropped));
     }
 
     [Fact]
@@ -504,7 +504,7 @@ public sealed class InMemoryProviderTests
 
         var reordered = initial with { Key = new KeyDefinition { Columns = ["name", "id"] } };
 
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(reordered));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(reordered));
     }
 
     [Fact]
@@ -522,9 +522,9 @@ public sealed class InMemoryProviderTests
             Key = new KeyDefinition { Columns = ["identifier"] }
         };
 
-        var result = connection.Schema.Apply(retyped);
+        var refusal = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Apply(retyped));
 
-        Assert.False(result.Applied);
+        Assert.Equal("GW-SCHEMA-003", Assert.Single(refusal.Refusals).Code);
         var stored = connection.OpenSession(initial, StorageAccess.Global).Read(new StorageKey(
             new Dictionary<string, object?> { ["id"] = "customer-1" }));
         Assert.NotNull(stored);
@@ -851,7 +851,7 @@ public sealed class InMemoryProviderTests
             Retention = initial.Retention! with { PartitionColumns = ["a", "b"] }
         };
 
-        var conflict = Assert.Throws<SchemaConflictException>(() => connection.Schema.Apply(drifted));
+        var conflict = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Apply(drifted));
         Assert.Contains("retention", conflict.Message, StringComparison.OrdinalIgnoreCase);
         Assert.True(connection.Schema.Diff(initial).IsEmpty);
     }
@@ -907,7 +907,7 @@ public sealed class InMemoryProviderTests
         Assert.Equal("by_value", indexChange.Identity);
 
         var changedScope = initial with { Scope = ScopePolicy.Scoped };
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changedScope));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(changedScope));
     }
 
     [Fact]
@@ -919,7 +919,7 @@ public sealed class InMemoryProviderTests
 
         var changed = initial with { Concurrency = ConcurrencyDeclaration.Optimistic() };
 
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(changed));
     }
 
     [Fact]
@@ -931,7 +931,28 @@ public sealed class InMemoryProviderTests
 
         var changed = initial with { SchemaVersion = 2 };
 
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(changed));
+    }
+
+    [Fact]
+    public void Runtime_admission_reports_stable_declaration_drift_without_auto_applying_it()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://schema-admission-stable-drift");
+        var initial = TestingFixture.GlobalUnit("schema-admission-stable-drift");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var changed = initial with { SchemaVersion = 2 };
+
+        var admission = connection.Schema.InspectRuntimeAdmission(
+            changed,
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
+
+        Assert.False(admission.IsReady);
+        Assert.False(admission.Plan.IsApplicable);
+        Assert.Null(admission.Application);
+        Assert.Equal(
+            PhysicalSchemaDiffPlanner.StableDeclarationChangedCode,
+            Assert.Single(admission.Plan.Refusals).Code);
+        Assert.True(connection.Schema.Diff(initial).IsEmpty);
     }
 
     [Fact]

@@ -1004,6 +1004,35 @@ public sealed class MongoProviderIntegrationTests
         Assert.Equal(7L, id["customerNo"].AsInt64);
     }
 
+    [Fact]
+    public void Mongo_keeps_only_its_physical_key_rename_guard_beside_shared_planning()
+    {
+        var initial = new StorageUnit
+        {
+            Id = new StorageUnitId("mongo-key-layout"),
+            Name = "mongo_key_layout",
+            Columns =
+            [
+                new ColumnDefinition { Name = "region", Type = PortableType.String, IsNullable = false },
+                new ColumnDefinition { Name = "number", Type = PortableType.Int64, IsNullable = false }
+            ],
+            Key = new KeyDefinition { Columns = ["region", "number"] }
+        };
+        var renamed = initial with
+        {
+            Columns = [.. initial.Columns.Select(column => column.Name == "region"
+                ? column with { Id = "region", Name = "area" }
+                : column)],
+            Key = new KeyDefinition { Columns = ["area", "number"] }
+        };
+        var reordered = initial with { Key = new KeyDefinition { Columns = ["number", "region"] } };
+
+        var providerRefusal = Assert.Single(MongoDeclarationRules.StableDeclarationRefusals(initial, renamed));
+
+        Assert.Equal("GW-PORT-008", providerRefusal.Code);
+        Assert.Empty(MongoDeclarationRules.StableDeclarationRefusals(initial, reordered));
+    }
+
     [SkippableFact]
     public void Composite_key_reordering_is_refused_after_reopening_the_provider()
     {
@@ -1026,10 +1055,10 @@ public sealed class MongoProviderIntegrationTests
 
         var reordered = unit with { Key = new KeyDefinition { Columns = ["customerNo", "region"] } };
         using var reopened = new MongoDbProviderFactory().Create(connectionString!);
-        var refusal = Assert.ThrowsAny<InvalidOperationException>(() => reopened.Schema.Apply(reordered));
+        var refusal = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => reopened.Schema.Apply(reordered));
 
-        Assert.Contains("GW-PORT-008", refusal.Message, StringComparison.Ordinal);
-        Assert.Contains("native _id field order", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("GW-SCHEMA-015", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("logical key identity or column order", refusal.Message, StringComparison.Ordinal);
     }
 
     [SkippableFact]

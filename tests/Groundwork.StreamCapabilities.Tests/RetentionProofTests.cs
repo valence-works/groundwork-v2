@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
 using Groundwork.PostgreSql;
@@ -816,9 +817,9 @@ public sealed class RetentionProofTests
             Retention = original.Retention! with { KeepNewest = 3 }
         };
 
-        var diff = Assert.Throws<MongoSchemaConflictException>(() => connection.Schema.Diff(changed));
+        var diff = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(changed));
         Assert.Contains("retention", diff.Message, StringComparison.OrdinalIgnoreCase);
-        var apply = Assert.Throws<MongoSchemaConflictException>(() => connection.Schema.Apply(changed));
+        var apply = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Apply(changed));
         Assert.Contains("retention", apply.Message, StringComparison.OrdinalIgnoreCase);
 
         var originalSession = connection.OpenSession(original, StorageAccess.Global);
@@ -850,7 +851,7 @@ public sealed class RetentionProofTests
         {
             Retention = combinedPartition.Retention! with { PartitionColumns = ["a", "b"] }
         };
-        var adversarialDrift = Assert.Throws<MongoSchemaConflictException>(() =>
+        var adversarialDrift = Assert.Throws<PhysicalSchemaPlanRefusedException>(() =>
             connection.Schema.Diff(splitPartitions));
         Assert.Contains("retention", adversarialDrift.Message, StringComparison.OrdinalIgnoreCase);
     }

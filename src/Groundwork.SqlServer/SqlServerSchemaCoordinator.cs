@@ -72,10 +72,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         using var lease = executor.AcquireApplicationLock(target.Identity);
         var history = executor.ReadHistory(target.Identity, lease);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(SchemaChangeMapping.Describe(
-            plan.Operations,
-            plan.PreviousDefinition,
-            physical));
+        return new SchemaDiff(SchemaChangeMapping.Describe(plan, physical));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -88,10 +85,7 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         {
             var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
             return new SchemaApplyResult(
-                new SchemaDiff(SchemaChangeMapping.Describe(
-                    result.Plan.Operations,
-                    result.Plan.PreviousDefinition,
-                    physical)),
+                new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
                 result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
         }
         finally

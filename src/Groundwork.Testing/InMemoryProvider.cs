@@ -286,8 +286,6 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         var physical = Prepare(desired);
         lock (database.Gate)
         {
-            var previous = database.Units.TryGetValue(physical.Id, out var state) ? state.Unit : null;
-            ValidateUnplannedChanges(previous, physical);
             return GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
                 Executor, Target(physical), options);
         }
@@ -300,12 +298,8 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         var target = Target(physical);
         using var lease = Executor.AcquireApplicationLock(target.Identity);
         var history = Executor.ReadHistory(target.Identity, lease);
-        ValidateUnplannedChanges(history.AppliedState?.Snapshot.Subject.Definition, physical);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(SchemaChangeMapping.Describe(
-            plan.Operations,
-            plan.PreviousDefinition,
-            physical));
+        return new SchemaDiff(SchemaChangeMapping.Describe(plan, physical));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -315,14 +309,9 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         var target = Target(physical);
         lock (database.Gate)
         {
-            var previous = database.Units.TryGetValue(physical.Id, out var state) ? state.Unit : null;
-            ValidateUnplannedChanges(previous, physical);
             var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, Executor);
             return new SchemaApplyResult(
-                new SchemaDiff(SchemaChangeMapping.Describe(
-                    result.Plan.Operations,
-                    result.Plan.PreviousDefinition,
-                    physical)),
+                new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
                 result.Outcome == PhysicalSchemaApplicationOutcome.Applied);
         }
     }
@@ -347,46 +336,6 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
 
     internal static PhysicalSchemaTarget Target(StorageUnit physical) =>
         new(new SchemaSubject(physical), Identity);
-
-    private static void ValidateUnplannedChanges(StorageUnit? previous, StorageUnit desired)
-    {
-        if (previous is null)
-            return;
-        if (!LogicalKeyColumns(previous).SequenceEqual(LogicalKeyColumns(desired), StringComparer.Ordinal))
-            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change its key.");
-        if (previous.Concurrency != desired.Concurrency)
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change its concurrency declaration.");
-        if (previous.Scope != desired.Scope)
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change scope from {previous.Scope} to {desired.Scope}.");
-        if (previous.SchemaVersion != desired.SchemaVersion)
-            throw new SchemaConflictException(
-                $"Storage unit '{desired.Name}' cannot change its schema version.");
-        if (!string.Equals(
-                RetentionCanonicalization.Canonicalize(previous.Retention),
-                RetentionCanonicalization.Canonicalize(desired.Retention),
-                StringComparison.Ordinal))
-            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change retention.");
-        if (previous.AppendIdempotency?.Window != desired.AppendIdempotency?.Window ||
-            !string.Equals(
-                previous.AppendIdempotency?.LedgerName,
-                desired.AppendIdempotency?.LedgerName,
-                StringComparison.Ordinal))
-            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change append idempotency.");
-        if (previous.RetentionIdempotency?.Window != desired.RetentionIdempotency?.Window ||
-            !string.Equals(
-                previous.RetentionIdempotency?.LedgerName,
-                desired.RetentionIdempotency?.LedgerName,
-                StringComparison.Ordinal))
-            throw new SchemaConflictException($"Storage unit '{desired.Name}' cannot change retention idempotency.");
-    }
-
-    private static IReadOnlyList<string> LogicalKeyColumns(StorageUnit unit)
-    {
-        var columns = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
-        return unit.Key.Columns.Select(column => columns[column].LogicalId).ToArray();
-    }
 
 }
 

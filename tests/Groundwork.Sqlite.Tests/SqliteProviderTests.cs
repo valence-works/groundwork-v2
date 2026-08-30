@@ -17,6 +17,27 @@ namespace Groundwork.Sqlite.Tests;
 public sealed class SqliteProviderTests
 {
     [Fact]
+    public void Stable_declaration_drift_is_refused_by_diff_and_apply_without_publishing_history()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var initial = StorageUnit.Declare("stable-sqlite", "stable_sqlite")
+            .Guid("id", column => column.Required())
+            .Key("id")
+            .Build();
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var changed = initial with { SchemaVersion = 2 };
+
+        var diff = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(changed));
+        var apply = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Apply(changed));
+
+        Assert.Equal("schema.schemaVersion", Assert.Single(diff.Refusals).Path);
+        Assert.Equal("schema.schemaVersion", Assert.Single(apply.Refusals).Path);
+        Assert.Equal(PhysicalSchemaDiffPlanner.StableDeclarationChangedCode, diff.Refusals[0].Code);
+        Assert.True(connection.Schema.Diff(initial).IsEmpty);
+    }
+
+    [Fact]
     public void Physical_foreign_keys_and_checks_apply_enforce_and_replan_idempotently()
     {
         using var store = TemporaryStore.Create();

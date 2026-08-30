@@ -53,6 +53,27 @@ public sealed class SchemaChangeMappingTests
             Assert.Single(SchemaChangeMapping.Describe(plan.Operations)).Kind);
     }
 
+    [Fact]
+    public void A_refused_kernel_plan_cannot_be_mistaken_for_an_empty_public_diff()
+    {
+        var initial = Orders(includeLegacy: false);
+        var executor = new RecordingExecutor();
+        PhysicalSchemaApplication.Apply(Target(initial), executor, DateTimeOffset.UnixEpoch);
+        var desired = initial with { Scope = ScopePolicy.Scoped };
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            Target(desired),
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            DateTimeOffset.UnixEpoch);
+
+        var exception = Assert.Throws<PhysicalSchemaPlanRefusedException>(
+            () => SchemaChangeMapping.Describe(plan, desired));
+
+        Assert.Same(plan, exception.Plan);
+        var refusal = Assert.Single(exception.Refusals);
+        Assert.Equal(PhysicalSchemaDiffPlanner.StableDeclarationChangedCode, refusal.Code);
+        Assert.StartsWith("GW-SCHEMA-015 at schema.scope:", exception.Message, StringComparison.Ordinal);
+    }
+
     private static PhysicalSchemaTarget Target(StorageUnit unit) => new(new SchemaSubject(unit), Provider);
 
     private static StorageUnit Orders(bool includeLegacy) => new()

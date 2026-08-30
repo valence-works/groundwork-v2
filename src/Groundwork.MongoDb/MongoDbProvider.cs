@@ -508,10 +508,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
             history.AppliedState?.Snapshot.Subject.Definition,
             target.Subject.Definition);
         var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UtcNow);
-        return new SchemaDiff(SchemaChangeMapping.Describe(
-            plan.Operations,
-            plan.PreviousDefinition,
-            target.Subject.Definition));
+        return new SchemaDiff(SchemaChangeMapping.Describe(plan, target.Subject.Definition));
     }
 
     public SchemaApplyResult Apply(StorageUnit desired)
@@ -528,10 +525,7 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
         if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
             state.Remember(target.Subject.Definition);
         return new SchemaApplyResult(
-            new SchemaDiff(SchemaChangeMapping.Describe(
-                result.Plan.Operations,
-                result.Plan.PreviousDefinition,
-                target.Subject.Definition)),
+            new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, target.Subject.Definition)),
             result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
     }
 
@@ -827,42 +821,21 @@ internal static class MongoDeclarationRules
     {
         if (previous is null)
             return [];
-        if (!previous.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
-            return
-            [
-                new SchemaRefusal(
-                    "GW-PORT-008",
-                    $"GW-PORT-008 at key.columns: Mongo composite key column order changed from " +
-                    $"[{string.Join(", ", previous.Key.Columns)}] to [{string.Join(", ", desired.Key.Columns)}]. " +
-                    "The native _id field order is part of the route and cannot be reordered.",
-                    "key.columns")
-            ];
-        if (!SchemaIdentity.RetentionEquals(previous.Retention, desired.Retention))
-            return
-            [
-                new SchemaRefusal(
-                    "GW-MONGO-001",
-                    $"GW-MONGO-001 at retention: Storage unit '{desired.Name}' changed its retention declaration non-additively.",
-                    "retention")
-            ];
-        if (!SchemaIdentity.RetentionIdempotencyEquals(previous.RetentionIdempotency, desired.RetentionIdempotency))
-            return
-            [
-                new SchemaRefusal(
-                    "GW-MONGO-002",
-                    $"GW-MONGO-002 at retentionIdempotency: Storage unit '{desired.Name}' changed its retention idempotency declaration non-additively.",
-                    "retentionIdempotency")
-            ];
-        if (previous.Scope != desired.Scope || previous.Concurrency != desired.Concurrency ||
-            previous.Timestamps != desired.Timestamps || previous.SchemaVersion != desired.SchemaVersion ||
-            !SchemaIdentity.IdempotencyEquals(previous.AppendIdempotency, desired.AppendIdempotency))
+        var previousColumns = previous.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        var desiredColumns = desired.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        var previousLogicalKey = previous.Key.Columns.Select(column => previousColumns[column].LogicalId);
+        var desiredLogicalKey = desired.Key.Columns.Select(column => desiredColumns[column].LogicalId);
+        if (previousLogicalKey.SequenceEqual(desiredLogicalKey, StringComparer.Ordinal) &&
+            !previous.Key.Columns.SequenceEqual(desired.Key.Columns, StringComparer.Ordinal))
         {
             return
             [
                 new SchemaRefusal(
-                    "GW-MONGO-003",
-                    $"GW-MONGO-003 at storageMetadata: Storage unit '{desired.Name}' changed non-additive storage metadata.",
-                    "storageMetadata")
+                    "GW-PORT-008",
+                    $"GW-PORT-008 at key.columns: Mongo key field names changed from " +
+                    $"[{string.Join(", ", previous.Key.Columns)}] to [{string.Join(", ", desired.Key.Columns)}]. " +
+                    "The native _id field layout is part of the route and cannot be renamed in place.",
+                    "key.columns")
             ];
         }
 

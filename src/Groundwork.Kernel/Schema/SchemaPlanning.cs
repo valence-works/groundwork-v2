@@ -8,6 +8,11 @@ public sealed record SchemaRefusal(string Code, string Message, string Path);
 public static class PhysicalSchemaDiffPlanner
 {
     /// <summary>
+    /// A declaration changed schema identity that has no provider-neutral in-place evolution.
+    /// </summary>
+    public const string StableDeclarationChangedCode = "GW-SCHEMA-015";
+
+    /// <summary>
     /// Plans one target. <paramref name="phase"/> selects which half of an expand–contract
     /// evolution the plan describes; it changes nothing for a declaration that supersedes no
     /// column, where both phases derive the same operations.
@@ -53,6 +58,18 @@ public static class PhysicalSchemaDiffPlanner
                     $"Applied state '{applied.TargetIdentity}' does not match target '{target.Identity}'.",
                     "schemaHistory.identity")],
                 phase: phase);
+        }
+
+        var stableDeclarationRefusals = ValidateStableDeclaration(target, applied);
+        if (stableDeclarationRefusals.Length != 0)
+        {
+            return PhysicalSchemaDiffPlan.Invalid(
+                target,
+                plannedAt,
+                stableDeclarationRefusals,
+                expectedAppliedTargetFingerprint: applied?.TargetFingerprint,
+                phase: phase,
+                previousDefinition: applied?.Snapshot.Subject.Definition);
         }
 
         return target.Subject.Evolution.RetiresPrimaryStorage
@@ -138,6 +155,67 @@ public static class PhysicalSchemaDiffPlanner
             phase,
             applied?.Snapshot.Subject.Definition);
     }
+
+    private static ImmutableArray<SchemaRefusal> ValidateStableDeclaration(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaAppliedState? applied)
+    {
+        if (applied is null)
+            return [];
+
+        var previous = applied.Snapshot.Subject.Definition;
+        var desired = target.Subject.Definition;
+        var refusals = ImmutableArray.CreateBuilder<SchemaRefusal>();
+
+        if (!LogicalKeyColumns(previous).SequenceEqual(LogicalKeyColumns(desired), StringComparer.Ordinal))
+        {
+            refusals.Add(Changed(
+                desired,
+                "logical key identity or column order",
+                "schema.key",
+                "Declare a new unit and migrate its rows."));
+        }
+        if (previous.Scope != desired.Scope)
+            refusals.Add(Changed(desired, "scope", "schema.scope"));
+        if (previous.Concurrency != desired.Concurrency)
+            refusals.Add(Changed(desired, "concurrency", "schema.concurrency"));
+        // TimestampDeclaration currently has one value. Keeping it in the stable set means adding
+        // another cannot silently turn a fingerprint change into publication-only work.
+        if (previous.Timestamps != desired.Timestamps)
+            refusals.Add(Changed(desired, "timestamp", "schema.timestamps"));
+        if (previous.SchemaVersion != desired.SchemaVersion)
+            refusals.Add(Changed(desired, "schema version", "schema.schemaVersion"));
+        if (!string.Equals(
+                RetentionCanonicalization.Canonicalize(previous.Retention),
+                RetentionCanonicalization.Canonicalize(desired.Retention),
+                StringComparison.Ordinal))
+        {
+            refusals.Add(Changed(desired, "retention", "schema.retention"));
+        }
+        if (previous.AppendIdempotency != desired.AppendIdempotency)
+            refusals.Add(Changed(desired, "append idempotency", "schema.appendIdempotency"));
+        if (previous.RetentionIdempotency != desired.RetentionIdempotency)
+            refusals.Add(Changed(desired, "retention idempotency", "schema.retentionIdempotency"));
+
+        return refusals.ToImmutable();
+    }
+
+    private static IReadOnlyList<string> LogicalKeyColumns(StorageUnit unit)
+    {
+        var columns = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
+        return unit.Key.Columns.Select(column => columns[column].LogicalId).ToArray();
+    }
+
+    private static SchemaRefusal Changed(
+        StorageUnit desired,
+        string declaration,
+        string path,
+        string remedy = "Rebuild the target from the current declaration.") =>
+        new(
+            StableDeclarationChangedCode,
+            $"Storage unit '{desired.Name}' changed its {declaration} declaration, for which Groundwork " +
+            $"defines no portable in-place evolution. {remedy}",
+            path);
 
     private static bool HasAggregationProfileDrift(
         PhysicalSchemaTarget target,
@@ -551,6 +629,30 @@ public sealed class PhysicalSchemaDiffPlan
             expectedAppliedTargetFingerprint,
             phase,
             previousDefinition);
+}
+
+/// <summary>
+/// The public provider schema surface was asked to describe a kernel plan that the planner refused.
+/// </summary>
+public sealed class PhysicalSchemaPlanRefusedException : InvalidOperationException
+{
+    public PhysicalSchemaPlanRefusedException(PhysicalSchemaDiffPlan plan)
+        : base(CreateMessage(plan)) => Plan = plan;
+
+    public PhysicalSchemaDiffPlan Plan { get; }
+
+    public ImmutableArray<SchemaRefusal> Refusals => Plan.Refusals;
+
+    private static string CreateMessage(PhysicalSchemaDiffPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (plan.IsApplicable)
+            throw new ArgumentException("An applicable physical schema plan cannot be reported as refused.", nameof(plan));
+
+        return string.Join(
+            Environment.NewLine,
+            plan.Refusals.Select(refusal => $"{refusal.Code} at {refusal.Path}: {refusal.Message}"));
+    }
 }
 
 /// <summary>One planned operation that startup auto-apply must not execute without authorization.</summary>

@@ -16,6 +16,20 @@ namespace Groundwork.Store;
 /// </remarks>
 public static class SchemaChangeMapping
 {
+    /// <summary>
+    /// Describes one complete kernel plan through the public provider vocabulary. A refused plan
+    /// is surfaced with all of its named diagnostics rather than being mistaken for an empty diff.
+    /// </summary>
+    public static IReadOnlyList<SchemaChange> Describe(PhysicalSchemaDiffPlan plan, StorageUnit desired)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(desired);
+        if (!plan.IsApplicable)
+            throw new PhysicalSchemaPlanRefusedException(plan);
+
+        return Describe(plan.Operations, plan.PreviousDefinition, desired);
+    }
+
     public static IReadOnlyList<SchemaChange> Describe(IEnumerable<PhysicalSchemaOperation> operations)
     {
         ArgumentNullException.ThrowIfNull(operations);
