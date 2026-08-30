@@ -39,6 +39,13 @@ connection's lifetime; a schema apply re-arms verification for that unit. Detect
 per connection lifetime — out-of-band tampering while a connection stays open is out of scope and
 surfaces on the next new connection.
 
+A successful apply through a provider connection also changes that connection's in-process
+declaration publication. Direct, owned, and unit-of-work sessions opened against the previous
+declaration refuse their next operation before provider I/O with `GW-RUNTIME-005`; reopen them after
+apply. Reapplying the same fingerprint is a no-op and does not stale sessions. Failed or refused
+application does not publish. Changes made through another process or connection remain governed by
+the admission boundary above rather than by polling retained sessions.
+
 MongoDB does the same inspect-only split at `OpenSession` via its public `InspectSchema` report.
 
 ## The `groundwork` CLI

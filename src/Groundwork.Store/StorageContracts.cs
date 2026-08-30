@@ -781,11 +781,15 @@ public static class SchemaCapabilityAdmission
 
 /// <summary>
 /// Non-owning view over one declared storage unit. This interface is intentionally not disposable:
-/// a session opened from a provider connection is valid while that connection is alive, and a
-/// session opened from a unit of work is valid until that unit reaches a terminal state or is
-/// disposed.
+/// a session opened from a provider connection is valid while that connection is alive and its
+/// applied declaration remains current. A session opened from a unit of work is additionally
+/// bounded by that unit reaching a terminal state or being disposed.
 /// </summary>
 /// <remarks>
+/// When the same provider connection successfully publishes a different declaration for this
+/// unit, every earlier session refuses its next operation before provider I/O with
+/// <see cref="StaleStorageSessionException"/>. Open a new session after schema application.
+///
 /// Every operation is declared twice: a synchronous member and an asynchronous counterpart that
 /// takes a <see cref="CancellationToken"/>. Both surfaces are supported, and a provider implements
 /// one session that serves both — the asynchronous member is the operation, and the synchronous
@@ -1134,7 +1138,10 @@ public interface IStorageProviderConnection : IDisposable
     /// <summary>Capabilities the deployed provider can enforce for schema and storage operations.</summary>
     IReadOnlyList<CapabilityDescriptor> Capabilities { get; }
 
-    /// <summary>Opens a non-owning session view that remains valid while this connection is alive.</summary>
+    /// <summary>
+    /// Opens a non-owning session view that remains valid while this connection is alive and the
+    /// applied declaration captured at open time remains current.
+    /// </summary>
     /// <param name="observer">
     /// Optional sink for the provider commands this session issues. It counts every round trip the session
     /// performs — reads, writes, probes and retention — because the session is what issues them. Schema work
@@ -1155,6 +1162,8 @@ public interface IStorageProviderConnection : IDisposable
     ///
     /// Use it when callers are concurrent and independent. Prefer <see cref="OpenSession"/> when the
     /// provider's own lifetime is the natural bound, which is the single-threaded case.
+    /// Both kinds refuse with <see cref="StaleStorageSessionException"/> when this provider
+    /// connection later publishes a different declaration for the same unit.
     /// </remarks>
     IOwnedStorageSession OpenOwnedSession(
         StorageUnit unit,

@@ -569,6 +569,8 @@ internal class MongoStoreSession(
     {
         if (released)
             throw new ObjectDisposedException(nameof(MongoStoreSession));
+        if (inner is IMongoSchemaBoundSession schemaBound)
+            schemaBound.EnsureSchemaCurrent();
     }
 }
 

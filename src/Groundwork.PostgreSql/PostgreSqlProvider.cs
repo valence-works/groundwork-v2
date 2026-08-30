@@ -72,6 +72,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
     }
     private readonly ConcurrentBag<NpgsqlConnection> ownedConnections = [];
     private readonly PostgreSqlSchemaCoordinator schemaCoordinator;
+    private readonly SchemaSessionPublicationRegistry schemaSessions = new();
     private volatile ISessionRegistrationObserver? activeRegistrationObserver;
     private volatile bool disposed;
 
@@ -113,6 +114,11 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
             : PostgreSqlSchemaCoordinator.Physicalize(source);
     }
 
+    internal SchemaSessionLease CaptureSchemaSession(StorageUnit physicalUnit) =>
+        schemaSessions.Capture(PostgreSqlSchemaCoordinator.Target(physicalUnit));
+
+    internal void PublishSchema(PhysicalSchemaTarget target) => schemaSessions.Publish(target);
+
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
@@ -125,14 +131,17 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            var schemaSession = CaptureSchemaSession(physicalUnit);
+            var session = new PostgreSqlStorageSession(
+                this, physicalUnit, access, connection, null, schemaSession, observer);
             OwnConnection(connection, observer);
+            return session;
         }
         catch
         {
             connection.Dispose();
             throw;
         }
-        return new PostgreSqlStorageSession(this, physicalUnit, access, connection, null, observer);
     }
 
     public IOwnedStorageSession OpenOwnedSession(
@@ -150,15 +159,17 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            // Deliberately NOT OwnConnection: the caller releases it, which is the whole point — a per-caller
+            // session that neither leaks a connection nor queues behind unrelated callers on a shared one.
+            var schemaSession = CaptureSchemaSession(physicalUnit);
+            return new OwnedPostgreSqlStorageSession(
+                this, physicalUnit, access, connection, schemaSession, observer);
         }
         catch
         {
             connection.Dispose();
             throw;
         }
-        // Deliberately NOT OwnConnection: the caller releases it, which is the whole point — a per-caller
-        // session that neither leaks a connection nor queues behind unrelated callers on a shared one.
-        return new OwnedPostgreSqlStorageSession(this, physicalUnit, access, connection, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -215,6 +226,7 @@ public sealed class PostgreSqlProviderConnection : IStorageProviderConnection, I
                         access,
                         connection,
                         transaction,
+                        CaptureSchemaSession(physicalUnits[unit.Id]),
                         observer);
                     return new RelationalUnitOfWorkSession(session, session.Close);
                 },
@@ -311,6 +323,7 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     private readonly PostgreSqlDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly RelationalRuntimeAdmission admission;
+    private readonly object applicationGate = new();
 
     internal PostgreSqlSchemaCoordinator(PostgreSqlProviderConnection owner)
     {
@@ -337,21 +350,26 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
         GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Physicalize(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
-            executor,
-            target,
-            options,
-            inspected: executor.InspectDeployedHistory(target),
-            inspectAfterApplication: () => executor.InspectDeployedHistory(target));
-        if (result.AppliedOperationCount != 0)
+        lock (applicationGate)
         {
-            owner.Remember(desired);
-            admission.Invalidate(desired.Id);
+            var physical = Physicalize(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                executor,
+                target,
+                options,
+                inspected: executor.InspectDeployedHistory(target),
+                inspectAfterApplication: () => executor.InspectDeployedHistory(target));
+            if (result.Application?.Outcome is PhysicalSchemaApplicationOutcome.Applied or
+                PhysicalSchemaApplicationOutcome.NoChanges)
+            {
+                owner.Remember(desired);
+                owner.PublishSchema(target);
+                admission.Invalidate(desired.Id);
+            }
+            return result;
         }
-        return result;
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -369,19 +387,24 @@ internal sealed class PostgreSqlSchemaCoordinator : ISchemaCoordinator
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Physicalize(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        try
+        lock (applicationGate)
         {
-            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
-            owner.Remember(desired);
-            return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
-                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
-        }
-        finally
-        {
-            admission.Invalidate(desired.Id);
+            var physical = Physicalize(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            try
+            {
+                var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
+                if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
+                    owner.PublishSchema(target);
+                owner.Remember(desired);
+                return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
+                    result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+            }
+            finally
+            {
+                admission.Invalidate(desired.Id);
+            }
         }
     }
 

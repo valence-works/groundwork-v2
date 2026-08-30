@@ -95,6 +95,92 @@ public sealed class InMemoryProviderTests
     }
 
     [Fact]
+    public void Owned_and_unit_of_work_sessions_refuse_after_same_connection_schema_publication()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://stale-session-lifetimes");
+        var initial = StaleSessionUnit("stale-session-lifetimes", "payload");
+        var evolved = StaleSessionUnit("stale-session-lifetimes", "body");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var observer = new ProviderCommandObserver();
+        using var owned = connection.OpenOwnedSession(initial, StorageAccess.Global, observer);
+        using var work = connection.BeginUnitOfWork(
+            StorageAccess.Global,
+            BatchWriteOptions.Default,
+            observer,
+            initial);
+        var transactional = work.OpenSession(initial);
+
+        Assert.True(connection.Schema.Apply(evolved).Applied);
+        var beforeRefusals = observer.RoundTrips;
+
+        Assert.Equal(initial.Id, Assert.Throws<StaleStorageSessionException>(() => owned.Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "one" }))).StorageUnitId);
+        Assert.Equal(initial.Id, Assert.Throws<StaleStorageSessionException>(() => transactional.Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "one" }))).StorageUnitId);
+        Assert.Equal(initial.Id, Assert.Throws<StaleStorageSessionException>(() => owned.Aggregate(
+            new AggregationQuery("missing"))).StorageUnitId);
+        Assert.Equal(beforeRefusals, observer.RoundTrips);
+        work.Rollback();
+    }
+
+    [Fact]
+    public void Successful_runtime_auto_apply_stales_retained_sessions()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://stale-session-auto-apply");
+        var initial = StaleSessionUnit("stale-session-auto-apply", "payload");
+        Assert.True(connection.Schema.Apply(initial).Applied);
+        var retained = connection.OpenSession(initial, StorageAccess.Global);
+        var evolved = initial with
+        {
+            Columns =
+            [
+                .. initial.Columns,
+                new ColumnDefinition
+                {
+                    Id = "note",
+                    Name = "note",
+                    Type = PortableType.String,
+                    MaxLength = 64
+                }
+            ]
+        };
+
+        var admission = connection.Schema.InspectRuntimeAdmission(
+            evolved,
+            new GroundworkRuntimeSchemaAdmissionOptions { AutoApplyOnStartup = true });
+
+        Assert.True(admission.IsReady);
+        Assert.NotNull(admission.Application);
+        Assert.Throws<StaleStorageSessionException>(() => retained.Read(
+            new StorageKey(new Dictionary<string, object?> { ["id"] = "one" })));
+    }
+
+    [Fact]
+    public void Publication_epochs_do_not_revive_an_old_session_after_a_schema_cycles_back()
+    {
+        var registry = new SchemaSessionPublicationRegistry();
+        var first = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(
+            StaleSessionUnit("stale-session-epoch", "payload")));
+        var second = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(
+            StaleSessionUnit("stale-session-epoch", "body")));
+        var unrelated = InMemorySchemaCoordinator.Target(InMemorySchemaCoordinator.Prepare(
+            StaleSessionUnit("stale-session-unrelated", "value")));
+        var oldLease = registry.Capture(first);
+
+        registry.Publish(unrelated);
+        oldLease.EnsureCurrent();
+        registry.Publish(first);
+        oldLease.EnsureCurrent();
+        registry.Publish(second);
+        registry.Publish(first);
+
+        var stale = Assert.Throws<StaleStorageSessionException>(oldLease.EnsureCurrent);
+        Assert.Equal(StaleStorageSessionException.DiagnosticCode, stale.Code);
+        Assert.Equal(first.Identity.SubjectId, stale.StorageUnitId);
+        registry.Capture(first).EnsureCurrent();
+    }
+
+    [Fact]
     public void A_63_byte_storage_unit_name_applies_without_provider_rewriting()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://physical-name-boundary");
@@ -531,6 +617,7 @@ public sealed class InMemoryProviderTests
         var initial = EvolutionUnit("schema-key-type");
         Assert.True(connection.Schema.Apply(initial).Applied);
         InsertEvolutionRow(connection, initial);
+        var retained = connection.OpenSession(initial, StorageAccess.Global);
         var retyped = initial with
         {
             Columns = [.. initial.Columns.Select(column => column.Name == "id"
@@ -542,7 +629,7 @@ public sealed class InMemoryProviderTests
         var refusal = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Apply(retyped));
 
         Assert.Equal("GW-SCHEMA-003", Assert.Single(refusal.Refusals).Code);
-        var stored = connection.OpenSession(initial, StorageAccess.Global).Read(new StorageKey(
+        var stored = retained.Read(new StorageKey(
             new Dictionary<string, object?> { ["id"] = "customer-1" }));
         Assert.NotNull(stored);
         Assert.Equal("customer-1", stored.Values.Values["id"]);
@@ -659,6 +746,7 @@ public sealed class InMemoryProviderTests
             coordinator.Executor,
             planAuthorization: _ => PhysicalSchemaPlanAuthorization.Allow);
         Assert.Equal(PhysicalSchemaApplicationOutcome.Applied, authorized.Outcome);
+        Assert.True(connection.Schema.Apply(reduced).IsNoOp);
 
         var afterDrop = ReadEvolutionRow(connection, reduced);
         Assert.False(afterDrop.Values.Values.ContainsKey("legacy"));
@@ -2031,6 +2119,32 @@ public sealed class InMemoryProviderTests
         Assert.NotNull(stored);
         return stored!;
     }
+
+    private static StorageUnit StaleSessionUnit(string id, string payloadName) => new()
+    {
+        Id = new StorageUnitId(id),
+        Name = id.Replace('-', '_'),
+        Columns =
+        [
+            new ColumnDefinition
+            {
+                Id = "id",
+                Name = "id",
+                Type = PortableType.String,
+                MaxLength = 64,
+                IsNullable = false
+            },
+            new ColumnDefinition
+            {
+                Id = "payload",
+                Name = payloadName,
+                Type = PortableType.String,
+                MaxLength = 64,
+                IsNullable = false
+            }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
 
     private static void AssertOpaque(string token, params string[] forbiddenValues)
     {

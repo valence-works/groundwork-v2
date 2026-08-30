@@ -85,6 +85,7 @@ internal static class PublicApiApprovalFixture
         _ = typeof(BatchWriteOptions);
         _ = typeof(SchemaChangeKind);
         _ = typeof(SchemaCapabilityAdmission);
+        _ = typeof(StaleStorageSessionException);
         _ = typeof(RowWrite);
         _ = typeof(AppendOutcomeReport);
         _ = typeof(IExactAppendStorageSession);

@@ -78,6 +78,68 @@ public static class ConformanceSuite
                 return default;
             }).ConfigureAwait(false);
 
+            await RunCheck(checks, "retained sessions refuse stale schema before provider I/O", async () =>
+            {
+                var name = "conformance_stale_session_" + Guid.NewGuid().ToString("N");
+                var initial = SessionSchemaUnit(name, "payload");
+                var evolved = SessionSchemaUnit(name, "body");
+                Require(connection.Schema.Apply(initial).Applied,
+                    "the initial stale-session declaration did not apply");
+                var observer = new ProviderCommandObserver();
+                var retained = connection.OpenSession(initial, StorageAccess.Global, observer);
+                var values = new StorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = "one",
+                    ["payload"] = "carried"
+                });
+                Require((await surface.Insert(retained, values).ConfigureAwait(false)).Succeeded,
+                    "the stale-session seed row was not inserted");
+
+                Require(connection.Schema.Apply(evolved).Applied,
+                    "the physical column rename did not apply");
+                var beforeRefusal = observer.RoundTrips;
+                StaleStorageSessionException stale;
+                try
+                {
+                    _ = await surface.Read(
+                        retained,
+                        new StorageKey(new Dictionary<string, object?> { ["id"] = "one" }))
+                        .ConfigureAwait(false);
+                    throw new ConformanceFailureException(
+                        "contract",
+                        "a retained session executed after its declaration was replaced");
+                }
+                catch (StaleStorageSessionException exception)
+                {
+                    stale = exception;
+                }
+
+                Require(stale.Code == StaleStorageSessionException.DiagnosticCode,
+                    "the stale-session refusal did not expose its stable diagnostic code");
+                Require(stale.StorageUnitId == initial.Id,
+                    "the stale-session refusal did not identify its storage unit");
+                Require(observer.RoundTrips == beforeRefusal,
+                    "the stale-session refusal observed a provider command");
+
+                var current = connection.OpenSession(evolved, StorageAccess.Global);
+                var carried = await surface.Read(
+                    current,
+                    new StorageKey(new Dictionary<string, object?> { ["id"] = "one" }))
+                    .ConfigureAwait(false);
+                Require(carried?.Values.Values.TryGetValue("body", out var body) == true &&
+                        Equals(body, "carried") &&
+                        !carried.Values.Values.ContainsKey("payload"),
+                    "a fresh session did not read the carried row through the renamed declaration");
+
+                Require(connection.Schema.Apply(evolved).IsNoOp,
+                    "reapplying the renamed declaration was not a no-op");
+                Require(await surface.Read(
+                        current,
+                        new StorageKey(new Dictionary<string, object?> { ["id"] = "one" }))
+                        .ConfigureAwait(false) is not null,
+                    "a same-fingerprint no-op invalidated a current session");
+            }).ConfigureAwait(false);
+
             await RunCheck(checks, "storage-scope isolation", async () =>
             {
                 connection.Schema.Apply(scoped);
@@ -399,6 +461,32 @@ public static class ConformanceSuite
             }
         }
     }
+
+    private static StorageUnit SessionSchemaUnit(string name, string payloadName) => new()
+    {
+        Id = new StorageUnitId(name),
+        Name = name,
+        Columns =
+        [
+            new ColumnDefinition
+            {
+                Id = "id",
+                Name = "id",
+                Type = PortableType.String,
+                MaxLength = 64,
+                IsNullable = false
+            },
+            new ColumnDefinition
+            {
+                Id = "payload",
+                Name = payloadName,
+                Type = PortableType.String,
+                MaxLength = 64,
+                IsNullable = false
+            }
+        ],
+        Key = new KeyDefinition { Columns = ["id"] }
+    };
 
     /// <summary>
     /// Dispatches one storage operation to the surface under proof, so every conformance check is

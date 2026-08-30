@@ -57,3 +57,11 @@ contract-family assemblies, or provider assumptions in the substrate. The
 `Groundwork.Samples.ExternalProviderStub` project compiles the complete public provider boundary and
 marks every driver-owned operation explicitly; its dialect portion proves that schema reuse needs no
 friend access.
+
+A concrete provider retains connection-local schema-publication state outside the substrate. Every
+direct, owned, and unit-of-work session must invoke its freshness guard from the adapter's
+`EnsureUsable` path before observer accounting or ADO.NET dispatch. A successful changed-target
+publication advances an epoch and causes earlier sessions to throw `StaleStorageSessionException`;
+an unchanged fingerprint preserves the epoch. The concrete coordinator serializes application
+through publication per connection so concurrent successful applies cannot publish out of durable
+order.

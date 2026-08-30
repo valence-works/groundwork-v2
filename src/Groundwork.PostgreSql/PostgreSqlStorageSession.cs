@@ -25,6 +25,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
     private readonly RelationalSessionSetMutations setMutations;
     private readonly RelationalSessionAppends appends;
     private readonly RelationalSessionRetention retention;
+    private readonly SchemaSessionLease schemaSession;
 
     /// <summary>
     /// True when this session was opened through <c>OpenOwnedSession</c> and must return its connection on
@@ -40,6 +41,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         StorageAccess access,
         NpgsqlConnection connection,
         NpgsqlTransaction? transaction,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer = null,
         bool ownsConnection = false)
     {
@@ -49,12 +51,13 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        this.schemaSession = schemaSession;
         commandObserver = observer;
         execution = new RelationalSessionExecution(
             access,
             transaction,
             ownsConnection,
-            new PostgreSqlSessionExecutionAdapter(owner, connection),
+            new PostgreSqlSessionExecutionAdapter(owner, connection, schemaSession),
             nameof(PostgreSqlStorageSession));
         pointReads = new RelationalSessionPointReads(
             unit,
@@ -984,6 +987,7 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
             null,
             () =>
             {
+                schemaSession.EnsureCurrent();
                 var existing = ReadCore(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
                 return existing is null
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
@@ -1591,11 +1595,16 @@ internal class PostgreSqlStorageSession : IStorageSession, IProviderBoundStorage
 
     private sealed class PostgreSqlSessionExecutionAdapter(
         PostgreSqlProviderConnection owner,
-        NpgsqlConnection connection) : IRelationalSessionExecutionAdapter
+        NpgsqlConnection connection,
+        SchemaSessionLease schemaSession) : IRelationalSessionExecutionAdapter
     {
         public bool SerializeAmbientReads => true;
 
-        public void EnsureUsable() => owner.ThrowIfDisposed();
+        public void EnsureUsable()
+        {
+            owner.ThrowIfDisposed();
+            schemaSession.EnsureCurrent();
+        }
 
         public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
             owner.EnterGate(execution);
@@ -1667,8 +1676,9 @@ internal sealed class OwnedPostgreSqlStorageSession : PostgreSqlStorageSession, 
         StorageUnit unit,
         StorageAccess access,
         NpgsqlConnection connection,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer = null)
-        : base(owner, unit, access, connection, null, observer, ownsConnection: true)
+        : base(owner, unit, access, connection, null, schemaSession, observer, ownsConnection: true)
     {
     }
 }

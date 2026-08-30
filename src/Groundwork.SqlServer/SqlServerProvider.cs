@@ -6,6 +6,7 @@ using Groundwork.Kernel;
 using Groundwork.Store;
 using Groundwork.Substrate.Relational;
 using Groundwork.Diagnostics;
+using Groundwork.Kernel.Schema;
 
 namespace Groundwork.SqlServer;
 
@@ -35,6 +36,7 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
     private readonly string connectionString;
     private readonly List<SqlConnection> sessionConnections = [];
     private readonly SqlServerSchemaCoordinator schemaCoordinator;
+    private readonly SchemaSessionPublicationRegistry schemaSessions = new();
     private volatile ISessionRegistrationObserver? activeRegistrationObserver;
     private volatile bool disposed;
 
@@ -104,6 +106,11 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         }
     }
 
+    internal SchemaSessionLease CaptureSchemaSession(StorageUnit physicalUnit) =>
+        schemaSessions.Capture(SqlServerSchemaCoordinator.Target(physicalUnit));
+
+    internal void PublishSchema(PhysicalSchemaTarget target) => schemaSessions.Publish(target);
+
     public IStorageSession OpenSession(StorageUnit unit, StorageAccess access, IProviderCommandObserver? observer = null)
     {
         ThrowIfDisposed();
@@ -116,14 +123,17 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            var schemaSession = CaptureSchemaSession(physicalUnit);
+            var session = new SqlServerStorageSession(
+                this, physicalUnit, access, connection, null, schemaSession, observer);
             RegisterSessionConnection(connection, observer);
+            return session;
         }
         catch
         {
             connection.Dispose();
             throw;
         }
-        return new SqlServerStorageSession(this, physicalUnit, access, connection, null, observer);
     }
 
     public IOwnedStorageSession OpenOwnedSession(
@@ -141,14 +151,16 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, connection);
+            // Deliberately not added to sessionConnections: the caller releases it on disposal.
+            var schemaSession = CaptureSchemaSession(physicalUnit);
+            return new OwnedSqlServerStorageSession(
+                this, physicalUnit, access, connection, schemaSession, observer);
         }
         catch
         {
             connection.Dispose();
             throw;
         }
-        // Deliberately not added to sessionConnections: the caller releases it on disposal.
-        return new OwnedSqlServerStorageSession(this, physicalUnit, access, connection, observer);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -188,6 +200,9 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
             }
 
             var transaction = connection.BeginTransaction(IsolationLevel.Serializable);
+            var physicalUnits = units.ToDictionary(
+                unit => unit.Id,
+                SqlServerSchemaCoordinator.Physicalize);
             var lifetime = new RelationalUnitOfWorkLifetime(
                 connection,
                 transaction,
@@ -200,10 +215,11 @@ public sealed class SqlServerProviderConnection : IStorageProviderConnection, IQ
                 {
                     var session = new SqlServerStorageSession(
                         this,
-                        SqlServerSchemaCoordinator.Physicalize(unit),
+                        physicalUnits[unit.Id],
                         access,
                         connection,
                         transaction,
+                        CaptureSchemaSession(physicalUnits[unit.Id]),
                         observer);
                     return new RelationalUnitOfWorkSession(session, session.Close);
                 },
