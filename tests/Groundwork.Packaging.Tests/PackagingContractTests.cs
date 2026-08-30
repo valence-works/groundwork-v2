@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Xunit;
 
@@ -149,6 +150,62 @@ public sealed class PackagingContractTests
 
         var cleanRoomVerifier = File.ReadAllText(Path.Combine(root, "tests", "Groundwork.PublicApi.Acceptance.Tests", "verify-clean-room.sh"));
         Assert.Contains("Groundwork.Tool $version", cleanRoomVerifier, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Nuget_publication_workflow_pins_actions_and_gates_credentials_on_the_package_manifest()
+    {
+        var root = RepositoryRoot.Find();
+        var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/publish-nuget.yml"));
+
+        Assert.DoesNotContain("actions/setup-dotnet@v4", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/download-artifact@v4", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/checkout@v4", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/upload-artifact@v4", workflow, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(
+            workflow,
+            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262").Count);
+        Assert.Equal(3, Regex.Matches(
+            workflow,
+            "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9").Count);
+        Assert.Equal(2, Regex.Matches(
+            workflow,
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093").Count);
+        Assert.Single(Regex.Matches(
+            workflow,
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"));
+        Assert.Contains("# v4.3.1", workflow, StringComparison.Ordinal);
+        Assert.Contains("# v4.3.0", workflow, StringComparison.Ordinal);
+        Assert.Contains("# v4.4.0", workflow, StringComparison.Ordinal);
+        Assert.Contains("# v4.6.2", workflow, StringComparison.Ordinal);
+
+        var manifest = workflow.IndexOf("eng/verify-package-integrity.sh", StringComparison.Ordinal);
+        var upload = workflow.IndexOf(
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", StringComparison.Ordinal);
+        var manifestDigest = workflow.IndexOf(
+            "actual_manifest_sha256=\"$(eng/verify-package-integrity.sh digest artifacts/packages)\"",
+            StringComparison.Ordinal);
+        var verification = workflow.IndexOf(
+            "eng/verify-package-integrity.sh verify artifacts/packages", StringComparison.Ordinal);
+        var expectedDigest = workflow.IndexOf(
+            "EXPECTED_MANIFEST_SHA256: ${{ needs.package.outputs.manifest_sha256 }}",
+            StringComparison.Ordinal);
+        var credential = workflow.IndexOf(
+            "NUGET_ORG_API_KEY: ${{ secrets.NUGET_API_KEY }}", StringComparison.Ordinal);
+        var push = workflow.IndexOf("dotnet nuget push", StringComparison.Ordinal);
+
+        Assert.True(manifest >= 0);
+        Assert.True(upload > manifest);
+        Assert.True(manifestDigest > upload);
+        Assert.True(expectedDigest > upload);
+        Assert.True(verification > manifestDigest);
+        Assert.True(credential > verification);
+        Assert.True(push > verification);
+        Assert.Contains("manifest_sha256: ${{ steps.manifest.outputs.sha256 }}", workflow, StringComparison.Ordinal);
+        Assert.Contains("needs.package.outputs.manifest_sha256", workflow, StringComparison.Ordinal);
+        Assert.Contains("EXPECTED_MANIFEST_SHA256", workflow, StringComparison.Ordinal);
+        Assert.Contains("package-sha256sums.txt", File.ReadAllText(
+            Path.Combine(root, "eng", "verify-package-integrity.sh")), StringComparison.Ordinal);
     }
 
 }
