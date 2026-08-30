@@ -71,9 +71,12 @@ public sealed class BenchmarkMethodologyTests
         benchmarks.Setup();
         try
         {
-            Assert.NotNull(await benchmarks.PointRead_Groundwork());
-            Assert.Equal("item-0500", (await benchmarks.PointRead_EFCoreCompiledModel()).Id);
-            Assert.Equal("item-0500", (await benchmarks.PointRead_Dapper()).Id);
+            var groundworkPoint = await benchmarks.PointRead_Groundwork();
+            var efPoint = await benchmarks.PointRead_EFCoreCompiledModel();
+            var dapperPoint = await benchmarks.PointRead_Dapper();
+            Assert.Equal("item-0500", groundworkPoint.Id);
+            AssertEquivalent(groundworkPoint, efPoint);
+            AssertEquivalent(groundworkPoint, dapperPoint);
 
             Assert.Equal(BenchmarkMethodology.PageSize, (await benchmarks.CoveredQuery_Groundwork()).Count);
             Assert.Equal(BenchmarkMethodology.PageSize, (await benchmarks.CoveredQuery_EFCoreCompiledModel()).Count);
@@ -93,5 +96,13 @@ public sealed class BenchmarkMethodologyTests
         {
             benchmarks.Cleanup();
         }
+    }
+
+    private static void AssertEquivalent(BenchmarkItem expected, BenchmarkItem actual)
+    {
+        Assert.Equal(expected.Id, actual.Id);
+        Assert.Equal(expected.Category, actual.Category);
+        Assert.Equal(expected.Sequence, actual.Sequence);
+        Assert.Equal(expected.Payload, actual.Payload);
     }
 }

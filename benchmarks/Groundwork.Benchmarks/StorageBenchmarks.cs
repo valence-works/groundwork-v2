@@ -40,7 +40,9 @@ public class StorageBenchmarks
     private IBatchedStorageSession? batchedSession;
     private SqliteConnection? dapperConnection;
     private SqliteConnection? efConnection;
-    private BenchmarkDbContext? efContext;
+    private BenchmarkDbContext? efQueryContext;
+    private BenchmarkDbContext? efBatchContext;
+    private BenchmarkDbContext? efCommitContext;
     private BenchmarkItem[] efBatchItems = [];
     private BenchmarkItem? efCommitItem;
     private GwQueryTable<BenchmarkItem>? groundworkTable;
@@ -66,15 +68,17 @@ public class StorageBenchmarks
 
         dapperConnection = new SqliteConnection(connectionString);
         dapperConnection.Open();
-        RegisterGroundworkCollation(dapperConnection);
+        ConfigureSqliteConnection(dapperConnection);
         Seed(dapperConnection);
 
         efConnection = new SqliteConnection(connectionString);
         efConnection.Open();
-        RegisterGroundworkCollation(efConnection);
-        efContext = BenchmarkDbContext.Create(efConnection);
-        efBatchItems = efContext.Items.Where(item => item.Id.StartsWith("batch-")).OrderBy(item => item.Id).ToArray();
-        efCommitItem = efContext.Items.Single(item => item.Id == CommitId);
+        ConfigureSqliteConnection(efConnection);
+        efQueryContext = BenchmarkDbContext.Create(efConnection);
+        efBatchContext = BenchmarkDbContext.Create(efConnection);
+        efCommitContext = BenchmarkDbContext.Create(efConnection);
+        efBatchItems = efBatchContext.Items.Where(item => item.Id.StartsWith("batch-")).OrderBy(item => item.Id).ToArray();
+        efCommitItem = efCommitContext.Items.Single(item => item.Id == CommitId);
 
         var executor = new SqliteLinqExecutor(session, provider);
         groundworkTable = new GwQueryDatabase(executor).Table(tableModel);
@@ -93,7 +97,9 @@ public class StorageBenchmarks
     [GlobalCleanup]
     public void Cleanup()
     {
-        efContext?.Dispose();
+        efCommitContext?.Dispose();
+        efBatchContext?.Dispose();
+        efQueryContext?.Dispose();
         efConnection?.Dispose();
         dapperConnection?.Dispose();
         provider?.Dispose();
@@ -103,13 +109,17 @@ public class StorageBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("PointRead")]
-    public ValueTask<StoredEntry?> PointRead_Groundwork() =>
-        Session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["id"] = PointId }));
+    public async Task<BenchmarkItem> PointRead_Groundwork()
+    {
+        var stored = await Session.ReadAsync(new StorageKey(new Dictionary<string, object?> { ["id"] = PointId }))
+            ?? throw new InvalidOperationException($"Seed row '{PointId}' was not found.");
+        return Materialize(stored);
+    }
 
     [Benchmark]
     [BenchmarkCategory("PointRead")]
     public Task<BenchmarkItem> PointRead_EFCoreCompiledModel() =>
-        EfContext.Items.AsNoTracking().SingleAsync(item => item.Id == PointId);
+        EfQueryContext.Items.AsNoTracking().SingleAsync(item => item.Id == PointId);
 
     [Benchmark]
     [BenchmarkCategory("PointRead")]
@@ -126,7 +136,7 @@ public class StorageBenchmarks
     [Benchmark]
     [BenchmarkCategory("CoveredQuery")]
     public Task<List<BenchmarkItem>> CoveredQuery_EFCoreCompiledModel() =>
-        EfContext.Items.AsNoTracking()
+        EfQueryContext.Items.AsNoTracking()
             .Where(item => item.Category == CoveredCategory)
             .OrderBy(item => item.Id)
             .Take(BenchmarkMethodology.PageSize)
@@ -147,7 +157,7 @@ public class StorageBenchmarks
     [Benchmark]
     [BenchmarkCategory("PagedQuery")]
     public Task<List<BenchmarkItem>> PagedQuery_EFCoreCompiledModel() =>
-        EfContext.Items.AsNoTracking()
+        EfQueryContext.Items.AsNoTracking()
             .OrderBy(item => item.Id)
             .Skip(BenchmarkMethodology.SeedRowCount / 2)
             .Take(BenchmarkMethodology.PageSize)
@@ -178,7 +188,7 @@ public class StorageBenchmarks
         var payload = NextPayload();
         foreach (var item in efBatchItems)
             item.Payload = payload;
-        return EfContext.SaveChangesAsync();
+        return EfBatchContext.SaveChangesAsync();
     }
 
     [Benchmark]
@@ -211,9 +221,9 @@ public class StorageBenchmarks
     [BenchmarkCategory("UnitOfWorkCommit")]
     public async Task<int> UnitOfWorkCommit_EFCoreCompiledModel()
     {
-        await using var transaction = await EfContext.Database.BeginTransactionAsync();
+        await using var transaction = await EfCommitContext.Database.BeginTransactionAsync();
         EfCommitItem.Payload = NextPayload();
-        var affected = await EfContext.SaveChangesAsync();
+        var affected = await EfCommitContext.SaveChangesAsync();
         await transaction.CommitAsync();
         return affected;
     }
@@ -235,7 +245,9 @@ public class StorageBenchmarks
     private IStorageSession Session => session ?? throw new InvalidOperationException("Setup has not run.");
     private IBatchedStorageSession BatchedSession => batchedSession ?? throw new InvalidOperationException("Setup has not run.");
     private SqliteConnection DapperConnection => dapperConnection ?? throw new InvalidOperationException("Setup has not run.");
-    private BenchmarkDbContext EfContext => efContext ?? throw new InvalidOperationException("Setup has not run.");
+    private BenchmarkDbContext EfQueryContext => efQueryContext ?? throw new InvalidOperationException("Setup has not run.");
+    private BenchmarkDbContext EfBatchContext => efBatchContext ?? throw new InvalidOperationException("Setup has not run.");
+    private BenchmarkDbContext EfCommitContext => efCommitContext ?? throw new InvalidOperationException("Setup has not run.");
     private BenchmarkItem EfCommitItem => efCommitItem ?? throw new InvalidOperationException("Setup has not run.");
     private IGwQueryable<BenchmarkItem> GroundworkCoveredQuery => groundworkCoveredQuery ?? throw new InvalidOperationException("Setup has not run.");
     private IGwQueryable<BenchmarkItem> GroundworkPagedQuery => groundworkPagedQuery ?? throw new InvalidOperationException("Setup has not run.");
@@ -272,8 +284,19 @@ public class StorageBenchmarks
         transaction.Commit();
     }
 
-    private static void RegisterGroundworkCollation(SqliteConnection connection) =>
+    private static void ConfigureSqliteConnection(SqliteConnection connection)
+    {
         connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", string.CompareOrdinal);
+        connection.Execute("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;");
+    }
+
+    private static BenchmarkItem Materialize(StoredEntry stored) => new()
+    {
+        Id = Convert.ToString(stored.Values.Values["id"], System.Globalization.CultureInfo.InvariantCulture)!,
+        Category = Convert.ToString(stored.Values.Values["category"], System.Globalization.CultureInfo.InvariantCulture)!,
+        Sequence = Convert.ToInt32(stored.Values.Values["sequence"], System.Globalization.CultureInfo.InvariantCulture),
+        Payload = Convert.ToString(stored.Values.Values["payload"], System.Globalization.CultureInfo.InvariantCulture)!
+    };
 
     private static StorageValues Values(string id, string category, int sequence, string payload) => new(
         new Dictionary<string, object?>

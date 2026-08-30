@@ -11,6 +11,9 @@ The comparative suite measures five public workloads: point reads, covered queri
 queries, 32-row batched writes, and one-row unit-of-work commits. Every workload runs through
 Groundwork, EF Core with its checked-in compiled model, and Dapper. All three use the same temporary
 SQLite database, physical table, index, seed rows, open-connection policy, process, and hardware.
+Each connection uses foreign keys, WAL journaling, `synchronous=NORMAL`, a 5-second busy timeout,
+and Groundwork's UTF-16 ordinal collation. Point reads materialize the same `BenchmarkItem` shape,
+and EF uses separate compiled-model contexts for query, batch-write, and one-row-commit state.
 The canonical schema and its SHA-256 fingerprint are exposed by `BenchmarkMethodology`; a focused
 test prevents a workload or stack from silently leaving the comparison matrix.
 BenchmarkDotNet reports mean latency, operations per second, allocation cost, and ratios against
