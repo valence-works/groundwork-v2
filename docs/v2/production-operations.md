@@ -19,7 +19,9 @@ Before escalation, preserve:
 
 - the exact `Groundwork.*` package closure and application commit;
 - provider/server version and topology, including whether the endpoint was writable;
-- the storage declaration fingerprint and redacted `groundwork status --output json` report;
+- the storage declaration fingerprint and redacted
+  `groundwork status --schema groundwork.schema.json --provider <provider> --connection-env GROUNDWORK_CONNECTION --output json`
+  report;
 - the stable `GW-*` diagnostic, complete exception chain, and provider command event names;
 - the last successful deployment, recent schema/data migration, and the smallest safe reproducer;
 - whether the failure survives a newly opened provider connection after native service health is

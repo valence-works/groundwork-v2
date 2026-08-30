@@ -17,7 +17,8 @@ schema/data. Preserve:
 
 - exact `Groundwork.*` versions and application commit;
 - provider/server version, topology, and whether the endpoint was writable;
-- declaration fingerprint and redacted `groundwork status --output json`;
+- declaration fingerprint and redacted
+  `groundwork status --schema groundwork.schema.json --provider <provider> --connection-env GROUNDWORK_CONNECTION --output json`;
 - the `GW-*` code, exception chain, and provider command event names;
 - the last successful deployment/recent migration and a minimal safe reproducer;
 - whether a newly opened connection still fails after native service health is restored.
