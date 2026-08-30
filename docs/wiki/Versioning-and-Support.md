@@ -101,20 +101,16 @@ with maintained runbooks and best-effort maintainer ownership of reproducible Gr
 **Development/reference-only** is non-production. No tier creates a response-time or availability
 SLA.
 
-| Component / provider | Tier | Supported topology |
-| --- | --- | --- |
-| **SQLite** | **Production-supported** | SQLite 3.35.0+, file-backed with local locking, one long-lived provider connection and one writer process per file; `:memory:` is development/reference-only |
-| **MySQL/MariaDB** | **Production-supported** | MySQL 8.0.17+ or MariaDB 11.4.13+, InnoDB, verified NO PAD `utf8mb4_0900_bin`, writable primary endpoint |
-| **PostgreSQL** | **Production-supported** | PostgreSQL 17-compatible writable primary endpoint |
-| **SQL Server** | **Production-supported** | SQL Server 2022-compatible writable primary database with required application-lock/schema permissions |
-| **MongoDB** | **Production-supported** | Transaction-capable replica set or sharded cluster |
-| **MongoDB standalone** | **Compatibility-only** | Evaluation using only advertised capabilities; transaction-dependent facilities are refused |
-| `Groundwork.Testing` | **Development/reference-only** | Public conformance contracts and deterministic reference provider; **not an application database** |
-| `Groundwork.Tool` | **Production-supported** | Deployment-time planning and authorized application on a supported provider topology |
+The exact provider, version, and topology assignments are maintained only in the canonical
+**[v2 provider support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)**.
+The canonical table separates live-evidenced production topologies from compatible deployments that
+have not passed their own live conformance, schema-tool, and concurrency lanes.
 
 The deployment owner owns the database/platform, capacity, credentials, backup/restore, upgrades,
 and failover. Groundwork maintainers own reproducible package defects within the named boundary. See
-**[Production Operations](Production-Operations)** for the runbooks and incident evidence contract.
+the canonical
+**[production operations runbooks](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md)**
+for the runbooks and incident evidence contract.
 
 All relational providers and the reference provider advertise
 `groundwork.operational.atomic-commit`. MongoDB advertises it only when the connected deployment
