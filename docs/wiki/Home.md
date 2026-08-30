@@ -59,6 +59,9 @@ If you want a storage contract you can reason about and move between databases, 
 2. **[Core Concepts](Core-Concepts)** — storage units, sessions, access, lifetimes. The mental model.
 3. **[Records: Typed Rows](Records-Typed-Rows)** — the ordinary path for typed CRUD.
 
+**Coming from EF Core?** Start with **[Migrate from EF Core](EF-Core-Migration)** for the concept
+map, model-import report, catalog adoption boundary, and a complete customer/order cutover.
+
 **Evaluating it?** [Versioning & Support](Versioning-and-Support), [Providers](Providers), and
 [Portable Semantics](Portable-Semantics) tell you what you'd be committing to.
 
@@ -70,6 +73,7 @@ If you want a storage contract you can reason about and move between databases, 
 - **[Installation](Installation)** — feed configuration, package source mapping, versions
 - **[Package Map](Package-Map)** — which package to reference, and why the layering matters
 - **[Core Concepts](Core-Concepts)** — the mental model: units, sessions, access, capabilities, lifetimes
+- **[Migrate from EF Core](EF-Core-Migration)** — scaffold, reconcile, deploy, and cut over an EF application
 
 ### Declaring your storage
 - **[Declaring Storage](Declaring-Storage)** — the kernel declaration builder, columns, keys, indexes

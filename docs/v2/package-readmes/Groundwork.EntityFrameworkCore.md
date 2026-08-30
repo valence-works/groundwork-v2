@@ -16,6 +16,8 @@ its normal design-time environment, where executing compiled model or snapshot c
 
 Full usage and refusal semantics:
 [Importing an EF Core model](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/ef-core-import.md).
+The consumer migration path, including a worked customer/order cutover, is
+[Migrate from EF Core](https://github.com/valence-works/groundwork-v2/blob/main/docs/wiki/EF-Core-Migration.md).
 
 ## Referencing it
 

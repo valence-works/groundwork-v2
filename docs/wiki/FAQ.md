@@ -86,8 +86,10 @@ editor.
 ### Can I use Groundwork with an existing database?
 
 Only if the physical schema matches a Groundwork declaration exactly. Column drift is startup-fatal
-(`GW-RUNTIME-001`), and there is no mapping layer to bridge a mismatch. Greenfield or
-recreate-and-reload is the intended path today.
+(`GW-RUNTIME-001`), and there is no mapping layer to bridge a mismatch. `groundwork adopt` can record
+an exactly matching catalog without executing DDL; otherwise create Groundwork-owned storage and
+backfill it rather than weakening the declaration. See **[Migrate from EF Core](EF-Core-Migration)**
+for the inventory, adoption, dual-write, and cutover path.
 
 ### Can I mix Records and Documents in one transaction?
 

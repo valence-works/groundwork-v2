@@ -155,3 +155,4 @@ allowlist and asserts it against the resulting `.nupkg` and `.snupkg`.
 - **[Package Map](Package-Map)** — what each package owns
 - **[Hosting & Dependency Injection](Hosting-and-Dependency-Injection)** — `AddGroundwork()` and the connection lifetime
 - **[Core Concepts](Core-Concepts)** — the mental model before you write real code
+- **[Migrate from EF Core](EF-Core-Migration)** — scaffold and cut over an existing EF application
