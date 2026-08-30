@@ -7,7 +7,7 @@ operational guidance, and an owner for provider-specific incidents.
 | Component/provider | Status in the first preview | Required topology and evidence |
 | --- | --- | --- |
 | SQLite | Conformance-passing / preview | File-backed or in-memory SQLite with the documented connection lifetime; production support requires an operational pilot and runbook. |
-| MySQL/MariaDB | Implementation preview | MySQL 8.0.17+ or MariaDB 11.4.13+ with InnoDB and a runtime-verified NO PAD `utf8mb4_0900_bin`; the live hosted conformance lane is delivered separately in #180. |
+| MySQL/MariaDB | Conformance-passing / preview | MySQL 8.0.17+ or MariaDB 11.4.13+ with InnoDB and a runtime-verified NO PAD `utf8mb4_0900_bin`; hosted correctness covers both runtime TFMs and the schema tool, with concurrency kept in the exact-head/main workflow. See [the provider evidence report](mysql-provider-evidence.md). |
 | PostgreSQL | Conformance-passing / preview | PostgreSQL 17-compatible deployment; production support requires an operational pilot and runbook. |
 | SQL Server | Conformance-passing / preview | SQL Server 2022-compatible deployment; production support follows an operational pilot. |
 | MongoDB | Conformance-passing / preview | Replica-set or sharded deployment for transactional and exact-append behavior. |

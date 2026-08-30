@@ -59,8 +59,8 @@ groundwork schema emit --input schema.json --file groundwork.schema.json
 
 Add `--output json` for the stable machine-readable report.
 
-The aliases are `sqlite`, `postgresql`, `sqlserver` and `mongodb`, each discovered from its provider
-package. All four speak one plan and report format: operation kinds, operation identities,
+The aliases are `sqlite`, `mysql`, `postgresql`, `sqlserver` and `mongodb`, each discovered from its
+provider package. All five speak one plan and report format: operation kinds, operation identities,
 authorization addresses, refusal codes and exit codes mean the same thing whether the target is a
 table or a collection. The MongoDB plug-in requires a replica set or a sharded cluster, because
 publishing the applied schema ledger needs a transaction; a standalone deployment is refused when
@@ -257,6 +257,7 @@ full dual-presence semantics and both worked examples.
 | Provider | Drop / rename / alter |
 | --- | --- |
 | SQLite | Native `DROP COLUMN` and `RENAME COLUMN`; an alteration rebuilds the table in the schema transaction, the same mechanism the dialect already uses to finalize a backfilled column |
+| MySQL/MariaDB | Native `DROP COLUMN`, `RENAME COLUMN`, and `MODIFY COLUMN` under the connection-bound schema lease; index rebuilds use the same provider-neutral plan ordering as the other relational providers |
 | PostgreSQL | Native, including in-place index rename |
 | SQL Server | Native, through `sp_rename`; a column's auto-named default constraint is dropped with it |
 | MongoDB | Native, through `MongoSchemaExecutor`: a rename `$rename`s the stored field, a drop `$unset`s it, and an alteration re-encodes stored values when the BSON representation changes. Work spans the primary collection and every per-scope collection. The in-process `connection.Schema.Apply` reads the same applied ledger and plans the same evolution |
