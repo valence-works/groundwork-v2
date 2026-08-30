@@ -113,12 +113,16 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         new(
             new SchemaSubject(physical),
             Identity,
-            physical.DerivedColumns.Select(derived => new ProviderPhysicalSchemaDefinition(
-                "SQLite",
-                physical.Id,
-                RelationalDialect.SearchKeyDefinitionKind,
-                physical.Name + RelationalDialect.SearchKeyDefinitionSeparator + derived.Name,
-                derived.AlgorithmId ?? throw new InvalidOperationException($"Derived search-key column '{derived.Name}' is missing its algorithm identity."))).ToArray());
+            RelationalInteropViewDefinition.AppendTo(
+                Identity.Name,
+                physical,
+                physical.DerivedColumns.Select(derived => new ProviderPhysicalSchemaDefinition(
+                    Identity.Name,
+                    physical.Id,
+                    RelationalDialect.SearchKeyDefinitionKind,
+                    physical.Name + RelationalDialect.SearchKeyDefinitionSeparator + derived.Name,
+                    derived.AlgorithmId ?? throw new InvalidOperationException(
+                        $"Derived search-key column '{derived.Name}' is missing its algorithm identity.")))));
 
     internal static void ValidateAccess(StorageUnit unit, StorageAccess access)
     {

@@ -69,6 +69,7 @@ public static class SchemaCompilation
                 Value = new PortableDefault(check.Value.Value)
             }).ToArray(),
             AggregationProfiles = table.Aggregations.Select(Compile).ToArray(),
+            InteropView = table.InteropView is null ? null : new InteropViewDeclaration(table.InteropView),
             Scope = table.Scope == SchemaScope.Scoped ? ScopePolicy.Scoped : ScopePolicy.Global,
             ForeignColumns = table.ForeignColumns == SchemaForeignColumns.TolerateDatabaseSupplied
                 ? ForeignColumnPolicy.TolerateDatabaseSupplied

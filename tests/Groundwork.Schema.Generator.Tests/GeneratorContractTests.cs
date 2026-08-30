@@ -12,6 +12,51 @@ namespace Groundwork.Schema.Generator.Tests;
 public sealed class GeneratorContractTests
 {
     [Fact]
+    public void Blank_interop_view_attribute_is_a_named_generator_diagnostic()
+    {
+        const string source = """
+            using Groundwork.Schema;
+
+            [GwTable("orders", InteropView = " ")]
+            public partial class Order
+            {
+                [GwKey, GwColumn(Required = true)] public string Id { get; set; } = "";
+            }
+            """;
+
+        var result = Run(source);
+
+        var diagnostic = Assert.Single(result.Diagnostics, item => item.Id == "GW_SCHEMA_TABLE_003");
+        Assert.Contains("interop view cannot be empty", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Interop_view_attribute_reaches_the_generated_runtime_unit()
+    {
+        const string source = """
+            using Groundwork.Schema;
+
+            [GwTable("orders", InteropView = "reporting_orders")]
+            public partial class Order
+            {
+                [GwKey, GwColumn(Required = true)] public string Id { get; set; } = "";
+            }
+            """;
+
+        var result = Run(source);
+
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(result.OutputCompilation.GetDiagnostics(), diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var canonical = (string)result.OutputCompilation.Assembly.GetAttributes()
+            .Single(attribute => attribute.AttributeClass?.ToDisplayString() == typeof(GroundworkSchemaAttribute).FullName)
+            .ConstructorArguments[0].Value!;
+        Assert.Contains("\"interopView\":\"reporting_orders\"", canonical, StringComparison.Ordinal);
+
+        var definition = Definition(result, "OrderStorageUnit");
+        Assert.Equal("reporting_orders", definition.InteropView!.Name);
+    }
+
+    [Fact]
     public void Attributes_generate_one_runtime_unit_and_a_matching_assembly_fingerprint()
     {
         const string source = """

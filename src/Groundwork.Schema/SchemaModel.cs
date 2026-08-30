@@ -374,6 +374,44 @@ public sealed record SchemaEvolution
 
 public sealed record SchemaTable
 {
+    // Retain the pre-interop-view CLR signature for source generators and other design-time
+    // consumers that can remain loaded while Groundwork.Schema is rebuilt.
+    public SchemaTable(
+        string name,
+        IEnumerable<SchemaColumn> columns,
+        IEnumerable<string> key,
+        IEnumerable<SchemaIndex>? indexes,
+        SchemaScope scope,
+        SchemaConcurrency? concurrency,
+        SchemaTimestamps timestamps,
+        SchemaRetention? retention,
+        SchemaIdempotency? appendIdempotency,
+        SchemaIdempotency? retentionIdempotency,
+        IEnumerable<SchemaAggregation>? aggregations,
+        string? id,
+        SchemaForeignColumns foreignColumns,
+        IEnumerable<SchemaReference>? references,
+        IEnumerable<SchemaCheck>? checks)
+        : this(
+            name,
+            columns,
+            key,
+            indexes,
+            scope,
+            concurrency,
+            timestamps,
+            retention,
+            appendIdempotency,
+            retentionIdempotency,
+            aggregations,
+            id,
+            foreignColumns,
+            references,
+            checks,
+            interopView: null)
+    {
+    }
+
     public SchemaTable(
         string name,
         IEnumerable<SchemaColumn> columns,
@@ -389,7 +427,8 @@ public sealed record SchemaTable
         string? id = null,
         SchemaForeignColumns foreignColumns = SchemaForeignColumns.Refuse,
         IEnumerable<SchemaReference>? references = null,
-        IEnumerable<SchemaCheck>? checks = null)
+        IEnumerable<SchemaCheck>? checks = null,
+        string? interopView = null)
     {
         Name = string.IsNullOrWhiteSpace(name) ? throw new ArgumentException("A non-empty value is required.", nameof(name)) : name;
         Id = string.IsNullOrWhiteSpace(id) ? null : id;
@@ -406,6 +445,11 @@ public sealed record SchemaTable
         ForeignColumns = foreignColumns;
         References = Ordered(references ?? Array.Empty<SchemaReference>(), nameof(references), reference => reference.Name);
         Checks = Ordered(checks ?? Array.Empty<SchemaCheck>(), nameof(checks), check => check.Name);
+        InteropView = interopView is null
+            ? null
+            : string.IsNullOrWhiteSpace(interopView)
+                ? throw new ArgumentException("An interop view requires a non-empty name.", nameof(interopView))
+                : interopView;
     }
 
     public string Name { get; }
@@ -438,6 +482,9 @@ public sealed record SchemaTable
 
     /// <summary>Portable checks held in canonical name order.</summary>
     public IReadOnlyList<SchemaCheck> Checks { get; }
+
+    /// <summary>The optional provider-native reporting view name.</summary>
+    public string? InteropView { get; }
 
     /// <summary>
     /// How a deployed column this table does not declare is treated. Declared here so the

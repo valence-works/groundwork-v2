@@ -41,6 +41,16 @@ executed in one durable transaction with fencing before and after the batch; a f
 rolls back the complete batch. Dialect callbacks do not commit or roll back the transaction owned
 by the shared executor.
 
+An opted-in interop reporting view is a provider-owned schema definition. The shared relational
+dialect emits the view from the declared physical columns, while the provider may override the
+column expression for an idiomatic reporting type. View creation, replacement, and removal are
+protected deployment-tool operations and must be represented in the target fingerprint and applied
+ledger. A scoped view must retain `__groundwork_scope` and is an all-scopes read surface; database
+permissions, not the view itself, provide authorization. Providers without one stable relational
+catalog view must refuse the declaration before mutation. MySQL/MariaDB may implicitly commit DDL,
+so its implementation documents reconciliation rather than promising full rollback for a failed
+multi-operation batch.
+
 The provider project references the substrate, `Groundwork.Store`, and `Groundwork.Kernel`
 normally. It must not rely on `InternalsVisibleTo`, internal helper types,
 contract-family assemblies, or provider assumptions in the substrate. The

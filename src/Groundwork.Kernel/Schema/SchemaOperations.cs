@@ -28,7 +28,10 @@ public enum PhysicalSchemaOperationKind
     CreatePhysicalForeignKey,
 
     /// <summary>Adds one declared portable database check.</summary>
-    CreatePhysicalCheckConstraint
+    CreatePhysicalCheckConstraint,
+
+    /// <summary>Removes one provider-owned definition from the physical catalog.</summary>
+    DropProviderDefinition
 }
 
 /// <summary>One immutable semantic schema operation with deterministic identity and fingerprint.</summary>
@@ -97,7 +100,8 @@ public abstract class PhysicalSchemaOperation
         PhysicalSchemaOperationKind.AlterColumn or
         PhysicalSchemaOperationKind.DropColumn or
         PhysicalSchemaOperationKind.DropIndex or
-        PhysicalSchemaOperationKind.DropPrimaryStorage;
+        PhysicalSchemaOperationKind.DropPrimaryStorage or
+        PhysicalSchemaOperationKind.DropProviderDefinition;
 
     /// <summary>Whether the operation is bookkeeping the applied snapshot never carries.</summary>
     internal static bool IsLedgerExcluded(PhysicalSchemaOperationKind kind) => kind is
@@ -108,7 +112,8 @@ public abstract class PhysicalSchemaOperation
         PhysicalSchemaOperationKind.AlterColumn or
         PhysicalSchemaOperationKind.DropColumn or
         PhysicalSchemaOperationKind.DropIndex or
-        PhysicalSchemaOperationKind.DropPrimaryStorage;
+        PhysicalSchemaOperationKind.DropPrimaryStorage or
+        PhysicalSchemaOperationKind.DropProviderDefinition;
 
     internal static string CreateSlotIdentity(
         PhysicalSchemaOperationKind kind,
@@ -744,8 +749,34 @@ public sealed class ApplyProviderPhysicalSchemaDefinitionOperation : PhysicalSch
             definition.ProviderName,
             definition.Kind,
             definition.Fingerprint,
-            definition.CanonicalDefinition) =>
+            definition.CanonicalDefinition)
+    {
         Definition = definition;
+        RequiresAuthorization = string.Equals(
+            definition.Kind,
+            ProviderPhysicalSchemaDefinitionKinds.InteropView,
+            StringComparison.Ordinal);
+    }
+
+    public ProviderPhysicalSchemaDefinition Definition { get; }
+}
+
+public sealed class DropProviderPhysicalSchemaDefinitionOperation : PhysicalSchemaOperation
+{
+    internal DropProviderPhysicalSchemaDefinitionOperation(ProviderPhysicalSchemaDefinition definition)
+        : base(
+            PhysicalSchemaOperationKind.DropProviderDefinition,
+            definition.SubjectId,
+            definition.SubjectIdentity,
+            null,
+            definition.ProviderName,
+            definition.Kind,
+            definition.Fingerprint,
+            definition.CanonicalDefinition)
+    {
+        Definition = definition;
+        RequiresAuthorization = true;
+    }
 
     public ProviderPhysicalSchemaDefinition Definition { get; }
 }

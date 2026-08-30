@@ -433,6 +433,11 @@ public sealed class MySqlDialect : RelationalDialect
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
     {
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.ApplyProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (!string.Equals(definition.Kind, SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported MySQL/MariaDB provider definition '{definition.Kind}'.");
         RelationalSearchKeyCatalog.Apply(
@@ -448,6 +453,11 @@ public sealed class MySqlDialect : RelationalDialect
         ProviderPhysicalSchemaDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.DropProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (!string.Equals(definition.Kind, SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported MySQL/MariaDB provider definition '{definition.Kind}'.");
         RelationalSearchKeyCatalog.Drop(
@@ -456,6 +466,33 @@ public sealed class MySqlDialect : RelationalDialect
             definition,
             "DELETE FROM `__groundwork_search_key_algorithms` WHERE `table_name`=@table AND `column_name`=@column;");
     }
+
+    protected override string RenderInteropViewExpression(ColumnDefinition column) =>
+        column.Type == PortableType.DateTimeOffset
+            ? $"CAST(TIMESTAMPADD(MICROSECOND, FLOOR(({QuoteIdentifier(column.Name)} - 621355968000000000) / 10.0), '1970-01-01 00:00:00') AS DATETIME(6))"
+            : base.RenderInteropViewExpression(column);
+
+    protected override bool SupportsInteropViewDefinitionInspection => true;
+
+    protected override string? ReadInteropViewBlockingObject(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT TABLE_TYPE FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=@view AND TABLE_TYPE<>'VIEW' LIMIT 1;",
+            "view",
+            viewName);
+
+    protected override string? ReadInteropViewDefinition(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT VIEW_DEFINITION FROM information_schema.views WHERE table_schema=DATABASE() AND table_name=@view;",
+            "view",
+            viewName);
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,
@@ -499,7 +536,7 @@ public sealed class MySqlDialect : RelationalDialect
 
     public override bool TableExists(DbConnection connection, DbTransaction? transaction, string table)
     {
-        using var command = Command(connection, transaction, "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=@table LIMIT 1;");
+        using var command = Command(connection, transaction, "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=@table AND TABLE_TYPE='BASE TABLE' LIMIT 1;");
         Add(command, "table", table);
         return command.ExecuteScalar() is not null;
     }

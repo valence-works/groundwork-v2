@@ -10,6 +10,23 @@ namespace Groundwork.Testing.SelfTests;
 public sealed class InMemoryProviderTests
 {
     [Fact]
+    public void In_memory_schema_refuses_interop_views_before_mutating_its_catalog()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://interop-view-refusal");
+        var unit = StorageUnit.Declare("memory-interop", "memory_interop")
+            .String("id", 64, column => column.Required())
+            .Key("id")
+            .Index("by_id", "id")
+            .InteropView("reporting_memory_interop")
+            .Build();
+
+        var refusal = Assert.Throws<NotSupportedException>(() => connection.Schema.Apply(unit));
+
+        Assert.Contains("no native catalog", refusal.Message, StringComparison.Ordinal);
+        Assert.Empty(connection.Catalog.ReadIndexes(unit.Id));
+    }
+
+    [Fact]
     public void Reference_join_execution_fails_closed_until_the_reference_renderer_lands()
     {
         using var connection = new InMemoryProviderFactory().Create("memory://join-model-guard");

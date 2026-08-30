@@ -10,6 +10,50 @@ namespace Groundwork.SqlServer.Tests;
 public sealed class SqlServerSchemaToolTests : IDisposable
 {
     [SkippableFact]
+    public async Task Authorized_interop_view_preserves_native_datetimeoffset_and_is_not_a_base_table()
+    {
+        var connectionString = LiveSqlServer.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_SQLSERVER_CONNECTION to run SQL Server integration tests.");
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var table = "interop_orders_" + suffix;
+        var view = "reporting_orders_" + suffix;
+        try
+        {
+            var schema = harness.Temp(
+                "sqlserver-interop-view.json",
+                $$"""
+                {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"occurred_at","type":"DateTimeOffset","nullable":false,"length":null,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[],"interopView":"{{view}}"}]}
+                """);
+
+            var safeOnly = await harness.RunAsync(["apply", "--schema", schema, "--safe"], connectionString!);
+            Assert.True(SchemaToolExitCodes.AuthorizationRequired == safeOnly.ExitCode, safeOnly.Reason);
+            var apply = await harness.ApplyAuthorizedAsync(schema, connectionString!);
+            Assert.True(SchemaToolExitCodes.Success == apply.ExitCode, apply.Reason);
+
+            var timestamp = new DateTimeOffset(2026, 8, 30, 10, 11, 12, TimeSpan.FromHours(2)).AddTicks(1_234_567);
+            using var connection = new SqlConnection(connectionString);
+            connection.Open();
+            using (var insert = connection.CreateCommand())
+            {
+                insert.CommandText = $"INSERT INTO [{table}] ([id],[occurred_at]) VALUES ('o-1',@timestamp);";
+                insert.Parameters.AddWithValue("@timestamp", timestamp);
+                insert.ExecuteNonQuery();
+            }
+            using (var read = connection.CreateCommand())
+            {
+                read.CommandText = $"SELECT [occurred_at] FROM [{view}] WHERE [id]='o-1';";
+                Assert.Equal(timestamp, (DateTimeOffset)read.ExecuteScalar()!);
+            }
+            Assert.False(new SqlServerDialect().TableExists(connection, transaction: null, view));
+        }
+        finally
+        {
+            Cleanup(connectionString!, table, view);
+        }
+    }
+
+    [SkippableFact]
     public async Task Discovered_sqlserver_factory_plans_applies_and_reports_status_against_a_live_database()
     {
         var connection = LiveSqlServer.ConnectionString;
@@ -63,7 +107,7 @@ public sealed class SqlServerSchemaToolTests : IDisposable
         }
     }
 
-    private static void Cleanup(string connectionString, string table)
+    private static void Cleanup(string connectionString, string table, string? view = null)
     {
         using var connection = new SqlConnection(connectionString);
         try
@@ -75,7 +119,7 @@ public sealed class SqlServerSchemaToolTests : IDisposable
             return;
         }
         using var command = connection.CreateCommand();
-        command.CommandText = $"""
+        command.CommandText = (view is null ? string.Empty : $"DROP VIEW IF EXISTS [{view}];") + $"""
             DROP TABLE IF EXISTS [{table}];
             IF OBJECT_ID(N'[__groundwork_schema_history]', N'U') IS NOT NULL
                 DELETE FROM [__groundwork_schema_history] WHERE subject_id=@id;

@@ -127,6 +127,16 @@ public sealed class StorageDeclarationBuilder
     }
 
     /// <summary>
+    /// Declares one provider-native reporting view. For a scoped unit the view exposes
+    /// <see cref="ProviderOwnedColumns.Scope"/> and therefore requires database-level read grants.
+    /// </summary>
+    public StorageDeclarationBuilder InteropView(string name)
+    {
+        state.SetInteropView(new InteropViewDeclaration(name));
+        return this;
+    }
+
+    /// <summary>
     /// Coexists with a catalog another tool extends: a deployed column this declaration does not
     /// describe stops being fatal at admission and is reported as a warning instead — but only when
     /// the database supplies a value for it, so a column Groundwork could never write around stays
@@ -482,6 +492,7 @@ internal sealed class StorageDeclarationState
     private ConcurrencyDeclaration concurrency = ConcurrencyDeclaration.None;
     private ScopePolicy scope = ScopePolicy.Global;
     private ForeignColumnPolicy foreignColumns = ForeignColumnPolicy.Refuse;
+    private InteropViewDeclaration? interopView;
     private RetentionDeclaration? retention;
     private AppendIdempotencyDeclaration? appendIdempotency;
     private RetentionIdempotencyDeclaration? retentionIdempotency;
@@ -625,6 +636,9 @@ internal sealed class StorageDeclarationState
 
     public void SetForeignColumns(ForeignColumnPolicy value) => foreignColumns = value;
 
+    public void SetInteropView(InteropViewDeclaration declaration) =>
+        interopView = declaration ?? throw new ArgumentNullException(nameof(declaration));
+
     public void SetRetention(RetentionDeclaration declaration) => retention = declaration ?? throw new ArgumentNullException(nameof(declaration));
 
     public void SetAppendIdempotency(AppendIdempotencyDeclaration declaration) =>
@@ -648,6 +662,7 @@ internal sealed class StorageDeclarationState
                 Value = new PortableDefault(check.Value.Value)
             }).ToArray()),
             AggregationProfiles = Array.AsReadOnly(aggregationProfiles.Select(AggregationProfileSnapshot.Capture).ToArray()),
+            InteropView = interopView is null ? null : new InteropViewDeclaration(interopView.Name),
             Scope = scope,
             ForeignColumns = foreignColumns,
             Concurrency = concurrency,

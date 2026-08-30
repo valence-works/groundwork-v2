@@ -319,6 +319,11 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
     internal static StorageUnit Prepare(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
+        if (desired.InteropView is not null)
+        {
+            throw new NotSupportedException(
+                "The in-memory provider has no native catalog for an interop view. Declare interop views only for relational providers.");
+        }
         ProviderOwnedColumns.ValidateLogicalDeclaration(desired);
         ConcurrencyDeclaration.ValidateDeclaration(desired);
         var portability = PortabilityValidator.Validate(desired);

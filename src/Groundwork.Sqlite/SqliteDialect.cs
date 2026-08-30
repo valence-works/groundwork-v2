@@ -277,6 +277,11 @@ internal sealed class SqliteDialect : RelationalDialect
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
     {
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.ApplyProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported SQLite provider definition '{definition.Kind}'.");
         RelationalSearchKeyCatalog.Apply(
@@ -292,6 +297,11 @@ internal sealed class SqliteDialect : RelationalDialect
         ProviderPhysicalSchemaDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
+        if (string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+        {
+            base.DropProviderDefinition(connection, transaction, definition);
+            return;
+        }
         if (!string.Equals(definition.Kind, RelationalDialect.SearchKeyDefinitionKind, StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported SQLite provider definition '{definition.Kind}'.");
         RelationalSearchKeyCatalog.Drop(
@@ -300,6 +310,33 @@ internal sealed class SqliteDialect : RelationalDialect
             definition,
             "DELETE FROM \"__groundwork_search_key_algorithms\" WHERE \"table_name\"=@table AND \"column_name\"=@column;");
     }
+
+    protected override string RenderInteropViewExpression(ColumnDefinition column) =>
+        column.Type == PortableType.Decimal
+            ? $"CAST({QuoteIdentifier(column.Name)} AS NUMERIC)"
+            : base.RenderInteropViewExpression(column);
+
+    protected override bool SupportsInteropViewDefinitionInspection => true;
+
+    protected override string? ReadInteropViewBlockingObject(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT type FROM sqlite_master WHERE name=@view AND type<>'view' LIMIT 1;",
+            "view",
+            viewName);
+
+    protected override string? ReadInteropViewDefinition(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => ReadCatalogText(
+            connection,
+            transaction,
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name=@view;",
+            "view",
+            viewName);
 
     public override IReadOnlyDictionary<string, string> ReadDerivedSearchKeyAlgorithms(
         DbConnection connection,

@@ -482,6 +482,61 @@ public abstract class RelationalDialect
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
     {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+            return;
+
+        PreflightProviderDefinition(connection, transaction, definition);
+        var view = RelationalInteropViewDefinition.Parse(definition);
+        ExecuteDefinition(connection, transaction, $"DROP VIEW IF EXISTS {QuoteIdentifier(view.ViewName)};");
+        var projection = string.Join(", ", view.Columns.Select(column =>
+        {
+            var definition = column.ToColumn();
+            return $"{RenderInteropViewExpression(definition)} AS {QuoteIdentifier(definition.Name)}";
+        }));
+        ExecuteDefinition(
+            connection,
+            transaction,
+            $"CREATE VIEW {QuoteIdentifier(view.ViewName)} AS SELECT {projection} " +
+            $"FROM {QuoteIdentifier(view.SourceName)} WHERE '{InteropViewMarker(definition)}' = '{InteropViewMarker(definition)}';");
+    }
+
+    /// <summary>Maps one physical column into its provider-idiomatic reporting representation.</summary>
+    protected virtual string RenderInteropViewExpression(ColumnDefinition column) => QuoteIdentifier(column.Name);
+
+    /// <summary>
+    /// Refuses an unsupported or colliding provider definition before an operation batch performs
+    /// any schema mutation. External dialects that opt into the shared interop-view emitter must
+    /// also opt into exact live-definition inspection.
+    /// </summary>
+    public virtual void PreflightProviderDefinition(
+        DbConnection connection,
+        DbTransaction? transaction,
+        ProviderPhysicalSchemaDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+            return;
+        if (!SupportsInteropViewDefinitionInspection)
+            throw new InvalidOperationException(
+                $"Relational dialect '{ProviderName}' cannot inspect an interop view definition and therefore refuses to create one.");
+        var view = RelationalInteropViewDefinition.Parse(definition);
+        string? blocker;
+        try
+        {
+            blocker = ReadInteropViewBlockingObject(connection, transaction, view.ViewName);
+        }
+        catch (DbException exception)
+        {
+            throw new InvalidOperationException(
+                $"Interop view name '{view.ViewName}' could not be preflighted against the provider catalog.", exception);
+        }
+        if (blocker is not null)
+            throw new InvalidOperationException(
+                $"GW-PORT-015: Interop view '{view.ViewName}' collides with an existing {blocker}.");
     }
 
     /// <summary>
@@ -496,6 +551,13 @@ public abstract class RelationalDialect
         DbTransaction transaction,
         ProviderPhysicalSchemaDefinition definition)
     {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal))
+            return;
+        var view = RelationalInteropViewDefinition.Parse(definition);
+        ExecuteDefinition(connection, transaction, $"DROP VIEW IF EXISTS {QuoteIdentifier(view.ViewName)};");
     }
 
     public virtual void ValidateTarget(
@@ -503,6 +565,90 @@ public abstract class RelationalDialect
         DbTransaction? transaction,
         PhysicalSchemaTarget target)
     {
+        foreach (var definition in target.ProviderDefinitions.Where(definition =>
+                     string.Equals(definition.Kind, RelationalInteropViewDefinition.Kind, StringComparison.Ordinal)))
+        {
+            var view = RelationalInteropViewDefinition.Parse(definition);
+            if (!SupportsInteropViewDefinitionInspection)
+                throw new InvalidOperationException(
+                    $"Relational dialect '{ProviderName}' cannot inspect interop view '{view.ViewName}'.");
+            string? liveDefinition;
+            try
+            {
+                liveDefinition = ReadInteropViewDefinition(connection, transaction, view.ViewName);
+            }
+            catch (DbException exception)
+            {
+                throw new InvalidOperationException(
+                    $"Interop view '{view.ViewName}' could not be inspected.", exception);
+            }
+            if (liveDefinition is null || !liveDefinition.Contains(InteropViewMarker(definition), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Interop view '{view.ViewName}' is missing or its deployed definition has drifted.");
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            var projection = string.Join(", ", view.Columns.Select(column => QuoteIdentifier(column.Name)));
+            command.CommandText = $"SELECT {projection} FROM {QuoteIdentifier(view.ViewName)} WHERE 1=0;";
+            try
+            {
+                using var reader = command.ExecuteReader();
+            }
+            catch (DbException exception)
+            {
+                throw new InvalidOperationException(
+                    $"Interop view '{view.ViewName}' is missing or unreadable.", exception);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the provider's catalog representation of a view definition. Shipped relational
+    /// providers override this so target validation can distinguish a same-shaped replacement
+    /// from the exact provider definition Groundwork deployed.
+    /// </summary>
+    protected virtual bool SupportsInteropViewDefinitionInspection => false;
+
+    /// <summary>
+    /// Returns the provider object kind that prevents a view from owning <paramref name="viewName"/>,
+    /// or null when the name is free or already names a replaceable ordinary view.
+    /// </summary>
+    protected virtual string? ReadInteropViewBlockingObject(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => TableExists(connection, transaction, viewName) ? "base table" : null;
+
+    protected virtual string? ReadInteropViewDefinition(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string viewName) => null;
+
+    /// <summary>Reads one nullable text value from a provider catalog query.</summary>
+    protected static string? ReadCatalogText(
+        DbConnection connection,
+        DbTransaction? transaction,
+        string sql,
+        string parameterName,
+        string value)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = parameterName;
+        parameter.Value = value;
+        command.Parameters.Add(parameter);
+        return command.ExecuteScalar() as string;
+    }
+
+    private static string InteropViewMarker(ProviderPhysicalSchemaDefinition definition) =>
+        "groundwork:" + definition.Fingerprint;
+
+    private static void ExecuteDefinition(DbConnection connection, DbTransaction transaction, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
     }
 }
 

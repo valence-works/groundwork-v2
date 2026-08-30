@@ -8,6 +8,50 @@ namespace Groundwork.PostgreSql.Tests;
 public sealed class PostgreSqlSchemaToolTests : IDisposable
 {
     [SkippableFact]
+    public async Task Authorized_interop_view_converts_ticks_to_timestamptz_and_is_not_a_base_table()
+    {
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var table = "interop_orders_" + suffix;
+        var view = "reporting_orders_" + suffix;
+        var schema = harness.Temp(
+            "postgresql-interop-view.json",
+            $$"""
+            {"tables":[{"name":"{{table}}","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"occurred_at","type":"DateTimeOffset","nullable":false,"length":null,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[],"scope":"Scoped","interopView":"{{view}}"}]}
+            """);
+
+        var safeOnly = await harness.RunAsync(
+            ["apply", "--schema", schema, "--safe"],
+            database.ConnectionString);
+        Assert.True(SchemaToolExitCodes.AuthorizationRequired == safeOnly.ExitCode, safeOnly.Reason);
+        var apply = await harness.ApplyAuthorizedAsync(schema, database.ConnectionString);
+        Assert.True(SchemaToolExitCodes.Success == apply.ExitCode, apply.Reason);
+
+        var timestamp = DateTimeOffset.UnixEpoch.AddTicks(-1);
+        using var connection = new NpgsqlConnection(database.ConnectionString);
+        connection.Open();
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = $"INSERT INTO \"{table}\" (\"id\",\"occurred_at\",\"__groundwork_scope\") VALUES ('o-1',@ticks,'tenant-a');";
+            insert.Parameters.AddWithValue("ticks", timestamp.Ticks);
+            insert.ExecuteNonQuery();
+        }
+        using (var read = connection.CreateCommand())
+        {
+            read.CommandText = $"SELECT occurred_at,\"__groundwork_scope\" FROM \"{view}\" WHERE id='o-1';";
+            using var reader = read.ExecuteReader();
+            Assert.True(reader.Read());
+            var projected = reader.GetFieldValue<DateTime>(0);
+            Assert.Equal(DateTimeKind.Utc, projected.Kind);
+            Assert.Equal(DateTimeOffset.UnixEpoch.AddTicks(-10).UtcTicks, projected.Ticks);
+            Assert.Equal("tenant-a", reader.GetString(1));
+        }
+        Assert.False(new PostgreSqlDialect().TableExists(connection, transaction: null, view));
+        var status = await harness.RunAsync(["status", "--schema", schema], database.ConnectionString);
+        Assert.Equal(SchemaToolExitCodes.Success, status.ExitCode);
+    }
+
+    [SkippableFact]
     public async Task Discovered_postgresql_factory_plans_applies_and_reports_status_against_a_live_database()
     {
         using var database = PostgreSqlFixture.OpenOrSkip();

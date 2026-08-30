@@ -167,7 +167,20 @@ internal sealed class SchemaEvolutionAnalysis
         PlanRemovals(target, appliedSubject, desiredColumns, supersessions.WithheldColumns, operations, refusals);
 
         MarkSatisfied(appliedSubject, target.Subject, desired, desiredColumnIds, operations, satisfied);
-        ReportUnevolvedApplied(desired, appliedByLogicalSlot, desiredColumnIds, operations, refusals);
+        var removableProviderSlots = applied.Snapshot.ProviderDefinitions
+            .Where(definition => string.Equals(
+                definition.Kind,
+                ProviderPhysicalSchemaDefinitionKinds.InteropView,
+                StringComparison.Ordinal))
+            .Select(definition => new ApplyProviderPhysicalSchemaDefinitionOperation(definition).SlotIdentity)
+            .ToHashSet(StringComparer.Ordinal);
+        ReportUnevolvedApplied(
+            desired,
+            appliedByLogicalSlot,
+            desiredColumnIds,
+            removableProviderSlots,
+            operations,
+            refusals);
         return new SchemaEvolutionAnalysis(
             [.. refusals],
             [.. operations],
@@ -382,6 +395,7 @@ internal sealed class SchemaEvolutionAnalysis
         IReadOnlyList<PhysicalSchemaOperation> desired,
         IReadOnlyDictionary<string, PhysicalSchemaAppliedOperation> appliedByLogicalSlot,
         IReadOnlyDictionary<string, string> desiredColumnIds,
+        IReadOnlySet<string> removableProviderSlots,
         IReadOnlyList<PhysicalSchemaOperation> evolution,
         List<SchemaRefusal> refusals)
     {
@@ -433,6 +447,11 @@ internal sealed class SchemaEvolutionAnalysis
 
             if (desiredSlots.Contains(slot) ||
                 (renamesStorage && operation.Kind == PhysicalSchemaOperationKind.ApplyProviderDefinition) ||
+                // Only interop views have a provider-neutral protected drop. Other provider
+                // definitions retain the established fail-closed behavior until their executor
+                // defines an equally explicit removal contract.
+                (operation.Kind == PhysicalSchemaOperationKind.ApplyProviderDefinition &&
+                 removableProviderSlots.Contains(slot)) ||
                 operation.Kind is PhysicalSchemaOperationKind.CreatePrimaryStorage or
                     PhysicalSchemaOperationKind.AddColumn or
                     PhysicalSchemaOperationKind.BackfillColumn or

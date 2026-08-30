@@ -92,6 +92,9 @@ public sealed class GwTableAttribute : Attribute
     public string? ConcurrencyToken { get; set; }
     public SchemaTimestamps Timestamps { get; set; } = SchemaTimestamps.None;
 
+    /// <summary>Opts the table into one named provider-native reporting view.</summary>
+    public string? InteropView { get; set; }
+
     /// <summary>
     /// How a deployed column this table does not declare is treated. Set it only to coexist with a
     /// catalog another tool extends; it never covers a column the database will not fill in.

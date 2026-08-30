@@ -701,7 +701,9 @@ public enum SchemaChangeKind
     DropIndex,
     DropStorageUnit,
     CreateForeignKey,
-    CreateCheckConstraint
+    CreateCheckConstraint,
+    CreateInteropView,
+    DropInteropView
 }
 
 public sealed record SchemaChange(SchemaChangeKind Kind, string Identity);

@@ -308,6 +308,9 @@ public sealed class RelationalSchemaExecutor
             case ApplyProviderPhysicalSchemaDefinitionOperation applyProvider:
                 dialect.ApplyProviderDefinition(connection, transaction, applyProvider.Definition);
                 break;
+            case DropProviderPhysicalSchemaDefinitionOperation dropProvider:
+                dialect.DropProviderDefinition(connection, transaction, dropProvider.Definition);
+                break;
             case ValidatePhysicalSchemaOperation validate:
                 ValidateTarget(connection, transaction, validate.Target);
                 break;
@@ -618,6 +621,12 @@ public sealed class RelationalSchemaExecutor
             try
             {
                 dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);
+                foreach (var definition in operations
+                             .OfType<ApplyProviderPhysicalSchemaDefinitionOperation>()
+                             .Select(operation => operation.Definition))
+                {
+                    dialect.PreflightProviderDefinition(lease.Connection, transaction, definition);
+                }
                 foreach (var operation in operations)
                 {
                     dialect.AssertFence(lease.Connection, transaction, target, lease.Owner, lease.Fence);

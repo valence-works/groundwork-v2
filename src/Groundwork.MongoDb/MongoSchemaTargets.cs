@@ -40,6 +40,12 @@ public static class MongoSchemaTargets
     public static StorageUnit Physicalize(StorageUnit source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (source.InteropView is not null)
+        {
+            throw new NotSupportedException(
+                "MongoDB cannot materialize one safe per-unit interop view because scoped units use separate physical collections. " +
+                "Declare interop views only for relational providers.");
+        }
         ProviderOwnedColumns.ValidateLogicalDeclaration(source);
         PortabilityValidator.EnsurePortableDefaults(source);
         var expanded = SearchKeyProjection.Expand(source);

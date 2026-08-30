@@ -74,7 +74,62 @@ public sealed class SchemaChangeMappingTests
         Assert.StartsWith("GW-SCHEMA-015 at schema.scope:", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void An_interop_view_creation_maps_to_the_public_create_kind()
+    {
+        var unit = Orders(includeLegacy: false) with
+        {
+            InteropView = new InteropViewDeclaration("reporting_orders")
+        };
+        var target = Target(unit, [InteropViewDefinition(unit, "v1")]);
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, PhysicalSchemaHistoryState.Empty, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(
+            SchemaChangeKind.CreateInteropView,
+            Assert.Single(SchemaChangeMapping.Describe(plan.Operations), change =>
+                change.Kind == SchemaChangeKind.CreateInteropView).Kind);
+    }
+
+    [Fact]
+    public void An_interop_view_removal_maps_to_the_public_drop_kind()
+    {
+        var oldUnit = Orders(includeLegacy: false) with
+        {
+            InteropView = new InteropViewDeclaration("reporting_orders")
+        };
+        var executor = new RecordingExecutor();
+        PhysicalSchemaApplication.Apply(
+            Target(oldUnit, [InteropViewDefinition(oldUnit, "v1")]),
+            executor,
+            DateTimeOffset.UnixEpoch,
+            _ => PhysicalSchemaPlanAuthorization.Allow);
+
+        var target = Target(Orders(includeLegacy: false));
+        var plan = PhysicalSchemaDiffPlanner.Plan(
+            target,
+            PhysicalSchemaHistoryState.FromApplied(executor.AppliedState!),
+            DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(
+            SchemaChangeKind.DropInteropView,
+            Assert.Single(SchemaChangeMapping.Describe(plan.Operations), change =>
+                change.Kind == SchemaChangeKind.DropInteropView).Kind);
+    }
+
     private static PhysicalSchemaTarget Target(StorageUnit unit) => new(new SchemaSubject(unit), Provider);
+
+    private static PhysicalSchemaTarget Target(
+        StorageUnit unit,
+        IEnumerable<ProviderPhysicalSchemaDefinition> definitions) =>
+        new(new SchemaSubject(unit), Provider, definitions);
+
+    private static ProviderPhysicalSchemaDefinition InteropViewDefinition(StorageUnit unit, string canonical) =>
+        new(
+            Provider.Name,
+            unit.Id,
+            ProviderPhysicalSchemaDefinitionKinds.InteropView,
+            unit.InteropView!.Name,
+            canonical);
 
     private static StorageUnit Orders(bool includeLegacy) => new()
     {

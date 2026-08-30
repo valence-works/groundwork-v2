@@ -98,20 +98,21 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         new(
             new SchemaSubject(physical),
             Identity,
+            RelationalInteropViewDefinition.AppendTo(Identity.Name, physical,
             [
                 new ProviderPhysicalSchemaDefinition(
-                    "SQLServer",
+                    Identity.Name,
                     physical.Id,
                     BatchTypeKind,
                     BatchTypeName(physical),
                     BatchTypeCanonicalDefinition(physical)),
                 .. physical.DerivedColumns.Select(derived => new ProviderPhysicalSchemaDefinition(
-                    "SQLServer",
+                    Identity.Name,
                     physical.Id,
                     RelationalDialect.SearchKeyDefinitionKind,
                     physical.Name + RelationalDialect.SearchKeyDefinitionSeparator + derived.Name,
                     derived.AlgorithmId ?? throw new InvalidOperationException($"Derived search-key column '{derived.Name}' is missing its algorithm identity.")))
-            ]);
+            ]));
 
     internal static string BatchTypeName(StorageUnit physical)
     {

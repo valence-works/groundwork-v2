@@ -384,6 +384,23 @@ public sealed class PortabilityTests
         Assert.Contains(name.Length == 0 ? "<empty>" : name, diagnostic.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Interop_view_names_cannot_collide_with_their_storage_unit()
+    {
+        var unit = Unit(
+            [Column("id", PortableType.Guid, nullable: false)],
+            name: "reporting_orders",
+            key: ["id"]) with
+        {
+            InteropView = new InteropViewDeclaration("REPORTING_ORDERS")
+        };
+
+        var diagnostic = Assert.Single(Validate(unit).Refusals, item => item.Code == "GW-PORT-015");
+
+        Assert.Equal("interopView.name", diagnostic.Path);
+        Assert.Contains("collides", diagnostic.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("__groundwork_scope")]
     [InlineData("__groundwork_version")]

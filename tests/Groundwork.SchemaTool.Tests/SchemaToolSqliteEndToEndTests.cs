@@ -2,6 +2,7 @@ using System.Text.Json;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Sqlite;
+using Groundwork.Store;
 using Groundwork.Testing;
 using Microsoft.Data.Sqlite;
 using Xunit;
@@ -10,6 +11,152 @@ namespace Groundwork.SchemaTool.Tests;
 
 public sealed class SchemaToolSqliteEndToEndTests : IDisposable
 {
+    [Fact]
+    public async Task Interop_view_requires_exact_authorization_and_exposes_only_typed_application_and_scope_columns()
+    {
+        const string schemaDocument =
+            """
+            {"tables":[{"name":"reporting_orders","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"},{"name":"total","type":"Decimal","nullable":false,"length":null,"precision":18,"scale":4,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[],"scope":"Scoped","interopView":"reporting_orders_view"}]}
+            """;
+        var schema = harness.Temp("interop-view.json", schemaDocument);
+        var database = Path.Combine(harness.Root, "interop-view.db");
+        var connectionString = $"Data Source={database}";
+        File.Create(database).Dispose();
+        var unit = StorageUnit.Declare("reporting_orders", "reporting_orders")
+            .String("id", 64, column => column.Required())
+            .Decimal("total", 18, 4, column => column.Required())
+            .Key("id")
+            .Scoped()
+            .InteropView("reporting_orders_view")
+            .Build();
+
+        using (var runtime = new SqliteProviderFactory().Create(connectionString))
+        {
+            var refusal = Assert.Throws<InvalidOperationException>(() => runtime.Schema.Apply(unit));
+            Assert.Contains("GW-SCHEMA-010", refusal.Message, StringComparison.Ordinal);
+        }
+
+        var plan = await harness.RunAsync(["plan", "--schema", schema], connectionString);
+        Assert.True(SchemaToolExitCodes.PendingChanges == plan.ExitCode, plan.Reason);
+        Assert.Contains("ApplyProviderDefinition", PendingOperationKinds(plan));
+
+        var safeOnly = await harness.RunAsync(["apply", "--schema", schema, "--safe"], connectionString);
+        Assert.True(SchemaToolExitCodes.AuthorizationRequired == safeOnly.ExitCode, safeOnly.Reason);
+
+        var apply = await harness.ApplyAuthorizedAsync(schema, connectionString);
+        Assert.True(SchemaToolExitCodes.Success == apply.ExitCode, apply.Reason);
+
+        using (var store = new SqliteProviderFactory().Create(connectionString))
+        {
+            Assert.Equal(WriteOutcomeStatus.Inserted, store
+                .OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-a")))
+                .Insert(new StorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = "order-a",
+                    ["total"] = 12.3400m
+                })).Status);
+            Assert.Equal(WriteOutcomeStatus.Inserted, store
+                .OpenSession(unit, StorageAccess.Scoped(new StorageScope("tenant-b")))
+                .Insert(new StorageValues(new Dictionary<string, object?>
+                {
+                    ["id"] = "order-b",
+                    ["total"] = 98.7654m
+                })).Status);
+        }
+
+        using var raw = new SqliteConnection(connectionString);
+        raw.Open();
+        RegisterReportingCollations(raw);
+        using (var columns = raw.CreateCommand())
+        {
+            columns.CommandText = "SELECT name FROM pragma_table_info('reporting_orders_view') ORDER BY cid;";
+            using var reader = columns.ExecuteReader();
+            var names = new List<string>();
+            while (reader.Read()) names.Add(reader.GetString(0));
+            Assert.Equal(["id", "total", "__groundwork_scope"], names);
+        }
+        using (var rows = raw.CreateCommand())
+        {
+            rows.CommandText = "SELECT id,total,__groundwork_scope,typeof(total) FROM reporting_orders_view ORDER BY id;";
+            using var reader = rows.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal("order-a", reader.GetString(0));
+            Assert.Equal(12.34d, reader.GetDouble(1), precision: 4);
+            Assert.Equal("tenant-a", reader.GetString(2));
+            Assert.Equal("real", reader.GetString(3));
+            Assert.True(reader.Read());
+            Assert.Equal("order-b", reader.GetString(0));
+            Assert.Equal("tenant-b", reader.GetString(2));
+            Assert.False(reader.Read());
+        }
+        using (var tamper = raw.CreateCommand())
+        {
+            tamper.CommandText =
+                "DROP VIEW reporting_orders_view; " +
+                "CREATE VIEW reporting_orders_view AS " +
+                "SELECT id,total,__groundwork_scope FROM reporting_orders;";
+            tamper.ExecuteNonQuery();
+        }
+        raw.Close();
+
+        var drift = await harness.RunAsync(["status", "--schema", schema], connectionString);
+        Assert.True(SchemaToolExitCodes.ValidationFailed == drift.ExitCode, drift.Reason);
+        raw.Open();
+        RegisterReportingCollations(raw);
+        using (var simulateCommittedRemoval = raw.CreateCommand())
+        {
+            simulateCommittedRemoval.CommandText = "DROP VIEW reporting_orders_view;";
+            simulateCommittedRemoval.ExecuteNonQuery();
+        }
+        raw.Close();
+
+        var withoutView = harness.Temp(
+            "interop-view-removed.json",
+            schemaDocument.Replace(",\"interopView\":\"reporting_orders_view\"", string.Empty, StringComparison.Ordinal));
+        var removalPlan = await harness.RunAsync(["plan", "--schema", withoutView], connectionString);
+        Assert.True(SchemaToolExitCodes.PendingChanges == removalPlan.ExitCode, removalPlan.Reason);
+        Assert.Contains("DropProviderDefinition", PendingOperationKinds(removalPlan));
+        var remove = await harness.ApplyAuthorizedAsync(withoutView, connectionString);
+        Assert.True(SchemaToolExitCodes.Success == remove.ExitCode, remove.Reason);
+
+        using var catalog = new SqliteConnection(connectionString);
+        catalog.Open();
+        using var objects = catalog.CreateCommand();
+        objects.CommandText =
+            "SELECT type FROM sqlite_master WHERE name IN ('reporting_orders','reporting_orders_view') ORDER BY type;";
+        using var objectReader = objects.ExecuteReader();
+        Assert.True(objectReader.Read());
+        Assert.Equal("table", objectReader.GetString(0));
+        Assert.False(objectReader.Read());
+        catalog.Close();
+
+        var collisionDatabase = Path.Combine(harness.Root, "interop-view-collision.db");
+        File.Create(collisionDatabase).Dispose();
+        var collisionConnectionString = $"Data Source={collisionDatabase}";
+        using var collisionCatalog = new SqliteConnection(collisionConnectionString);
+        collisionCatalog.Open();
+        using (var collision = collisionCatalog.CreateCommand())
+        {
+            collision.CommandText =
+                "CREATE TABLE external_anchor (id TEXT); " +
+                "CREATE INDEX reporting_orders_view ON external_anchor(id);";
+            collision.ExecuteNonQuery();
+        }
+        collisionCatalog.Close();
+        var collisionApply = await harness.ApplyAuthorizedAsync(schema, collisionConnectionString);
+        Assert.Equal(SchemaToolExitCodes.ExecutionFailed, collisionApply.ExitCode);
+        collisionCatalog.Open();
+        using var collisionObjects = collisionCatalog.CreateCommand();
+        collisionObjects.CommandText =
+            "SELECT name,type FROM sqlite_master " +
+            "WHERE name IN ('reporting_orders','reporting_orders_view') ORDER BY name;";
+        using var collisionReader = collisionObjects.ExecuteReader();
+        Assert.True(collisionReader.Read());
+        Assert.Equal("reporting_orders_view", collisionReader.GetString(0));
+        Assert.Equal("index", collisionReader.GetString(1));
+        Assert.False(collisionReader.Read());
+    }
+
     [Fact]
     public async Task Discovered_sqlite_factory_plans_applies_and_reports_status_against_a_real_file_database()
     {
@@ -187,6 +334,19 @@ public sealed class SchemaToolSqliteEndToEndTests : IDisposable
         var count = Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         SqliteConnection.ClearPool(connection);
         return count;
+    }
+
+    private static string[] PendingOperationKinds(SchemaToolCliRun run) =>
+        run.Report.RootElement.GetProperty("pendingOperations").EnumerateArray()
+            .Select(operation => operation.GetProperty("kind").GetString()!)
+            .ToArray();
+
+    private static void RegisterReportingCollations(SqliteConnection connection)
+    {
+        connection.CreateCollation("GROUNDWORK_UTF16_ORDINAL", static (left, right) => string.CompareOrdinal(left, right));
+        connection.CreateCollation("GROUNDWORK_DECIMAL_18_4", static (left, right) =>
+            decimal.Parse(left, System.Globalization.CultureInfo.InvariantCulture)
+                .CompareTo(decimal.Parse(right, System.Globalization.CultureInfo.InvariantCulture)));
     }
 
     private readonly SchemaToolCliHarness harness = new(
