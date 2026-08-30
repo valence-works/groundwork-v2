@@ -21,10 +21,14 @@ unit-of-work commit. The connection gate that serializes write transactions acro
 one provider connection is a `SemaphoreSlim` rather than a monitor, because the asynchronous write
 path holds it across an await.
 
-The provider uses `sp_getapplock` plus a durable fence/history pair for schema coordination and
+The provider uses one database-scoped `sp_getapplock` plus a per-target durable fence/history pair
+for schema coordination, so different declarations cannot deadlock each other through SQL Server's
+shared catalog. Earlier previews used target-specific lock resources and do not coordinate with the
+database-scoped resource; during a rolling upgrade, pre-apply declarations or allow only one release
+line to apply schema until every schema-applying instance has been updated. The provider uses
 serializable write transactions for optimistic concurrency. The conformance suite runs against the
-server named by `GROUNDWORK_SQLSERVER_CONNECTION` and skips without one, like every other live
-suite: CI proves it in the jobs that provision a SQL Server, not in the ones that do not.
+server named by `GROUNDWORK_SQLSERVER_CONNECTION` and skips without one, like every other live suite:
+CI proves it in the jobs that provision a SQL Server, not in the ones that do not.
 
 Folded prefix indexes target provider-owned ASCII search-key columns. SQL Server validates their
 physical key budget against the logical source width using the declared expansion factor: `5x`

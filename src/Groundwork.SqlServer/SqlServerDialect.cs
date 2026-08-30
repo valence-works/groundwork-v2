@@ -11,6 +11,9 @@ namespace Groundwork.SqlServer;
 
 internal sealed class SqlServerDialect : RelationalDialect
 {
+    private const string DatabaseSchemaLockResource = "groundwork:schema";
+    private const string ApplicationLockDiagnosticCode = "GW-SQLSERVER-LOCK-001";
+
     public override string ProviderName => "SQLServer";
 
     protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
@@ -382,19 +385,24 @@ internal sealed class SqlServerDialect : RelationalDialect
 
     public override void AcquireApplicationLock(DbConnection connection, string resource)
     {
+        var effectiveResource = EffectiveApplicationLockResource(resource);
         using var command = connection.CreateCommand();
         command.CommandText = "DECLARE @result int; EXEC @result = sys.sp_getapplock @Resource=@resource, @LockMode='Exclusive', @LockOwner='Session', @DbPrincipal='public'; SELECT @result;";
-        AddParameter(command, "@resource", resource);
+        AddParameter(command, "@resource", effectiveResource);
         var result = Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture);
         if (result < 0)
-            throw new InvalidOperationException($"SQL Server could not acquire application lock '{resource}' (result {result}).");
+        {
+            throw new InvalidOperationException(
+                $"{ApplicationLockDiagnosticCode}: SQL Server could not acquire application lock " +
+                $"'{effectiveResource}' for requested resource '{resource}' (result {result}).");
+        }
     }
 
     public override void ReleaseApplicationLock(DbConnection connection, string resource)
     {
         using var command = connection.CreateCommand();
         command.CommandText = "DECLARE @result int; EXEC @result = sys.sp_releaseapplock @Resource=@resource, @LockOwner='Session'; SELECT @result;";
-        AddParameter(command, "@resource", resource);
+        AddParameter(command, "@resource", EffectiveApplicationLockResource(resource));
         _ = command.ExecuteScalar();
     }
 
@@ -402,9 +410,14 @@ internal sealed class SqlServerDialect : RelationalDialect
     {
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT APPLOCK_MODE('public', @resource, 'Session');";
-        AddParameter(command, "@resource", resource);
+        AddParameter(command, "@resource", EffectiveApplicationLockResource(resource));
         return string.Equals(Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture), "Exclusive", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string EffectiveApplicationLockResource(string resource) =>
+        resource.StartsWith("groundwork:schema:", StringComparison.Ordinal)
+            ? DatabaseSchemaLockResource
+            : resource;
 
     public override long ReadServerSessionId(DbConnection connection)
     {

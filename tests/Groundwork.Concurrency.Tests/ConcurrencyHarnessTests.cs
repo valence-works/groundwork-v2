@@ -40,15 +40,89 @@ public sealed class ConcurrencyHarnessTests
         Assert.Equal(3L, command.ExecuteScalar());
     }
 
+    [Fact]
+    public async Task Sqlite_concurrent_provider_connections_refuse_the_second_lifetime()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var ready = new Barrier(2);
+        using var attempted = new CountdownEvent(2);
+        using var releaseWinner = new ManualResetEventSlim();
+        var tasks = Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        {
+            ready.SignalAndWait(TimeSpan.FromSeconds(10));
+            try
+            {
+                using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+                attempted.Signal();
+                releaseWinner.Wait(TimeSpan.FromSeconds(10));
+                return (Succeeded: true, Error: (string?)null);
+            }
+            catch (InvalidOperationException exception)
+            {
+                attempted.Signal();
+                return (Succeeded: false, Error: exception.Message);
+            }
+        })).ToArray();
+
+        try
+        {
+            Assert.True(attempted.Wait(TimeSpan.FromSeconds(10)));
+        }
+        finally
+        {
+            releaseWinner.Set();
+        }
+
+        var results = await Task.WhenAll(tasks);
+        Assert.Single(results, result => result.Succeeded);
+        var refusal = Assert.Single(results, result => !result.Succeeded);
+        Assert.StartsWith("GW-SQLITE-LIFETIME-001:", refusal.Error, StringComparison.Ordinal);
+    }
+
     [SkippableFact]
     public async Task MySql_concurrent_first_schema_applies_serialize_infrastructure_creation()
     {
         using var store = LiveMySqlDatabase.OpenOrSkip();
+        await ApplyDifferentTargetsConcurrently(
+            new MySqlProviderFactory(),
+            store.ConnectionString,
+            "mysql_infrastructure_race");
+    }
+
+    [SkippableFact]
+    public async Task Mongo_concurrent_schema_applies_for_different_targets_complete_independently()
+    {
+        var configured = Environment.GetEnvironmentVariable("GROUNDWORK_MONGO_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(configured),
+            "Set GROUNDWORK_MONGO_CONNECTION to run the live MongoDB schema concurrency proof.");
+        var databaseName = "schema_concurrency_" + Guid.NewGuid().ToString("N");
+        var connectionString = new MongoUrlBuilder(configured!) { DatabaseName = databaseName }
+            .ToMongoUrl()
+            .ToString();
+        try
+        {
+            await ApplyDifferentTargetsConcurrently(
+                new MongoProviderFactory(),
+                connectionString,
+                "mongo_catalog_race");
+        }
+        finally
+        {
+            using var cleanupClient = new MongoClient(connectionString);
+            cleanupClient.DropDatabase(databaseName);
+        }
+    }
+
+    private static async Task ApplyDifferentTargetsConcurrently(
+        IStorageProviderFactory factory,
+        string connectionString,
+        string prefix)
+    {
         using var ready = new Barrier(2);
         var tasks = Enumerable.Range(0, 2).Select(index => Task.Run(() =>
         {
             ready.SignalAndWait(TimeSpan.FromSeconds(10));
-            var name = $"mysql_infrastructure_race_{index}_{Guid.NewGuid():N}";
+            var name = $"{prefix}_{index}_{Guid.NewGuid():N}";
             var unit = new StorageUnit
             {
                 Id = new StorageUnitId(name),
@@ -66,7 +140,7 @@ public sealed class ConcurrencyHarnessTests
                 Key = new KeyDefinition { Columns = ["id"] }
             };
 
-            using var connection = new MySqlProviderFactory().Create(store.ConnectionString);
+            using var connection = factory.Create(connectionString);
             Assert.True(connection.Schema.Apply(unit).Applied);
         })).ToArray();
 

@@ -411,6 +411,7 @@ durable state. See **[expand–contract workflows](../v2/expand-contract.md)**.
 | `GW-BATCHREAD-004` | A single keyed batch-read value exceeds the provider's conservative encoded-payload budget |
 | `GW-BATCH-FINGERPRINT-001` | Batch fingerprint refusal |
 | `GW-SQLSERVER-LIFECYCLE-001` | SQL Server lifecycle table has a non-`BIN2` collation — migration required |
+| `GW-SQLSERVER-LOCK-001` | SQL Server could not acquire a required database application lock; the message names the effective and requested resources plus the provider result code |
 | `GW-SQLITE-LIFETIME-001` | A second Groundwork connection to the same SQLite file — the schema lock is held for the life of a connection. One `IStorageProviderConnection` per database file per process; in tests, one file per test or `Data Source=:memory:` |
 
 ---

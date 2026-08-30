@@ -538,12 +538,37 @@ public sealed class PostgreSqlDialectTests
             "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL integration tests.");
 
         using var database = PostgreSqlFixture.OpenOrSkip();
-        const int workerCount = 24;
+        await ApplyDifferentTargetsConcurrently(database.ConnectionString, 24, "pg_infrastructure_race");
+    }
+
+    [SkippableFact]
+    [Trait("Category", "Concurrency")]
+    public async Task Live_concurrent_schema_applies_for_different_targets_after_bootstrap()
+    {
+        var baseConnection = Environment.GetEnvironmentVariable("GROUNDWORK_POSTGRES_CONNECTION");
+        Skip.If(string.IsNullOrWhiteSpace(baseConnection),
+            "Set GROUNDWORK_POSTGRES_CONNECTION to run PostgreSQL integration tests.");
+
+        using var database = PostgreSqlFixture.OpenOrSkip();
+        using (var bootstrap = new NpgsqlConnection(database.ConnectionString))
+        {
+            bootstrap.Open();
+            new PostgreSqlDialect().EnsureInfrastructure(bootstrap);
+        }
+
+        await ApplyDifferentTargetsConcurrently(database.ConnectionString, 2, "pg_catalog_race");
+    }
+
+    private static async Task ApplyDifferentTargetsConcurrently(
+        string connectionString,
+        int workerCount,
+        string prefix)
+    {
         using var ready = new Barrier(workerCount);
         var tasks = Enumerable.Range(0, workerCount).Select(index => Task.Run(() =>
         {
             ready.SignalAndWait(TimeSpan.FromSeconds(30));
-            var name = $"pg_infrastructure_race_{index}_{Guid.NewGuid():N}";
+            var name = $"{prefix}_{index}_{Guid.NewGuid():N}";
             var unit = new StorageUnit
             {
                 Id = new StorageUnitId(name),
@@ -552,7 +577,7 @@ public sealed class PostgreSqlDialectTests
                 Key = new KeyDefinition { Columns = ["id"] }
             };
 
-            using var connection = new PostgreSqlProviderFactory().Create(database.ConnectionString);
+            using var connection = new PostgreSqlProviderFactory().Create(connectionString);
             Assert.True(connection.Schema.Apply(unit).Applied);
         })).ToArray();
 

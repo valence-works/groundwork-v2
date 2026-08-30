@@ -150,8 +150,11 @@ using var connection = new SqlServerProviderFactory().Create(
 - Uses `Microsoft.Data.SqlClient`. SQL Server 2022+.
 - **Native typed tables and nonclustered primary/secondary indexes.** No document envelope, no
   synthetic identity column.
-- Schema coordination uses `sp_getapplock` plus a durable fence/history pair; optimistic concurrency
-  uses serializable write transactions.
+- Schema coordination uses one database-scoped `sp_getapplock` plus per-target durable fences/history,
+  so applications of different declarations serialize before reading the shared server catalog;
+  optimistic concurrency uses serializable write transactions. Earlier previews used target-specific
+  application locks, so rolling upgrades must pre-apply schema or restrict schema application to one
+  release line until all schema-applying instances are current.
 - Provider sequences use `IDENTITY(1,1)`, read from `OUTPUT INSERTED`.
 - Parameter budget: **2,098 caller-owned parameters** — SQL Server's 2,100 statement limit leaves two
   slots for the `Microsoft.Data.SqlClient` `sp_executesql` wrapper; the connection advertises this

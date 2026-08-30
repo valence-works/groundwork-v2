@@ -65,10 +65,42 @@ public sealed class RuntimeAdmissionInfrastructureTests
         Assert.Contains("groundwork:infrastructure", connection.Parameters[1], StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SqlServer_schema_application_lock_is_database_scoped_and_diagnosable()
+    {
+        var dialect = new SqlServerDialect();
+        var first = new RecordingConnection(0, "Exclusive", 0);
+        var second = new RecordingConnection();
+
+        dialect.AcquireApplicationLock(first, "groundwork:schema:SQLServer:first");
+        Assert.True(dialect.VerifyApplicationLock(first, "groundwork:schema:SQLServer:first"));
+        dialect.ReleaseApplicationLock(first, "groundwork:schema:SQLServer:first");
+        dialect.AcquireApplicationLock(second, "groundwork:schema:SQLServer:second");
+
+        Assert.Equal(
+            ["groundwork:schema", "groundwork:schema", "groundwork:schema"],
+            first.Parameters);
+        Assert.Equal("groundwork:schema", Assert.Single(second.Parameters));
+
+        var unavailable = new RecordingConnection(-1);
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            dialect.AcquireApplicationLock(unavailable, "groundwork:schema:SQLServer:third"));
+        Assert.StartsWith("GW-SQLSERVER-LOCK-001:", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("groundwork:schema", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("result -1", refusal.Message, StringComparison.Ordinal);
+    }
+
     private sealed class RecordingConnection : DbConnection
     {
+        private readonly Queue<object?> scalarResults;
+
+        public RecordingConnection(params object?[] scalarResults) =>
+            this.scalarResults = new Queue<object?>(scalarResults);
+
         public List<string> Commands { get; } = [];
         public List<string> Parameters { get; } = [];
+
+        public object? NextScalarResult() => scalarResults.Count == 0 ? null : scalarResults.Dequeue();
 
 #pragma warning disable CS8765
         public override string ConnectionString { get; set; } = string.Empty;
@@ -106,7 +138,7 @@ public sealed class RuntimeAdmissionInfrastructureTests
         public override object? ExecuteScalar()
         {
             owner.Commands.Add(CommandText);
-            return null;
+            return owner.NextScalarResult();
         }
         public override void Prepare() { }
         protected override DbParameter CreateDbParameter() => new RecordingParameter();
