@@ -661,11 +661,15 @@ public sealed class RelationalSchemaExecutor
     {
         var inspection = InspectTarget(
             connection, transaction, target, PhysicalSchemaHistoryState.Empty, target.Subject.ForeignColumns);
-        if (inspection.HasColumnDrift || inspection.HasIndexDrift || inspection.HasConstraintDrift)
+        // Index drift is an observable degraded state: runtime admission refuses only the query
+        // shapes that need the missing/mismatched index, while plan and status remain actionable.
+        // A no-change apply must make the same decision. Column and constraint drift can change
+        // data semantics, so they remain fatal here.
+        if (inspection.HasColumnDrift || inspection.HasConstraintDrift)
         {
             var refusal = inspection.HasColumnDrift
                 ? inspection.ColumnDrift[0]
-                : inspection.HasIndexDrift ? inspection.IndexDrift[0] : inspection.ConstraintDrift[0];
+                : inspection.ConstraintDrift[0];
             throw new InvalidOperationException(refusal.Message);
         }
     }
