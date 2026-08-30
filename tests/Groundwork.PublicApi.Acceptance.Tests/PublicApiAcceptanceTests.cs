@@ -17,7 +17,7 @@ public sealed class PublicApiAcceptanceTests
         // a leftover artifact must never make this acceptance path test a different source tree.
         var packageDirectory = Path.Combine(repository, "artifacts", "acceptance-packages");
         var packScript = Path.Combine(repository, "eng", "pack-public-packages.sh");
-        var pack = Process.Start(new ProcessStartInfo
+        AssertProcessSucceeds(new ProcessStartInfo
         {
             FileName = "/bin/bash",
             Arguments = Quote(packScript) + " " + Quote(packageDirectory),
@@ -26,13 +26,8 @@ public sealed class PublicApiAcceptanceTests
             RedirectStandardError = true,
             UseShellExecute = false
         });
-        Assert.NotNull(pack);
-        var packOutput = pack!.StandardOutput.ReadToEnd();
-        var packError = pack.StandardError.ReadToEnd();
-        pack.WaitForExit();
-        Assert.True(pack.ExitCode == 0, packOutput + Environment.NewLine + packError);
         var script = Path.Combine(repository, "tests", "Groundwork.PublicApi.Acceptance.Tests", "verify-clean-room.sh");
-        var result = Process.Start(new ProcessStartInfo
+        AssertProcessSucceeds(new ProcessStartInfo
         {
             FileName = "/bin/bash",
             Arguments = Quote(script),
@@ -41,11 +36,6 @@ public sealed class PublicApiAcceptanceTests
             RedirectStandardError = true,
             UseShellExecute = false
         });
-        Assert.NotNull(result);
-        var output = result!.StandardOutput.ReadToEnd();
-        var error = result.StandardError.ReadToEnd();
-        result.WaitForExit();
-        Assert.True(result.ExitCode == 0, output + Environment.NewLine + error);
     }
 
     private static string FindRepositoryRoot()
@@ -57,4 +47,14 @@ public sealed class PublicApiAcceptanceTests
     }
 
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+
+    private static void AssertProcessSucceeds(ProcessStartInfo startInfo)
+    {
+        using var process = Process.Start(startInfo);
+        Assert.NotNull(process);
+        var output = process!.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, output.Result + Environment.NewLine + error.Result);
+    }
 }

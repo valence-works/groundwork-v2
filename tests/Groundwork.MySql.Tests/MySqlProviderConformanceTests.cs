@@ -184,6 +184,33 @@ public sealed class MySqlProviderConformanceTests
     }
 
     [SkippableFact]
+    public void Idempotency_ledgers_accept_the_full_operation_nonce_contract()
+    {
+        using var database = LiveMySqlDatabase.OpenOrSkip();
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("mysql-full-nonce"),
+            Name = "mysql_full_nonce",
+            Columns =
+            [
+                new ColumnDefinition { Name = "id", Type = PortableType.Int32, IsNullable = false },
+                new ColumnDefinition { Name = "payload", Type = PortableType.String, MaxLength = 40 }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            AppendIdempotency = new AppendIdempotencyDeclaration { Window = TimeSpan.FromHours(1) }
+        };
+
+        using var provider = new MySqlProviderFactory().Create(database.ConnectionString);
+        Assert.True(provider.Schema.Apply(unit).Applied);
+        using var session = provider.OpenOwnedSession(unit, StorageAccess.Global);
+        var result = session.Append(
+            new OperationId(DateTimeOffset.UtcNow, new string('n', 256)),
+            [new StorageValues(new Dictionary<string, object?> { ["id"] = 1, ["payload"] = "ok" })]);
+
+        Assert.Equal(WriteOutcomeStatus.Inserted, result.Status);
+    }
+
+    [SkippableFact]
     public void Conditional_inserts_run_on_append_retention()
     {
         using var database = LiveMySqlDatabase.OpenOrSkip();

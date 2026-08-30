@@ -256,7 +256,7 @@ public sealed class MySqlProviderConnection : IStorageProviderConnection, IQuery
             command.CommandText = $"CREATE TABLE IF NOT EXISTS {MySqlDialect.Quote(ledger!)} (" +
                 $"`unit` varchar(191) CHARACTER SET utf8mb4 COLLATE {MySqlDialect.OrdinalCollation} NOT NULL, " +
                 $"`scope` varchar(191) CHARACTER SET utf8mb4 COLLATE {MySqlDialect.OrdinalCollation} NOT NULL, " +
-                $"`nonce` varchar(191) CHARACTER SET utf8mb4 COLLATE {MySqlDialect.OrdinalCollation} NOT NULL, " +
+                $"`nonce` varchar(256) CHARACTER SET utf8mb4 COLLATE {MySqlDialect.OrdinalCollation} NOT NULL, " +
                 "`committed_at` varchar(40) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, " +
                 "`input_fingerprint` varchar(128) CHARACTER SET ascii COLLATE ascii_bin NULL, " +
                 $"`exact_result` longtext CHARACTER SET utf8mb4 COLLATE {MySqlDialect.OrdinalCollation} NULL, " +
