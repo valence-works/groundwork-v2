@@ -130,6 +130,8 @@ public sealed class SchemaToolCliHarness : IDisposable
     {
         ArgumentNullException.ThrowIfNull(arguments);
         var composed = new List<string>(arguments) { "--provider", providerAlias };
+        if (!arguments.Contains("--deployment-id", StringComparer.Ordinal))
+            composed.AddRange(["--deployment-id", "groundwork-test:" + providerAlias]);
         if (connection is not null)
             composed.AddRange(["--connection", connection]);
         composed.AddRange(["--provider-assembly", providerAssembly, "--output", "json"]);

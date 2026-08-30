@@ -1240,60 +1240,72 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
             throw new InvalidOperationException(
                 "GW-ACCESS-003: privileged cross-scope queries refuse joins because one audited query cannot bind a single same-scope target collection.");
         }
-        StorageAccessValidation.ObservePrivilegedQuery(
+        var audit = StorageAccessValidation.BeginPrivilegedQuery(
             StorageAccess.PrivilegedAcrossScopes(Access.Audit!),
             Unit);
 
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        if (suppliedOptions.FindPinnedIndex() is not null)
-            throw new NotSupportedException(
-                "GW-ACCESS-005: MongoDB cross-scope queries cannot pin one physical index across multiple scope collections.");
-        var scopeToken = new ColumnRef(
-            new TableId(Unit.Name),
-            CrossScopeQueryMaterializer.ScopeTokenColumn,
-            QueryType.String,
-            isNullable: false);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
-            new[] { scopeToken }
-                .Concat(Unit.Key.Columns
-                    .Select(QueryColumn)
-                    .Where(column => column is not null)
-                    .Select(column => column!))) with
+        CrossScopeQueryResult result;
+        try
         {
-            Indexes = ImmutableArray<QueryIndexDeclaration>.Empty,
-            PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal),
-            SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
-            LatestPartitionColumns = [scopeToken]
-        };
-        var executionSource = QueryRequestExecution.WithProviderPredicate(
-            request,
-            request.Where,
-            CrossScopeQueryMaterializer.BindingDiscriminator(
-                StorageAccess.PrivilegedAcrossScopes(Access.Audit!)));
-        var executionRequest = EnsureCrossScopeProjection(
-            QueryRequestExecution.ForPage(executionSource, renderOptions));
-        var sourcePrefix = CrossScopeSourcePrefix(state.ReadScopes(applied));
-        var command = new MongoQueryRenderer().Render(
-            executionRequest,
-            renderOptions,
-            collection.CollectionNamespace.CollectionName,
-            sourcePrefix);
-        var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
-        commandObserver?.Observe(new ProviderCommandEvent("mongodb.query-across-scopes", "MongoDB.Aggregate(cross-scope)", ProviderCommandKind.Read, IsProbe: false));
-        var documents = await mode.Aggregate(collection, session: null, pipeline).ConfigureAwait(false);
-        var rows = documents.Select(ToCrossScopeQueryRow).ToArray();
-        var materialized = QueryResultMaterializer.Materialize(
-            executionSource,
-            renderOptions,
-            rows,
-            selectedIndex: null,
-            indexHintApplied: false,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-        return CrossScopeQueryMaterializer.FromNativePage(
-            materialized,
-            rows,
-            CrossScopeQueryMaterializer.RawScopeColumn);
+            var suppliedOptions = options ?? QueryRenderOptions.Default;
+            if (suppliedOptions.FindPinnedIndex() is not null)
+                throw new NotSupportedException(
+                    "GW-ACCESS-005: MongoDB cross-scope queries cannot pin one physical index across multiple scope collections.");
+            var scopeToken = new ColumnRef(
+                new TableId(Unit.Name),
+                CrossScopeQueryMaterializer.ScopeTokenColumn,
+                QueryType.String,
+                isNullable: false);
+            var renderOptions = suppliedOptions.WithIdentityTieBreaks(
+                new[] { scopeToken }
+                    .Concat(Unit.Key.Columns
+                        .Select(QueryColumn)
+                        .Where(column => column is not null)
+                        .Select(column => column!))) with
+            {
+                Indexes = ImmutableArray<QueryIndexDeclaration>.Empty,
+                PhysicalIndexNames = new Dictionary<string, string>(StringComparer.Ordinal),
+                SearchKeyColumns = SearchKeyQueryMappings.For(Unit),
+                LatestPartitionColumns = [scopeToken]
+            };
+            var executionSource = QueryRequestExecution.WithProviderPredicate(
+                request,
+                request.Where,
+                CrossScopeQueryMaterializer.BindingDiscriminator(
+                    StorageAccess.PrivilegedAcrossScopes(Access.Audit!)));
+            var executionRequest = EnsureCrossScopeProjection(
+                QueryRequestExecution.ForPage(executionSource, renderOptions));
+            var sourcePrefix = CrossScopeSourcePrefix(state.ReadScopes(applied));
+            var command = new MongoQueryRenderer().Render(
+                executionRequest,
+                renderOptions,
+                collection.CollectionNamespace.CollectionName,
+                sourcePrefix);
+            var pipeline = PipelineDefinition<BsonDocument, BsonDocument>.Create(command.Pipeline);
+            commandObserver?.Observe(new ProviderCommandEvent("mongodb.query-across-scopes", "MongoDB.Aggregate(cross-scope)", ProviderCommandKind.Read, IsProbe: false));
+            var documents = await mode.Aggregate(collection, session: null, pipeline).ConfigureAwait(false);
+            var rows = documents.Select(ToCrossScopeQueryRow).ToArray();
+            var materialized = QueryResultMaterializer.Materialize(
+                executionSource,
+                renderOptions,
+                rows,
+                selectedIndex: null,
+                indexHintApplied: false,
+                sourceIncludesRequestedOffset: true,
+                sourceIncludesContinuation: true);
+            result = CrossScopeQueryMaterializer.FromNativePage(
+                materialized,
+                rows,
+                CrossScopeQueryMaterializer.RawScopeColumn);
+        }
+        catch (Exception exception)
+        {
+            audit.Failure(exception);
+            throw;
+        }
+
+        audit.Success();
+        return result;
     }
 
     private static IReadOnlyList<BsonDocument> CrossScopeSourcePrefix(
@@ -1787,6 +1799,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         MongoExecution mode)
     {
         ArgumentNullException.ThrowIfNull(where);
+        SetMutationExecutionAdmission.Require(where);
         var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(Unit, assignments);
         ThrowIfDisposed();
         RefusePrivilegedOperation("update-where");
@@ -1826,6 +1839,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     private async ValueTask<SetMutationResult> DeleteWhereCore(Predicate where, MongoExecution mode)
     {
         ArgumentNullException.ThrowIfNull(where);
+        SetMutationExecutionAdmission.Require(where);
         ThrowIfDisposed();
         RefusePrivilegedOperation("delete-where");
         var filter = new MongoQueryRenderer().RenderAggregationSourcePredicate(

@@ -4,10 +4,16 @@ The `groundwork` CLI: `plan`, `validate`, `status`, `apply`, `adopt`, and `schem
 Deployment-time schema planning and application, separate from your application's startup path on
 purpose.
 
-`plan` reports exactly what would change and a plan fingerprint. `apply` refuses unless you
-authorize that exact fingerprint, and refuses again if the plan is no longer current — so a schema
-change cannot be applied on the strength of a plan somebody read yesterday. Destructive and
-semantic operations each need their own explicit authorization.
+`plan` reports exactly what would change and a deployment-bound plan fingerprint. Exact-plan
+`apply`/`adopt` authorization requires the same non-secret `--deployment-id`, and refuses again if
+the plan is no longer current — so a plan reviewed for staging cannot authorize production and a
+schema change cannot be applied on the strength of stale evidence. Destructive and semantic
+operations each need their own explicit authorization.
+
+Prefer `--connection-env`, `--connection-file`, or `--connection-stdin` over placing a connection
+string in process arguments. Connection input modes are mutually exclusive, and the resolved secret
+is redacted from human and JSON errors. Database RBAC and secret storage remain the deployment
+host's responsibility; see the repository's security-boundary guide.
 
 `adopt` covers the database that already holds exactly what the declaration describes while
 Groundwork has no history of applying it. It executes no DDL: it proves the deployed catalog matches

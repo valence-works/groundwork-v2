@@ -1982,7 +1982,10 @@ public sealed class MongoProviderIntegrationTests
         }
 
         var privileged = connection.OpenSession(unit, MongoStorageAccess.PrivilegedAcrossScopes(
-            new StorageAccessAudit("mongo-registry-test", "verify-uow-only-scope")));
+            new StorageAccessAudit(
+                "mongo-registry-test",
+                "verify-uow-only-scope",
+                new RecordingAccessObserver())));
         Assert.Throws<InvalidOperationException>(() => privileged.Read(
             new MongoStorageKey(new Dictionary<string, object?> { ["id"] = "one" })));
         Assert.Throws<InvalidOperationException>(() => privileged.Insert(new MongoStorageValues(
@@ -2014,7 +2017,10 @@ public sealed class MongoProviderIntegrationTests
             new BsonDocument { ["kind"] = "scope", ["unit"] = unit.Id.Value },
             new BsonDocument("$set", new BsonDocument("collection", "forged-collection")));
         var privileged = connection.OpenSession(unit, MongoStorageAccess.PrivilegedAcrossScopes(
-            new StorageAccessAudit("mongo-registry-test", "verify-registry-drift-refusal")));
+            new StorageAccessAudit(
+                "mongo-registry-test",
+                "verify-registry-drift-refusal",
+                new RecordingAccessObserver())));
 
         var failure = Assert.Throws<InvalidOperationException>(() => privileged.QueryAcrossScopes(
             new QueryRequest(new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None)));
@@ -2212,6 +2218,13 @@ public sealed class MongoProviderIntegrationTests
         Skip.If(string.IsNullOrWhiteSpace(connectionString),
             "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
         return new MongoDbProviderFactory().Create(connectionString!);
+    }
+
+    private sealed class RecordingAccessObserver : IStorageAccessObserver
+    {
+        public List<StorageAccessEvent> Events { get; } = [];
+
+        public void Observe(StorageAccessEvent accessEvent) => Events.Add(accessEvent);
     }
 
 }

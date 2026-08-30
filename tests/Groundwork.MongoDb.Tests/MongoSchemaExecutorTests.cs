@@ -717,7 +717,8 @@ public sealed class MongoSchemaExecutorTests : IDisposable
 
     private sealed class CopyTotalTransform : IDataMigrationTransform
     {
-        public string Identity => "copy-total-v1";
+        public string Identity => "copy-total";
+        public string Version => "v1";
 
         public ImmutableArray<string> SourceColumns => ["total"];
 

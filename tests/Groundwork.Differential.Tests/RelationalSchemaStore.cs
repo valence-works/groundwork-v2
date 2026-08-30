@@ -3,11 +3,13 @@ using System.Data.Common;
 using Groundwork.Kernel.Schema;
 using Groundwork.LiveDatabases;
 using Groundwork.PostgreSql;
+using Groundwork.MySql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 using Npgsql;
+using MySqlConnector;
 using Xunit;
 
 namespace Groundwork.Differential.Tests;
@@ -120,6 +122,26 @@ internal sealed record RelationalSchemaProvider(string Name, Func<RelationalSche
                     drop.CommandText = $"DROP TABLE IF EXISTS [{name}];";
                     drop.ExecuteNonQuery();
                 }
+            });
+    });
+
+    /// <summary>A MySQL/MariaDB database owned by this store and dropped with it.</summary>
+    internal static RelationalSchemaProvider MySql(string prefix) => new("mysql", () =>
+    {
+        var database = LiveMySqlDatabase.OpenOrSkip();
+        var session = new MySqlSchemaToolProviderSessionFactory().Open(
+            new SchemaToolProviderOptions("mysql", database.ConnectionString, null, AllowCreate: true, CancellationToken.None));
+        return new RelationalSchemaStore(
+            session,
+            $"{prefix}_" + Guid.NewGuid().ToString("N")[..12],
+            () => new MySqlConnection(database.ConnectionString),
+            identifier => "`" + identifier.Replace("`", "``", StringComparison.Ordinal) + "`",
+            (table, column, required) =>
+                $"ALTER TABLE `{table}` ADD COLUMN `{column}` varchar(64){(required ? " NOT NULL" : string.Empty)};",
+            () =>
+            {
+                session.Dispose();
+                database.Dispose();
             });
     });
 }

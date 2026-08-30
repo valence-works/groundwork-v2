@@ -57,7 +57,11 @@ public enum StorageAccessKind
     PrivilegedAcrossScopes
 }
 
-/// <summary>Required operator identity and purpose attached to privileged cross-scope access.</summary>
+/// <summary>
+/// Required caller-supplied audit label and purpose attached to privileged cross-scope access.
+/// These values are evidence labels, not proof that Groundwork authenticated or authorized the
+/// caller; authentication and authorization remain the host application's responsibility.
+/// </summary>
 public sealed record StorageAccessAudit
 {
     public const int MaxIdentityLength = 128;
@@ -73,10 +77,15 @@ public sealed record StorageAccessAudit
         Observer = observer;
     }
 
+    /// <summary>A caller-supplied audit label; it is not an authenticated principal.</summary>
     public string Identity { get; }
 
     public string Purpose { get; }
 
+    /// <summary>
+    /// Sink bound by the host for privileged execution evidence. Construction may omit it for
+    /// compatibility, but every cross-scope execution fails closed until one is bound.
+    /// </summary>
     public IStorageAccessObserver? Observer { get; }
 
     private static string Validate(string value, int maxLength, string parameter, string description)
@@ -117,7 +126,10 @@ public sealed record StorageAccessEvent(
     string Identity,
     string Purpose);
 
-/// <summary>Receives privileged-access evidence before provider work begins.</summary>
+/// <summary>
+/// Receives privileged-access lifecycle evidence. The attempt event is delivered before provider
+/// work begins; success or failure is delivered only after the execution outcome is known.
+/// </summary>
 public interface IStorageAccessObserver
 {
     void Observe(StorageAccessEvent accessEvent);
@@ -157,18 +169,107 @@ public static class StorageAccessValidation
         }
     }
 
+    /// <summary>
+    /// Emits the legacy one-shot event. New provider implementations should use
+    /// <see cref="BeginPrivilegedQuery"/> and record the final outcome.
+    /// </summary>
+    [Obsolete("Use BeginPrivilegedQuery and complete the returned lifecycle with Success or Failure.")]
     public static void ObservePrivilegedQuery(StorageAccess access, StorageUnit unit)
     {
-        ArgumentNullException.ThrowIfNull(access);
-        ArgumentNullException.ThrowIfNull(unit);
-        var audit = access.Audit ?? throw new InvalidOperationException(
-            "GW-ACCESS-001: cross-scope queries require audit metadata.");
-        audit.Observer?.Observe(new StorageAccessEvent(
+        var audit = RequireAudit(access, unit);
+        audit.Observer!.Observe(new StorageAccessEvent(
             unit.Id,
             "query-across-scopes",
             audit.Identity,
             audit.Purpose));
     }
+
+    /// <summary>
+    /// Records a privileged-query attempt and returns the lifecycle handle a provider must complete
+    /// with <see cref="StorageAccessAuditOperation.Success"/> or
+    /// <see cref="StorageAccessAuditOperation.Failure"/>.
+    /// </summary>
+    public static StorageAccessAuditOperation BeginPrivilegedQuery(StorageAccess access, StorageUnit unit)
+    {
+        var audit = RequireAudit(access, unit);
+        var lifecycle = new StorageAccessAuditOperation(audit.Observer!, unit.Id, audit.Identity, audit.Purpose);
+        lifecycle.Attempt();
+        return lifecycle;
+    }
+
+    private static StorageAccessAudit RequireAudit(StorageAccess access, StorageUnit unit)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(unit);
+        var audit = access.Audit ?? throw new InvalidOperationException(
+            "GW-ACCESS-001: cross-scope queries require audit metadata.");
+        if (audit.Observer is null)
+            throw new InvalidOperationException("GW-ACCESS-001: cross-scope queries require a bound audit observer.");
+        return audit;
+    }
+}
+
+/// <summary>One privileged-query audit lifecycle begun before provider work.</summary>
+public sealed class StorageAccessAuditOperation
+{
+    private readonly IStorageAccessObserver observer;
+    private readonly StorageUnitId unit;
+    private readonly string identity;
+    private readonly string purpose;
+    private int completed;
+
+    internal StorageAccessAuditOperation(
+        IStorageAccessObserver observer,
+        StorageUnitId unit,
+        string identity,
+        string purpose)
+    {
+        this.observer = observer;
+        this.unit = unit;
+        this.identity = identity;
+        this.purpose = purpose;
+    }
+
+    internal void Attempt() => Observe("attempt");
+
+    /// <summary>Records that provider execution and result materialization succeeded.</summary>
+    public void Success() => Complete("success");
+
+    /// <summary>Records that provider execution or result materialization failed.</summary>
+    public void Failure() => Complete("failure");
+
+    /// <summary>
+    /// Records failure without losing the provider exception when the audit sink also fails. A
+    /// sink failure still fails the operation, but the aggregate preserves both causes in order.
+    /// </summary>
+    public void Failure(Exception operationFailure)
+    {
+        ArgumentNullException.ThrowIfNull(operationFailure);
+        try
+        {
+            Complete("failure");
+        }
+        catch (Exception auditFailure)
+        {
+            throw new AggregateException(
+                "Provider execution and privileged-query failure auditing both failed.",
+                operationFailure,
+                auditFailure);
+        }
+    }
+
+    private void Complete(string outcome)
+    {
+        if (Interlocked.CompareExchange(ref completed, 1, 0) != 0)
+            throw new InvalidOperationException("A privileged-query audit operation can be completed only once.");
+        Observe(outcome);
+    }
+
+    private void Observe(string outcome) => observer.Observe(new StorageAccessEvent(
+        unit,
+        "query-across-scopes." + outcome,
+        identity,
+        purpose));
 }
 
 /// <summary>A defensive snapshot of values belonging to one storage unit.</summary>

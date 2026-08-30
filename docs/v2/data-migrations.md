@@ -10,7 +10,8 @@ authorization that admits the semantic schema change.
 ```csharp
 public interface IDataMigrationTransform
 {
-    string Identity { get; }                       // part of the request fingerprint
+    string Identity { get; }                       // stable logical identity
+    string Version { get; }                        // version or controlled content digest
     ImmutableArray<string> SourceColumns { get; }  // columns the scan projects
     ImmutableArray<string> TargetColumns { get; }  // columns it may write
     DataMigrationValues Transform(DataMigrationRow row);
@@ -21,9 +22,13 @@ Row in, values out. The member returns a value rather than a task on purpose: a 
 per row inside a provider chunk and runs again on a row that a rolled-back chunk did not commit, so
 it must be a pure function of the row and never a place to do I/O.
 
+Identity and version are hashed together in the durable request fingerprint. Change the version
+whenever transform output can change; a deployment host can use a controlled artifact digest.
+Groundwork cannot detect changed code when its caller leaves the version unchanged.
+
 The row carries the **portable** CLR type each column declares — `RelationalDialect.ReadValue` maps
 the driver's storage representation back before the transform sees it — so one transform behaves
-the same on SQLite, PostgreSQL, SQL Server, and MongoDB rather than seeing `long` on one and `int`
+the same on SQLite, MySQL/MariaDB, PostgreSQL, SQL Server, and MongoDB rather than seeing `long` on one and `int`
 on the next.
 
 A transform is attached by identity:
@@ -51,7 +56,11 @@ there is one definition of what a search key is rather than one per provider.
 ## Chunked, resumable execution
 
 `DataMigrationRunner.Run` / `RunAsync` owns budgets, ledger transitions, and refusals; the provider
-owns reading, writing, and committing one chunk.
+owns reading, writing, and committing one chunk. Direct runs acquire the same durable target lease
+as schema application for the whole pass. A migration started by schema application reuses its
+already-held lease, so neither two runners nor a runner and an apply can transform the same cursor
+concurrently. Renewable provider leases remain heartbeated while a chunk is executing, and the
+runner verifies ownership again before it accepts the chunk's progress.
 
 ```csharp
 new DataMigrationBudget { MaxRowsPerBatch = 512, MaxBatches = 4, MaxRows = 10_000 }
@@ -107,9 +116,14 @@ still says `Running`, and the next pass runs one more chunk to settle it.
 
 Replay is therefore idempotent. A completed entry short-circuits to
 `DataMigrationStatus.Replayed` without touching a row. Reusing a migration identity with a changed
-transform, subject, or column set is refused with `GW-MIGRATION-002` rather than silently producing
+transform identity/version fingerprint, subject, or column set is refused with `GW-MIGRATION-002` rather than silently producing
 different values under a name that already means something — the same discipline as append
 idempotency.
+
+Transform output is validated before provider execution. Values must match the target column's
+portable CLR type, nullability, string/binary length, and decimal precision and scale; undeclared
+target columns remain refused. This makes invalid output provider-neutral instead of depending on
+driver coercion. See [security boundaries](security-boundaries.md) for the remaining trust boundary.
 
 ## Capabilities, advertised not assumed
 

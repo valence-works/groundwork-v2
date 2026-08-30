@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Numerics;
 
 namespace Groundwork.Kernel.Schema;
 
@@ -60,7 +61,10 @@ public enum DataMigrationCapabilities
     AppliedLedger = 4,
 
     /// <summary>A chunk is written with set-based statements rather than one write per row.</summary>
-    SetBasedBatchUpdate = 8
+    SetBasedBatchUpdate = 8,
+
+    /// <summary>One durable target lease serializes an entire migration pass across callers.</summary>
+    ExclusiveRunLease = 16
 }
 
 /// <summary>One source row handed to a host-process transform.</summary>
@@ -111,11 +115,15 @@ public readonly struct DataMigrationValues
 public interface IDataMigrationTransform
 {
     /// <summary>
-    /// A stable identity for what this transform computes. It is part of the migration's request
-    /// fingerprint, so replaying a recorded migration identity with changed logic is refused
-    /// rather than silently producing different values.
+    /// A stable logical identity for what this transform computes.
     /// </summary>
     string Identity { get; }
+
+    /// <summary>
+    /// An explicit version or content digest for the transform logic. Change this whenever the
+    /// transform's output can change, even when its logical identity stays the same.
+    /// </summary>
+    string Version { get; }
 
     /// <summary>Columns the transform reads. The scan projects exactly these plus the key.</summary>
     ImmutableArray<string> SourceColumns { get; }
@@ -124,6 +132,25 @@ public interface IDataMigrationTransform
     ImmutableArray<string> TargetColumns { get; }
 
     DataMigrationValues Transform(DataMigrationRow row);
+}
+
+/// <summary>Canonical, collision-safe transform fingerprinting for migration replay binding.</summary>
+public static class DataMigrationTransformFingerprint
+{
+    public static string Create(string identity, string versionOrContentDigest)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(versionOrContentDigest);
+        if (!PortableStringComparison.IsWellFormedUnicode(identity))
+            throw new ArgumentException("A data migration transform identity must be well-formed Unicode.", nameof(identity));
+        if (!PortableStringComparison.IsWellFormedUnicode(versionOrContentDigest))
+        {
+            throw new ArgumentException(
+                "A data migration transform version or content digest must be well-formed Unicode.",
+                nameof(versionOrContentDigest));
+        }
+        return SchemaFingerprint.Create(["data-migration-transform-v1", identity, versionOrContentDigest]);
+    }
 }
 
 /// <summary>One transform attached to a semantic migration identity for one subject.</summary>
@@ -139,12 +166,11 @@ public sealed class DataMigration
         ArgumentNullException.ThrowIfNull(transform);
         if (transform.TargetColumns.IsDefaultOrEmpty)
             throw new ArgumentException("A data migration transform must declare at least one target column.", nameof(transform));
-        if (string.IsNullOrWhiteSpace(transform.Identity))
-            throw new ArgumentException("A data migration transform must declare a stable identity.", nameof(transform));
 
         Id = semanticMigrationId;
         SubjectId = subjectId;
         Transform = transform;
+        TransformFingerprint = DataMigrationTransformFingerprint.Create(transform.Identity, transform.Version);
         Description = description;
     }
 
@@ -153,6 +179,9 @@ public sealed class DataMigration
     public StorageUnitId SubjectId { get; }
 
     public IDataMigrationTransform Transform { get; }
+
+    /// <summary>The immutable identity/version fingerprint bound into durable replay evidence.</summary>
+    public string TransformFingerprint { get; }
 
     public string? Description { get; }
 
@@ -208,7 +237,7 @@ public sealed class DataMigration
             Id,
             SubjectId.Value,
             unit.Name,
-            Transform.Identity,
+            TransformFingerprint,
             .. (Transform.SourceColumns.IsDefault ? [] : Transform.SourceColumns).Select(column => "source:" + column),
             .. Transform.TargetColumns.Select(column => "target:" + column),
             .. unit.Key.Columns.Select(column => "key:" + column)
@@ -644,6 +673,8 @@ public sealed class DataMigrationLedgerEntry
 /// <summary>One chunk of work handed to a provider.</summary>
 public sealed class DataMigrationChunkRequest
 {
+    private readonly IReadOnlyDictionary<string, ColumnDefinition> columnsByName;
+
     public DataMigrationChunkRequest(
         DataMigration migration,
         StorageUnit unit,
@@ -668,6 +699,7 @@ public sealed class DataMigrationChunkRequest
         Cursor = cursor;
         Projection = projection;
         MaxRows = maxRows;
+        columnsByName = unit.Columns.ToDictionary(column => column.Name, StringComparer.Ordinal);
     }
 
     public DataMigration Migration { get; }
@@ -695,7 +727,7 @@ public sealed class DataMigrationChunkRequest
         var produced = Migration.Transform.Transform(new DataMigrationRow(row));
         if (!produced.HasValues)
             return null;
-        foreach (var column in produced.Values!.Keys)
+        foreach (var (column, value) in produced.Values!)
         {
             if (!Migration.Transform.TargetColumns.Contains(column, StringComparer.Ordinal))
             {
@@ -703,9 +735,80 @@ public sealed class DataMigrationChunkRequest
                     DataMigrationCodes.UndeclaredTargetColumn,
                     $"data migration '{Migration.Id}' produced column '{column}', which its transform does not declare as a target.");
             }
+            ValidateOutput(columnsByName[column], value);
         }
         return new ReadOnlyDictionary<string, object?>(
             produced.Values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
+    }
+
+    private void ValidateOutput(ColumnDefinition definition, object? value)
+    {
+        if (value is null)
+        {
+            if (!definition.IsNullable)
+            {
+                throw new DataMigrationRefusedException(
+                    DataMigrationCodes.NotApplicable,
+                    $"data migration '{Migration.Id}' produced null for non-nullable target column '{definition.Name}'.");
+            }
+            return;
+        }
+        if (!PortabilityValidator.IsPortableDefaultValue(definition.Type, value))
+        {
+            throw new DataMigrationRefusedException(
+                DataMigrationCodes.NotApplicable,
+                $"data migration '{Migration.Id}' produced CLR type '{value.GetType().Name}' for target " +
+                $"column '{definition.Name}', which declares portable type '{definition.Type}'.");
+        }
+        if (definition.Type == PortableType.Double && value is double doubleValue && !PortableDouble.IsStorable(doubleValue))
+        {
+            throw new DataMigrationRefusedException(
+                DataMigrationCodes.NotApplicable,
+                $"data migration '{Migration.Id}' produced a value outside the portable Double storage domain for " +
+                $"target column '{definition.Name}': {PortableDouble.Explain(definition.Name, doubleValue)}");
+        }
+
+        var outputLength = value switch
+        {
+            string text => text.Length,
+            byte[] bytes => bytes.Length,
+            _ => (int?)null
+        };
+        if (definition.MaxLength is { } maxLength && outputLength > maxLength)
+        {
+            throw new DataMigrationRefusedException(
+                DataMigrationCodes.NotApplicable,
+                $"data migration '{Migration.Id}' output for target column '{definition.Name}' exceeds its " +
+                $"declared length of {maxLength}.");
+        }
+        if (definition is { Type: PortableType.Decimal, Precision: { } precision, Scale: { } scale } &&
+            value is decimal number && !FitsDecimal(number, precision, scale))
+        {
+            throw new DataMigrationRefusedException(
+                DataMigrationCodes.NotApplicable,
+                $"data migration '{Migration.Id}' output for target column '{definition.Name}' does not fit " +
+                $"its declared decimal({precision},{scale}).");
+        }
+    }
+
+    private static bool FitsDecimal(decimal value, int precision, int scale)
+    {
+        var bits = decimal.GetBits(value);
+        var coefficient = (BigInteger)(uint)bits[0]
+            | ((BigInteger)(uint)bits[1] << 32)
+            | ((BigInteger)(uint)bits[2] << 64);
+        var actualScale = (bits[3] >> 16) & 0x7F;
+        while (actualScale > 0 && coefficient % 10 == 0)
+        {
+            coefficient /= 10;
+            actualScale--;
+        }
+
+        var digits = coefficient.IsZero
+            ? 0
+            : coefficient.ToString(CultureInfo.InvariantCulture).Length;
+        var integralDigits = Math.Max(0, digits - actualScale);
+        return actualScale <= scale && integralDigits <= precision - scale;
     }
 }
 
@@ -741,6 +844,13 @@ public interface IDataMigrationExecutor
 {
     /// <summary>What this provider can actually honour. The kernel checks it before any row moves.</summary>
     DataMigrationCapabilities Capabilities { get; }
+
+    /// <summary>
+    /// Acquires the same target-wide durable lease used by schema application. A direct runner call
+    /// holds it for the complete pass, preventing two processes from transforming the same first
+    /// chunk after observing the same ledger cursor.
+    /// </summary>
+    IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target);
 
     DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId);
 

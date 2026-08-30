@@ -33,6 +33,10 @@ public sealed class SchemaAdoptionDifferentialTests
     public void SqlServer_adopts_a_catalog_it_never_applied() =>
         RunAdoption(RelationalSchemaProvider.SqlServer("gw_adopt"));
 
+    [SkippableFact]
+    public void MySql_adopts_a_catalog_it_never_applied() =>
+        RunAdoption(RelationalSchemaProvider.MySql("gw_adopt"));
+
     [Fact]
     public void Sqlite_refuses_to_adopt_a_catalog_that_differs() =>
         RunRefusal(RelationalSchemaProvider.Sqlite("gw_adopt"));
@@ -44,6 +48,10 @@ public sealed class SchemaAdoptionDifferentialTests
     [SkippableFact]
     public void SqlServer_refuses_to_adopt_a_catalog_that_differs() =>
         RunRefusal(RelationalSchemaProvider.SqlServer("gw_adopt"));
+
+    [SkippableFact]
+    public void MySql_refuses_to_adopt_a_catalog_that_differs() =>
+        RunRefusal(RelationalSchemaProvider.MySql("gw_adopt"));
 
     [Fact]
     public void Sqlite_tolerates_a_foreign_column_only_where_the_declaration_opts_in() =>
@@ -57,6 +65,10 @@ public sealed class SchemaAdoptionDifferentialTests
     public void SqlServer_tolerates_a_foreign_column_only_where_the_declaration_opts_in() =>
         RunForeignColumns(RelationalSchemaProvider.SqlServer("gw_foreign"));
 
+    [SkippableFact]
+    public void MySql_tolerates_a_foreign_column_only_where_the_declaration_opts_in() =>
+        RunForeignColumns(RelationalSchemaProvider.MySql("gw_foreign"));
+
     /// <summary>
     /// The limitation the documentation states, proved rather than asserted. A derived search-key
     /// column's algorithm registration lives in Groundwork's own catalog; a database Groundwork
@@ -64,7 +76,7 @@ public sealed class SchemaAdoptionDifferentialTests
     /// produced by the declared algorithm. Adoption refuses instead of assuming.
     ///
     /// One provider is enough: the search-key catalog and the check over it are shared relational
-    /// code, exercised on all three by the cases above.
+    /// code, exercised on all four relational providers by the cases above.
     /// </summary>
     [Fact]
     public void A_folded_column_cannot_be_adopted_without_its_search_key_registration()

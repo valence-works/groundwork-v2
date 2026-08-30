@@ -96,8 +96,10 @@ static void RunPrivilegedCrossScopeJourney(IStorageProviderConnection connection
     Require(result.Rows[0].Values.ContainsKey("id") &&
             !result.Rows[0].Values.Keys.Any(key => key.StartsWith("__groundwork_", StringComparison.Ordinal)),
         "The package-only privileged query leaked provider-owned columns.");
-    Require(observer.Events.Count == 1 &&
-            observer.Events[0].Purpose == "recover-stalled-workflows",
+    Require(observer.Events.Count == 2 &&
+            observer.Events[0].Operation == "query-across-scopes.attempt" &&
+            observer.Events[1].Operation == "query-across-scopes.success" &&
+            observer.Events.All(item => item.Purpose == "recover-stalled-workflows"),
         "The package-only privileged query did not emit audit evidence.");
     try
     {

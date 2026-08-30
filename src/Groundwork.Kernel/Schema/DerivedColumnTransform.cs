@@ -28,7 +28,7 @@ public sealed class DerivedColumnTransform : IDataMigrationTransform
         projectionUnit = unit with { DerivedColumns = derived };
         SourceColumns = derived.Select(column => column.SourceColumn).Distinct(StringComparer.Ordinal).ToImmutableArray();
         TargetColumns = derived.Select(column => column.Name).ToImmutableArray();
-        Identity = SchemaFingerprint.Create(
+        Version = SchemaFingerprint.Create(
         [
             "derived-column-v1",
             .. derived
@@ -38,7 +38,9 @@ public sealed class DerivedColumnTransform : IDataMigrationTransform
         ]);
     }
 
-    public string Identity { get; }
+    public string Identity => "derived-column";
+
+    public string Version { get; }
 
     public ImmutableArray<string> SourceColumns { get; }
 

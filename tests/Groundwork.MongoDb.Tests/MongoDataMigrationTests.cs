@@ -28,6 +28,7 @@ public sealed class MongoDataMigrationTests
         Assert.Equal(
             DataMigrationCapabilities.KeysetScan |
             DataMigrationCapabilities.AppliedLedger |
+            DataMigrationCapabilities.ExclusiveRunLease |
             DataMigrationCapabilities.AtomicChunkProgress,
             executor.Capabilities);
         // Mongo has no multi-document update carrying a different value per document, so it does
@@ -137,7 +138,9 @@ public sealed class MongoDataMigrationTests
         var executor = connection.DataMigrations;
 
         Assert.Equal(
-            DataMigrationCapabilities.KeysetScan | DataMigrationCapabilities.AppliedLedger,
+            DataMigrationCapabilities.KeysetScan |
+            DataMigrationCapabilities.AppliedLedger |
+            DataMigrationCapabilities.ExclusiveRunLease,
             executor.Capabilities);
         var refusal = Assert.Throws<DataMigrationRefusedException>(() => DataMigrationRunner.Run(
             executor, MongoDataMigrationExecutor.TargetFor(unit), unit,
@@ -204,7 +207,8 @@ public sealed class MongoDataMigrationTests
 
     private sealed class SlugTransform : IDataMigrationTransform
     {
-        public string Identity => "slug/v1";
+        public string Identity => "slug";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["slug"];
         public DataMigrationValues Transform(DataMigrationRow row) =>
@@ -216,7 +220,8 @@ public sealed class MongoDataMigrationTests
 
     private sealed class FailingSlugTransform(string failOnId) : IDataMigrationTransform
     {
-        public string Identity => "slug/v1";
+        public string Identity => "slug";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["slug"];
         public DataMigrationValues Transform(DataMigrationRow row)

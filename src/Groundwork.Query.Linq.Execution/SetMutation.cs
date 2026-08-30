@@ -13,9 +13,9 @@ namespace Groundwork.Query.Linq.Execution;
 /// It lives here, beside <see cref="GwLinqExecutor"/>, because this is where a read is admitted:
 /// the coverage checker is provider-neutral and depends only on the query model, and
 /// <c>Groundwork.Store</c> is held to referencing the two kernel assemblies and nothing else. The
-/// capability seam itself stays in <c>Groundwork.Store</c>, where providers implement it — so a
-/// caller who reaches <see cref="ISetMutationStorageSession"/> directly bypasses admission exactly
-/// as a caller who reaches <see cref="IStorageSession.Query"/> directly bypasses the query gate.
+/// capability seam itself stays in <c>Groundwork.Store</c>, where providers implement it. This
+/// entry point binds internal execution evidence only after coverage succeeds, so direct native
+/// capability calls cannot bypass coverage or explicit scan acceptance.
 /// </para>
 /// </summary>
 public static class SetMutationSessionExtensions
@@ -32,10 +32,11 @@ public static class SetMutationSessionExtensions
         var (native, predicate, validated) = PrepareUpdate(session, where, assignments, options);
         if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
             return ExecuteExactUpdate(session, where, validated, options);
+        using var admission = SetMutationExecutionAdmission.Enter(predicate);
         return native.UpdateWhere(predicate, validated);
     }
 
-    public static ValueTask<SetMutationResult> UpdateWhereAsync(
+    public static async ValueTask<SetMutationResult> UpdateWhereAsync(
         this IStorageSession session,
         Predicate where,
         IReadOnlyDictionary<string, object?> assignments,
@@ -47,8 +48,10 @@ public static class SetMutationSessionExtensions
         options.Validate();
         var (native, predicate, validated) = PrepareUpdate(session, where, assignments, options);
         if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
-            return ExecuteExactUpdateAsync(session, where, validated, options, cancellationToken);
-        return native.UpdateWhereAsync(predicate, validated, cancellationToken);
+            return await ExecuteExactUpdateAsync(session, where, validated, options, cancellationToken)
+                .ConfigureAwait(false);
+        using var admission = SetMutationExecutionAdmission.Enter(predicate);
+        return await native.UpdateWhereAsync(predicate, validated, cancellationToken).ConfigureAwait(false);
     }
 
     public static SetMutationResult DeleteWhere(
@@ -62,10 +65,11 @@ public static class SetMutationSessionExtensions
         var (native, predicate) = PrepareDelete(session, where, options);
         if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
             return ExecuteExactDelete(session, where, options);
+        using var admission = SetMutationExecutionAdmission.Enter(predicate);
         return native.DeleteWhere(predicate);
     }
 
-    public static ValueTask<SetMutationResult> DeleteWhereAsync(
+    public static async ValueTask<SetMutationResult> DeleteWhereAsync(
         this IStorageSession session,
         Predicate where,
         SetMutationOptions? options = null,
@@ -76,8 +80,9 @@ public static class SetMutationSessionExtensions
         options.Validate();
         var (native, predicate) = PrepareDelete(session, where, options);
         if (options.OutcomeMode == SetMutationOutcomeMode.Exact)
-            return ExecuteExactDeleteAsync(session, where, options, cancellationToken);
-        return native.DeleteWhereAsync(predicate, cancellationToken);
+            return await ExecuteExactDeleteAsync(session, where, options, cancellationToken).ConfigureAwait(false);
+        using var admission = SetMutationExecutionAdmission.Enter(predicate);
+        return await native.DeleteWhereAsync(predicate, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -393,7 +398,7 @@ internal static class SetMutationAdmission
 
         // A relational RenderPredicateFragment and MongoDB's filter renderer both skip the
         // portability validation their full query renderers run, so it is run here rather than
-        // assumed. Without it a non-portable predicate reaches four providers and is refused by
+        // assumed. Without it a non-portable predicate reaches five providers and is refused by
         // none of them at the point the caller can act on.
         var validation = PortableQuerySemantics.Validate(physical);
         if (!validation.IsPortable)
@@ -421,7 +426,7 @@ internal static class StorageUnitCoverage
     /// prepends nothing. Admitting a caller's logical predicate against the physical index would
     /// therefore refuse on three providers and admit on the fourth — for a physical statement that
     /// binds the scope column as an equality and does use the index. Removing the provider-owned
-    /// columns admits the shape the caller actually wrote, identically on all four.
+    /// columns admits the shape the caller actually wrote, identically on all five.
     /// </para>
     /// </summary>
     public static ImmutableArray<CoverageIndex> PortableIndexes(StorageUnit unit)

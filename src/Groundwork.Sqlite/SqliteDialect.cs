@@ -1,6 +1,8 @@
 using System.Data.Common;
 using System.Data;
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -12,6 +14,10 @@ namespace Groundwork.Sqlite;
 
 internal sealed class SqliteDialect : RelationalDialect
 {
+    private static readonly ConcurrentDictionary<DbConnection, ApplicationFileLock> ApplicationLocks =
+        new(ReferenceEqualityComparer.Instance);
+    private static readonly TimeSpan ApplicationLockTimeout = TimeSpan.FromSeconds(30);
+
     public override string ProviderName => "SQLite";
 
     protected internal override string RenderAggregationOrder(string expression, PortableType type, SortDirection direction)
@@ -215,12 +221,64 @@ internal sealed class SqliteDialect : RelationalDialect
         return false;
     }
 
-    public override void AcquireApplicationLock(DbConnection connection, string resource) { }
-    public override void ReleaseApplicationLock(DbConnection connection, string resource) { }
-    public override bool VerifyApplicationLock(DbConnection connection, string resource) => true;
+    public override void AcquireApplicationLock(DbConnection connection, string resource)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resource);
+        var directory = Path.Combine(Path.GetTempPath(), "groundwork-sqlite-locks");
+        Directory.CreateDirectory(directory);
+        var identity = DatabaseIdentity(connection) + "\n" + resource;
+        var path = Path.Combine(directory, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))) + ".lock");
+        var deadline = DateTimeOffset.UtcNow + ApplicationLockTimeout;
+        IOException? lastFailure = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            try
+            {
+                var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                var lease = new ApplicationFileLock(resource, stream);
+                if (ApplicationLocks.TryAdd(connection, lease))
+                    return;
+                stream.Dispose();
+                throw new InvalidOperationException("The SQLite connection already owns an application lock.");
+            }
+            catch (IOException exception)
+            {
+                lastFailure = exception;
+                Thread.Sleep(25);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"SQLite could not acquire application lock '{resource}' within {ApplicationLockTimeout}.",
+            lastFailure);
+    }
+
+    public override void ReleaseApplicationLock(DbConnection connection, string resource)
+    {
+        if (ApplicationLocks.TryRemove(connection, out var lease))
+            lease.Stream.Dispose();
+    }
+
+    public override bool VerifyApplicationLock(DbConnection connection, string resource) =>
+        ApplicationLocks.TryGetValue(connection, out var lease) &&
+        string.Equals(lease.Resource, resource, StringComparison.Ordinal) &&
+        !lease.Stream.SafeFileHandle.IsClosed;
     public override long ReadServerSessionId(DbConnection connection) => Environment.ProcessId;
     public override long AcquireFence(DbConnection connection, PhysicalSchemaTargetIdentity target, string owner) => 1;
     public override void AssertFence(DbConnection connection, DbTransaction transaction, PhysicalSchemaTargetIdentity target, string owner, long fence) { }
+
+    private static string DatabaseIdentity(DbConnection connection)
+    {
+        var source = new SqliteConnectionStringBuilder(connection.ConnectionString).DataSource;
+        if (string.IsNullOrWhiteSpace(source))
+            return connection.ConnectionString;
+        if (source == ":memory:" || source.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+            return source;
+        return Path.GetFullPath(source);
+    }
+
+    private sealed record ApplicationFileLock(string Resource, FileStream Stream);
 
     public override int ParameterBudget => SqliteQueryRenderer.ParameterBudget;
 

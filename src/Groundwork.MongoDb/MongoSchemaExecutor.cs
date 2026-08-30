@@ -773,26 +773,51 @@ public sealed class MongoSchemaExecutor
     /// One held MongoDB schema lease. Ownership, its fence and applied state occupy the same target
     /// document, allowing publication to update the ledger only while this exact lease is current.
     /// </summary>
-    private sealed class MongoApplicationLock(
-        MongoSchemaExecutor executor,
-        PhysicalSchemaTargetIdentity target,
-        string id,
-        string owner,
-        long fence) : IPhysicalSchemaApplicationLock
+    private sealed class MongoApplicationLock : IPhysicalSchemaApplicationLock
     {
+        private static readonly TimeSpan HeartbeatPeriod = TimeSpan.FromTicks(LeaseDuration.Ticks / 3);
+        private readonly object gate = new();
+        private readonly string id;
+        private readonly string owner;
+        private readonly long fence;
+        private readonly Timer heartbeatTimer;
+        private Exception? heartbeatFailure;
         private bool released;
 
-        internal MongoSchemaExecutor Executor { get; } = executor;
+        internal MongoApplicationLock(
+            MongoSchemaExecutor executor,
+            PhysicalSchemaTargetIdentity target,
+            string id,
+            string owner,
+            long fence)
+        {
+            Executor = executor;
+            Target = target;
+            this.id = id;
+            this.owner = owner;
+            this.fence = fence;
+            heartbeatTimer = new Timer(
+                static state => ((MongoApplicationLock)state!).RenewInBackground(),
+                this,
+                HeartbeatPeriod,
+                HeartbeatPeriod);
+        }
 
-        public PhysicalSchemaTargetIdentity Target { get; } = target;
+        internal MongoSchemaExecutor Executor { get; }
+
+        public PhysicalSchemaTargetIdentity Target { get; }
 
         internal void Verify()
         {
-            if (released)
-                throw new InvalidOperationException($"The MongoDB schema application lock for '{Target}' was released.");
-            if (!Held())
-                throw new InvalidOperationException(
-                    $"The MongoDB schema application lock for '{Target}' is no longer held by this deployment.");
+            lock (gate)
+            {
+                ThrowIfUnusable();
+                if (!Held())
+                {
+                    throw new InvalidOperationException(
+                        $"The MongoDB schema application lock for '{Target}' is no longer held by this deployment.");
+                }
+            }
         }
 
         internal BsonDocument PublicationFilter(string? expectedAppliedTargetFingerprint)
@@ -823,18 +848,73 @@ public sealed class MongoSchemaExecutor
 
         private bool Held() => Executor.Metadata.Find(HeldFilter()).Limit(1).Any();
 
-        public void Dispose()
+        public void Renew()
+        {
+            lock (gate)
+            {
+                ThrowIfUnusable();
+                RenewCore();
+            }
+        }
+
+        private void RenewInBackground()
+        {
+            lock (gate)
+            {
+                if (released || heartbeatFailure is not null)
+                    return;
+                try
+                {
+                    RenewCore();
+                }
+                catch (Exception exception)
+                {
+                    heartbeatFailure = exception;
+                }
+            }
+        }
+
+        private void RenewCore()
+        {
+            var result = Executor.Metadata.UpdateOne(
+                HeldFilter(),
+                new BsonDocument("$set", new BsonDocument(
+                    "expiresAt", Instant(DateTimeOffset.UtcNow + LeaseDuration))));
+            if (result.MatchedCount != 1)
+            {
+                throw new InvalidOperationException(
+                    $"The MongoDB schema application lock for '{Target}' is no longer held by this deployment.");
+            }
+        }
+
+        private void ThrowIfUnusable()
         {
             if (released)
-                return;
-            released = true;
-            Executor.Metadata.UpdateOne(
-                new BsonDocument { ["_id"] = id, ["owner"] = owner, ["fence"] = fence },
-                new BsonDocument("$set", new BsonDocument
-                {
-                    ["owner"] = BsonNull.Value,
-                    ["expiresAt"] = Instant(DateTimeOffset.UnixEpoch)
-                }));
+                throw new InvalidOperationException($"The MongoDB schema application lock for '{Target}' was released.");
+            if (heartbeatFailure is not null)
+            {
+                throw new InvalidOperationException(
+                    $"The MongoDB schema application lock heartbeat for '{Target}' failed.",
+                    heartbeatFailure);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (released)
+                    return;
+                released = true;
+                heartbeatTimer.Dispose();
+                Executor.Metadata.UpdateOne(
+                    new BsonDocument { ["_id"] = id, ["owner"] = owner, ["fence"] = fence },
+                    new BsonDocument("$set", new BsonDocument
+                    {
+                        ["owner"] = BsonNull.Value,
+                        ["expiresAt"] = Instant(DateTimeOffset.UnixEpoch)
+                    }));
+            }
         }
     }
 }

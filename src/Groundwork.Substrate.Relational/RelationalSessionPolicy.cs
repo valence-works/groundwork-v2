@@ -43,7 +43,6 @@ internal static class RelationalSessionPolicy
             throw new InvalidOperationException(
                 "GW-ACCESS-001: cross-scope queries require explicit privileged across-scope access.");
         EnsureTable(unit, request);
-        StorageAccessValidation.ObservePrivilegedQuery(access, unit);
 
         var suppliedOptions = options ?? QueryRenderOptions.Default;
         var renderOptions = CompleteOptions(unit, suppliedOptions, physicalIndexNames, crossScope: true);

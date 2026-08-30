@@ -27,6 +27,11 @@ after the set operation, all inside the unit's transaction. Exact mode can requi
 keyed write per selected row; choose the default aggregate mode when whole-set atomicity and an
 affected count are sufficient outside a unit of work.
 
+Provider-native `ISetMutationStorageSession` methods are not application entry points. Provider
+authors must call `SetMutationExecutionAdmission.Require(where)` before validation, flush,
+rendering, or I/O; only the admitted extensions can create that evidence. Direct calls refuse with
+`GW-COVER-001` instead of bypassing coverage or explicit scan acceptance.
+
 Sessions execute declared aggregation profiles and runtime-composed profiles only when the latter
 carry an active `AggregationAcceptance`; scoped and privileged-access refusals apply to both.
 
@@ -39,6 +44,9 @@ implementing these interfaces never learns that `Groundwork.Records` or `Groundw
 exists. Scoped sessions are tenant-isolated; cross-scope reads require the explicit, query-only
 [`StorageAccess.PrivilegedAcrossScopes`](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/privileged-cross-scope.md)
 contract, which is audited.
+The audit sink is required at execution time and receives attempt plus success/failure lifecycle
+events. Provider authors use `StorageAccessValidation.BeginPrivilegedQuery` and complete the
+returned `StorageAccessAuditOperation` around their native execution.
 
 ## Referencing it
 

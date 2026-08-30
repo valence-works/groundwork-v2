@@ -1,6 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
+using Groundwork.MySql;
 using Groundwork.PostgreSql;
 using Groundwork.Query.Model;
 using Groundwork.Query.Planning;
@@ -14,7 +15,7 @@ using Xunit;
 namespace Groundwork.Differential.Tests;
 
 /// <summary>
-/// The four-provider acceptance proof for set-based mutation (P4.3, #89).
+/// The five-provider acceptance proof for set-based mutation (P4.3, #89).
 ///
 /// Every assertion here is pinned to a literal. Nothing is recomputed from the code under test, so
 /// a provider that agrees with the others by making the same mistake still fails.
@@ -35,6 +36,7 @@ public sealed class SetMutationDifferentialTests
         AssertRendered(new SqliteQueryRenderer(), "\"label\"", "\"__groundwork_version\"");
         AssertRendered(new PostgreSqlQueryRenderer(), "\"label\"", "\"__groundwork_version\"");
         AssertRendered(new SqlServerQueryRenderer(), "[label]", "[__groundwork_version]");
+        AssertRendered(new MySqlQueryRenderer(), "`label`", "`__groundwork_version`");
 
         static void AssertRendered(RelationalQueryRenderer renderer, string label, string version)
         {
@@ -77,6 +79,13 @@ public sealed class SetMutationDifferentialTests
     [SkippableFact]
     public void MongoDB_set_based_mutation_matches_the_portable_contract() =>
         AssertProvider("MongoDB", () => new MongoProviderFactory().Create(LiveMongo.Required()));
+
+    [SkippableFact]
+    public void MySQL_set_based_mutation_matches_the_portable_contract()
+    {
+        using var database = LiveMySqlDatabase.OpenOrSkip();
+        AssertProvider("MySQL/MariaDB", () => new MySqlProviderFactory().Create(database.ConnectionString));
+    }
 
     private static void AssertProvider(string provider, Func<IStorageProviderConnection> open)
     {
@@ -235,13 +244,13 @@ public sealed class SetMutationDifferentialTests
         Assert.Equal(new string?[] { "keep", "keep", "keep" }, Labels(second, unit, "old"));
 
         // A privileged cross-scope session sees every scope at once and so has no scope to write
-        // to. The provider session refuses it, which is what a caller who reaches the capability
-        // interface directly — bypassing the admitted entry point — actually meets.
+        // to. A caller who reaches the capability interface directly is refused first because it
+        // has no unforgeable coverage/scan-acceptance evidence from the admitted entry point.
         var privileged = (ISetMutationStorageSession)connection.OpenSession(
             unit,
             StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("operator", "P4.3 acceptance proof")));
         var refusal = Assert.Throws<InvalidOperationException>(() => privileged.DeleteWhere(Status(unit, "old")));
-        Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("GW-COVER-001", refusal.Message, StringComparison.Ordinal);
         Assert.Equal(new[] { "a1", "a2", "o1", "o2", "o3" }, Ids(first, unit));
     }
 

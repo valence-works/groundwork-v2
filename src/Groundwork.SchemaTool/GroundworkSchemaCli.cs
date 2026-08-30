@@ -1,7 +1,9 @@
+using System.Data.Common;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Groundwork.Kernel;
 using Groundwork.Kernel.Schema;
 using Groundwork.Schema;
@@ -61,8 +63,17 @@ public static class GroundworkSchemaCli
         IReadOnlyList<string> arguments,
         TextWriter output,
         TextWriter error,
-        CancellationToken cancellationToken = default) =>
-        RunAsync(arguments, output, error, provider => DiscoverProvider(arguments, provider, cancellationToken), cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        string? resolvedConnection = null;
+        return RunCoreAsync(
+            arguments,
+            output,
+            error,
+            provider => DiscoverProvider(arguments, provider, cancellationToken, () => resolvedConnection),
+            cancellationToken,
+            connection => resolvedConnection = connection);
+    }
 
     public static async Task<int> RunAsync(
         IReadOnlyList<string> arguments,
@@ -70,6 +81,15 @@ public static class GroundworkSchemaCli
         TextWriter error,
         Func<string, ISchemaToolProviderSession?> providerResolver,
         CancellationToken cancellationToken = default)
+        => await RunCoreAsync(arguments, output, error, providerResolver, cancellationToken, null);
+
+    private static async Task<int> RunCoreAsync(
+        IReadOnlyList<string> arguments,
+        TextWriter output,
+        TextWriter error,
+        Func<string, ISchemaToolProviderSession?> providerResolver,
+        CancellationToken cancellationToken,
+        Action<string?>? captureConnection)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(output);
@@ -91,6 +111,7 @@ public static class GroundworkSchemaCli
 
         var json = arguments.Contains("--output", StringComparer.Ordinal) &&
                    Value(arguments, "--output")?.Equals("json", StringComparison.OrdinalIgnoreCase) == true;
+        var redactionSecret = Value(arguments, "--connection");
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -103,6 +124,11 @@ public static class GroundworkSchemaCli
             ValidateInvocation(arguments, command, 1);
             var schemaPath = RequiredValue(arguments, "--schema");
             var providerName = RequiredValue(arguments, "--provider");
+            var connection = await ResolveConnectionAsync(arguments, cancellationToken);
+            redactionSecret = connection ?? redactionSecret;
+            captureConnection?.Invoke(connection);
+            var deploymentId = Value(arguments, "--deployment-id");
+            ValidateDeploymentIdentity(deploymentId);
             var phase = Value(arguments, "--phase") switch
             {
                 null or "expand" => SchemaEvolutionPhase.Expand,
@@ -147,7 +173,7 @@ public static class GroundworkSchemaCli
             {
                 // A provider raises its physicalization refusals as InvalidOperationException;
                 // they name a code and path, so they belong with the validation failures.
-                await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
+                await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message, redactionSecret);
                 return SchemaToolExitCodes.ValidationFailed;
             }
             var targetReports = new List<SchemaToolTargetReport>();
@@ -161,6 +187,10 @@ public static class GroundworkSchemaCli
                         "GW-CLI-001",
                         $"{command[0..1].ToUpperInvariant()}{command[1..]} requires --safe or an exact " +
                         "--expected-plan authorization mode.");
+                if (expectedPlans.Count != 0 && deploymentId is null)
+                    throw new SchemaToolInvocationException(
+                        "GW-CLI-001",
+                        "Exact --expected-plan authorization requires an explicit --deployment-id.");
                 var destructive = Values(arguments, "--allow-destructive")
                     .Concat(Values(arguments, "--authorize-destructive")).ToHashSet(StringComparer.Ordinal);
                 var semantic = Values(arguments, "--allow-semantic")
@@ -175,9 +205,18 @@ public static class GroundworkSchemaCli
                     PhysicalSchemaTarget target,
                     PhysicalSchemaDiffPlan plan)
                 {
-                    var fingerprint = PlanFingerprint(target, plan);
+                    var fingerprint = PlanFingerprint(target, plan, deploymentId);
                     var exact = expectedPlans.Contains(fingerprint);
                     var protection = PhysicalSchemaPlanProtection.Inspect(plan.Operations);
+                    if (expectedPlans.Count != 0 && !exact)
+                    {
+                        return PhysicalSchemaPlanAuthorization.Deny([
+                            new SchemaRefusal(
+                                "GW-CLI-011",
+                                "The current plan does not match the exact expected plan fingerprint for this deployment.",
+                                "authorization.plan")
+                        ]);
+                    }
                     if (!protection.IsSafe && !exact)
                     {
                         return PhysicalSchemaPlanAuthorization.Deny([
@@ -213,7 +252,8 @@ public static class GroundworkSchemaCli
                         item.Target,
                         item.Plan,
                         item.Inspection,
-                        readiness: item.Readiness)));
+                        readiness: item.Readiness,
+                        deploymentId: deploymentId)));
                     await WriteAsync(output, json, new SchemaToolReport(
                         command, "blocked", null,
                         provider.Provider.Name, provider.Provider.Version, targetReports, [])
@@ -227,7 +267,8 @@ public static class GroundworkSchemaCli
                         item.Plan,
                         item.Inspection,
                         item.Authorization.Refusals,
-                        item.Readiness)));
+                        item.Readiness,
+                        deploymentId)));
                     await WriteAsync(output, json, new SchemaToolReport(
                         command, "authorization-required", null,
                         provider.Provider.Name, provider.Provider.Version, targetReports, [])
@@ -258,7 +299,7 @@ public static class GroundworkSchemaCli
                         await WriteErrorAsync(
                             output, error, json, "GW-CLI-013",
                             $"Provider '{provider.Provider.Name}' cannot compare a deployed catalog to a " +
-                            "compiled target, so it cannot adopt one.");
+                            "compiled target, so it cannot adopt one.", redactionSecret);
                         return SchemaToolExitCodes.ValidationFailed;
                     }
                     foreach (var target in targets)
@@ -267,7 +308,7 @@ public static class GroundworkSchemaCli
                         targetReports.Add(FromAdoption(target, PhysicalSchemaAdoption.Adopt(
                             target,
                             provider.Executor,
-                            planAuthorization: plan => Authorize(target, plan))));
+                            planAuthorization: plan => Authorize(target, plan)), deploymentId));
                     }
                     var adoptionBlocked = targetReports.Any(item => item.Outcome == "blocked");
                     var adoptionUnauthorized = targetReports.Any(item => item.Outcome == "authorization-required");
@@ -296,7 +337,7 @@ public static class GroundworkSchemaCli
                         dataMigrations: dataMigrationCatalog,
                         phase: phase,
                         dataMigrationExecutor: dataMigrationExecutor);
-                    targetReports.Add(FromApplication(target, result) with
+                    targetReports.Add(FromApplication(target, result, deploymentId) with
                     {
                         DataMigrations = ReadDataMigrations(provider, target),
                         Supersessions = Describe(result.ContractReadiness)
@@ -337,7 +378,7 @@ public static class GroundworkSchemaCli
                 invalid |= !plan.IsApplicable ||
                            (!inspection.IsAppliedSchemaValid &&
                             !IsRepairableProviderDefinitionDrift(inspection, plan));
-                targetReports.Add(FromPlan(target, plan, inspection, readiness: readiness) with
+                targetReports.Add(FromPlan(target, plan, inspection, deploymentId: deploymentId, readiness: readiness) with
                 {
                     DataMigrations = dataMigrations
                 });
@@ -355,42 +396,42 @@ public static class GroundworkSchemaCli
         }
         catch (SchemaToolInvocationException exception)
         {
-            await WriteErrorAsync(output, error, json, exception.Code, exception.Message);
+            await WriteErrorAsync(output, error, json, exception.Code, exception.Message, redactionSecret);
             return SchemaToolExitCodes.InvalidInvocation;
         }
         catch (SchemaToolProviderInvocationException exception)
         {
-            await WriteErrorAsync(output, error, json, "GW-CLI-001", exception.Message);
+            await WriteErrorAsync(output, error, json, "GW-CLI-001", exception.Message, redactionSecret);
             return SchemaToolExitCodes.InvalidInvocation;
         }
         catch (OperationCanceledException)
         {
-            await WriteErrorAsync(output, error, json, "GW-CLI-009", "The operation was cancelled.");
+            await WriteErrorAsync(output, error, json, "GW-CLI-009", "The operation was cancelled.", redactionSecret);
             return SchemaToolExitCodes.Cancelled;
         }
         catch (GroundworkSchemaBoundaryException exception)
         {
-            await WriteErrorAsync(output, error, json, GroundworkSchemaBoundaryException.Code, exception.Message);
+            await WriteErrorAsync(output, error, json, GroundworkSchemaBoundaryException.Code, exception.Message, redactionSecret);
             return SchemaToolExitCodes.ValidationFailed;
         }
         catch (DataMigrationRefusedException exception)
         {
-            await WriteErrorAsync(output, error, json, exception.Code, exception.Message);
+            await WriteErrorAsync(output, error, json, exception.Code, exception.Message, redactionSecret);
             return SchemaToolExitCodes.ValidationFailed;
         }
         catch (Exception exception) when (exception is JsonException or FormatException or ArgumentException)
         {
-            await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message);
+            await WriteErrorAsync(output, error, json, "GW-CLI-005", exception.Message, redactionSecret);
             return SchemaToolExitCodes.ValidationFailed;
         }
         catch (SchemaToolProviderException exception)
         {
-            await WriteErrorAsync(output, error, json, "GW-CLI-010", $"Schema tool execution failed: {exception.Message}");
+            await WriteErrorAsync(output, error, json, "GW-CLI-010", $"Schema tool execution failed: {exception.Message}", redactionSecret);
             return SchemaToolExitCodes.ExecutionFailed;
         }
         catch (Exception)
         {
-            await WriteErrorAsync(output, error, json, "GW-CLI-010", "Schema tool execution failed.");
+            await WriteErrorAsync(output, error, json, "GW-CLI-010", "Schema tool execution failed.", redactionSecret);
             return SchemaToolExitCodes.ExecutionFailed;
         }
     }
@@ -423,7 +464,8 @@ public static class GroundworkSchemaCli
         PhysicalSchemaDiffPlan plan,
         PhysicalSchemaInspectionResult inspection,
         IEnumerable<SchemaRefusal>? authorizationRefusals = null,
-        ContractReadinessAssessment? readiness = null) => new(
+        ContractReadinessAssessment? readiness = null,
+        string? deploymentId = null) => new(
         target.Subject.Id.Value,
         target.Fingerprint,
         authorizationRefusals?.Any() == true
@@ -432,7 +474,7 @@ public static class GroundworkSchemaCli
               (!inspection.IsAppliedSchemaValid && !IsRepairableProviderDefinitionDrift(inspection, plan))
                 ? "blocked"
                 : plan.Operations.Length == 0 ? "ready" : "pending",
-        PlanFingerprint(target, plan),
+        PlanFingerprint(target, plan, deploymentId),
         inspection.History.AppliedState?.TargetFingerprint,
         plan.Operations.Select(operation => SchemaToolOperationReport.FromPending(operation, PhysicalSchemaPlanProtection.Inspect(plan.Operations))).ToArray(),
         inspection.History.AppliedState?.AppliedOperations.Select(SchemaToolOperationReport.FromApplied).ToArray() ?? [],
@@ -458,7 +500,8 @@ public static class GroundworkSchemaCli
 
     private static SchemaToolTargetReport FromApplication(
         PhysicalSchemaTarget target,
-        PhysicalSchemaApplicationResult result) => new(
+        PhysicalSchemaApplicationResult result,
+        string? deploymentId = null) => new(
         target.Subject.Id.Value,
         target.Fingerprint,
         result.Outcome switch
@@ -469,7 +512,7 @@ public static class GroundworkSchemaCli
             PhysicalSchemaApplicationOutcome.DataMigrationIncomplete => DataMigrationPendingOutcome,
             _ => "applied"
         },
-        PlanFingerprint(target, result.Plan),
+        PlanFingerprint(target, result.Plan, deploymentId),
         result.AppliedState?.TargetFingerprint,
         result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.DataMigrationIncomplete
             ? []
@@ -489,7 +532,8 @@ public static class GroundworkSchemaCli
     /// </summary>
     private static SchemaToolTargetReport FromAdoption(
         PhysicalSchemaTarget target,
-        PhysicalSchemaAdoptionResult result) => new(
+        PhysicalSchemaAdoptionResult result,
+        string? deploymentId = null) => new(
         target.Subject.Id.Value,
         target.Fingerprint,
         result.Outcome switch
@@ -499,7 +543,7 @@ public static class GroundworkSchemaCli
             PhysicalSchemaAdoptionOutcome.AuthorizationRequired => "authorization-required",
             _ => "blocked"
         },
-        PlanFingerprint(target, result.Plan),
+        PlanFingerprint(target, result.Plan, deploymentId),
         result.AppliedState?.TargetFingerprint,
         result.Outcome == PhysicalSchemaAdoptionOutcome.Adopted
             ? []
@@ -591,11 +635,18 @@ public static class GroundworkSchemaCli
     private static string? Instant(DateTimeOffset? value) =>
         value?.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
 
-    private static string PlanFingerprint(PhysicalSchemaTarget target, PhysicalSchemaDiffPlan plan)
+    private static string PlanFingerprint(
+        PhysicalSchemaTarget target,
+        PhysicalSchemaDiffPlan plan,
+        string? deploymentId = null)
     {
-        // The phase is appended only for a contract plan, so every expand plan keeps the exact
-        // fingerprint it had before phases existed and an --expected-plan value does not churn.
-        var parts = new[] { target.Fingerprint, plan.ExpectedAppliedTargetFingerprint ?? string.Empty }
+        // Keep fingerprints without an identity compatible with existing plan output. Once an
+        // explicit deployment identity is supplied, include it in the signed preimage so a plan
+        // copied from one deployment cannot authorize a different deployment.
+        var parts = (deploymentId is null
+                ? []
+                : new[] { "deployment-id", deploymentId })
+            .Concat(new[] { target.Fingerprint, plan.ExpectedAppliedTargetFingerprint ?? string.Empty })
             .Concat(plan.Operations.SelectMany(operation => new[] { operation.Identity, operation.Fingerprint }))
             .Concat(plan.Phase == SchemaEvolutionPhase.Expand ? [] : new[] { "phase:" + plan.Phase });
         return PortableHex.Lower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', parts))));
@@ -606,14 +657,144 @@ public static class GroundworkSchemaCli
         TextWriter error,
         bool json,
         string code,
-        string message)
+        string message,
+        string? connectionSecret = null)
     {
+        message = RedactConnection(message, connectionSecret);
         if (json)
             await WriteAsync(output, true, new SchemaToolReport("unknown", "invalid", null, null, null, [],
                 [new SchemaVerificationError(code, message, "invocation")]));
         else
             await error.WriteLineAsync($"{code}: {message}");
     }
+
+    private static string RedactConnection(string message, string? connectionSecret)
+    {
+        if (string.IsNullOrEmpty(connectionSecret))
+            return RedactSensitiveAssignments(message);
+
+        var redacted = message.Replace(connectionSecret, "<redacted>", StringComparison.Ordinal);
+        foreach (var secret in ConnectionSecretValues(connectionSecret)
+                     .Where(value => value.Length != 0)
+                     .Distinct(StringComparer.Ordinal)
+                     .OrderByDescending(value => value.Length))
+        {
+            redacted = redacted.Replace(secret, "<redacted>", StringComparison.Ordinal);
+        }
+        return RedactSensitiveAssignments(redacted);
+    }
+
+    private static IReadOnlyList<string> ConnectionSecretValues(string connection)
+    {
+        var secrets = new List<string>();
+        var builder = new DbConnectionStringBuilder();
+        try
+        {
+            builder.ConnectionString = connection;
+            foreach (KeyValuePair<string, object?> pair in builder)
+            {
+                if (IsSensitiveConnectionKey(pair.Key) && pair.Value is not null)
+                {
+                    secrets.Add(
+                        Convert.ToString(pair.Value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty);
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+            // URI-style provider strings (notably MongoDB) are handled below.
+        }
+
+        if (Uri.TryCreate(connection, UriKind.Absolute, out var uri) && uri.UserInfo.Contains(':'))
+        {
+            var encoded = uri.UserInfo[(uri.UserInfo.IndexOf(':') + 1)..];
+            secrets.Add(encoded);
+            try
+            {
+                secrets.Add(Uri.UnescapeDataString(encoded));
+            }
+            catch (UriFormatException)
+            {
+                // The encoded form is still redacted. A malformed escape must not replace the
+                // provider's original error with a failure in the redaction path.
+            }
+        }
+        return secrets;
+    }
+
+    private static bool IsSensitiveConnectionKey(string key)
+    {
+        var normalized = new string(key.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+        return normalized is "password" or "pwd" or "token" or "accesstoken" or "apikey" or
+            "accountkey" or "sharedaccesskey" or "secret" or "clientsecret";
+    }
+
+    private static string RedactSensitiveAssignments(string message) => SensitiveAssignmentPattern.Replace(
+        message,
+        match => match.Groups["prefix"].Value + "<redacted>");
+
+    private static readonly Regex SensitiveAssignmentPattern = new(
+        @"(?<prefix>\b(?:password|pwd|access\s*token|api\s*key|account\s*key|shared\s*access\s*key|client\s*secret|secret|token)\s*=\s*)(?<value>""[^""]*""|'[^']*'|[^;\s,}\]]+)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static void ValidateDeploymentIdentity(string? deploymentId)
+    {
+        if (deploymentId is null)
+            return;
+        if (string.IsNullOrWhiteSpace(deploymentId) || deploymentId.Length > 256 ||
+            deploymentId.Contains('\r') || deploymentId.Contains('\n'))
+            throw new SchemaToolInvocationException(
+                "GW-CLI-001", "Option '--deployment-id' requires a non-empty single-line value of at most 256 characters.");
+        if (!PortableStringComparison.IsWellFormedUnicode(deploymentId))
+            throw new SchemaToolInvocationException(
+                "GW-CLI-001", "Option '--deployment-id' must be well-formed Unicode.");
+    }
+
+    private static async Task<string?> ResolveConnectionAsync(
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var inline = Value(arguments, "--connection");
+        var environment = Value(arguments, "--connection-env");
+        var file = Value(arguments, "--connection-file");
+        var stdin = arguments.Contains("--connection-stdin", StringComparer.Ordinal);
+        var sources = (inline is null ? 0 : 1) + (environment is null ? 0 : 1) +
+                      (file is null ? 0 : 1) + (stdin ? 1 : 0);
+        if (sources > 1)
+            throw new SchemaToolInvocationException(
+                "GW-CLI-001",
+                "Connection input options are mutually exclusive; choose --connection, --connection-env, " +
+                "--connection-file, or --connection-stdin.");
+        if (inline is not null)
+            return inline;
+        if (environment is not null)
+        {
+            var value = Environment.GetEnvironmentVariable(environment);
+            return !string.IsNullOrWhiteSpace(value)
+                ? value
+                : throw new SchemaToolInvocationException(
+                    "GW-CLI-001", $"Connection environment variable '{environment}' is unset or empty.");
+        }
+        if (file is not null)
+        {
+            var value = TrimTerminalLineEnding(await File.ReadAllTextAsync(file, cancellationToken));
+            return value.Length != 0
+                ? value
+                : throw new SchemaToolInvocationException(
+                    "GW-CLI-001", $"Connection file '{file}' is empty.");
+        }
+        if (stdin)
+        {
+            var value = TrimTerminalLineEnding(await Console.In.ReadToEndAsync(cancellationToken));
+            return value.Length != 0
+                ? value
+                : throw new SchemaToolInvocationException(
+                    "GW-CLI-001", "Connection standard input is empty.");
+        }
+        return null;
+    }
+
+    private static string TrimTerminalLineEnding(string value) => value.TrimEnd('\r', '\n');
 
     private static Task WriteAsync(TextWriter output, bool json, object report) => json
         ? output.WriteLineAsync(JsonSerializer.Serialize(Json(report), new JsonSerializerOptions
@@ -741,22 +922,25 @@ public static class GroundworkSchemaCli
         string command,
         int optionStart)
     {
-        var flags = command switch
-        {
-            "validate" => new HashSet<string>(["--offline"], StringComparer.Ordinal),
-            "apply" or "adopt" => new HashSet<string>(["--safe"], StringComparer.Ordinal),
-            _ => new HashSet<string>(StringComparer.Ordinal)
-        };
+        var flags = new HashSet<string>(StringComparer.Ordinal);
+        if (command != "schema emit")
+            flags.Add("--connection-stdin");
+        if (command == "validate")
+            flags.Add("--offline");
+        if (command is "apply" or "adopt")
+            flags.Add("--safe");
         var values = command switch
         {
             "schema emit" => new HashSet<string>(["--input", "--file", "--output"], StringComparer.Ordinal),
             "apply" or "adopt" => new HashSet<string>([
-                "--schema", "--provider", "--connection", "--database", "--provider-assembly",
+                "--schema", "--provider", "--connection", "--connection-env", "--connection-file",
+                "--deployment-id", "--database", "--provider-assembly",
                 "--coverage", "--output", "--phase", "--expected-plan", "--allow-destructive", "--allow-semantic",
                 "--authorize-destructive", "--authorize-semantic"
             ], StringComparer.Ordinal),
             _ => new HashSet<string>([
-                "--schema", "--provider", "--connection", "--database", "--provider-assembly",
+                "--schema", "--provider", "--connection", "--connection-env", "--connection-file",
+                "--deployment-id", "--database", "--provider-assembly",
                 "--coverage", "--output", "--phase"
             ], StringComparer.Ordinal)
         };
@@ -793,7 +977,8 @@ public static class GroundworkSchemaCli
     private static ISchemaToolProviderSession? DiscoverProvider(
         IReadOnlyList<string> arguments,
         string provider,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string?> connection)
     {
         var assemblies = AppDomain.CurrentDomain.GetAssemblies().ToList();
         foreach (var path in Values(arguments, "--provider-assembly"))
@@ -811,7 +996,7 @@ public static class GroundworkSchemaCli
                                          string.Equals(candidate.Alias, provider, StringComparison.OrdinalIgnoreCase));
         return factory?.Open(new SchemaToolProviderOptions(
             provider,
-            Value(arguments, "--connection"),
+            connection(),
             Value(arguments, "--database"),
             arguments.Count != 0 && arguments[0] == "apply",
             cancellationToken));
@@ -830,9 +1015,10 @@ public static class GroundworkSchemaCli
     }
 
     private const string HelpText = """
-        Usage: groundwork <plan|validate|status|apply|adopt> --schema <file> --provider <name> [--connection <value>]
-               [--database <name>] [--provider-assembly <file>] [--coverage <file>] [--output json|human]
-               [--phase expand|contract]
+        Usage: groundwork <plan|validate|status|apply|adopt> --schema <file> --provider <name>
+               [--connection <value> | --connection-env <name> | --connection-file <file> | --connection-stdin]
+               [--deployment-id <id>] [--database <name>] [--provider-assembly <file>]
+               [--coverage <file>] [--output json|human] [--phase expand|contract]
                groundwork schema emit --input <file> --file <file> [--output json|human]
 
         --phase selects which half of an expand-contract evolution to plan. It defaults to expand, the
@@ -841,6 +1027,8 @@ public static class GroundworkSchemaCli
 
         Apply requires --safe, or exact --expected-plan authorization. Destructive operation identities additionally
         require --allow-destructive <identity>; semantic migrations require --allow-semantic <identity>.
+        An explicit --deployment-id binds an exact plan fingerprint to that deployment. Connection input modes are
+        mutually exclusive; environment, file, and standard input avoid placing the connection secret in arguments.
         Runtime admission remains inspect-only unless AutoApplyOnStartup is explicitly enabled by the host.
 
         Adopt records an existing catalog Groundwork has never applied, under the same authorization as apply. It

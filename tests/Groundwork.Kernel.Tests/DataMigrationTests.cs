@@ -209,6 +209,153 @@ public sealed class DataMigrationTests
             refusal.Message);
     }
 
+    [Fact]
+    public void A_transform_cannot_produce_null_for_a_required_target()
+    {
+        var unit = Unit with
+        {
+            Columns = Unit.Columns.Select(column =>
+                column.Name == "slug" ? column with { IsNullable = false } : column).ToArray()
+        };
+        var migration = new DataMigration("m", unit.Id, new ConstantTransform("slug", null));
+        var request = new DataMigrationChunkRequest(
+            migration, unit, DataMigrationLedgerEntry.Start(Target, migration, unit, Now), null, ["id"], 10);
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => request.Apply(Row(1)));
+
+        Assert.Equal(DataMigrationCodes.NotApplicable, refusal.Code);
+        Assert.Contains("produced null for non-nullable target column 'slug'", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_transform_cannot_produce_a_value_outside_the_targets_portable_type()
+    {
+        var migration = new DataMigration("m", Unit.Id, new ConstantTransform("slug", 42));
+        var request = new DataMigrationChunkRequest(
+            migration, Unit, DataMigrationLedgerEntry.Start(Target, migration, Unit, Now), null, ["id"], 10);
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => request.Apply(Row(1)));
+
+        Assert.Equal(DataMigrationCodes.NotApplicable, refusal.Code);
+        Assert.Contains(
+            "produced CLR type 'Int32' for target column 'slug', which declares portable type 'String'",
+            refusal.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_transform_cannot_produce_text_longer_than_the_target_allows()
+    {
+        var migration = new DataMigration("m", Unit.Id, new ConstantTransform("slug", new string('x', 65)));
+        var request = new DataMigrationChunkRequest(
+            migration, Unit, DataMigrationLedgerEntry.Start(Target, migration, Unit, Now), null, ["id"], 10);
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => request.Apply(Row(1)));
+
+        Assert.Equal(DataMigrationCodes.NotApplicable, refusal.Code);
+        Assert.Contains("target column 'slug' exceeds its declared length of 64", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_transform_cannot_produce_binary_longer_than_the_target_allows()
+    {
+        var unit = Unit with
+        {
+            Columns =
+            [
+                .. Unit.Columns,
+                new ColumnDefinition { Name = "payload", Type = PortableType.Binary, MaxLength = 4 }
+            ]
+        };
+        var migration = new DataMigration("m", unit.Id, new ConstantTransform("payload", new byte[5]));
+        var request = new DataMigrationChunkRequest(
+            migration, unit, DataMigrationLedgerEntry.Start(Target, migration, unit, Now), null, ["id"], 10);
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => request.Apply(Row(1)));
+
+        Assert.Equal(DataMigrationCodes.NotApplicable, refusal.Code);
+        Assert.Contains("target column 'payload' exceeds its declared length of 4", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_transform_cannot_produce_a_decimal_outside_the_targets_precision()
+    {
+        var unit = Unit with
+        {
+            Columns =
+            [
+                .. Unit.Columns,
+                new ColumnDefinition
+                {
+                    Name = "amount", Type = PortableType.Decimal, Precision = 5, Scale = 2
+                }
+            ]
+        };
+        var migration = new DataMigration("m", unit.Id, new ConstantTransform("amount", 1234.56m));
+        var request = new DataMigrationChunkRequest(
+            migration, unit, DataMigrationLedgerEntry.Start(Target, migration, unit, Now), null, ["id"], 10);
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => request.Apply(Row(1)));
+
+        Assert.Equal(DataMigrationCodes.NotApplicable, refusal.Code);
+        Assert.Contains(
+            "target column 'amount' does not fit its declared decimal(5,2)",
+            refusal.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Decimal_output_must_fit_scale_without_rounding_but_ignores_insignificant_zeroes()
+    {
+        var unit = Unit with
+        {
+            Columns =
+            [
+                .. Unit.Columns,
+                new ColumnDefinition
+                {
+                    Name = "amount", Type = PortableType.Decimal, Precision = 5, Scale = 2
+                }
+            ]
+        };
+
+        DataMigrationChunkRequest Request(decimal value)
+        {
+            var migration = new DataMigration("m", unit.Id, new ConstantTransform("amount", value));
+            return new DataMigrationChunkRequest(
+                migration, unit, DataMigrationLedgerEntry.Start(Target, migration, unit, Now), null, ["id"], 10);
+        }
+
+        Assert.Equal(1.2300m, Assert.Single(Request(1.2300m).Apply(Row(1))!).Value);
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => Request(1.234m).Apply(Row(1)));
+        Assert.Contains("does not fit its declared decimal(5,2)", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    [InlineData(-0.0d)]
+    public void Double_output_must_be_in_the_portable_storage_domain(double value)
+    {
+        var unit = Unit with
+        {
+            Columns =
+            [
+                .. Unit.Columns,
+                new ColumnDefinition { Name = "measurement", Type = PortableType.Double }
+            ]
+        };
+        var migration = new DataMigration("m", unit.Id, new ConstantTransform("measurement", value));
+        var request = new DataMigrationChunkRequest(
+            migration, unit, DataMigrationLedgerEntry.Start(Target, migration, unit, Now), null, ["id"], 10);
+
+        var refusal = Assert.Throws<DataMigrationRefusedException>(() => request.Apply(Row(1)));
+
+        Assert.Equal(DataMigrationCodes.NotApplicable, refusal.Code);
+        Assert.Contains("portable Double storage domain", refusal.Message, StringComparison.Ordinal);
+    }
+
     // ---------------------------------------------------------------- runner
 
     [Fact]
@@ -222,7 +369,7 @@ public sealed class DataMigrationTests
         Assert.Equal("GW-MIGRATION-001", refusal.Code);
         Assert.Equal(
             "GW-MIGRATION-001: this provider does not advertise data-migration capability " +
-            "AtomicChunkProgress, AppliedLedger; it cannot move data under the facility's " +
+            "AtomicChunkProgress, AppliedLedger, ExclusiveRunLease; it cannot move data under the facility's " +
             "interruption guarantees.",
             refusal.Message);
         Assert.Empty(executor.Ledger);
@@ -314,6 +461,30 @@ public sealed class DataMigrationTests
     }
 
     [Fact]
+    public async Task Concurrent_direct_runs_share_one_exclusive_target_lease()
+    {
+        var executor = new FakeExecutor(Unit, Seed(1));
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var transform = new BlockingSlugTransform(entered, release);
+        var migration = new DataMigration("concurrent", Unit.Id, transform);
+
+        var first = Task.Run(() => DataMigrationRunner.Run(executor, Target, Unit, migration, null, Now));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        var second = Task.Run(() => DataMigrationRunner.Run(executor, Target, Unit, migration, null, Now));
+
+        await Task.Delay(100);
+        Assert.Equal(1, transform.Calls);
+        Assert.False(second.IsCompleted);
+
+        release.Set();
+        var outcomes = await Task.WhenAll(first, second);
+        Assert.Contains(outcomes, outcome => outcome.Status == DataMigrationStatus.Completed);
+        Assert.Contains(outcomes, outcome => outcome.Status == DataMigrationStatus.Replayed);
+        Assert.Equal(1, transform.Calls);
+    }
+
+    [Fact]
     public void A_completed_migration_replays_after_contract_retires_its_source_column()
     {
         var executor = new FakeExecutor(Unit, Seed(3));
@@ -342,6 +513,25 @@ public sealed class DataMigrationTests
 
         Assert.Equal("GW-MIGRATION-002", refusal.Code);
         Assert.Contains("Use a new semantic migration identity for a changed transform.", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_transform_version_changes_the_request_fingerprint_even_when_its_identity_is_unchanged()
+    {
+        Assert.NotEqual(
+            Migration(new SlugTransform()).RequestFingerprint(Unit),
+            Migration(new UpperSlugTransform()).RequestFingerprint(Unit));
+    }
+
+    [Fact]
+    public void Transform_fingerprints_are_delimiter_safe_and_require_an_explicit_version()
+    {
+        Assert.NotEqual(
+            DataMigrationTransformFingerprint.Create("a:b", "c"),
+            DataMigrationTransformFingerprint.Create("a", "b:c"));
+        Assert.Throws<ArgumentException>(() => DataMigrationTransformFingerprint.Create("slug", " "));
+        Assert.Throws<ArgumentException>(() => DataMigrationTransformFingerprint.Create("slug\ud800", "v1"));
+        Assert.Throws<ArgumentException>(() => DataMigrationTransformFingerprint.Create("slug", "v1\udc00"));
     }
 
     [Fact]
@@ -522,8 +712,8 @@ public sealed class DataMigrationTests
         };
 
         Assert.NotEqual(
-            new DerivedColumnTransform(unit, [Derived(PortableCollation.OrdinalIgnoreCase)]).Identity,
-            new DerivedColumnTransform(unit, [Derived(PortableCollation.UnicodeOrdinalIgnoreCase)]).Identity);
+            new DerivedColumnTransform(unit, [Derived(PortableCollation.OrdinalIgnoreCase)]).Version,
+            new DerivedColumnTransform(unit, [Derived(PortableCollation.UnicodeOrdinalIgnoreCase)]).Version);
     }
 
     // ---------------------------------------------------------------- helpers
@@ -550,7 +740,8 @@ public sealed class DataMigrationTests
 
     private sealed class SlugTransform : IDataMigrationTransform
     {
-        public string Identity => "slug/v1";
+        public string Identity => "slug";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["slug"];
         public DataMigrationValues Transform(DataMigrationRow row) =>
@@ -562,7 +753,8 @@ public sealed class DataMigrationTests
 
     private sealed class UpperSlugTransform : IDataMigrationTransform
     {
-        public string Identity => "slug/v2";
+        public string Identity => "slug";
+        public string Version => "v2";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["slug"];
         public DataMigrationValues Transform(DataMigrationRow row) =>
@@ -572,9 +764,35 @@ public sealed class DataMigrationTests
             });
     }
 
+    private sealed class BlockingSlugTransform(
+        ManualResetEventSlim entered,
+        ManualResetEventSlim release) : IDataMigrationTransform
+    {
+        private int calls;
+
+        public int Calls => Volatile.Read(ref calls);
+        public string Identity => "blocking-slug";
+        public string Version => "v1";
+        public ImmutableArray<string> SourceColumns => ["name"];
+        public ImmutableArray<string> TargetColumns => ["slug"];
+
+        public DataMigrationValues Transform(DataMigrationRow row)
+        {
+            Interlocked.Increment(ref calls);
+            entered.Set();
+            if (!release.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("The concurrent migration test did not release its first transform.");
+            return DataMigrationValues.Set(new Dictionary<string, object?>
+            {
+                ["slug"] = row["name"] + "-slug"
+            });
+        }
+    }
+
     private sealed class KeyWritingTransform : IDataMigrationTransform
     {
-        public string Identity => "renumber/v1";
+        public string Identity => "renumber";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["id"];
         public DataMigrationValues Transform(DataMigrationRow row) => DataMigrationValues.Unchanged;
@@ -582,7 +800,8 @@ public sealed class DataMigrationTests
 
     private sealed class StrayTransform : IDataMigrationTransform
     {
-        public string Identity => "stray/v1";
+        public string Identity => "stray";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["slug"];
         public DataMigrationValues Transform(DataMigrationRow row) =>
@@ -593,6 +812,16 @@ public sealed class DataMigrationTests
             });
     }
 
+    private sealed class ConstantTransform(string target, object? value) : IDataMigrationTransform
+    {
+        public string Identity => "constant";
+        public string Version => "v1";
+        public ImmutableArray<string> SourceColumns => [];
+        public ImmutableArray<string> TargetColumns => [target];
+        public DataMigrationValues Transform(DataMigrationRow row) =>
+            DataMigrationValues.Set(new Dictionary<string, object?> { [target] = value });
+    }
+
     /// <summary>
     /// An in-process executor that keeps the facility's contract honestly: it scans strictly after
     /// the cursor in key order, applies the caller's transform, and records the advanced entry with
@@ -601,11 +830,18 @@ public sealed class DataMigrationTests
     private sealed class FakeExecutor(StorageUnit unit, List<Dictionary<string, object?>>? rows = null)
         : IDataMigrationExecutor
     {
+        private readonly SemaphoreSlim migrationGate = new(1, 1);
         public List<Dictionary<string, object?>> Rows { get; } = rows ?? [];
 
         public Dictionary<string, DataMigrationLedgerEntry> Ledger { get; } = new(StringComparer.Ordinal);
 
         public DataMigrationCapabilities Capabilities { get; set; } = DataMigrationRunner.Required;
+
+        public IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target)
+        {
+            migrationGate.Wait();
+            return new MigrationLock(target, () => migrationGate.Release());
+        }
 
         /// <summary>
         /// A ceiling on chunks this source will serve. No budget can bound a runner that spins —
@@ -708,6 +944,19 @@ public sealed class DataMigrationTests
             SawAsync = true;
             cancellationToken.ThrowIfCancellationRequested();
             return new(ExecuteChunk(request));
+        }
+
+        private sealed class MigrationLock(
+            PhysicalSchemaTargetIdentity target,
+            Action release) : IPhysicalSchemaApplicationLock
+        {
+            private int disposed;
+            public PhysicalSchemaTargetIdentity Target { get; } = target;
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref disposed, 1) == 0)
+                    release();
+            }
         }
     }
 }

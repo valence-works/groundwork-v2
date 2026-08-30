@@ -39,9 +39,13 @@ public sealed class MongoDataMigrationExecutor : IDataMigrationExecutor
     public DataMigrationCapabilities Capabilities =>
         DataMigrationCapabilities.KeysetScan |
         DataMigrationCapabilities.AppliedLedger |
+        DataMigrationCapabilities.ExclusiveRunLease |
         (context.SupportsTransactions()
             ? DataMigrationCapabilities.AtomicChunkProgress
             : DataMigrationCapabilities.None);
+
+    public IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target) =>
+        new MongoSchemaExecutor(context).AcquireApplicationLock(target);
 
     public DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId) =>
         ReadEntry(target, migrationId, MongoExecution.Synchronous).GetAwaiter().GetResult();

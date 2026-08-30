@@ -5,9 +5,9 @@
 ## CLI
 
 ```text
-groundwork plan     --schema groundwork.schema.json --provider <alias> [--phase expand|contract]
+groundwork plan     --schema groundwork.schema.json --provider <alias> [--deployment-id <id>] [--phase expand|contract]
 groundwork validate --schema groundwork.schema.json --provider <alias> [--offline]
-groundwork status   --schema groundwork.schema.json --provider <alias> [--phase expand|contract]
+groundwork status   --schema groundwork.schema.json --provider <alias> [--deployment-id <id>] [--phase expand|contract]
 groundwork apply    --schema groundwork.schema.json --provider <alias> --safe [--phase expand|contract]
 groundwork schema emit --input schema.json --file groundwork.schema.json
 ```
@@ -26,6 +26,12 @@ schema attribute preserves evolution. Generated `StorageUnit.Definition` remains
 shape because evolution is deployment-target metadata rather than part of a storage unit.
 
 `apply` mutates nothing unless the invocation selects `--safe` or supplies an exact `--expected-plan` fingerprint. Safe mode refuses protected work. A destructive plan requires its current fingerprint plus every exact operation identity through `--allow-destructive`; semantic migrations require their exact IDs through `--allow-semantic`.
+
+Exact-plan authorization also requires a non-secret `--deployment-id`, which is part of the plan
+fingerprint and prevents a plan reviewed for one deployment from authorizing another. Prefer
+`--connection-env`, `--connection-file`, or `--connection-stdin` over putting a credential in
+process arguments. See [security boundaries](v2/security-boundaries.md) for the trust model,
+credential handling, and partial multi-target outcome guidance.
 
 ### Opt-in interop reporting views
 
@@ -77,7 +83,7 @@ declared table; the interop view is inspected as its own provider-owned definiti
 Inspection checks both its declared output columns and the canonical-definition marker embedded in
 the live view text, so a same-shaped replacement is still reported as drift.
 
-Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories and can load a provider plug-in explicitly with `--provider-assembly`; `--connection` and `--database` are passed to the factory without being echoed in reports. Hosts can instead inject an `ISchemaToolProviderSession` resolver directly.
+Provider packages implement `ISchemaToolProviderSessionFactory`. The tool discovers loaded factories and can load a provider plug-in explicitly with `--provider-assembly`; the resolved connection and `--database` are passed to the factory without being echoed in reports. Hosts can instead inject an `ISchemaToolProviderSession` resolver directly.
 The shipped aliases are `sqlite`, `mysql`, `postgresql`, `sqlserver`, and `mongodb`; each uses the
 same canonical document, authorization vocabulary, plan fingerprint, and report format.
 

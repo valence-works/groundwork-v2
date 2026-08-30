@@ -73,7 +73,7 @@ public sealed class SchemaToolTargetFrameworkParityTests : IDisposable
         "9923bfbc8f4f475209cc8d1b39a51ccf7a7d15c51d20ec1e006f4aa79ddee31e";
 
     private const string ExpectedPlanFingerprint =
-        "a0703693d0fe77dbeb907f0a7b74f8209b573181fb41da8118a1e71fb6c7b388";
+        "6a3edfd8598fc59303015f5d8fdbc6217b28a9584826f4a6ea559002aeb37d5f";
 
     private readonly SchemaToolCliHarness harness = new(
         static (arguments, output, error) => GroundworkSchemaCli.RunAsync(arguments, output, error),

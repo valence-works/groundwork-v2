@@ -120,6 +120,7 @@ Published codes appear in messages; Roslyn ids use underscores.
 
 | Code | Roslyn id | Meaning |
 | --- | --- | --- |
+| `GW-COVER-001` | — | Direct set-mutation capability call has no coverage or explicit scan-acceptance evidence; use the admitted extensions |
 | `GW-COVER-005` | `GW_COVER_005` | Actionable coverage refusal — may include suggested `[GwIndex(...)]` |
 | `GW-COVER-006` | `GW_COVER_006` | Uncovered query — may include suggested `[GwIndex(...)]` |
 | `GW-COVER-009` | `GW_COVER_009` | Sparse-index coverage refusal — may include suggested `[GwIndex(...)]` |

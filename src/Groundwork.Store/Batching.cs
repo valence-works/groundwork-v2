@@ -946,6 +946,7 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         Predicate where,
         IReadOnlyDictionary<string, object?> assignments)
     {
+        SetMutationExecutionAdmission.Require(where);
         var validated = SetMutationValidation.ValidateLogicalAssignments(Unit, assignments);
         context.FlushAll();
         return RequireSetMutation().UpdateWhere(where, validated);
@@ -956,6 +957,7 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         IReadOnlyDictionary<string, object?> assignments,
         CancellationToken cancellationToken)
     {
+        SetMutationExecutionAdmission.Require(where);
         var validated = SetMutationValidation.ValidateLogicalAssignments(Unit, assignments);
         await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
         return await RequireSetMutation().UpdateWhereAsync(where, validated, cancellationToken).ConfigureAwait(false);
@@ -963,6 +965,7 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
 
     protected SetMutationResult DeleteWhereWithBarrier(Predicate where)
     {
+        SetMutationExecutionAdmission.Require(where);
         context.FlushAll();
         return RequireSetMutation().DeleteWhere(where);
     }
@@ -971,6 +974,7 @@ internal class BatchStorageSession : IStorageSession, IProviderBoundStorageSessi
         Predicate where,
         CancellationToken cancellationToken)
     {
+        SetMutationExecutionAdmission.Require(where);
         await context.FlushAllAsync(cancellationToken).ConfigureAwait(false);
         return await RequireSetMutation().DeleteWhereAsync(where, cancellationToken).ConfigureAwait(false);
     }

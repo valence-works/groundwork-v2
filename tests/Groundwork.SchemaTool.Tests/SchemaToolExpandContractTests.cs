@@ -194,7 +194,10 @@ public sealed class SchemaToolExpandContractTests : IDisposable
     {
         output.GetStringBuilder().Clear();
         error.GetStringBuilder().Clear();
-        return GroundworkSchemaCli.RunAsync(arguments, output, error, _ => session);
+        var bound = arguments.Contains("--deployment-id", StringComparer.Ordinal)
+            ? arguments
+            : [.. arguments, "--deployment-id", "groundwork-test:expand-contract"];
+        return GroundworkSchemaCli.RunAsync(bound, output, error, _ => session);
     }
 
     /// <summary>
@@ -234,6 +237,9 @@ public sealed class SchemaToolExpandContractTests : IDisposable
 
         public DataMigrationCapabilities Capabilities => DataMigrationRunner.Required;
 
+        public IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target) =>
+            new Lease(target);
+
         public DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId) =>
             Ledger.FirstOrDefault(entry => entry.MigrationId == migrationId);
 
@@ -265,6 +271,12 @@ public sealed class SchemaToolExpandContractTests : IDisposable
 
         public void Dispose()
         {
+        }
+
+        private sealed class Lease(PhysicalSchemaTargetIdentity target) : IPhysicalSchemaApplicationLock
+        {
+            public PhysicalSchemaTargetIdentity Target { get; } = target;
+            public void Dispose() { }
         }
 
         private sealed class Compiler(SupersedingSession owner) : IPhysicalSchemaTargetCompiler
@@ -324,7 +336,8 @@ public sealed class SchemaToolExpandContractTests : IDisposable
 
         private sealed class CopySlugTransform : IDataMigrationTransform
         {
-            public string Identity => "copy-slug-v1";
+            public string Identity => "copy-slug";
+            public string Version => "v1";
 
             public System.Collections.Immutable.ImmutableArray<string> SourceColumns => ["slug"];
 

@@ -10,6 +10,8 @@ namespace Groundwork.SchemaTool.Tests;
 
 public sealed class SchemaToolContractTests
 {
+    private const string DeploymentId = "test-deployment";
+
     private const string ValidSchema = """
         {"tables":[{"name":"tickets","columns":[{"name":"id","type":"String","nullable":false,"length":64,"precision":null,"scale":null,"folding":"None","generation":"Supplied"}],"key":["id"],"indexes":[]}]}
         """;
@@ -128,7 +130,7 @@ public sealed class SchemaToolContractTests
             """.Replace("MIGRATION", migration, StringComparison.Ordinal));
         using var session = new FakeSession();
         Assert.Equal(SchemaToolExitCodes.PendingChanges, await RunAsync(
-            ["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+            ["plan", "--schema", schema, "--provider", "fake", "--deployment-id", DeploymentId, "--output", "json"], _ => session));
         using var plan = JsonDocument.Parse(output.ToString());
         var fingerprints = plan.RootElement.GetProperty("targets").EnumerateArray()
             .Select(target => target.GetProperty("planFingerprint").GetString()!)
@@ -137,6 +139,7 @@ public sealed class SchemaToolContractTests
         var exit = await RunAsync(
         [
             "apply", "--schema", schema, "--provider", "fake", "--output", "json",
+            "--deployment-id", DeploymentId,
             "--expected-plan", fingerprints[0], "--expected-plan", fingerprints[1],
             "--allow-semantic", migration
         ], _ => session);
@@ -163,7 +166,7 @@ public sealed class SchemaToolContractTests
             new InvalidOrdersTransform());
         using var session = new FakeSession(migration: migration);
         Assert.Equal(SchemaToolExitCodes.PendingChanges, await RunAsync(
-            ["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+            ["plan", "--schema", schema, "--provider", "fake", "--deployment-id", DeploymentId, "--output", "json"], _ => session));
         using var plan = JsonDocument.Parse(output.ToString());
         var fingerprints = plan.RootElement.GetProperty("targets").EnumerateArray()
             .Select(target => target.GetProperty("planFingerprint").GetString()!)
@@ -172,6 +175,7 @@ public sealed class SchemaToolContractTests
         var exit = await RunAsync(
         [
             "apply", "--schema", schema, "--provider", "fake", "--output", "json",
+            "--deployment-id", DeploymentId,
             "--expected-plan", fingerprints[0], "--expected-plan", fingerprints[1],
             "--allow-semantic", migrationId
         ], _ => session);
@@ -411,6 +415,21 @@ public sealed class SchemaToolContractTests
     }
 
     [Fact]
+    public async Task Emit_refuses_connection_input_it_cannot_use()
+    {
+        var source = Temp("source-with-unused-connection.json", ValidSchema);
+        var destination = Path.Combine(directory, "unused-connection-output.json");
+
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation,
+            await RunAsync([
+                "schema", "emit", "--input", source, "--file", destination, "--connection-stdin"
+            ]));
+
+        Assert.False(File.Exists(destination));
+        Assert.Contains("GW-CLI-001", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Default_host_discovers_a_loaded_provider_factory()
     {
         var schema = Temp("discovery-schema.json", ValidSchema);
@@ -431,7 +450,7 @@ public sealed class SchemaToolContractTests
         using var session = new FakeSession();
 
         Assert.Equal(SchemaToolExitCodes.PendingChanges,
-            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--deployment-id", DeploymentId, "--output", "json"], _ => session));
         Assert.Empty(session.ExecutorImpl.AppliedOperations);
         using var plan = JsonDocument.Parse(output.ToString());
         Assert.Equal("1", plan.RootElement.GetProperty("schemaVersion").GetString());
@@ -447,7 +466,7 @@ public sealed class SchemaToolContractTests
         Assert.Empty(session.ExecutorImpl.AppliedOperations);
 
         Assert.Equal(SchemaToolExitCodes.Success,
-            await RunAsync(["apply", "--schema", schema, "--provider", "fake", "--expected-plan", fingerprint], _ => session));
+            await RunAsync(["apply", "--schema", schema, "--provider", "fake", "--deployment-id", DeploymentId, "--expected-plan", fingerprint], _ => session));
         Assert.NotEmpty(session.ExecutorImpl.AppliedOperations);
 
         Assert.Equal(SchemaToolExitCodes.Success,
@@ -472,13 +491,14 @@ public sealed class SchemaToolContractTests
         using var session = new FakeSession();
 
         Assert.Equal(SchemaToolExitCodes.PendingChanges,
-            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--output", "json"], _ => session));
+            await RunAsync(["plan", "--schema", schema, "--provider", "fake", "--deployment-id", DeploymentId, "--output", "json"], _ => session));
         using var report = JsonDocument.Parse(output.ToString());
         var onlyFirstPlan = report.RootElement.GetProperty("targets")[0].GetProperty("planFingerprint").GetString()!;
 
         Assert.Equal(SchemaToolExitCodes.AuthorizationRequired,
             await RunAsync([
                 "apply", "--schema", schema, "--provider", "fake",
+                "--deployment-id", DeploymentId,
                 "--expected-plan", onlyFirstPlan
             ], _ => session));
         Assert.Empty(session.ExecutorImpl.AppliedOperations);
@@ -509,11 +529,153 @@ public sealed class SchemaToolContractTests
 
         Assert.Equal(SchemaToolExitCodes.ExecutionFailed,
             await RunAsync([
-                "plan", "--schema", schema, "--provider", "fake", "--output", "json"
-            ], _ => throw new InvalidOperationException(secret)));
+                "plan", "--schema", schema, "--provider", "fake", "--connection", secret, "--output", "json"
+            ], _ => throw new SchemaToolProviderException($"provider rejected {secret}")));
 
         Assert.Contains("GW-CLI-010", output.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+
+        Assert.Equal(SchemaToolExitCodes.ValidationFailed,
+            await RunAsync([
+                "plan", "--schema", schema, "--provider", "fake", "--connection", secret, "--output", "json"
+            ], _ => throw new ArgumentException($"ordinary CLI failure: {secret}")));
+        Assert.Contains("GW-CLI-005", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+
+        const string connection = "Host=private.example;User Id=operator;Password=fragment-secret";
+        Assert.Equal(SchemaToolExitCodes.ExecutionFailed,
+            await RunAsync([
+                "plan", "--schema", schema, "--provider", "fake", "--connection", connection, "--output", "json"
+            ], _ => throw new SchemaToolProviderException(
+                "authentication failed for fragment-secret; canonical Password=fragment-secret")));
+        Assert.DoesNotContain("fragment-secret", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("redacted", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task An_exact_plan_is_bound_to_the_explicit_deployment_identity()
+    {
+        var schema = Temp("deployment-identity-schema.json", ValidSchema);
+        using var session = new FakeSession();
+
+        Assert.Equal(SchemaToolExitCodes.PendingChanges, await RunAsync([
+            "plan", "--schema", schema, "--provider", "fake", "--deployment-id", "staging", "--output", "json"
+        ], _ => session));
+        using var plan = JsonDocument.Parse(output.ToString());
+        var fingerprint = plan.RootElement.GetProperty("planFingerprint").GetString()!;
+
+        var apply = await RunAsync([
+            "apply", "--schema", schema, "--provider", "fake", "--deployment-id", "production",
+            "--expected-plan", fingerprint, "--output", "json"
+        ], _ => session);
+
+        Assert.Equal(SchemaToolExitCodes.AuthorizationRequired, apply);
+        Assert.Contains("GW-CLI-011", output.ToString(), StringComparison.Ordinal);
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+
+        var unbound = await RunAsync([
+            "apply", "--schema", schema, "--provider", "fake", "--expected-plan", fingerprint, "--output", "json"
+        ], _ => session);
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation, unbound);
+        Assert.Contains("--deployment-id", output.ToString(), StringComparison.Ordinal);
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+
+        var safeButUnbound = await RunAsync([
+            "apply", "--schema", schema, "--provider", "fake", "--safe",
+            "--expected-plan", fingerprint, "--output", "json"
+        ], _ => session);
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation, safeButUnbound);
+        Assert.Contains("--deployment-id", output.ToString(), StringComparison.Ordinal);
+        Assert.Empty(session.ExecutorImpl.AppliedOperations);
+
+        Assert.Equal(SchemaToolExitCodes.Success, await RunAsync([
+            "apply", "--schema", schema, "--provider", "fake", "--deployment-id", "staging",
+            "--expected-plan", fingerprint, "--output", "json"
+        ], _ => session));
+        Assert.NotEmpty(session.ExecutorImpl.AppliedOperations);
+    }
+
+    [Fact]
+    public async Task A_deployment_identity_must_be_well_formed_unicode()
+    {
+        var schema = Temp("deployment-identity-unicode-schema.json", ValidSchema);
+
+        Assert.Equal(SchemaToolExitCodes.InvalidInvocation, await RunAsync([
+            "plan", "--schema", schema, "--provider", "fake", "--deployment-id", "staging\ud800",
+            "--output", "json"
+        ], _ => new FakeSession()));
+
+        Assert.Contains("well-formed Unicode", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_connection_environment_source_reaches_the_provider_without_echoing_the_secret()
+    {
+        var schema = Temp("connection-environment-schema.json", ValidSchema);
+        const string variable = "GROUNDWORK_TEST_CONNECTION_189";
+        const string secret = "Host=private.example;Password=do-not-echo";
+        Environment.SetEnvironmentVariable(variable, secret);
+        DiscoveredFactory.LastOptions = null;
+        try
+        {
+            Assert.Equal(SchemaToolExitCodes.PendingChanges, await GroundworkSchemaCli.RunAsync([
+                "plan", "--schema", schema, "--provider", DiscoveredFactory.ProviderAlias,
+                "--connection-env", variable, "--provider-assembly", typeof(DiscoveredFactory).Assembly.Location,
+                "--output", "json"
+            ], output, error));
+
+            Assert.Equal(secret, DiscoveredFactory.LastOptions?.Connection);
+            Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    [Fact]
+    public async Task A_connection_file_removes_only_its_terminal_line_ending()
+    {
+        var schema = Temp("connection-file-schema.json", ValidSchema);
+        const string secret = "Host=private.example;Password= value with spaces ";
+        var connectionFile = Temp("connection.secret", secret + "\r\n");
+        DiscoveredFactory.LastOptions = null;
+
+        Assert.Equal(SchemaToolExitCodes.PendingChanges, await GroundworkSchemaCli.RunAsync([
+            "plan", "--schema", schema, "--provider", DiscoveredFactory.ProviderAlias,
+            "--connection-file", connectionFile,
+            "--provider-assembly", typeof(DiscoveredFactory).Assembly.Location,
+            "--output", "json"
+        ], output, error));
+
+        Assert.Equal(secret, DiscoveredFactory.LastOptions?.Connection);
+        Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Connection_sources_cannot_be_combined_and_the_inline_secret_is_not_echoed()
+    {
+        var schema = Temp("connection-conflict-schema.json", ValidSchema);
+        const string variable = "GROUNDWORK_TEST_CONNECTION_CONFLICT_189";
+        const string secret = "Host=private.example;Password=conflict-do-not-echo";
+        Environment.SetEnvironmentVariable(variable, secret);
+        try
+        {
+            Assert.Equal(SchemaToolExitCodes.InvalidInvocation, await RunAsync([
+                "plan", "--schema", schema, "--provider", "fake", "--connection", secret,
+                "--connection-env", variable, "--output", "json"
+            ], _ => new FakeSession()));
+
+            Assert.Contains("GW-CLI-001", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
     }
 
     [Fact]
@@ -670,6 +832,8 @@ public sealed class SchemaToolContractTests
             ? Groundwork.Kernel.Schema.DataMigrationCatalog.Empty
             : new DataMigrationCatalog([migration]);
         public DataMigrationCapabilities Capabilities => DataMigrationRunner.Required;
+        public IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target) =>
+            ExecutorImpl.AcquireApplicationLock(target);
         public DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId) => null;
         public ValueTask<DataMigrationLedgerEntry?> ReadLedgerEntryAsync(
             PhysicalSchemaTargetIdentity target,
@@ -692,7 +856,8 @@ public sealed class SchemaToolContractTests
 
     private sealed class InvalidOrdersTransform : IDataMigrationTransform
     {
-        public string Identity => "invalid-orders/v1";
+        public string Identity => "invalid-orders";
+        public string Version => "v1";
         public System.Collections.Immutable.ImmutableArray<string> SourceColumns => ["missing_source"];
         public System.Collections.Immutable.ImmutableArray<string> TargetColumns => ["id"];
         public DataMigrationValues Transform(DataMigrationRow row) => DataMigrationValues.Unchanged;
@@ -708,8 +873,13 @@ public sealed class SchemaToolContractTests
     public sealed class DiscoveredFactory : ISchemaToolProviderSessionFactory
     {
         public const string ProviderAlias = "schema-tool-test-discovered";
+        public static SchemaToolProviderOptions? LastOptions { get; set; }
         public string Alias => ProviderAlias;
-        public ISchemaToolProviderSession Open(SchemaToolProviderOptions options) => new FakeSession(ProviderAlias);
+        public ISchemaToolProviderSession Open(SchemaToolProviderOptions options)
+        {
+            LastOptions = options;
+            return new FakeSession(ProviderAlias);
+        }
     }
 
     private sealed class FakeExecutor : IPhysicalSchemaExecutor, IPhysicalSchemaHistoryInspector

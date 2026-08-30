@@ -2,6 +2,7 @@ using Groundwork.Kernel;
 using Groundwork.LiveDatabases;
 using Groundwork.Query.Model;
 using Groundwork.MongoDb;
+using Groundwork.MySql;
 using Groundwork.PostgreSql;
 using Groundwork.Sqlite;
 using Groundwork.SqlServer;
@@ -140,6 +141,14 @@ public sealed class ProviderCommandTests
         AssertReadEvents(connection, "mongodb");
     }
 
+    [SkippableFact]
+    public void MySQL_read_and_query_raise_single_read_events()
+    {
+        using var database = LiveMySqlDatabase.OpenOrSkip();
+        using var connection = new MySqlProviderFactory().Create(database.ConnectionString);
+        AssertReadEvents(connection, "mysql");
+    }
+
     [Fact]
     public void InMemory_ordinary_writes_each_raise_one_write_event()
     {
@@ -204,6 +213,14 @@ public sealed class ProviderCommandTests
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB provider-command tests.");
         using var connection = new MongoProviderFactory().Create(connectionString!);
         AssertOrdinaryWritesObserved(connection, "mongodb");
+    }
+
+    [SkippableFact]
+    public void MySQL_ordinary_writes_each_raise_one_write_event()
+    {
+        using var database = LiveMySqlDatabase.OpenOrSkip();
+        using var connection = new MySqlProviderFactory().Create(database.ConnectionString);
+        AssertOrdinaryWritesObserved(connection, "mysql");
     }
 
     [Fact]
@@ -287,9 +304,13 @@ public sealed class ProviderCommandTests
             .Insert(Values("two", "second", DateTimeOffset.UnixEpoch));
 
         var observer = new ProviderCommandObserver();
+        var accessObserver = new RecordingAccessObserver();
         var privileged = connection.OpenSession(
             unit,
-            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("provider-command-tests", "cross-scope-observation")),
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit(
+                "provider-command-tests",
+                "cross-scope-observation",
+                accessObserver)),
             observer);
         var crossScope = Assert.IsAssignableFrom<IPrivilegedCrossScopeQuerySession>(privileged);
 
@@ -299,6 +320,40 @@ public sealed class ProviderCommandTests
         Assert.Equal("sqlite.query-across-scopes", single.Operation);
         Assert.Equal(ProviderCommandKind.Read, single.Kind);
         Assert.False(single.IsProbe);
+        Assert.Equal(
+            ["query-across-scopes.attempt", "query-across-scopes.success"],
+            accessObserver.Events.Select(item => item.Operation));
+    }
+
+    [Fact]
+    public void SQLite_privileged_audit_refusals_precede_provider_commands()
+    {
+        using var store = TemporarySqliteStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = Unit("sqlite-cross-scope-audit-refusal", scope: ScopePolicy.Scoped);
+        connection.Schema.Apply(unit);
+        var commands = new ProviderCommandObserver();
+
+        var missing = connection.OpenSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("claimed-operator", "repair")),
+            commands);
+        var beforeMissing = commands.RoundTrips;
+        var missingFailure = Assert.Throws<InvalidOperationException>(() =>
+            missing.QueryAcrossScopes(Page(unit)));
+        Assert.Contains("GW-ACCESS-001", missingFailure.Message, StringComparison.Ordinal);
+        Assert.Equal(beforeMissing, commands.RoundTrips);
+
+        var throwing = connection.OpenSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit(
+                "claimed-operator",
+                "repair",
+                new ThrowingAccessObserver())),
+            commands);
+        var beforeThrowing = commands.RoundTrips;
+        Assert.Throws<AuditSinkException>(() => throwing.QueryAcrossScopes(Page(unit)));
+        Assert.Equal(beforeThrowing, commands.RoundTrips);
     }
 
     [Fact]
@@ -1114,6 +1169,20 @@ public sealed class ProviderCommandTests
             catch { }
         }
     }
+
+    private sealed class RecordingAccessObserver : IStorageAccessObserver
+    {
+        public List<StorageAccessEvent> Events { get; } = [];
+
+        public void Observe(StorageAccessEvent accessEvent) => Events.Add(accessEvent);
+    }
+
+    private sealed class ThrowingAccessObserver : IStorageAccessObserver
+    {
+        public void Observe(StorageAccessEvent accessEvent) => throw new AuditSinkException();
+    }
+
+    private sealed class AuditSinkException : Exception { }
 }
 
 internal static class StorageSessionExtensions
