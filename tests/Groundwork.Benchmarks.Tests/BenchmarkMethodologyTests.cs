@@ -65,6 +65,16 @@ public sealed class BenchmarkMethodologyTests
     }
 
     [Fact]
+    public void Published_evidence_fingerprint_matches_the_canonical_schema()
+    {
+        Assert.Equal(
+            BenchmarkMethodology.SchemaFingerprint,
+            File.ReadAllText(Path.Combine(
+                AppContext.BaseDirectory,
+                "evidence/schema-fingerprint.txt")).Trim());
+    }
+
+    [Fact]
     public async Task Every_comparison_path_executes_once_against_the_shared_physical_schema()
     {
         var benchmarks = new StorageBenchmarks();

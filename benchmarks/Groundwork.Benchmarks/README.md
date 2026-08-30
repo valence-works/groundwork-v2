@@ -38,8 +38,9 @@ dotnet run --project benchmarks/Groundwork.Benchmarks -c Release -- \
 
 A real measurement must run in Release mode on an otherwise idle host and retain BenchmarkDotNet's
 environment metadata. Do not compare results from different machines or mix them with the existing
-round-trip/reflection assertions. Publishing results and defining CI regression thresholds belong
-to issue #186; this project intentionally adds neither an automatic workflow nor a pass/fail gate.
+round-trip/reflection assertions. The controlled-host exact-SHA collection procedure and publication
+handoff are defined in [`evidence/methodology.md`](evidence/methodology.md). Ordinary correctness
+checks validate the benchmark matrix and evidence contract without elapsed-time pass/fail criteria.
 
 When the EF mapping changes, regenerate its compiled model with the repository's matching EF tool:
 

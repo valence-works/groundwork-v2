@@ -14,5 +14,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../benchmarks/Groundwork.Benchmarks/Groundwork.Benchmarks.csproj" />
+    <None Include="../../benchmarks/Groundwork.Benchmarks/evidence/schema-fingerprint.txt"
+          Link="evidence/schema-fingerprint.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
