@@ -9,6 +9,9 @@ namespace Groundwork.Substrate.Relational.Tests;
 
 public sealed class RelationalSubstrateContractTests
 {
+    private const string ExpectedSearchKeyAlgorithmId =
+        "groundwork-unicode-ordinal-ignore-case-v1-3206f759667cb9cc764ec243dfb3d322a39970184efab619e80163c36d86818f";
+
     [Theory]
     [InlineData("stale-search-key-v0")]
     [InlineData("prefix-groundwork-ascii-lower-v1-suffix")]
@@ -382,20 +385,7 @@ public sealed class RelationalSubstrateContractTests
     [Fact]
     public void Inspection_classifies_collation_search_key_and_index_shape_drift()
     {
-        const string expectedAlgorithmId =
-            "groundwork-unicode-ordinal-ignore-case-v1-3206f759667cb9cc764ec243dfb3d322a39970184efab619e80163c36d86818f";
-        var dialect = new StubDialect
-        {
-            TableExistsResult = true,
-            MappedCollation = "OrdinalIgnoreCase"
-        };
-        dialect.CatalogColumns["status"] = new("status", "varchar(255)", true, null, "OrdinalIgnoreCase", 1);
-        dialect.CatalogColumns["status_folded"] = new("status_folded", "varchar(255)", false, null, null, 0);
-        dialect.DerivedSearchKeyAlgorithms["status_folded"] = expectedAlgorithmId;
-        dialect.CatalogIndexes["ix_status"] = new(
-            true,
-            [new RelationalIndexColumnMetadata("status", SortDirection.Ascending)],
-            "\"status\" IS NOT NULL");
+        var dialect = SearchDialect();
         var target = SearchTarget();
         var (executor, _) = Applied(dialect, target);
         dialect.CatalogColumns["status"] = new("status", "varchar(255)", true, null, "Ordinal", 1);
@@ -428,6 +418,32 @@ public sealed class RelationalSubstrateContractTests
             "Relational schema index 'search.ix_status' does not match its declaration.",
             indexRefusal.Message);
         Assert.False(inspection.IsAppliedSchemaValid);
+    }
+
+    [Fact]
+    public void No_change_apply_tolerates_index_only_drift_but_still_refuses_column_drift()
+    {
+        var dialect = SearchDialect();
+        var target = SearchTarget();
+        var (executor, history) = Applied(dialect, target);
+        dialect.CatalogIndexes["ix_status"] = new(
+            true,
+            [new RelationalIndexColumnMetadata("status", SortDirection.Descending)],
+            null);
+
+        var inspection = executor.InspectHistory(target);
+        var plan = PhysicalSchemaDiffPlanner.Plan(target, history, DateTimeOffset.UnixEpoch);
+        var application = PhysicalSchemaApplication.Apply(target, executor, DateTimeOffset.UnixEpoch);
+
+        Assert.True(inspection.HasIndexDrift);
+        Assert.False(inspection.HasColumnDrift);
+        Assert.Empty(plan.Operations);
+        Assert.Equal(PhysicalSchemaApplicationOutcome.NoChanges, application.Outcome);
+
+        dialect.CatalogColumns["status"] = new("status", "varchar(255)", true, null, "Ordinal", 1);
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            PhysicalSchemaApplication.Apply(target, executor, DateTimeOffset.UnixEpoch));
+        Assert.Contains("collation 'Ordinal' != 'OrdinalIgnoreCase'", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -714,6 +730,23 @@ public sealed class RelationalSubstrateContractTests
             }]
         }),
         new ProviderIdentity("stub", "1"));
+
+    private static StubDialect SearchDialect()
+    {
+        var dialect = new StubDialect
+        {
+            TableExistsResult = true,
+            MappedCollation = "OrdinalIgnoreCase"
+        };
+        dialect.CatalogColumns["status"] = new("status", "varchar(255)", true, null, "OrdinalIgnoreCase", 1);
+        dialect.CatalogColumns["status_folded"] = new("status_folded", "varchar(255)", false, null, null, 0);
+        dialect.DerivedSearchKeyAlgorithms["status_folded"] = ExpectedSearchKeyAlgorithmId;
+        dialect.CatalogIndexes["ix_status"] = new(
+            true,
+            [new RelationalIndexColumnMetadata("status", SortDirection.Ascending)],
+            "\"status\" IS NOT NULL");
+        return dialect;
+    }
 
     private static (RelationalSchemaExecutor Executor, PhysicalSchemaHistoryState History) Applied(
         StubDialect dialect,
