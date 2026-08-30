@@ -45,6 +45,12 @@ public interface IPhysicalSchemaHistoryInspector
 public interface IPhysicalSchemaApplicationLock : IDisposable
 {
     PhysicalSchemaTargetIdentity Target { get; }
+
+    /// <summary>
+    /// Renews or verifies a time-bounded lease before long-running work continues. Providers whose
+    /// native lock remains held until disposal may keep the default no-op implementation.
+    /// </summary>
+    void Renew() { }
 }
 
 public sealed record PhysicalSchemaInspectionResult(
@@ -255,7 +261,8 @@ public static class PhysicalSchemaApplication
             // A target whose schema is already applied can still owe a data migration that an
             // earlier pass left running, so the resume runs here too rather than only after DDL.
             var resumed = await RunDataMigrations(
-                target, migrationExecutor, supersessions, migration, dataMigrationBudget, dataMigrationProgress, now, mode)
+                target, migrationExecutor, supersessions, migration, dataMigrationBudget, dataMigrationProgress,
+                now, applicationLock, mode)
                 .ConfigureAwait(false);
             return new(
                 resumed.Any(result => !result.IsComplete)
@@ -285,7 +292,8 @@ public static class PhysicalSchemaApplication
         // unfinished data migration is reported by the outcome and by that ledger, not by pretending
         // the schema was never applied.
         var migrations = await RunDataMigrations(
-            target, migrationExecutor, supersessions, migration, dataMigrationBudget, dataMigrationProgress, now, mode)
+            target, migrationExecutor, supersessions, migration, dataMigrationBudget, dataMigrationProgress,
+            now, applicationLock, mode)
             .ConfigureAwait(false);
         return new(
             migrations.Any(result => !result.IsComplete)
@@ -312,6 +320,7 @@ public static class PhysicalSchemaApplication
         DataMigrationBudget? budget,
         IProgress<DataMigrationProgress>? progress,
         DateTimeOffset? now,
+        IPhysicalSchemaApplicationLock applicationLock,
         DataMigrationExecution mode)
     {
         if (migration is null)
@@ -331,12 +340,12 @@ public static class PhysicalSchemaApplication
         // migration runs against and typed exactly like every other column.
         var unit = MigrationUnit(target, supersessions);
         var result = await (mode.IsAsync
-            ? DataMigrationRunner.RunAsync(
+            ? DataMigrationRunner.RunUnderApplicationLockAsync(
                 migrationExecutor, target.Identity, unit, migration,
-                budget, now, progress, mode.CancellationToken)
-            : new ValueTask<DataMigrationRunResult>(DataMigrationRunner.Run(
+                applicationLock, budget, now, progress, mode.CancellationToken)
+            : new ValueTask<DataMigrationRunResult>(DataMigrationRunner.RunUnderApplicationLock(
                 migrationExecutor, target.Identity, unit, migration,
-                budget, now, progress))).ConfigureAwait(false);
+                applicationLock, budget, now, progress))).ConfigureAwait(false);
         return [result];
     }
 

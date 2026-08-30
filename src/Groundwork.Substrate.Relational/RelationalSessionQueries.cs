@@ -85,39 +85,52 @@ internal sealed class RelationalSessionQueries
         QueryRenderOptions? options,
         RelationalExecution execution)
     {
-        var prepared = RelationalSessionPolicy.PrepareCrossScopeQuery(
-            unit,
-            access,
-            request,
-            options,
-            physicalIndexNames());
-        var command = renderer.Render(prepared.ExecutionRequest, prepared.RenderOptions);
-        Observe("query-across-scopes", command);
-        var rows = await RelationalQueryResultReader.Read(
-            connection,
-            command,
-            (name, value) =>
-            {
-                if (name == "__groundwork_total_count")
-                    return value;
-                var column = unit.Columns.FirstOrDefault(item => item.Name == name);
-                return column is null ? value : decode(value ?? DBNull.Value, column);
-            },
-            transaction: null,
-            execution).ConfigureAwait(false);
-        await assertExplainPlan(command, prepared.RenderOptions, execution).ConfigureAwait(false);
-        var materialized = QueryResultMaterializer.Materialize(
-            prepared.ExecutionSource,
-            prepared.RenderOptions,
-            rows,
-            command.SelectedIndex,
-            command.IndexHintApplied,
-            sourceIncludesRequestedOffset: true,
-            sourceIncludesContinuation: true);
-        return CrossScopeQueryMaterializer.FromNativePage(
-            materialized,
-            rows,
-            ProviderOwnedColumns.Scope);
+        var audit = StorageAccessValidation.BeginPrivilegedQuery(access, unit);
+        CrossScopeQueryResult result;
+        try
+        {
+            var prepared = RelationalSessionPolicy.PrepareCrossScopeQuery(
+                unit,
+                access,
+                request,
+                options,
+                physicalIndexNames());
+            var command = renderer.Render(prepared.ExecutionRequest, prepared.RenderOptions);
+            Observe("query-across-scopes", command);
+            var rows = await RelationalQueryResultReader.Read(
+                connection,
+                command,
+                (name, value) =>
+                {
+                    if (name == "__groundwork_total_count")
+                        return value;
+                    var column = unit.Columns.FirstOrDefault(item => item.Name == name);
+                    return column is null ? value : decode(value ?? DBNull.Value, column);
+                },
+                transaction: null,
+                execution).ConfigureAwait(false);
+            await assertExplainPlan(command, prepared.RenderOptions, execution).ConfigureAwait(false);
+            var materialized = QueryResultMaterializer.Materialize(
+                prepared.ExecutionSource,
+                prepared.RenderOptions,
+                rows,
+                command.SelectedIndex,
+                command.IndexHintApplied,
+                sourceIncludesRequestedOffset: true,
+                sourceIncludesContinuation: true);
+            result = CrossScopeQueryMaterializer.FromNativePage(
+                materialized,
+                rows,
+                ProviderOwnedColumns.Scope);
+        }
+        catch (Exception exception)
+        {
+            audit.Failure(exception);
+            throw;
+        }
+
+        audit.Success();
+        return result;
     }
 
     private object? DecodeQueryValue(

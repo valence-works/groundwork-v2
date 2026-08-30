@@ -166,10 +166,40 @@ public static class ConformanceSuite
                     "the second scope could not read its own value");
             }).ConfigureAwait(false);
 
+            await RunCheck(checks, "direct set-mutation capability refuses missing admission", async () =>
+            {
+                if (!connection.Capabilities.Any(capability => capability.Id == BatchWriteCapabilities.SetMutation))
+                    return;
+
+                var observer = new ProviderCommandObserver();
+                var session = connection.OpenSession(global, StorageAccess.Global, observer);
+                Require(session is ISetMutationStorageSession,
+                    "the provider advertises set mutation but its session exposes no native capability");
+                var native = (ISetMutationStorageSession)session;
+                var assignments = new Dictionary<string, object?>
+                {
+                    [scenario.ValueColumn] = "must-not-be-written"
+                };
+                var before = observer.RoundTrips;
+                RequireSetMutationAdmissionRefusal(() =>
+                    native.UpdateWhere(Predicate.AlwaysTrue.Instance, assignments));
+                RequireSetMutationAdmissionRefusal(() =>
+                    native.DeleteWhere(Predicate.AlwaysTrue.Instance));
+                await RequireSetMutationAdmissionRefusal(async () =>
+                    await native.UpdateWhereAsync(Predicate.AlwaysTrue.Instance, assignments).ConfigureAwait(false));
+                await RequireSetMutationAdmissionRefusal(async () =>
+                    await native.DeleteWhereAsync(Predicate.AlwaysTrue.Instance).ConfigureAwait(false));
+                Require(observer.RoundTrips == before,
+                    "a direct set-mutation refusal observed provider I/O before GW-COVER-001");
+            }).ConfigureAwait(false);
+
             await RunCheck(checks, "audited privileged cross-scope query", async () =>
             {
                 var access = StorageAccess.PrivilegedAcrossScopes(
-                    new StorageAccessAudit("conformance-suite", "verify-cross-scope-recovery"));
+                    new StorageAccessAudit(
+                        "conformance-suite",
+                        "verify-cross-scope-recovery",
+                        new ConformanceAccessObserver()));
                 var session = connection.OpenSession(scoped, access);
                 var table = new TableId(scoped.Name);
                 var request = new QueryRequest(
@@ -252,7 +282,10 @@ public static class ConformanceSuite
                 var timestamp = new ColumnRef(table, "observed_at", QueryType.DateTimeOffset, isNullable: false);
                 var result = await surface.QueryAcrossScopes(
                     connection.OpenSession(latestUnit, StorageAccess.PrivilegedAcrossScopes(
-                        new StorageAccessAudit("conformance-suite", "verify-latest-scope-partition"))),
+                        new StorageAccessAudit(
+                            "conformance-suite",
+                            "verify-latest-scope-partition",
+                            new ConformanceAccessObserver()))),
                     new QueryRequest(
                         table,
                         Predicate.AlwaysTrue.Instance,
@@ -436,6 +469,39 @@ public static class ConformanceSuite
         throw new ConformanceFailureException("contract", $"Expected {typeof(TException).Name}.");
     }
 
+    private static void RequireSetMutationAdmissionRefusal(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (InvalidOperationException exception)
+        {
+            Require(exception.Message.Contains("GW-COVER-001", StringComparison.Ordinal),
+                "a direct set-mutation call raised the wrong refusal instead of GW-COVER-001");
+            return;
+        }
+
+        throw new ConformanceFailureException("contract", "A direct set-mutation call did not refuse GW-COVER-001.");
+    }
+
+    private static async ValueTask RequireSetMutationAdmissionRefusal(Func<ValueTask> action)
+    {
+        try
+        {
+            await action().ConfigureAwait(false);
+        }
+        catch (InvalidOperationException exception)
+        {
+            Require(exception.Message.Contains("GW-COVER-001", StringComparison.Ordinal),
+                "a direct asynchronous set-mutation call raised the wrong refusal instead of GW-COVER-001");
+            return;
+        }
+
+        throw new ConformanceFailureException(
+            "contract", "A direct asynchronous set-mutation call did not refuse GW-COVER-001.");
+    }
+
     private static void AssertCatalog(StorageUnit declaration, IReadOnlyList<ProviderIndex> actual)
     {
         Require(actual.Count == declaration.Indexes.Count,
@@ -543,5 +609,10 @@ public static class ConformanceSuite
         internal ValueTask<BatchWriteReport> CommitWithOutcomes(IUnitOfWork unitOfWork) => IsAsync
             ? unitOfWork.CommitWithOutcomesAsync(CancellationToken)
             : new(unitOfWork.CommitWithOutcomes());
+    }
+
+    private sealed class ConformanceAccessObserver : IStorageAccessObserver
+    {
+        public void Observe(StorageAccessEvent accessEvent) { }
     }
 }

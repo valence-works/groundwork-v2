@@ -779,78 +779,90 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
                 $"Query table '{request.Table.Value}' does not match session unit '{Unit.Name}'.",
                 nameof(request));
         RefuseUnrenderedJoin(request);
-        StorageAccessValidation.ObservePrivilegedQuery(Access, Unit);
+        var audit = StorageAccessValidation.BeginPrivilegedQuery(Access, Unit);
 
-        var suppliedOptions = options ?? QueryRenderOptions.Default;
-        var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
-        var executionRequest = QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns);
-        var table = new TableId(Unit.Name);
-        var scopeToken = new ColumnRef(
-            table,
-            CrossScopeQueryMaterializer.ScopeTokenColumn,
-            QueryType.String,
-            isNullable: false);
-        var renderOptions = suppliedOptions.WithIdentityTieBreaks(
-            new[] { scopeToken }
-                .Concat(Unit.Key.Columns
-                    .Select(QueryColumn)
-                    .Where(column => column is not null)
-                    .Select(column => column!))) with
+        CrossScopeQueryResult result;
+        try
         {
-            LatestPartitionColumns = [scopeToken],
-            SearchKeyColumns = searchKeyColumns
-        };
-        var validation = PortableQuerySemantics.Validate(executionRequest);
-        if (!validation.IsPortable)
-        {
-            var refusal = validation.Refusals[0];
-            throw new QueryRenderException(
-                refusal.Code,
-                refusal.Message + " (" + refusal.Path + ").");
-        }
-        ValidateInBudget(executionRequest.Where, suppliedOptions.InValueLimit, request.Table.Value);
+            var suppliedOptions = options ?? QueryRenderOptions.Default;
+            var searchKeyColumns = SearchKeyQueryMappings.For(Unit);
+            var executionRequest = QuerySearchKeyRewriter.Rewrite(request, searchKeyColumns);
+            var table = new TableId(Unit.Name);
+            var scopeToken = new ColumnRef(
+                table,
+                CrossScopeQueryMaterializer.ScopeTokenColumn,
+                QueryType.String,
+                isNullable: false);
+            var renderOptions = suppliedOptions.WithIdentityTieBreaks(
+                new[] { scopeToken }
+                    .Concat(Unit.Key.Columns
+                        .Select(QueryColumn)
+                        .Where(column => column is not null)
+                        .Select(column => column!))) with
+            {
+                LatestPartitionColumns = [scopeToken],
+                SearchKeyColumns = searchKeyColumns
+            };
+            var validation = PortableQuerySemantics.Validate(executionRequest);
+            if (!validation.IsPortable)
+            {
+                var refusal = validation.Refusals[0];
+                throw new QueryRenderException(
+                    refusal.Code,
+                    refusal.Message + " (" + refusal.Path + ").");
+            }
+            ValidateInBudget(executionRequest.Where, suppliedOptions.InValueLimit, request.Table.Value);
 
-        lock (database.Gate)
-        {
-            ThrowIfDisposed();
-            commandObserver?.Observe(new ProviderCommandEvent("in-memory.query-across-scopes", null, ProviderCommandKind.Read, IsProbe: false));
-            var values = CurrentState().Partitions
-                .SelectMany(partition => partition.Value.Values
-                    .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
-                    .Select(entry =>
-                    {
-                        var row = new Dictionary<string, object?>(entry.Values, StringComparer.Ordinal)
+            lock (database.Gate)
+            {
+                ThrowIfDisposed();
+                commandObserver?.Observe(new ProviderCommandEvent("in-memory.query-across-scopes", null, ProviderCommandKind.Read, IsProbe: false));
+                var values = CurrentState().Partitions
+                    .SelectMany(partition => partition.Value.Values
+                        .Where(entry => PortableQuerySemantics.Evaluate(executionRequest.Where, entry.Values))
+                        .Select(entry =>
                         {
-                            [CrossScopeQueryMaterializer.RawScopeColumn] = partition.Key,
-                            [CrossScopeQueryMaterializer.ScopeTokenColumn] =
-                                CrossScopeQueryMaterializer.ScopeToken(new StorageScope(partition.Key))
-                        };
-                        return (IReadOnlyDictionary<string, object?>)row;
-                    }))
-                .ToList();
+                            var row = new Dictionary<string, object?>(entry.Values, StringComparer.Ordinal)
+                            {
+                                [CrossScopeQueryMaterializer.RawScopeColumn] = partition.Key,
+                                [CrossScopeQueryMaterializer.ScopeTokenColumn] =
+                                    CrossScopeQueryMaterializer.ScopeToken(new StorageScope(partition.Key))
+                            };
+                            return (IReadOnlyDictionary<string, object?>)row;
+                        }))
+                    .ToList();
 
-            if (executionRequest.LatestPerKey is not null)
-                values = LatestPerKeyRows(values, executionRequest.LatestPerKey,
-                    renderOptions.TieBreakColumns, renderOptions.LatestPartitionColumns);
+                if (executionRequest.LatestPerKey is not null)
+                    values = LatestPerKeyRows(values, executionRequest.LatestPerKey,
+                        renderOptions.TieBreakColumns, renderOptions.LatestPartitionColumns);
 
-            var order = renderOptions.GetEffectiveOrder(executionRequest);
-            if (order.Length != 0)
-                values.Sort(new MemoryRowComparer(order));
+                var order = renderOptions.GetEffectiveOrder(executionRequest);
+                if (order.Length != 0)
+                    values.Sort(new MemoryRowComparer(order));
 
-            var rows = values.Select(row => new CrossScopeQueryRow(
-                new StorageScope((string)row[CrossScopeQueryMaterializer.RawScopeColumn]!),
-                row)).ToArray();
+                var rows = values.Select(row => new CrossScopeQueryRow(
+                    new StorageScope((string)row[CrossScopeQueryMaterializer.RawScopeColumn]!),
+                    row)).ToArray();
 
-            var boundRequest = QueryRequestExecution.WithProviderPredicate(
-                executionRequest,
-                executionRequest.Where,
-                CrossScopeQueryMaterializer.BindingDiscriminator(Access));
-            return CrossScopeQueryMaterializer.Materialize(
-                boundRequest,
-                renderOptions,
-                rows,
-                renderOptions.FindPinnedIndex()?.Name);
+                var boundRequest = QueryRequestExecution.WithProviderPredicate(
+                    executionRequest,
+                    executionRequest.Where,
+                    CrossScopeQueryMaterializer.BindingDiscriminator(Access));
+                result = CrossScopeQueryMaterializer.Materialize(
+                    boundRequest,
+                    renderOptions,
+                    rows,
+                    renderOptions.FindPinnedIndex()?.Name);
+            }
         }
+        catch (Exception exception)
+        {
+            audit.Failure(exception);
+            throw;
+        }
+
+        audit.Success();
+        return result;
     }
 
     private static void RefuseUnrenderedJoin(QueryRequest request)

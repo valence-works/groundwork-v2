@@ -558,21 +558,34 @@ public sealed class LinqExecutorTests
             CancellationToken cancellationToken = default) =>
             inner.AppendAsync(operationId, values, cancellationToken);
 
-        public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments) =>
-            new(0);
+        public SetMutationResult UpdateWhere(Predicate where, IReadOnlyDictionary<string, object?> assignments)
+        {
+            SetMutationExecutionAdmission.Require(where);
+            return new(0);
+        }
 
         public ValueTask<SetMutationResult> UpdateWhereAsync(
             Predicate where,
             IReadOnlyDictionary<string, object?> assignments,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(new SetMutationResult(0));
+            CancellationToken cancellationToken = default)
+        {
+            SetMutationExecutionAdmission.Require(where);
+            return ValueTask.FromResult(new SetMutationResult(0));
+        }
 
-        public SetMutationResult DeleteWhere(Predicate where) => new(0);
+        public SetMutationResult DeleteWhere(Predicate where)
+        {
+            SetMutationExecutionAdmission.Require(where);
+            return new(0);
+        }
 
         public ValueTask<SetMutationResult> DeleteWhereAsync(
             Predicate where,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(new SetMutationResult(0));
+            CancellationToken cancellationToken = default)
+        {
+            SetMutationExecutionAdmission.Require(where);
+            return ValueTask.FromResult(new SetMutationResult(0));
+        }
     }
 
     /// <summary>

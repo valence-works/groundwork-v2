@@ -75,6 +75,7 @@ public sealed class SqlServerDataMigrationTests
             DataMigrationCapabilities.KeysetScan |
             DataMigrationCapabilities.AtomicChunkProgress |
             DataMigrationCapabilities.AppliedLedger |
+            DataMigrationCapabilities.ExclusiveRunLease |
             DataMigrationCapabilities.SetBasedBatchUpdate,
             executor.Capabilities);
     }
@@ -161,7 +162,8 @@ public sealed class SqlServerDataMigrationTests
 
     private sealed class LabelTransform : IDataMigrationTransform
     {
-        public string Identity => "label/v1";
+        public string Identity => "label";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["source"];
         public ImmutableArray<string> TargetColumns => ["label"];
         public DataMigrationValues Transform(DataMigrationRow row) =>

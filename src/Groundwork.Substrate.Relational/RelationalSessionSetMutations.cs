@@ -45,6 +45,7 @@ internal sealed class RelationalSessionSetMutations
         IReadOnlyDictionary<string, object?> assignments)
     {
         ArgumentNullException.ThrowIfNull(where);
+        SetMutationExecutionAdmission.Require(where);
         var physical = SetMutationValidation.ValidateAndPhysicalizeAssignments(unit, assignments);
         var columns = physical.Keys.OrderBy(column => column, StringComparer.Ordinal).ToArray();
         return async execution =>
@@ -73,6 +74,7 @@ internal sealed class RelationalSessionSetMutations
     internal Func<RelationalExecution, ValueTask<SetMutationResult>> PrepareDeleteWhere(Predicate where)
     {
         ArgumentNullException.ThrowIfNull(where);
+        SetMutationExecutionAdmission.Require(where);
         return async execution =>
         {
             var rendered = renderer.RenderDeleteWhere(unit.Name, Scoped(where));

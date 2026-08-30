@@ -18,6 +18,24 @@ public sealed class SqliteDataMigrationTests
     private static readonly DateTimeOffset Now = new(2026, 8, 27, 10, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task Separate_executors_serialize_a_complete_migration_pass_for_one_file()
+    {
+        using var store = TemporaryStore.Create();
+        var target = Target().Identity;
+        var firstExecutor = Executor(store);
+        var secondExecutor = Executor(store);
+        using var first = firstExecutor.AcquireMigrationLock(target);
+
+        var waiting = Task.Run(() => secondExecutor.AcquireMigrationLock(target));
+        await Task.Delay(100);
+        Assert.False(waiting.IsCompleted);
+
+        first.Dispose();
+        using var second = await waiting.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(target, second.Target);
+    }
+
+    [Fact]
     public void A_budgeted_apply_migrates_a_chunk_and_leaves_a_resumable_ledger()
     {
         using var store = TemporaryStore.Create();
@@ -302,7 +320,8 @@ public sealed class SqliteDataMigrationTests
 
     private sealed class SlugTransform : IDataMigrationTransform
     {
-        public string Identity => "slug/v1";
+        public string Identity => "slug";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["slug"];
         public DataMigrationValues Transform(DataMigrationRow row) =>
@@ -314,7 +333,8 @@ public sealed class SqliteDataMigrationTests
 
     private sealed class FailingSlugTransform(int failOnId) : IDataMigrationTransform
     {
-        public string Identity => "slug/v1";
+        public string Identity => "slug";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["name"];
         public ImmutableArray<string> TargetColumns => ["slug"];
         public DataMigrationValues Transform(DataMigrationRow row)

@@ -54,7 +54,8 @@ public static class DataMigrationRunner
     public const DataMigrationCapabilities Required =
         DataMigrationCapabilities.KeysetScan |
         DataMigrationCapabilities.AtomicChunkProgress |
-        DataMigrationCapabilities.AppliedLedger;
+        DataMigrationCapabilities.AppliedLedger |
+        DataMigrationCapabilities.ExclusiveRunLease;
 
     public static DataMigrationRunResult Run(
         IDataMigrationExecutor executor,
@@ -64,7 +65,8 @@ public static class DataMigrationRunner
         DataMigrationBudget? budget = null,
         DateTimeOffset? now = null,
         IProgress<DataMigrationProgress>? progress = null) =>
-        RunCore(executor, target, unit, migration, budget, now, progress, DataMigrationExecution.Synchronous)
+        RunCore(executor, target, unit, migration, budget, now, progress, DataMigrationExecution.Synchronous,
+                heldApplicationLock: null)
             .GetAwaiter().GetResult();
 
     public static ValueTask<DataMigrationRunResult> RunAsync(
@@ -77,7 +79,33 @@ public static class DataMigrationRunner
         IProgress<DataMigrationProgress>? progress = null,
         CancellationToken cancellationToken = default) =>
         RunCore(executor, target, unit, migration, budget, now, progress,
-            DataMigrationExecution.Asynchronous(cancellationToken));
+            DataMigrationExecution.Asynchronous(cancellationToken), heldApplicationLock: null);
+
+    internal static DataMigrationRunResult RunUnderApplicationLock(
+        IDataMigrationExecutor executor,
+        PhysicalSchemaTargetIdentity target,
+        StorageUnit unit,
+        DataMigration migration,
+        IPhysicalSchemaApplicationLock applicationLock,
+        DataMigrationBudget? budget = null,
+        DateTimeOffset? now = null,
+        IProgress<DataMigrationProgress>? progress = null) =>
+        RunCore(executor, target, unit, migration, budget, now, progress, DataMigrationExecution.Synchronous,
+                applicationLock)
+            .GetAwaiter().GetResult();
+
+    internal static ValueTask<DataMigrationRunResult> RunUnderApplicationLockAsync(
+        IDataMigrationExecutor executor,
+        PhysicalSchemaTargetIdentity target,
+        StorageUnit unit,
+        DataMigration migration,
+        IPhysicalSchemaApplicationLock applicationLock,
+        DataMigrationBudget? budget = null,
+        DateTimeOffset? now = null,
+        IProgress<DataMigrationProgress>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        RunCore(executor, target, unit, migration, budget, now, progress,
+            DataMigrationExecution.Asynchronous(cancellationToken), applicationLock);
 
     /// <summary>
     /// Refuses when the provider does not advertise everything the facility promises, naming the
@@ -103,7 +131,8 @@ public static class DataMigrationRunner
         DataMigrationBudget? budget,
         DateTimeOffset? now,
         IProgress<DataMigrationProgress>? progress,
-        DataMigrationExecution mode)
+        DataMigrationExecution mode,
+        IPhysicalSchemaApplicationLock? heldApplicationLock)
     {
         ArgumentNullException.ThrowIfNull(executor);
         ArgumentNullException.ThrowIfNull(target);
@@ -111,6 +140,17 @@ public static class DataMigrationRunner
         ArgumentNullException.ThrowIfNull(migration);
         var bounds = (budget ?? DataMigrationBudget.Default).Validate();
         mode.CancellationToken.ThrowIfCancellationRequested();
+
+        using var acquiredMigrationLock = heldApplicationLock is null
+            ? executor.AcquireMigrationLock(target)
+            : null;
+        var migrationLock = heldApplicationLock ?? acquiredMigrationLock!;
+        if (migrationLock.Target != target)
+        {
+            throw new InvalidOperationException(
+                $"Data-migration executor returned lock '{migrationLock.Target}' for requested target '{target}'.");
+        }
+        migrationLock.Renew();
 
         var fingerprint = migration.RequestFingerprint(unit);
         var clock = now ?? DateTimeOffset.UtcNow;
@@ -167,6 +207,7 @@ public static class DataMigrationRunner
         while (true)
         {
             mode.CancellationToken.ThrowIfCancellationRequested();
+            migrationLock.Renew();
             if (bounds.MaxBatches is { } maxBatches && batchesThisPass >= maxBatches)
                 break;
             var admitted = bounds.MaxRowsPerBatch;
@@ -180,6 +221,9 @@ public static class DataMigrationRunner
 
             var request = new DataMigrationChunkRequest(migration, unit, entry, cursor, projection, admitted);
             var outcome = await mode.ExecuteChunk(executor, request).ConfigureAwait(false);
+            // A provider may spend longer than its lease duration inside one chunk. Re-check the
+            // exact fence before accepting that chunk's progress or publishing completion.
+            migrationLock.Renew();
             var advanced = outcome.Entry;
             if (!string.Equals(advanced.MigrationId, entry.MigrationId, StringComparison.Ordinal) ||
                 !string.Equals(advanced.RequestFingerprint, entry.RequestFingerprint, StringComparison.Ordinal) ||

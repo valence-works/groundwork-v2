@@ -113,6 +113,7 @@ public sealed class PostgreSqlDataMigrationTests
             DataMigrationCapabilities.KeysetScan |
             DataMigrationCapabilities.AtomicChunkProgress |
             DataMigrationCapabilities.AppliedLedger |
+            DataMigrationCapabilities.ExclusiveRunLease |
             DataMigrationCapabilities.SetBasedBatchUpdate,
             executor.Capabilities);
         DataMigrationRunner.EnsureCapabilities(executor);
@@ -180,7 +181,8 @@ public sealed class PostgreSqlDataMigrationTests
 
     private sealed class ScoreTransform : IDataMigrationTransform
     {
-        public string Identity => "score/v1";
+        public string Identity => "score";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["weight"];
         public ImmutableArray<string> TargetColumns => ["score"];
         public DataMigrationValues Transform(DataMigrationRow row) =>
@@ -194,7 +196,8 @@ public sealed class PostgreSqlDataMigrationTests
 
     private sealed class FailingTransform(int failOnIndex) : IDataMigrationTransform
     {
-        public string Identity => "score/v1";
+        public string Identity => "score";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["weight"];
         public ImmutableArray<string> TargetColumns => ["score"];
         public DataMigrationValues Transform(DataMigrationRow row)

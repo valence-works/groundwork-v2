@@ -1,6 +1,7 @@
 using Groundwork.Kernel;
 using Groundwork.LiveDatabases;
 using Groundwork.MongoDb;
+using Groundwork.Query.Linq.Execution;
 using Groundwork.Query.Model;
 using Groundwork.Store;
 using MongoDB.Driver;
@@ -46,12 +47,12 @@ public sealed class MongoSetMutationGuardTests
 
             var observer = new ProviderCommandObserver();
             var session = connection.OpenSession(unit, StorageAccess.Global, observer);
-            var capability = Assert.IsAssignableFrom<ISetMutationStorageSession>(session);
+            Assert.IsAssignableFrom<ISetMutationStorageSession>(session);
 
-            Assert.Equal(2L, capability.UpdateWhere(
+            Assert.Equal(2L, session.UpdateWhere(
                 Status(unit, "open"),
                 new Dictionary<string, object?> { ["label"] = "after" }).MatchedRows);
-            Assert.Equal(1L, capability.DeleteWhere(Status(unit, "closed")).MatchedRows);
+            Assert.Equal(1L, session.DeleteWhere(Status(unit, "closed")).MatchedRows);
 
             Assert.Equal(
                 ["mongodb.update-where", "mongodb.delete-where"],
@@ -67,7 +68,7 @@ public sealed class MongoSetMutationGuardTests
     }
 
     [SkippableFact]
-    public void MongoDB_privileged_set_mutation_capability_refuses_before_a_native_command()
+    public void MongoDB_direct_set_mutation_capability_refuses_before_a_native_command()
     {
         using var connection = OpenReplicaSetConnection();
         var unit = Unit("mongo_set_mutation_privileged") with { Scope = ScopePolicy.Scoped };
@@ -82,7 +83,7 @@ public sealed class MongoSetMutationGuardTests
         var capability = Assert.IsAssignableFrom<ISetMutationStorageSession>(session);
 
         var refusal = Assert.Throws<InvalidOperationException>(() => capability.DeleteWhere(Status(unit, "open")));
-        Assert.Contains("GW-ACCESS-003", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("GW-COVER-001", refusal.Message, StringComparison.Ordinal);
         Assert.Empty(observer.Commands);
     }
 

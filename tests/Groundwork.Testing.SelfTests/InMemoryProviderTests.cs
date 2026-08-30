@@ -1172,11 +1172,13 @@ public sealed class InMemoryProviderTests
 
         var first = session.QueryAcrossScopes(request);
 
-        var auditEvent = Assert.Single(observer.Events);
+        Assert.Equal(2, observer.Events.Count);
+        var auditEvent = observer.Events[0];
         Assert.Equal(unit.Id, auditEvent.Unit);
-        Assert.Equal("query-across-scopes", auditEvent.Operation);
+        Assert.Equal("query-across-scopes.attempt", auditEvent.Operation);
         Assert.Equal("elsa-recovery", auditEvent.Identity);
         Assert.Equal("recover-stalled-workflows", auditEvent.Purpose);
+        Assert.Equal("query-across-scopes.success", observer.Events[1].Operation);
         Assert.Equal(2, first.TotalCount);
         Assert.Single(first.Rows);
         Assert.Equal("tenant-a", first.Rows[0].Scope.Value);
@@ -1195,11 +1197,94 @@ public sealed class InMemoryProviderTests
         Assert.Equal("tenant-b", second.Rows[0].Scope.Value);
 
         var differentAudit = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
-            new StorageAccessAudit("other-operator", "recover-stalled-workflows")));
+            new StorageAccessAudit("other-operator", "recover-stalled-workflows", new RecordingAccessObserver())));
         var tokenFailure = Assert.Throws<QueryRenderException>(() => differentAudit.QueryAcrossScopes(
             new QueryRequest(table, request.Where, request.Order, request.Projection,
                 Paging.Continuation(first.NextContinuationToken!, 1), request.Result)));
         Assert.Equal("GW-QUERY-013", tokenFailure.Code);
+    }
+
+    [Fact]
+    public void Privileged_cross_scope_query_requires_a_bound_audit_sink_before_provider_work()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://privileged-audit-required");
+        var unit = TestingFixture.ScopedUnit("privileged-audit-required");
+        connection.Schema.Apply(unit);
+        var commands = new ProviderCommandObserver();
+        var session = connection.OpenSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(new StorageAccessAudit("claimed-operator", "repair")),
+            commands);
+
+        var refusal = Assert.Throws<InvalidOperationException>(() =>
+            session.QueryAcrossScopes(new QueryRequest(
+                new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None)));
+
+        Assert.Contains("GW-ACCESS-001", refusal.Message, StringComparison.Ordinal);
+        Assert.Empty(commands.Commands);
+    }
+
+    [Fact]
+    public void Throwing_privileged_audit_sink_prevents_provider_work()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://privileged-audit-throws");
+        var unit = TestingFixture.ScopedUnit("privileged-audit-throws");
+        connection.Schema.Apply(unit);
+        var commands = new ProviderCommandObserver();
+        var session = connection.OpenSession(
+            unit,
+            StorageAccess.PrivilegedAcrossScopes(
+                new StorageAccessAudit("claimed-operator", "repair", new ThrowingAccessObserver())),
+            commands);
+
+        var refusal = Assert.Throws<AuditSinkException>(() =>
+            session.QueryAcrossScopes(new QueryRequest(
+                new TableId(unit.Name), Predicate.AlwaysTrue.Instance, [], Projection.All, Paging.None)));
+
+        Assert.Equal("audit sink unavailable", refusal.Message);
+        Assert.Empty(commands.Commands);
+    }
+
+    [Fact]
+    public void Privileged_audit_events_distinguish_failed_execution_from_an_attempt()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://privileged-audit-failure");
+        var unit = TestingFixture.ScopedUnit("privileged-audit-failure");
+        connection.Schema.Apply(unit);
+        var observer = new RecordingAccessObserver();
+        var session = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("claimed-operator", "repair", observer)));
+
+        Assert.Throws<QueryRenderException>(() => session.QueryAcrossScopes(new QueryRequest(
+            new TableId(unit.Name),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.Continuation("not-a-token", 1))));
+
+        Assert.Equal(
+            ["query-across-scopes.attempt", "query-across-scopes.failure"],
+            observer.Events.Select(item => item.Operation));
+    }
+
+    [Fact]
+    public void A_failure_sink_exception_preserves_the_provider_failure()
+    {
+        using var connection = new InMemoryProviderFactory().Create("memory://privileged-audit-double-failure");
+        var unit = TestingFixture.ScopedUnit("privileged-audit-double-failure");
+        connection.Schema.Apply(unit);
+        var session = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
+            new StorageAccessAudit("claimed-operator", "repair", new FailureThrowingAccessObserver())));
+
+        var failure = Assert.Throws<AggregateException>(() => session.QueryAcrossScopes(new QueryRequest(
+            new TableId(unit.Name),
+            Predicate.AlwaysTrue.Instance,
+            [],
+            Projection.All,
+            Paging.Continuation("not-a-token", 1))));
+
+        Assert.IsType<QueryRenderException>(failure.InnerExceptions[0]);
+        Assert.IsType<AuditSinkException>(failure.InnerExceptions[1]);
     }
 
     [Fact]
@@ -1272,6 +1357,22 @@ public sealed class InMemoryProviderTests
 
         public void Observe(StorageAccessEvent accessEvent) => Events.Add(accessEvent);
     }
+
+    private sealed class ThrowingAccessObserver : IStorageAccessObserver
+    {
+        public void Observe(StorageAccessEvent accessEvent) => throw new AuditSinkException("audit sink unavailable");
+    }
+
+    private sealed class FailureThrowingAccessObserver : IStorageAccessObserver
+    {
+        public void Observe(StorageAccessEvent accessEvent)
+        {
+            if (accessEvent.Operation.EndsWith(".failure", StringComparison.Ordinal))
+                throw new AuditSinkException("audit sink unavailable while recording failure");
+        }
+    }
+
+    private sealed class AuditSinkException(string message) : Exception(message);
 
     [Theory]
     [InlineData(null, "purpose")]

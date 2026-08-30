@@ -501,7 +501,8 @@ public sealed class ExpandContractTests
 
     private sealed class CopyTotalTransform : IDataMigrationTransform
     {
-        public string Identity => "copy-total/v1";
+        public string Identity => "copy-total";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => [];
         public ImmutableArray<string> TargetColumns => ["total_amount"];
         public DataMigrationValues Transform(DataMigrationRow row) => DataMigrationValues.Unchanged;
@@ -509,7 +510,8 @@ public sealed class ExpandContractTests
 
     private sealed class MissingSourceTransform : IDataMigrationTransform
     {
-        public string Identity => "missing-source/v1";
+        public string Identity => "missing-source";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["absent"];
         public ImmutableArray<string> TargetColumns => ["total_amount"];
         public DataMigrationValues Transform(DataMigrationRow row) => DataMigrationValues.Unchanged;
@@ -531,7 +533,11 @@ public sealed class ExpandContractTests
         public DataMigrationCapabilities Capabilities =>
             DataMigrationCapabilities.KeysetScan |
             DataMigrationCapabilities.AtomicChunkProgress |
-            DataMigrationCapabilities.AppliedLedger;
+            DataMigrationCapabilities.AppliedLedger |
+            DataMigrationCapabilities.ExclusiveRunLease;
+
+        public IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target) =>
+            new Lock(target);
 
         public IPhysicalSchemaApplicationLock AcquireApplicationLock(PhysicalSchemaTargetIdentity target) =>
             new Lock(target);

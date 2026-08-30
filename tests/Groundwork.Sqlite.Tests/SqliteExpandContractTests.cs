@@ -193,7 +193,8 @@ public sealed class SqliteExpandContractTests
 
     private sealed class CopyTotalTransform : IDataMigrationTransform
     {
-        public string Identity => "copy-total/v1";
+        public string Identity => "copy-total";
+        public string Version => "v1";
         public ImmutableArray<string> SourceColumns => ["total"];
         public ImmutableArray<string> TargetColumns => ["total_amount"];
         public DataMigrationValues Transform(DataMigrationRow row) =>

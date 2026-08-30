@@ -102,12 +102,12 @@ public sealed record SetMutationResult(long MatchedRows)
 /// deletes every row matching a portable predicate.
 /// </summary>
 /// <remarks>
-/// The seam receives an already-admitted predicate and a logical assignment snapshot. Providers
-/// validate and physicalize assignments again at this public capability boundary, because callers
-/// may reach the optional interface directly and must not be able to mutate keys or provider-owned
+/// The seam receives an already-admitted predicate and a logical assignment snapshot. The shared
+/// entry point binds unforgeable in-process admission evidence to that exact predicate; shipped
+/// providers refuse direct interface calls that do not carry it. Providers then validate and
+/// physicalize assignments again so admitted callers still cannot mutate keys or provider-owned
 /// projections. Admission — access, capability, portability, and index coverage — belongs to
-/// <see cref="SetMutationSessionExtensions"/> so that it is decided once for every provider rather
-/// than four times.
+/// <see cref="SetMutationSessionExtensions"/> so it is decided once for every provider.
 /// </remarks>
 public interface ISetMutationStorageSession
 {
@@ -121,6 +121,56 @@ public interface ISetMutationStorageSession
     SetMutationResult DeleteWhere(Predicate where);
 
     ValueTask<SetMutationResult> DeleteWhereAsync(Predicate where, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Unforgeable in-process evidence that the shared mutation entry point admitted the exact
+/// physical predicate currently reaching a provider. The public native capability intentionally
+/// carries no scan-acceptance input, so a caller reaching it directly cannot manufacture this
+/// scope or bypass coverage.
+/// </summary>
+public static class SetMutationExecutionAdmission
+{
+    private static readonly AsyncLocal<Frame?> Current = new();
+
+    internal static IDisposable Enter(Predicate where)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        var frame = new Frame(where, Current.Value);
+        Current.Value = frame;
+        return new Scope(frame);
+    }
+
+    /// <summary>
+    /// Requires evidence that the shared entry point admitted this exact predicate. Provider
+    /// implementations call this immediately before validation, flushing, rendering, or I/O.
+    /// </summary>
+    public static void Require(Predicate where)
+    {
+        ArgumentNullException.ThrowIfNull(where);
+        if (Current.Value is not { } frame || !ReferenceEquals(frame.Where, where))
+        {
+            throw new InvalidOperationException(
+                "GW-COVER-001: direct set-mutation capability execution has no coverage or explicit scan-acceptance evidence; " +
+                "call SetMutationSessionExtensions.UpdateWhere or DeleteWhere.");
+        }
+    }
+
+    private sealed record Frame(Predicate Where, Frame? Previous);
+
+    private sealed class Scope(Frame frame) : IDisposable
+    {
+        private bool disposed;
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+            disposed = true;
+            if (ReferenceEquals(Current.Value, frame))
+                Current.Value = frame.Previous;
+        }
+    }
 }
 
 internal static class SetMutationValidation

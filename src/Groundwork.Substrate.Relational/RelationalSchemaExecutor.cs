@@ -439,10 +439,14 @@ public sealed class RelationalSchemaExecutor
     public DataMigrationCapabilities Capabilities =>
         DataMigrationCapabilities.KeysetScan |
         DataMigrationCapabilities.AtomicChunkProgress |
+        DataMigrationCapabilities.ExclusiveRunLease |
         DataMigrationCapabilities.SetBasedBatchUpdate |
         (dialect.DataMigrationLedgerUpsertSql is null
             ? DataMigrationCapabilities.None
             : DataMigrationCapabilities.AppliedLedger);
+
+    public IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target) =>
+        AcquireApplicationLock(target);
 
     public DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId) =>
         ReadLedgerEntryCore(target, migrationId, RelationalExecution.Synchronous).GetAwaiter().GetResult();
@@ -1014,6 +1018,8 @@ public sealed class RelationalApplicationLock : IPhysicalSchemaApplicationLock
         if (!dialect.VerifyApplicationLock(Connection, resource))
             throw new InvalidOperationException($"The relational application lock '{resource}' is no longer held.");
     }
+
+    public void Renew() => Verify();
 
     public void Dispose()
     {

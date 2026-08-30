@@ -1542,7 +1542,10 @@ public sealed class SqliteProviderTests
             .Insert(new StorageValues(new Dictionary<string, object?> { ["id"] = "same", ["value"] = "shared" }));
 
         var session = connection.OpenSession(unit, StorageAccess.PrivilegedAcrossScopes(
-            new StorageAccessAudit("sqlite-proof", "recover-stalled-workflows")));
+            new StorageAccessAudit(
+                "sqlite-proof",
+                "recover-stalled-workflows",
+                new RecordingAccessObserver())));
         var table = new TableId(unit.Name);
         var request = new QueryRequest(
             table,
@@ -2567,6 +2570,13 @@ public sealed class SqliteProviderTests
             DisposalAttempted.Dispose();
             Release.Dispose();
         }
+    }
+
+    private sealed class RecordingAccessObserver : IStorageAccessObserver
+    {
+        public List<StorageAccessEvent> Events { get; } = [];
+
+        public void Observe(StorageAccessEvent accessEvent) => Events.Add(accessEvent);
     }
 
     private sealed class TemporaryStore : IDisposable

@@ -142,6 +142,9 @@ public sealed class SchemaToolDataMigrationStatusTests : IDisposable
 
         public DataMigrationCapabilities Capabilities => DataMigrationRunner.Required;
 
+        public IPhysicalSchemaApplicationLock AcquireMigrationLock(PhysicalSchemaTargetIdentity target) =>
+            new Lease(target);
+
         public DataMigrationLedgerEntry? ReadLedgerEntry(PhysicalSchemaTargetIdentity target, string migrationId) =>
             Ledger.FirstOrDefault(entry => entry.MigrationId == migrationId);
 
@@ -172,6 +175,12 @@ public sealed class SchemaToolDataMigrationStatusTests : IDisposable
             new(ExecuteChunk(request));
 
         public void Dispose() { }
+
+        private sealed class Lease(PhysicalSchemaTargetIdentity target) : IPhysicalSchemaApplicationLock
+        {
+            public PhysicalSchemaTargetIdentity Target { get; } = target;
+            public void Dispose() { }
+        }
 
         private sealed class Compiler(LedgerSession owner) : IPhysicalSchemaTargetCompiler
         {
