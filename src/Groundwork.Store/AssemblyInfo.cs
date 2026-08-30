@@ -9,4 +9,5 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Groundwork.PostgreSql")]
 [assembly: InternalsVisibleTo("Groundwork.SqlServer")]
 [assembly: InternalsVisibleTo("Groundwork.MongoDb")]
+[assembly: InternalsVisibleTo("Groundwork.MySql")]
 [assembly: InternalsVisibleTo("Groundwork.Substrate.Relational")]

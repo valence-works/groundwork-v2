@@ -142,6 +142,7 @@ Published codes appear in messages; Roslyn ids use underscores.
 | `GW-RUNTIME-002` | Index drift — missing/changed declared index | Dependent query shapes refuse |
 | `GW-RUNTIME-003` | A deployed column the declaration does not describe, downgraded from `GW-RUNTIME-001` by the unit's opt-in foreign-column policy | Warning |
 | `GW-RUNTIME-004` | Declared physical foreign key or check constraint is missing or differs from its declaration | **Startup-fatal** |
+| `GW-RUNTIME-005` | A retained session's provider connection published a different declaration after the session opened; reopen the session before retrying | Refused before provider I/O |
 | `GW-RUNTIME-010`…`013` | Additional runtime admission refusals | |
 
 A deployed column the declaration does not describe is `GW-RUNTIME-001` by default. Declaring

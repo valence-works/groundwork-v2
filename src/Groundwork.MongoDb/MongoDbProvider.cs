@@ -146,6 +146,7 @@ internal sealed class MongoProviderState
 {
     private readonly object gate = new();
     private readonly Dictionary<StorageUnitId, MongoAppliedUnit> units = [];
+    private readonly SchemaSessionPublicationRegistry schemaSessions = new();
 
     internal MongoProviderState(MongoClientContext context) => Context = context;
 
@@ -184,7 +185,8 @@ internal sealed class MongoProviderState
 
         var applied = new MongoAppliedUnit(
             MongoDeclarationSnapshot.Clone(appliedState.Snapshot.Subject.Definition),
-            appliedState.Snapshot.Subject.Name);
+            appliedState.Snapshot.Subject.Name,
+            appliedState.TargetFingerprint);
         // Privileged access intentionally has no single scope. Its query path fans out across the
         // registered per-scope collections, while ordinary scoped sessions validate one concrete
         // scope-to-collection route here.
@@ -251,7 +253,8 @@ internal sealed class MongoProviderState
 
             var candidate = new MongoAppliedUnit(
                 MongoDeclarationSnapshot.Clone(targetState.Snapshot.Subject.Definition),
-                targetState.Snapshot.Subject.Name);
+                targetState.Snapshot.Subject.Name,
+                targetState.TargetFingerprint);
             lock (gate)
             {
                 target = units.TryGetValue(reference.TargetUnitId, out var raced)
@@ -299,13 +302,23 @@ internal sealed class MongoProviderState
         }
     }
 
-    internal MongoAppliedUnit Remember(StorageUnit declaration)
+    internal MongoAppliedUnit Remember(PhysicalSchemaTarget target)
     {
-        var snapshot = MongoDeclarationSnapshot.Clone(declaration);
-        var applied = new MongoAppliedUnit(snapshot, snapshot.Name);
+        schemaSessions.Publish(target);
+        var snapshot = MongoDeclarationSnapshot.Clone(target.Subject.Definition);
+        var applied = new MongoAppliedUnit(snapshot, snapshot.Name, target.Fingerprint);
         lock (gate)
-            units[declaration.Id] = applied;
+            units[snapshot.Id] = applied;
         return applied;
+    }
+
+    internal SchemaSessionLease CaptureSchemaSession(MongoAppliedUnit applied)
+    {
+        var fingerprint = applied.TargetFingerprint ?? throw new InvalidOperationException(
+            $"MongoDB applied unit '{applied.Declaration.Id.Value}' is missing its authoritative target fingerprint.");
+        return schemaSessions.Capture(
+            new PhysicalSchemaTargetIdentity(applied.Declaration.Id, MongoSchemaTargets.Provider.Name),
+            fingerprint);
     }
 
     internal bool TryGet(StorageUnitId id, out MongoAppliedUnit applied)
@@ -400,7 +413,8 @@ internal sealed class MongoProviderState
 
 internal sealed record MongoAppliedUnit(
     StorageUnit Declaration,
-    string CollectionName);
+    string CollectionName,
+    string? TargetFingerprint = null);
 
 internal sealed record MongoScopeRegistration(StorageScope Scope, string Token, string CollectionName);
 
@@ -459,6 +473,7 @@ internal sealed class MongoProviderCatalog(MongoProviderState state) : IMongoPro
 internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoSchemaCoordinator
 {
     private readonly MongoSchemaExecutor executor = new(state.Context);
+    private readonly object applicationGate = new();
 
     public GroundworkRuntimeSchemaAdmissionResult InspectRuntimeAdmission(
         StorageUnit desired,
@@ -466,42 +481,46 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     {
         ArgumentNullException.ThrowIfNull(desired);
         SchemaCapabilityAdmission.EnsureSupported(desired, MongoDbProviderConnection.ConstraintCapabilities);
-        var target = MongoSchemaTargets.Compile(desired);
-        var inspection = executor.InspectHistory(target);
-        var stableRefusal = MongoDeclarationRules.StableDeclarationRefusals(
-            inspection.History.AppliedState?.Snapshot.Subject.Definition,
-            target.Subject.Definition).FirstOrDefault();
-        if (stableRefusal is not null)
+        lock (applicationGate)
         {
-            return new GroundworkRuntimeSchemaAdmissionResult(
-                inspection,
-                PhysicalSchemaDiffPlan.Invalid(target, DateTimeOffset.UtcNow, [stableRefusal]));
-        }
+            var target = MongoSchemaTargets.Compile(desired);
+            var inspection = executor.InspectHistory(target);
+            var stableRefusal = MongoDeclarationRules.StableDeclarationRefusals(
+                inspection.History.AppliedState?.Snapshot.Subject.Definition,
+                target.Subject.Definition).FirstOrDefault();
+            if (stableRefusal is not null)
+            {
+                return new GroundworkRuntimeSchemaAdmissionResult(
+                    inspection,
+                    PhysicalSchemaDiffPlan.Invalid(target, DateTimeOffset.UtcNow, [stableRefusal]));
+            }
 
-        GroundworkRuntimeSchemaAdmissionResult result;
-        try
-        {
-            result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
-                executor,
-                target,
-                options,
-                inspected: inspection,
-                inspectAfterApplication: () => executor.InspectHistory(target));
-        }
-        catch (MongoSchemaConflictException exception) when (exception.Refusal is { } refusal)
-        {
-            // An external history edit cannot normally pass the lease fence, but if the executor
-            // observes one between inspection and apply, return the same unit-level Blocked
-            // verdict rather than turning a provider guard into a hosting failure.
-            var current = executor.InspectHistory(target);
-            return new GroundworkRuntimeSchemaAdmissionResult(
-                current,
-                PhysicalSchemaDiffPlan.Invalid(target, DateTimeOffset.UtcNow, [refusal]));
-        }
+            GroundworkRuntimeSchemaAdmissionResult result;
+            try
+            {
+                result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                    executor,
+                    target,
+                    options,
+                    inspected: inspection,
+                    inspectAfterApplication: () => executor.InspectHistory(target));
+            }
+            catch (MongoSchemaConflictException exception) when (exception.Refusal is { } refusal)
+            {
+                // An external history edit cannot normally pass the lease fence, but if the executor
+                // observes one between inspection and apply, return the same unit-level Blocked
+                // verdict rather than turning a provider guard into a hosting failure.
+                var current = executor.InspectHistory(target);
+                return new GroundworkRuntimeSchemaAdmissionResult(
+                    current,
+                    PhysicalSchemaDiffPlan.Invalid(target, DateTimeOffset.UtcNow, [refusal]));
+            }
 
-        if (result.AppliedOperationCount != 0)
-            state.Remember(MongoSchemaTargets.Physicalize(desired));
-        return result;
+            if (result.Application?.Outcome is PhysicalSchemaApplicationOutcome.Applied or
+                PhysicalSchemaApplicationOutcome.NoChanges)
+                state.Remember(target);
+            return result;
+        }
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -520,19 +539,22 @@ internal sealed class MongoSchemaCoordinator(MongoProviderState state) : IMongoS
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         SchemaCapabilityAdmission.EnsureSupported(desired, MongoDbProviderConnection.ConstraintCapabilities);
-        var target = MongoSchemaTargets.Compile(desired);
-        if (target.Subject.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
-            state.Context.RequireTransactions("ProviderSequence");
-        var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
-        if (result.Outcome == PhysicalSchemaApplicationOutcome.Rejected)
-            MongoDeclarationRules.ThrowIfStableDeclarationChanged(
-                result.Plan.PreviousDefinition,
-                target.Subject.Definition);
-        if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
-            state.Remember(target.Subject.Definition);
-        return new SchemaApplyResult(
-            new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, target.Subject.Definition)),
-            result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        lock (applicationGate)
+        {
+            var target = MongoSchemaTargets.Compile(desired);
+            if (target.Subject.Columns.Any(column => column.Generation == ColumnGeneration.ProviderSequence))
+                state.Context.RequireTransactions("ProviderSequence");
+            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
+            if (result.Outcome == PhysicalSchemaApplicationOutcome.Rejected)
+                MongoDeclarationRules.ThrowIfStableDeclarationChanged(
+                    result.Plan.PreviousDefinition,
+                    target.Subject.Definition);
+            if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
+                state.Remember(target);
+            return new SchemaApplyResult(
+                new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, target.Subject.Definition)),
+                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+        }
     }
 
     internal static BsonDocument BuildBackfillFilter(
@@ -882,7 +904,12 @@ internal static class MongoDeclarationRules
         => throw new MongoSchemaConflictException(refusal);
 }
 
-internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, ISetMutationStorageSession
+internal interface IMongoSchemaBoundSession
+{
+    void EnsureSchemaCurrent();
+}
+
+internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongoCompareAndDeleteStorageSession, IMongoExactAppendStorageSession, IBatchedStorageSession, IRetentionStorageSession, IStorageInspectionSession, IExactRetentionStorageSession, ISetMutationStorageSession, IMongoSchemaBoundSession
 {
     private const string HighWaterValue = "high_water";
     private readonly MongoProviderState state;
@@ -890,6 +917,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     private readonly IMongoCollection<BsonDocument> collection;
     private readonly IClientSessionHandle? transactionSession;
     private readonly MongoUnitOfWork? unitOfWork;
+    private readonly SchemaSessionLease schemaSession;
     private bool disposed;
 
     // A wrapper-owned transaction must let transient failures escape so the wrapper can
@@ -914,6 +942,7 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
         this.collection = collection;
         this.transactionSession = transactionSession;
         this.unitOfWork = unitOfWork;
+        schemaSession = state.CaptureSchemaSession(applied);
         Access = access;
         Unit = MongoDeclarationSnapshot.Clone(applied.Declaration);
     }
@@ -3442,7 +3471,10 @@ internal sealed partial class MongoStorageSession : IMongoStorageSession, IMongo
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(MongoStorageSession));
+        schemaSession.EnsureCurrent();
     }
+
+    void IMongoSchemaBoundSession.EnsureSchemaCurrent() => ThrowIfDisposed();
 
     private void RefusePrivilegedOperation(string operation)
     {

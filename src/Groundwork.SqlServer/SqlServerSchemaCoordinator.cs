@@ -20,13 +20,16 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         ProviderName = "SQL Server",
         ScopeMaxLength = 128
     };
+    private readonly SqlServerProviderConnection owner;
     private readonly RelationalSchemaExecutor executor;
     private readonly SqlServerDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly RelationalRuntimeAdmission admission;
+    private readonly object applicationGate = new();
 
     internal SqlServerSchemaCoordinator(SqlServerProviderConnection owner)
     {
+        this.owner = owner;
         executor = new RelationalSchemaExecutor(owner.CreateIndependentConnection, dialect);
         admission = new RelationalRuntimeAdmission(
             "sqlserver.schema-admission",
@@ -49,18 +52,25 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
         GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Prepare(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
-            executor,
-            target,
-            options,
-            inspected: executor.InspectDeployedHistory(target),
-            inspectAfterApplication: () => executor.InspectDeployedHistory(target));
-        if (result.AppliedOperationCount != 0)
-            admission.Invalidate(desired.Id);
-        return result;
+        lock (applicationGate)
+        {
+            var physical = Prepare(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                executor,
+                target,
+                options,
+                inspected: executor.InspectDeployedHistory(target),
+                inspectAfterApplication: () => executor.InspectDeployedHistory(target));
+            if (result.Application?.Outcome is PhysicalSchemaApplicationOutcome.Applied or
+                PhysicalSchemaApplicationOutcome.NoChanges)
+            {
+                owner.PublishSchema(target);
+                admission.Invalidate(desired.Id);
+            }
+            return result;
+        }
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -78,19 +88,24 @@ internal sealed class SqlServerSchemaCoordinator : ISchemaCoordinator
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Prepare(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        try
+        lock (applicationGate)
         {
-            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
-            return new SchemaApplyResult(
-                new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
-                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
-        }
-        finally
-        {
-            admission.Invalidate(desired.Id);
+            var physical = Prepare(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            try
+            {
+                var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
+                if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
+                    owner.PublishSchema(target);
+                return new SchemaApplyResult(
+                    new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
+                    result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+            }
+            finally
+            {
+                admission.Invalidate(desired.Id);
+            }
         }
     }
 

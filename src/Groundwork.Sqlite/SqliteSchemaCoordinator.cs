@@ -28,6 +28,7 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     private readonly SqliteDialect dialect = new();
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly RelationalRuntimeAdmission admission;
+    private readonly object applicationGate = new();
 
     internal SqliteSchemaCoordinator(SqliteProviderConnection owner)
     {
@@ -61,21 +62,26 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
         GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Physicalize(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
-            executor,
-            target,
-            options,
-            inspected: InspectDeployed(target, null),
-            inspectAfterApplication: () => InspectDeployed(target, null));
-        if (result.AppliedOperationCount != 0)
+        lock (applicationGate)
         {
-            owner.RefreshSchema();
-            admission.Invalidate(desired.Id);
+            var physical = Physicalize(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                executor,
+                target,
+                options,
+                inspected: InspectDeployed(target, null),
+                inspectAfterApplication: () => InspectDeployed(target, null));
+            if (result.Application?.Outcome is PhysicalSchemaApplicationOutcome.Applied or
+                PhysicalSchemaApplicationOutcome.NoChanges)
+            {
+                owner.PublishSchema(target);
+                owner.RefreshSchema();
+                admission.Invalidate(desired.Id);
+            }
+            return result;
         }
-        return result;
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -93,19 +99,24 @@ internal sealed class SqliteSchemaCoordinator : ISchemaCoordinator
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Physicalize(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        try
+        lock (applicationGate)
         {
-            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
-            owner.RefreshSchema();
-            return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
-                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
-        }
-        finally
-        {
-            admission.Invalidate(desired.Id);
+            var physical = Physicalize(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            try
+            {
+                var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
+                if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
+                    owner.PublishSchema(target);
+                owner.RefreshSchema();
+                return new SchemaApplyResult(new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
+                    result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+            }
+            finally
+            {
+                admission.Invalidate(desired.Id);
+            }
         }
     }
 

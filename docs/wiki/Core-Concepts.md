@@ -80,8 +80,8 @@ Three objects with three very different lifetimes. Getting these wrong is the mo
 | Object | Owns resources? | Disposable? | Lifetime |
 | --- | --- | --- | --- |
 | `IStorageProviderConnection` | **Yes** — the provider connection, pools, schema locks | **Yes** — dispose it | You control it. Everything below dies with it. |
-| `IStorageSession` | Depends on how it was opened | Direct connection sessions are non-owning; `IOwnedStorageSession` sessions are disposable | Valid while its owner is alive, or until an owned session is disposed |
-| `IOwnedStorageSession` | **Yes** — its provider session resources | **Yes** — dispose it when the operation ends | Until disposed |
+| `IStorageSession` | Depends on how it was opened | Direct connection sessions are non-owning; `IOwnedStorageSession` sessions are disposable | While its owner is alive and its captured declaration remains current |
+| `IOwnedStorageSession` | **Yes** — its provider session resources | **Yes** — dispose it when the operation ends | Until disposed or its captured declaration becomes stale |
 | `IUnitOfWork` | **Yes** — its transaction and staged sessions | **Yes** — dispose it | Until commit / rollback / dispose |
 
 ```csharp
@@ -103,7 +103,9 @@ Rules worth memorising:
 2. **Commit and rollback are terminal.** Disposing a non-terminal unit of work rolls it back.
 3. **Never retain a session obtained from a unit of work** after that unit is terminal.
 4. **Dispose an owned session when its caller-owned operation ends.**
-5. `RecordTableStoreUnitOfWork<T>` follows exactly the same rules.
+5. **Reopen sessions after applying a changed declaration on their provider connection.** Earlier
+   direct, owned, and unit-of-work sessions refuse before provider I/O with `GW-RUNTIME-005`.
+6. `RecordTableStoreUnitOfWork<T>` follows exactly the same rules.
 
 Under a host, `Groundwork.Extensions.DependencyInjection` encodes those lifetimes for you — the
 connection is a process singleton, sessions and units of work come from a scoped `IGroundworkStorage`,

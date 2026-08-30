@@ -396,6 +396,65 @@ public sealed class SqliteProviderTests
     }
 
     [Fact]
+    public void Deferred_conflict_detail_refuses_stale_schema_before_observing_its_probe()
+    {
+        using var store = TemporaryStore.Create();
+        using var connection = new SqliteProviderFactory().Create(store.ConnectionString);
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId("deferred-stale-schema"),
+            Name = "deferred_stale_schema",
+            Columns =
+            [
+                new ColumnDefinition
+                {
+                    Id = "id",
+                    Name = "id",
+                    Type = PortableType.String,
+                    IsNullable = false
+                },
+                new ColumnDefinition
+                {
+                    Id = "value",
+                    Name = "value",
+                    Type = PortableType.String,
+                    IsNullable = false
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var observer = new ProviderCommandObserver();
+        using var retained = connection.OpenOwnedSession(unit, StorageAccess.Global, observer);
+        var values = new StorageValues(new Dictionary<string, object?>
+        {
+            ["id"] = "one",
+            ["value"] = "value"
+        });
+        Assert.Equal(WriteOutcomeStatus.Inserted, retained.Insert(values).Status);
+        var conflict = Assert.IsAssignableFrom<IConcurrencyStorageSession>(retained).ConditionalUpsert(
+            values,
+            WriteOptions.IfVersion(99));
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, conflict.Status);
+        var evolved = unit with
+        {
+            Columns =
+            [
+                unit.Columns[0],
+                unit.Columns[1] with { Name = "body" }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(evolved).Applied);
+        var beforeRefusal = observer.RoundTrips;
+
+        var stale = Assert.Throws<StaleStorageSessionException>(() => { _ = conflict.Detail; });
+
+        Assert.Equal(unit.Id, stale.StorageUnitId);
+        Assert.Equal(beforeRefusal, observer.RoundTrips);
+    }
+
+    [Fact]
     public void Optimistic_delete_reports_a_conflict_when_the_delete_affects_no_row()
     {
         using var store = TemporaryStore.Create();

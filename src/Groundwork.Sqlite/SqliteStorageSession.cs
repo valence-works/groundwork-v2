@@ -24,6 +24,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private readonly RelationalSessionAggregations aggregations;
     private readonly RelationalSessionSetMutations setMutations;
     private readonly RelationalSessionAppends appends;
+    private readonly SchemaSessionLease schemaSession;
 
     /// <summary>
     /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
@@ -37,6 +38,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         StorageAccess access,
         SqliteConnection connection,
         SqliteTransaction? transaction,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer = null,
         bool ownsConnection = false)
     {
@@ -47,11 +49,12 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        this.schemaSession = schemaSession;
         execution = new RelationalSessionExecution(
             access,
             transaction,
             ownsConnection,
-            new SqliteSessionExecutionAdapter(owner, connection, RollbackOrRetire),
+            new SqliteSessionExecutionAdapter(owner, connection, schemaSession, RollbackOrRetire),
             nameof(SqliteStorageSession));
         pointReads = new RelationalSessionPointReads(
             unit,
@@ -1087,6 +1090,7 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
             null,
             () =>
             {
+                schemaSession.EnsureCurrent();
                 var existing = ReadCore(key);
                 return existing is null
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
@@ -1607,11 +1611,16 @@ internal class SqliteStorageSession : IStorageSession, IProviderBoundStorageSess
     private sealed class SqliteSessionExecutionAdapter(
         SqliteProviderConnection owner,
         SqliteConnection connection,
+        SchemaSessionLease schemaSession,
         Action<SqliteTransaction> rollback) : IRelationalSessionExecutionAdapter
     {
         public bool SerializeAmbientReads => false;
 
-        public void EnsureUsable() => owner.ThrowIfDisposed();
+        public void EnsureUsable()
+        {
+            owner.ThrowIfDisposed();
+            schemaSession.EnsureCurrent();
+        }
 
         public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
             RelationalSessionExecution.EnterMonitor(owner.Gate);
@@ -1652,9 +1661,10 @@ internal sealed class OwnedSqliteStorageSession : SqliteStorageSession, IOwnedSt
         StorageUnit unit,
         StorageAccess access,
         SqliteConnection connection,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer = null,
         bool ownsConnection = true)
-        : base(owner, unit, access, connection, null, observer, ownsConnection)
+        : base(owner, unit, access, connection, null, schemaSession, observer, ownsConnection)
     {
     }
 }

@@ -334,6 +334,13 @@ a terminal state. Direct connection sessions are non-owning views: keep the conn
 never retain a unit-of-work session past commit/rollback/dispose. Dispose an `IOwnedStorageSession`
 only after its caller-owned operation is complete.
 
+### `GW-RUNTIME-005` / `StaleStorageSessionException` from a session
+
+The same provider connection successfully applied a different declaration after this direct,
+owned, or unit-of-work session opened. Groundwork refused before issuing provider I/O so the old
+physical names cannot leak into provider-specific errors. Close or discard the retained session and
+open a new one after schema application. Reapplying an unchanged declaration does not stale it.
+
 ### My unit of work silently rolled back
 
 Disposing a non-terminal unit rolls it back. Call `Commit()` / `CommitWithOutcomes()` explicitly.

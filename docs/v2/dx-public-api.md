@@ -41,6 +41,13 @@ disposal. A session opened from an `IUnitOfWork` is additionally bounded by that
 becomes invalid when the unit reaches a terminal state or is disposed. The DI `IGroundworkStorage`
 scope uses owned sessions and releases them when the scope ends.
 
+Every session also captures the declaration published by its provider connection. If that same
+connection successfully applies a different declaration for the unit, an earlier direct, owned, or
+unit-of-work session throws `StaleStorageSessionException` (`GW-RUNTIME-005`) before its next
+provider command. Reopen the session after applying schema. A schema change made through another
+process or connection is detected by that connection's normal admission boundary, not by polling
+already-open sessions.
+
 `IUnitOfWork` owns its transaction, staged sessions, and their provider resources. Commit and
 rollback are terminal operations; disposing a non-terminal unit rolls it back. Dispose the unit of
 work after the terminal operation and do not retain or use sessions obtained from it afterward.

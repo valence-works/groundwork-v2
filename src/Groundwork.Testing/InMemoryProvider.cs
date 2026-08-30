@@ -41,6 +41,7 @@ public sealed class SchemaConflictException : InvalidOperationException
 public sealed class InMemoryProviderConnection : IStorageProviderConnection
 {
     private readonly InMemoryDatabase database;
+    private readonly SchemaSessionPublicationRegistry schemaSessions = new();
     private volatile bool disposed;
 
     internal InMemoryProviderConnection(InMemoryDatabase database)
@@ -56,7 +57,7 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
             atomicCommit: true,
             compareAndDelete: true);
         Catalog = new InMemoryProviderCatalog(database);
-        Schema = new InMemorySchemaCoordinator(database, Capabilities);
+        Schema = new InMemorySchemaCoordinator(database, Capabilities, schemaSessions);
     }
 
     public IProviderCatalog Catalog { get; }
@@ -133,6 +134,9 @@ public sealed class InMemoryProviderConnection : IStorageProviderConnection
         if (disposed)
             throw new ObjectDisposedException(nameof(InMemoryProviderConnection));
     }
+
+    internal SchemaSessionLease CaptureSchemaSession(StorageUnit physicalUnit) =>
+        schemaSessions.Capture(InMemorySchemaCoordinator.Target(physicalUnit));
 }
 
 internal sealed class InMemoryDatabase
@@ -266,13 +270,16 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
     internal static readonly ProviderIdentity Identity = new("InMemory", "1.0");
     private readonly InMemoryDatabase database;
     private readonly IReadOnlyList<CapabilityDescriptor> capabilities;
+    private readonly SchemaSessionPublicationRegistry schemaSessions;
 
     internal InMemorySchemaCoordinator(
         InMemoryDatabase database,
-        IReadOnlyList<CapabilityDescriptor> capabilities)
+        IReadOnlyList<CapabilityDescriptor> capabilities,
+        SchemaSessionPublicationRegistry schemaSessions)
     {
         this.database = database;
         this.capabilities = capabilities;
+        this.schemaSessions = schemaSessions;
         Executor = new InMemoryPhysicalSchemaExecutor(database);
     }
 
@@ -284,10 +291,17 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
     {
         SchemaCapabilityAdmission.EnsureSupported(desired, capabilities);
         var physical = Prepare(desired);
+        var target = Target(physical);
         lock (database.Gate)
         {
-            return GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
-                Executor, Target(physical), options);
+            var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                Executor, target, options);
+            if (result.Application?.Outcome is PhysicalSchemaApplicationOutcome.Applied or
+                PhysicalSchemaApplicationOutcome.NoChanges)
+            {
+                schemaSessions.Publish(target);
+            }
+            return result;
         }
     }
 
@@ -310,6 +324,8 @@ internal sealed class InMemorySchemaCoordinator : ISchemaCoordinator
         lock (database.Gate)
         {
             var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, Executor);
+            if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
+                schemaSessions.Publish(target);
             return new SchemaApplyResult(
                 new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
                 result.Outcome == PhysicalSchemaApplicationOutcome.Applied);
@@ -560,6 +576,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
     private readonly Dictionary<RetentionLedgerKey, RetentionLedgerEntry>? stagedRetentionLedger;
     private readonly Dictionary<StorageUnitId, InMemoryUnitState>? stagedUnits;
     private readonly string partition;
+    private readonly SchemaSessionLease? schemaSession;
     private bool disposed;
 
     internal InMemoryStorageSession(
@@ -584,6 +601,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
         Unit = StorageDeclaration.Clone(state.Unit);
         partition = access.Scope?.Value ?? "<global>";
         ProviderConnection = providerConnection;
+        schemaSession = (providerConnection as InMemoryProviderConnection)?.CaptureSchemaSession(state.Unit);
     }
 
     /// <summary>
@@ -847,6 +865,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
 
     public AggregationResult Aggregate(AggregationQuery query)
     {
+        ThrowIfDisposed();
         RefusePrivilegedPointOperation("aggregate");
         ArgumentNullException.ThrowIfNull(query);
         var profile = AggregationProfileValidator.ResolveOrThrow(Unit, query);
@@ -1565,6 +1584,7 @@ internal class InMemoryStorageSession : IStorageSession, IProviderBoundStorageSe
             throw new ObjectDisposedException(nameof(InMemoryStorageSession));
         if (ProviderConnection is InMemoryProviderConnection providerConnection)
             providerConnection.ThrowIfDisposed();
+        schemaSession?.EnsureCurrent();
     }
 }
 

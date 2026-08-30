@@ -30,6 +30,10 @@ affected count are sufficient outside a unit of work.
 Sessions execute declared aggregation profiles and runtime-composed profiles only when the latter
 carry an active `AggregationAcceptance`; scoped and privileged-access refusals apply to both.
 
+Sessions capture the declaration published by their provider connection. If that connection later
+applies a different declaration, retained sessions throw `StaleStorageSessionException`
+(`GW-RUNTIME-005`) before provider I/O; open a new session after schema application.
+
 Store sits directly above `Groundwork.Kernel` and knows nothing about contract families: a provider
 implementing these interfaces never learns that `Groundwork.Records` or `Groundwork.Documents`
 exists. Scoped sessions are tenant-isolated; cross-scope reads require the explicit, query-only

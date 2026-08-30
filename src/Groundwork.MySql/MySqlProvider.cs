@@ -24,6 +24,7 @@ public sealed class MySqlProviderConnection : IStorageProviderConnection, IQuery
     private readonly ConcurrentBag<MySqlConnection> ownedConnections = [];
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly MySqlSchemaCoordinator schema;
+    private readonly SchemaSessionPublicationRegistry schemaSessions = new();
     private bool disposed;
 
     public MySqlProviderConnection(string connectionString)
@@ -72,10 +73,13 @@ public sealed class MySqlProviderConnection : IStorageProviderConnection, IQuery
         var lifetime = new MySqlSessionLifetime(nameof(MySqlStorageSession));
         try
         {
+            var physical = Resolve(unit);
+            var session = new MySqlStorageSession(
+                this, physical, access, connection, transaction: null,
+                new SemaphoreSlim(1, 1), lifetime, ownsConnection: false,
+                CaptureSchemaSession(physical), observer);
             Own(connection);
-            return new MySqlStorageSession(
-                this, Resolve(unit), access, connection, transaction: null,
-                new SemaphoreSlim(1, 1), lifetime, ownsConnection: false, observer);
+            return session;
         }
         catch
         {
@@ -90,7 +94,17 @@ public sealed class MySqlProviderConnection : IStorageProviderConnection, IQuery
         IProviderCommandObserver? observer = null)
     {
         var connection = PrepareSession(unit, access, observer);
-        return new OwnedMySqlStorageSession(this, Resolve(unit), access, connection, observer);
+        try
+        {
+            var physical = Resolve(unit);
+            return new OwnedMySqlStorageSession(
+                this, physical, access, connection, CaptureSchemaSession(physical), observer);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units) =>
@@ -153,6 +167,7 @@ public sealed class MySqlProviderConnection : IStorageProviderConnection, IQuery
                         gate,
                         new MySqlSessionLifetime(nameof(MySqlStorageSession)),
                         ownsConnection: false,
+                        CaptureSchemaSession(physical[unit.Id]),
                         observer);
                     return new RelationalUnitOfWorkSession(session, session.Close);
                 },
@@ -188,6 +203,11 @@ public sealed class MySqlProviderConnection : IStorageProviderConnection, IQuery
         units.TryGetValue(source.Id, out var physical)
             ? physical
             : MySqlSchemaCoordinator.Physicalize(source);
+
+    internal SchemaSessionLease CaptureSchemaSession(StorageUnit physicalUnit) =>
+        schemaSessions.Capture(MySqlSchemaCoordinator.Target(physicalUnit));
+
+    internal void PublishSchema(PhysicalSchemaTarget target) => schemaSessions.Publish(target);
 
     internal void ThrowIfDisposed()
     {
@@ -280,6 +300,7 @@ internal sealed class MySqlSchemaCoordinator : ISchemaCoordinator
     private readonly RelationalSchemaExecutor executor;
     private readonly ConcurrentDictionary<StorageUnitId, StorageUnit> units = new();
     private readonly RelationalRuntimeAdmission admission;
+    private readonly object applicationGate = new();
 
     internal MySqlSchemaCoordinator(MySqlProviderConnection owner)
     {
@@ -305,21 +326,26 @@ internal sealed class MySqlSchemaCoordinator : ISchemaCoordinator
         GroundworkRuntimeSchemaAdmissionOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Physicalize(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
-            executor,
-            target,
-            options,
-            inspected: executor.InspectDeployedHistory(target),
-            inspectAfterApplication: () => executor.InspectDeployedHistory(target));
-        if (result.AppliedOperationCount != 0)
+        lock (applicationGate)
         {
-            owner.Remember(desired);
-            admission.Invalidate(desired.Id);
+            var physical = Physicalize(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            var result = GroundworkRuntimeSchemaAdmission.InspectRuntimeAdmission(
+                executor,
+                target,
+                options,
+                inspected: executor.InspectDeployedHistory(target),
+                inspectAfterApplication: () => executor.InspectDeployedHistory(target));
+            if (result.Application?.Outcome is PhysicalSchemaApplicationOutcome.Applied or
+                PhysicalSchemaApplicationOutcome.NoChanges)
+            {
+                owner.PublishSchema(target);
+                owner.Remember(desired);
+                admission.Invalidate(desired.Id);
+            }
+            return result;
         }
-        return result;
     }
 
     public SchemaDiff Diff(StorageUnit desired)
@@ -337,20 +363,25 @@ internal sealed class MySqlSchemaCoordinator : ISchemaCoordinator
     public SchemaApplyResult Apply(StorageUnit desired)
     {
         ArgumentNullException.ThrowIfNull(desired);
-        var physical = Physicalize(desired);
-        Remember(desired, physical);
-        var target = Target(physical);
-        try
+        lock (applicationGate)
         {
-            var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
-            owner.Remember(desired);
-            return new SchemaApplyResult(
-                new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
-                result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
-        }
-        finally
-        {
-            admission.Invalidate(desired.Id);
+            var physical = Physicalize(desired);
+            Remember(desired, physical);
+            var target = Target(physical);
+            try
+            {
+                var result = PhysicalSchemaApplication.ApplyRecoverableWork(target, executor);
+                if (result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges)
+                    owner.PublishSchema(target);
+                owner.Remember(desired);
+                return new SchemaApplyResult(
+                    new SchemaDiff(SchemaChangeMapping.Describe(result.Plan, physical)),
+                    result.Outcome is PhysicalSchemaApplicationOutcome.Applied or PhysicalSchemaApplicationOutcome.NoChanges);
+            }
+            finally
+            {
+                admission.Invalidate(desired.Id);
+            }
         }
     }
 

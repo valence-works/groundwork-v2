@@ -244,6 +244,67 @@ public sealed class MongoProviderIntegrationTests
     }
 
     [SkippableFact]
+    public void Deferred_conflict_detail_refuses_stale_schema_before_observing_its_probe()
+    {
+        var connectionString = LiveMongo.ConnectionString;
+        Skip.If(string.IsNullOrWhiteSpace(connectionString),
+            "Set GROUNDWORK_MONGO_CONNECTION to run MongoDB integration tests.");
+        using var connection = new MongoProviderFactory().Create(connectionString!);
+        var name = "mongo_stale_detail_" + Guid.NewGuid().ToString("N");
+        var unit = new StorageUnit
+        {
+            Id = new StorageUnitId(name),
+            Name = name,
+            Columns =
+            [
+                new ColumnDefinition
+                {
+                    Id = "id",
+                    Name = "id",
+                    Type = PortableType.String,
+                    MaxLength = 64,
+                    IsNullable = false
+                },
+                new ColumnDefinition
+                {
+                    Id = "value",
+                    Name = "value",
+                    Type = PortableType.String,
+                    MaxLength = 64,
+                    IsNullable = false
+                }
+            ],
+            Key = new KeyDefinition { Columns = ["id"] },
+            Concurrency = ConcurrencyDeclaration.Optimistic()
+        };
+        Assert.True(connection.Schema.Apply(unit).Applied);
+        var observer = new ProviderCommandObserver();
+        using var retained = connection.OpenOwnedSession(unit, StorageAccess.Global, observer);
+        Assert.True(retained.Upsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "one", ["value"] = "current" }),
+            WriteOptions.Unconditional).Succeeded);
+        var conflict = Assert.IsAssignableFrom<IConcurrencyStorageSession>(retained).ConditionalUpsert(
+            new StorageValues(new Dictionary<string, object?> { ["id"] = "one", ["value"] = "stale" }),
+            WriteOptions.IfVersion(0));
+        Assert.Equal(WriteOutcomeStatus.ConcurrencyConflict, conflict.Status);
+        var evolved = unit with
+        {
+            Columns =
+            [
+                unit.Columns[0],
+                unit.Columns[1] with { Name = "body" }
+            ]
+        };
+        Assert.True(connection.Schema.Apply(evolved).Applied);
+        var beforeRefusal = observer.RoundTrips;
+
+        var stale = Assert.Throws<StaleStorageSessionException>(() => { _ = conflict.Detail; });
+
+        Assert.Equal(unit.Id, stale.StorageUnitId);
+        Assert.Equal(beforeRefusal, observer.RoundTrips);
+    }
+
+    [SkippableFact]
     public void Runtime_resolution_uses_kernel_history_not_the_legacy_schema_cache()
     {
         var connectionString = LiveMongo.ConnectionString;

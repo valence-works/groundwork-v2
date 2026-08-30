@@ -42,6 +42,13 @@ public interface IStorageProviderConnection : IDisposable
 `OpenSession` returns a non-owning view tied to the connection lifetime. `OpenOwnedSession` returns an
 `IOwnedStorageSession`; providers must release its per-session resources from both `Dispose` and
 `DisposeAsync`, report that state through `IsReleased`, and reject operations after release.
+All session kinds must also capture a connection-local declaration publication. After that
+connection successfully applies a different target fingerprint for the same unit, earlier sessions
+must throw `StaleStorageSessionException` (`GW-RUNTIME-005`) before observer accounting or native
+provider I/O. Use a monotonically increasing publication epoch as well as the fingerprint so an
+A→B→A cycle cannot revive an A session. Do not publish failed/refused applies or unchanged targets.
+Serialize schema application and publication per provider connection so two successful applies
+cannot commit in one order and publish their fingerprints in another.
 
 The Store package currently has eleven public session interfaces. Only `IStorageSession` is the
 required operation surface, and only the object returned by `OpenOwnedSession` implements

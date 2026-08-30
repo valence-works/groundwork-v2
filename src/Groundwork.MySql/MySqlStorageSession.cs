@@ -28,6 +28,7 @@ internal class MySqlStorageSession : RelationalStorageSessionBase,
         SemaphoreSlim gate,
         MySqlSessionLifetime lifetime,
         bool ownsConnection,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer)
         : this(
             owner,
@@ -36,7 +37,7 @@ internal class MySqlStorageSession : RelationalStorageSessionBase,
             transaction,
             ownsConnection,
             observer,
-            new MySqlSessionRuntime(unit, access, connection, gate, lifetime, observer))
+            new MySqlSessionRuntime(unit, access, connection, gate, lifetime, schemaSession, observer))
     {
     }
 
@@ -155,6 +156,7 @@ internal sealed class OwnedMySqlStorageSession : MySqlStorageSession, IOwnedStor
         StorageUnit unit,
         StorageAccess access,
         MySqlConnection connection,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer)
         : this(
             owner,
@@ -162,6 +164,7 @@ internal sealed class OwnedMySqlStorageSession : MySqlStorageSession, IOwnedStor
             access,
             connection,
             new MySqlSessionLifetime(nameof(OwnedMySqlStorageSession)),
+            schemaSession,
             observer)
     {
     }
@@ -172,6 +175,7 @@ internal sealed class OwnedMySqlStorageSession : MySqlStorageSession, IOwnedStor
         StorageAccess access,
         MySqlConnection connection,
         MySqlSessionLifetime lifetime,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer)
         : base(
             owner,
@@ -182,6 +186,7 @@ internal sealed class OwnedMySqlStorageSession : MySqlStorageSession, IOwnedStor
             new SemaphoreSlim(1, 1),
             lifetime,
             ownsConnection: true,
+            schemaSession,
             observer)
     {
         this.connection = connection;
@@ -215,9 +220,10 @@ internal sealed class MySqlSessionRuntime
         MySqlConnection connection,
         SemaphoreSlim gate,
         MySqlSessionLifetime lifetime,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer)
     {
-        Commands = new MySqlSessionAdapter(unit, access, connection, gate, lifetime, observer);
+        Commands = new MySqlSessionAdapter(unit, access, connection, gate, lifetime, schemaSession, observer);
         var ledger = new MySqlLedgerCommands(Commands);
         Appends = new MySqlAppendAdapter(Commands, ledger);
         Retention = new MySqlRetentionAdapter(Commands, ledger);
@@ -250,6 +256,7 @@ internal sealed class MySqlSessionAdapter : RelationalStorageSessionAdapter
     private readonly StorageUnit unit;
     private readonly StorageAccess access;
     private readonly MySqlSessionLifetime lifetime;
+    private readonly SchemaSessionLease schemaSession;
     private readonly IProviderCommandObserver? observer;
     private readonly IReadOnlyList<ColumnDefinition> userColumns;
     private readonly ColumnDefinition? sequenceColumn;
@@ -262,12 +269,14 @@ internal sealed class MySqlSessionAdapter : RelationalStorageSessionAdapter
         MySqlConnection connection,
         SemaphoreSlim gate,
         MySqlSessionLifetime lifetime,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer)
         : base(connection, new MySqlDialect(), gate)
     {
         this.unit = unit;
         this.access = access;
         this.lifetime = lifetime;
+        this.schemaSession = schemaSession;
         this.observer = observer;
         userColumns = unit.Columns.Where(column => column.Name is not ProviderOwnedColumns.Scope and
             not VersionColumn and not ActionColumn).ToArray();
@@ -285,7 +294,11 @@ internal sealed class MySqlSessionAdapter : RelationalStorageSessionAdapter
             index => MySqlDialect.PhysicalIndexName(unit.Name, index.Name),
             StringComparer.Ordinal);
 
-    public override void EnsureUsable() => lifetime.ThrowIfReleased();
+    public override void EnsureUsable()
+    {
+        lifetime.ThrowIfReleased();
+        schemaSession.EnsureCurrent();
+    }
 
     protected override string LockingClause(bool forUpdate) => forUpdate ? " FOR UPDATE" : string.Empty;
 

@@ -27,6 +27,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
     private readonly RelationalSessionSetMutations setMutations;
     private readonly RelationalSessionAppends appends;
     private readonly SqlServerDialect dialect = new();
+    private readonly SchemaSessionLease schemaSession;
 
     /// <summary>
     /// True when opened through <c>OpenOwnedSession</c>, so disposal returns this session's connection.
@@ -36,6 +37,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     internal SqlServerStorageSession(SqlServerProviderConnection owner, StorageUnit unit, StorageAccess access,
         SqlConnection connection, SqlTransaction? transaction,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer = null,
         bool ownsConnection = false)
     {
@@ -46,11 +48,12 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
         Access = access;
         this.connection = connection;
         this.transaction = transaction;
+        this.schemaSession = schemaSession;
         execution = new RelationalSessionExecution(
             access,
             transaction,
             ownsConnection,
-            new SqlServerSessionExecutionAdapter(owner, connection),
+            new SqlServerSessionExecutionAdapter(owner, connection, schemaSession),
             nameof(SqlServerStorageSession));
         pointReads = new RelationalSessionPointReads(
             unit,
@@ -1363,6 +1366,7 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
             null,
             () =>
             {
+                schemaSession.EnsureCurrent();
                 var existing = ReadCore(key, RelationalExecution.Synchronous).GetAwaiter().GetResult();
                 return existing is null
                     ? new WriteOutcomeDetail(WriteOutcomeStatus.NotFound)
@@ -1744,11 +1748,16 @@ internal class SqlServerStorageSession : IStorageSession, IProviderBoundStorageS
 
     private sealed class SqlServerSessionExecutionAdapter(
         SqlServerProviderConnection owner,
-        SqlConnection connection) : IRelationalSessionExecutionAdapter
+        SqlConnection connection,
+        SchemaSessionLease schemaSession) : IRelationalSessionExecutionAdapter
     {
         public bool SerializeAmbientReads => false;
 
-        public void EnsureUsable() => owner.ThrowIfDisposed();
+        public void EnsureUsable()
+        {
+            owner.ThrowIfDisposed();
+            schemaSession.EnsureCurrent();
+        }
 
         public ValueTask<IDisposable> EnterGate(RelationalExecution execution) =>
             owner.EnterGate(execution);
@@ -1827,8 +1836,9 @@ internal sealed class OwnedSqlServerStorageSession : SqlServerStorageSession, IO
         StorageUnit unit,
         StorageAccess access,
         SqlConnection connection,
+        SchemaSessionLease schemaSession,
         IProviderCommandObserver? observer = null)
-        : base(owner, unit, access, connection, null, observer, ownsConnection: true)
+        : base(owner, unit, access, connection, null, schemaSession, observer, ownsConnection: true)
     {
     }
 }

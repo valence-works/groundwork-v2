@@ -2,6 +2,7 @@ using System.Data;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.Store;
 using Groundwork.Substrate.Relational;
 using Groundwork.Diagnostics;
@@ -34,6 +35,7 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     private readonly List<SqliteConnection> sessionConnections = [];
     private readonly bool isMemory;
     private readonly SqliteSchemaCoordinator schemaCoordinator;
+    private readonly SchemaSessionPublicationRegistry schemaSessions = new();
     private volatile ISessionRegistrationObserver? activeRegistrationObserver;
     private volatile bool disposed;
 
@@ -87,6 +89,11 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
     internal SqliteConnection CreateIndependentConnection() =>
         CreateOpenConnection(connection.ConnectionString);
 
+    internal SchemaSessionLease CaptureSchemaSession(StorageUnit physicalUnit) =>
+        schemaSessions.Capture(SqliteSchemaCoordinator.Target(physicalUnit));
+
+    internal void PublishSchema(PhysicalSchemaTarget target) => schemaSessions.Publish(target);
+
     internal void RefreshSchema()
     {
         lock (gate)
@@ -112,7 +119,11 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, sessionConnection);
+            var schemaSession = CaptureSchemaSession(physicalUnit);
+            var session = new SqliteStorageSession(
+                this, physicalUnit, access, sessionConnection, null, schemaSession, observer);
             RegisterSessionConnection(sessionConnection, observer);
+            return session;
         }
         catch
         {
@@ -120,7 +131,6 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
                 sessionConnection.Dispose();
             throw;
         }
-        return new SqliteStorageSession(this, physicalUnit, access, sessionConnection, null, observer);
     }
 
     public IOwnedStorageSession OpenOwnedSession(
@@ -138,6 +148,12 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
         try
         {
             schemaCoordinator.EnsureRuntimeAdmission(unit, observer, sessionConnection);
+            // Shared in-memory mode is the one place ownership cannot transfer: that connection IS the database,
+            // so releasing it would drop every table. Disposal there closes the session only. SQLite serializes
+            // internally, so the concurrency this seam buys elsewhere costs nothing to forgo here.
+            var schemaSession = CaptureSchemaSession(physicalUnit);
+            return new OwnedSqliteStorageSession(
+                this, physicalUnit, access, sessionConnection, schemaSession, observer, !isMemory);
         }
         catch
         {
@@ -145,10 +161,6 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
                 sessionConnection.Dispose();
             throw;
         }
-        // Shared in-memory mode is the one place ownership cannot transfer: that connection IS the database,
-        // so releasing it would drop every table. Disposal there closes the session only. SQLite serializes
-        // internally, so the concurrency this seam buys elsewhere costs nothing to forgo here.
-        return new OwnedSqliteStorageSession(this, physicalUnit, access, sessionConnection, observer, !isMemory);
     }
 
     public IUnitOfWork BeginUnitOfWork(StorageAccess access, params StorageUnit[] units)
@@ -187,6 +199,9 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
             }
 
             var transaction = transactional.BeginTransaction(IsolationLevel.Serializable, deferred: false);
+            var physicalUnits = units.ToDictionary(
+                unit => unit.Id,
+                SqliteSchemaCoordinator.Physicalize);
             var lifetime = new RelationalUnitOfWorkLifetime(
                 transactional,
                 transaction,
@@ -200,10 +215,11 @@ public sealed class SqliteProviderConnection : IStorageProviderConnection, IQuer
                 {
                     var session = new SqliteStorageSession(
                         this,
-                        SqliteSchemaCoordinator.Physicalize(unit),
+                        physicalUnits[unit.Id],
                         access,
                         transactional,
                         transaction,
+                        CaptureSchemaSession(physicalUnits[unit.Id]),
                         observer);
                     return new RelationalUnitOfWorkSession(session, session.Close);
                 },
