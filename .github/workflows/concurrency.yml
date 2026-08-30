@@ -196,6 +196,7 @@ jobs:
           --filter "Category=Concurrency"
           --logger "trx;LogFileName=sqlserver-w2-${{ matrix.target-framework }}.trx"
           --results-directory artifacts/sqlserver-w2/${{ matrix.target-framework }}
+          --blame-hang --blame-hang-timeout 20m --blame-hang-dump-type full
       - name: Refuse a run whose SQL Server W2 proof did not execute exactly once (${{ matrix.target-framework }})
         env:
           TFM: ${{ matrix.target-framework }}
