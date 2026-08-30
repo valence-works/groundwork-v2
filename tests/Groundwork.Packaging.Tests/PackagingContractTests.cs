@@ -70,8 +70,30 @@ public sealed class PackagingContractTests
 
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/versioning.md")));
         Assert.True(File.Exists(Path.Combine(root, "docs/v2/support-matrix.md")));
+        Assert.True(File.Exists(Path.Combine(root, "docs/v2/production-operations.md")));
         Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-feedz.yml")));
         Assert.True(File.Exists(Path.Combine(root, ".github/workflows/publish-nuget.yml")));
+    }
+
+    [Fact]
+    public void Production_support_policy_names_tiers_topologies_ownership_and_runbooks()
+    {
+        var root = RepositoryRoot.Find();
+        var matrix = File.ReadAllText(Path.Combine(root, "docs", "v2", "support-matrix.md"));
+        var operations = File.ReadAllText(Path.Combine(root, "docs", "v2", "production-operations.md"));
+
+        Assert.Contains("**Production-supported**", matrix, StringComparison.Ordinal);
+        Assert.Contains("**Compatibility-only**", matrix, StringComparison.Ordinal);
+        Assert.Contains("**Development/reference-only**", matrix, StringComparison.Ordinal);
+        Assert.Contains("one application writer process per database file", matrix, StringComparison.Ordinal);
+        Assert.Contains("transaction-capable replica set or sharded cluster", matrix, StringComparison.Ordinal);
+        Assert.Contains("Groundwork maintainers", operations, StringComparison.Ordinal);
+        Assert.Contains("deployment owner", operations, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("## SQLite: single-writer file", operations, StringComparison.Ordinal);
+        Assert.Contains("## PostgreSQL: writable primary", operations, StringComparison.Ordinal);
+        Assert.Contains("## SQL Server: writable primary database", operations, StringComparison.Ordinal);
+        Assert.Contains("## MySQL/MariaDB: InnoDB writable primary", operations, StringComparison.Ordinal);
+        Assert.Contains("## MongoDB: transaction-capable deployment", operations, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -29,6 +29,7 @@
 **Operating**
 - [Hosting & DI](Hosting-and-Dependency-Injection)
 - [Providers](Providers)
+- [Production Operations](Production-Operations)
 - [Testing](Testing)
 - [Troubleshooting](Troubleshooting)
 - [Diagnostics Reference](Diagnostics-Reference)

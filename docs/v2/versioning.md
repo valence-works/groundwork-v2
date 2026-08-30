@@ -21,6 +21,15 @@ While the major version is zero:
   semantics, and storage contracts are changed only with an explicit release
   note and regression proof.
 
+## Support tiers
+
+Support status is published in the [provider support matrix](support-matrix.md) using three named
+tiers: **Production-supported**, **Compatibility-only**, and **Development/reference-only**. A
+production tier applies only to its named provider topology and advertised capabilities. It means
+Groundwork maintainers own reproducible package defects and maintain the
+[operations runbooks](production-operations.md); it does not transfer database/platform operations
+to the maintainers or create a response-time or availability SLA.
+
 Historical preview releases may still name a clean-break catalog boundary.
 Those boundaries remain authoritative for the affected preview pair; in
 particular, the `0.2.0-preview.1` SQLite reset is not retroactively changed by

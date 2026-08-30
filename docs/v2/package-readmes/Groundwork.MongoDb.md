@@ -14,6 +14,11 @@ production-supported.
 Transactional same-identity races return portable deterministic write outcomes, and wrapper-owned
 transactions retry transient write-conflict bodies.
 
+**Support tier:** Production-supported on a transaction-capable replica set or sharded cluster.
+Standalone MongoDB is compatibility-only and is not a production fallback. See the
+[support matrix](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/support-matrix.md)
+and [operations runbook](https://github.com/valence-works/groundwork-v2/blob/main/docs/v2/production-operations.md).
+
 ## Referencing it
 
 ```bash
