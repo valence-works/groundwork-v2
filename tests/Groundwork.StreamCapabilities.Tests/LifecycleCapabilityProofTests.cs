@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Groundwork.Kernel;
+using Groundwork.Kernel.Schema;
 using Groundwork.LiveDatabases;
 using Groundwork.Query.Model;
 using Groundwork.MongoDb;
@@ -567,7 +568,7 @@ public sealed class LifecycleCapabilityProofTests
         {
             RetentionIdempotency = unit.RetentionIdempotency! with { Window = TimeSpan.FromHours(2), LedgerName = "retention_other" }
         };
-        var conflict = Assert.Throws<SchemaConflictException>(() => connection.Schema.Apply(changed));
+        var conflict = Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Apply(changed));
         Assert.Contains("retention idempotency", conflict.Message, StringComparison.OrdinalIgnoreCase);
     }
 

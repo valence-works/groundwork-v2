@@ -55,8 +55,8 @@ public sealed class IdempotencyProofTests
         Assert.True(connection.Schema.Apply(applied).Applied);
 
         var changed = Unit(name, TimeSpan.FromMinutes(2), ledgerName: "profile_ledger_b");
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Diff(changed));
-        Assert.Throws<SchemaConflictException>(() => connection.Schema.Apply(changed));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Diff(changed));
+        Assert.Throws<PhysicalSchemaPlanRefusedException>(() => connection.Schema.Apply(changed));
     }
 
     [Fact]

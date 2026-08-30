@@ -38,7 +38,7 @@ Raised by `PortabilityValidator`, builders, and providers **before schema I/O**.
 | `GW-PORT-005` | `ProviderSequence` is not the sole non-nullable `Int64` primary key | Make it so |
 | `GW-PORT-006` | Collation outside the portable set | Use `Ordinal`, `OrdinalIgnoreCase`, or `UnicodeOrdinalIgnoreCase` |
 | `GW-PORT-007` | Invalid retention declaration | Non-negative `KeepNewest`, declared non-nullable orderable order column, declared partition columns |
-| `GW-PORT-008` | MongoDB composite key **order** changed after apply | Restore the order, or rebuild the catalog |
+| `GW-PORT-008` | MongoDB's physical `_id` key field layout changed after apply while retaining the same logical key identity | Restore the physical key names, or rebuild the catalog. Logical key identity/order changes are `GW-SCHEMA-015` |
 | `GW-PORT-009` | Two indexes share a physical signature | Consolidate onto one index |
 | `GW-PORT-010` | Invalid physical identifier | ASCII letters/digits/underscores, starts with letter/underscore, ≤ 63 bytes, no `__groundwork_` prefix |
 | `GW-PORT-011` | Duplicate physical index name | Use unique names |
@@ -150,16 +150,6 @@ schema document: `"foreignColumns": "TolerateDatabaseSupplied"`) downgrades it t
 generated. A foreign column a write that omits it would fail on stays `GW-RUNTIME-001`, because no
 policy makes it writable. Nothing else about drift changes: a declared column that differs, a
 missing column, and index drift are unaffected.
-
-## `GW-MONGO-*` — MongoDB stable declarations
-
-| Code | Meaning | Fix |
-| --- | --- | --- |
-| `GW-MONGO-001` | MongoDB retention declaration changed non-additively after apply | Keep the applied retention declaration, or perform an explicit migration |
-| `GW-MONGO-002` | MongoDB retention idempotency declaration changed after apply | Keep the applied declaration, or perform an explicit migration |
-| `GW-MONGO-003` | MongoDB scope, concurrency, timestamp, schema-version, or append-idempotency metadata changed after apply | Keep the applied metadata, or perform an explicit migration |
-
----
 
 ## `GW-WRITE-CONCURRENCY-*`
 
@@ -354,6 +344,7 @@ would make it work, while an unauthorized one is waiting on an operator naming i
 | `GW-SCHEMA-012` | `groundwork adopt` was asked to adopt a subject declared retired, which describes no catalog to verify | Invalid |
 | `GW-SCHEMA-013` | The provider reported the deployed catalog invalid without naming what differs, so adoption refused rather than record an unproved claim | Invalid |
 | `GW-SCHEMA-014` | A storage unit declares a physical foreign key or check constraint, but the deployment does not advertise `groundwork.schema.enforced-constraints`. Use a logical-only `Reference(...)` (and application validation for checks), or target an advertising relational deployment | Unsupported deployment |
+| `GW-SCHEMA-015` | Applied schema history and the desired declaration differ in a stable identity dimension for which Groundwork defines no portable in-place evolution: logical key identity/order, scope, concurrency, timestamps, schema version, retention, append idempotency, or retention idempotency. Rebuild or migrate as named by the refusal | Invalid |
 
 `GW-SCHEMA-007` and `-008` replace the earlier use of `GW-RUNTIME-002` for startup auto-apply
 refusals. `GW-RUNTIME-002` now means only what its own row says: **index drift**.

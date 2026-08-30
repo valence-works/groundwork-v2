@@ -116,8 +116,10 @@ string values. Provider-specific coercion is never used to make a mismatched def
 A `ProviderSequence` column must be **non-nullable `Int64` and the sole primary-key column** of its
 unit (`GW-PORT-005`). Supplying its value on `Insert` is refused.
 
-> **MongoDB caveat:** changing the *order* of composite key columns after a schema has been applied
-> is refused (`GW-PORT-008`), because the physical `_id` composition would change meaning.
+> **MongoDB caveat:** changing logical key identity or order after apply is refused by the shared
+> planner (`GW-SCHEMA-015`). Renaming a key column while retaining its logical identity is portable
+> on relational providers but refused by MongoDB (`GW-PORT-008`), because the physical `_id` field
+> layout is part of its route.
 
 ## Indexes
 

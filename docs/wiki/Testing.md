@@ -26,7 +26,8 @@ including capability advertisement:
 connection.Capabilities.Any(c => c.Id == BatchWriteCapabilities.ExactAppendOutcomes); // true
 ```
 
-`SchemaConflictException` surfaces conflicting schema application, so your tests can assert it.
+`PhysicalSchemaPlanRefusedException` surfaces planner-refused schema application with the complete
+ordered refusal set. Provider-substrate conflicts may retain a provider-specific exception.
 
 **What it is good for:** unit tests of your declarations, mapping, query shapes, and business logic.
 **What it is not:** proof that your workload behaves on PostgreSQL. For that, run against the real
