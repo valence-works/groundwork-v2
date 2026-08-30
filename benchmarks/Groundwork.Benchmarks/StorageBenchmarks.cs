@@ -176,7 +176,7 @@ public class StorageBenchmarks
     {
         var payload = NextPayload();
         var writes = Enumerable.Range(0, BenchmarkMethodology.BatchSize)
-            .Select(index => RowWrite.Update(unit, Values($"batch-{index:D2}", "write", index, payload)))
+            .Select(index => RowWrite.Update(unit, UpdateValues($"batch-{index:D2}", payload)))
             .ToArray();
         return BatchedSession.ApplyBatchAsync(writes, exactOutcomes: false);
     }
@@ -213,7 +213,7 @@ public class StorageBenchmarks
     public async Task<int> UnitOfWorkCommit_Groundwork()
     {
         using var work = Provider.BeginUnitOfWork(StorageAccess.Global, BatchWriteOptions.Default, unit);
-        work.Stage(RowWrite.Update(unit, Values(CommitId, "commit", -1, NextPayload())));
+        work.Stage(RowWrite.Update(unit, UpdateValues(CommitId, NextPayload())));
         return (await work.CommitAsync()).Succeeded;
     }
 
@@ -298,12 +298,10 @@ public class StorageBenchmarks
         Payload = Convert.ToString(stored.Values.Values["payload"], System.Globalization.CultureInfo.InvariantCulture)!
     };
 
-    private static StorageValues Values(string id, string category, int sequence, string payload) => new(
+    private static StorageValues UpdateValues(string id, string payload) => new(
         new Dictionary<string, object?>
         {
             ["id"] = id,
-            ["category"] = category,
-            ["sequence"] = sequence,
             ["payload"] = payload
         });
 
